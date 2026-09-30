@@ -820,7 +820,8 @@ function izakaya(w: World): void {
     c.ellipse(cw * 0.52, ch * 0.6, 30, 56, 0, 0, Math.PI * 2);
     c.fill();
   });
-  w.mesh(atlasPlane(W - 1.2, 2.2, shoji), lib.sign(w.atlas.texture, 0.75, { key: "atlas-interior-shoji" }), W / 2, 1.2, -0.2, g, { cast: false });
+  // 5 cm proud of the plaster front (z = -0.2): on its plane the two z-fight.
+  w.mesh(atlasPlane(W - 1.2, 2.2, shoji), lib.sign(w.atlas.texture, 0.75, { key: "atlas-interior-shoji" }), W / 2, 1.2, -0.15, g, { cast: false });
   // Hanging sign.
   const sign = w.atlas.draw(900, 220, (c, cw, ch) => {
     c.fillStyle = "#2a1a0e";

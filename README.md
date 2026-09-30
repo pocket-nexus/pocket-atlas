@@ -37,7 +37,7 @@ Requirements: VitaSDK at `~/vitasdk`, `cargo-vita`, Rust `nightly-2026-05-28` wi
 git submodule update --init
 # 1. Export the scene (dev server running) and cook it
 (cd web && bun run dev) &
-(cd web && bun scripts/export-city.ts)       # → .pocket-build/city/tokyo/scene.glb
+(cd web && bun scripts/export-city.ts --seconds 20)  # → .pocket-build/city/tokyo/scene.glb (the device loops the 20 s of traffic)
 bun tools/city.ts cook                        # → .pocket-build/city/tokyo/tokyo.pcity
 
 # 2. Development loop on a console running Pocket Devkit (PocketJS apps/devkit)

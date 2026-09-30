@@ -278,6 +278,11 @@ fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture]) -> Mat {
         (_, pc::Blend::Additive) => BlendMode::Additive,
     };
     let transparent = blend != BlendMode::Opaque;
+    // Alpha blending weighs by the program's alpha, which otherwise carries
+    // the eye distance.
+    if blend == BlendMode::Alpha && matches!(m.kind, pc::Kind::Standard | pc::Kind::Unlit) {
+        defines.push("BLEND");
+    }
     let w = m.wet.clone().unwrap_or_default();
     let d = m.damp.clone().unwrap_or_default();
     let base = match m.kind {
