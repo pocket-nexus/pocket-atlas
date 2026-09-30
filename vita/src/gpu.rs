@@ -62,8 +62,8 @@ pub enum U {
     Threshold,
     BloomK,
     Grade,
-    Grade2,
     Curtain,
+    GrainK,
     Count,
 }
 
@@ -71,8 +71,8 @@ const UNIFORM_NAMES: [&str; U::Count as usize] = [
     "uModel", "uDequant", "uViewProj", "uUv", "uBones", "uBase", "uEmissive", "uPbr", "uEnvK", "uWet", "uWet2", "uEye", "uFog", "uHemiSky",
     "uHemiGround", "uRipple", "uReflOn", "uLightPos", "uLightCol", "uLightDir", "uLightRight", "uLightUp", "uHaze", "uRayZ", "uRayX", "uRayY",
     "uZenith", "uHorizon", "uGlow", "uCam", "uTime", "uBox", "uWind", "uCenter", "uAmbient", "uDry", "uFogPos", "uFogCol", "uFogDir",
-    "uOpacity", "uBoxMin", "uBoxMax", "uTexel", "uThreshold", "uBloomK", "uGrade", "uGrade2",
-    "uCurtain",
+    "uOpacity", "uBoxMin", "uBoxMax", "uTexel", "uThreshold", "uBloomK", "uGrade",
+    "uCurtain", "uGrainK",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,12 +95,14 @@ pub enum S {
     Source,
     Support,
     Lut,
+    Mask,
+    Grain,
     Count,
 }
 
 const SAMPLER_NAMES: [&str; S::Count as usize] = [
     "uAlbedo", "uNormalMap", "uOrm", "uEmission", "uEnv", "uPuddles", "uRipples", "uReflSharp", "uReflBlur", "uBeads", "uClouds",
-    "uScene", "uHazeTex", "uBloom", "uSource", "uSupport", "uLut",
+    "uScene", "uHazeTex", "uBloom", "uSource", "uSupport", "uLut", "uMask", "uGrain",
 ];
 
 pub type Param = *const g::SceGxmProgramParameter;

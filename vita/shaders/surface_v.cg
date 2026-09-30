@@ -3,8 +3,9 @@
 // rigid moving parts. Skinned vertices blend up to four bone rows. Baked
 // vertices carry the static diffuse lighting as square-root RGBM.
 //
-// Defines: SKINNED, MAX_BONES, BAKED, FLAT (profiling: position and world
-// only).
+// Defines: SKINNED, MAX_BONES, BAKED; which varyings the fragment program
+// reads beyond world position, normal and UV: TANGENT, COLOR, SCREEN.
+// FLAT (profiling) writes position and world only.
 
 void main(
     float4 aPosition,
@@ -28,10 +29,16 @@ void main(
     out float4 oPosition : POSITION,
 #ifndef FLAT
     out half3 oNormal : TEXCOORD1,
-    out half4 oTangent : TEXCOORD2,
     out float2 oUv : TEXCOORD3,
+#ifdef TANGENT
+    out half4 oTangent : TEXCOORD2,
+#endif
+#ifdef SCREEN
     out float4 oScreen : TEXCOORD4,
+#endif
+#ifdef COLOR
     out half4 oColor : COLOR0,
+#endif
 #endif
     out float3 oWorld : TEXCOORD0)
 {
@@ -64,10 +71,16 @@ void main(
     oWorld = world;
 #ifndef FLAT
     oNormal = (half3)normalize(n);
-    oTangent = half4((half3)normalize(t), (half)aTangent.w);
     oUv = aUv * uUv.xy + uUv.zw;
+#ifdef TANGENT
+    oTangent = half4((half3)normalize(t), (half)aTangent.w);
+#endif
+#ifdef SCREEN
     oScreen = clipPos;
+#endif
+#ifdef COLOR
     oColor = (half4)aColor;
+#endif
 #endif
 #if defined(BAKED) && !defined(FLAT)
     float3 s = aLight.rgb * aLight.a;

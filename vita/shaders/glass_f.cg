@@ -4,7 +4,8 @@
 // (eye distance) is preserved.
 //
 // Defines: LIGHTS, FOG, REFLECTION, BAKED (static diffuse lighting from the
-// vertices; LIGHTS then counts moving lights only).
+// vertices; LIGHTS then counts moving lights only), LITE and FAR (bead
+// coverage only: no running drops, no bent normal, Schlick Fresnel).
 
 #include "common.cgh"
 
@@ -39,7 +40,12 @@ half4 main(
     if (dot(N, V) < 0.0) N = -N;
 
     half drop = 0.0;
-#ifndef REFLECTION
+#if defined(LITE) || defined(FAR)
+    {
+        float2 guv = abs(N.x) > abs(N.z) ? vWorld.zy : vWorld.xy;
+        drop = saturate(tex2D(uBeads, guv).b * (half)(uEnvK.w * uEnvK.y));
+    }
+#elif !defined(REFLECTION)
     {
         bool xFacing = abs(N.x) > abs(N.z);
         float2 guv = xFacing ? vWorld.zy : vWorld.xy;
@@ -85,8 +91,14 @@ half4 main(
     irradiance += tex2Dlod(uEnv, float4(octUv((float3)N), 0.0, 5.0)).rgb * (half)uEnvK.x;
 #endif
     half3 radiance = tex2Dlod(uEnv, float4(octUv((float3)reflect(-V, N)), 0.0, roughness * 5.0)).rgb * (half)uEnvK.x;
+#if defined(LITE) || defined(FAR)
+    half k = (half)1.0 - dotNV;
+    half k2 = k * k;
+    half3 spec = (half3)specular + radiance * ((half)0.04 + (half)0.96 * k2 * k2);
+#else
     half2 dfg = DFGApprox(roughness, dotNV);
     half3 spec = (half3)specular + radiance * (specularColor * dfg.x + dfg.y);
+#endif
     half3 diff = (half3)diffuse + irradiance * diffuseColor;
 
     half cover = saturate((half)uBase.a + drop * (half)0.12);

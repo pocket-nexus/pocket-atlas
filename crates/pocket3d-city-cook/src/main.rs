@@ -432,7 +432,7 @@ fn accessor_f32(doc: &gltf::Document, buffers: &[gltf::buffer::Data], index: usi
 fn push_draw(b: geometry::Built, material: u32, layout: pc::VertexLayout, node: Option<u32>, skin: Option<u32>, no_reflect: bool, blobs: &mut Blobs, draws: &mut Vec<pc::Draw>) {
     let vertices = Blobs::push(&mut blobs.geom, &b.vertices, 16);
     let indices = Blobs::push(&mut blobs.geom, &b.indices, 16);
-    let lod = b.lod.as_ref().map(|(idx, count, error)| pc::DrawLod { indices: Blobs::push(&mut blobs.geom, idx, 16), index_count: *count, error: *error });
+    let lods = b.lods.iter().map(|(idx, count, error)| pc::DrawLod { indices: Blobs::push(&mut blobs.geom, idx, 16), index_count: *count, error: *error }).collect();
     draws.push(pc::Draw {
         material,
         layout,
@@ -450,7 +450,7 @@ fn push_draw(b: geometry::Built, material: u32, layout: pc::VertexLayout, node: 
         skin,
         no_reflect,
         cast_shadow: true,
-        lod,
+        lods,
     });
 }
 
@@ -892,7 +892,10 @@ fn main() {
 
     // ---- static chunking and draw building
     let mut draws: Vec<pc::Draw> = Vec::new();
-    let mut static_buckets: BTreeMap<(u32, i32, i32, bool, bool), (Vec<Vertex>, Vec<[u32; 3]>)> = BTreeMap::new();
+    // Per bucket: vertices, triangles, and the positions on edges the chunk
+    // shares with another chunk of the same primitive (locked in its LODs).
+    type Bucket = (Vec<Vertex>, Vec<[u32; 3]>, HashSet<[u32; 3]>);
+    let mut static_buckets: BTreeMap<(u32, i32, i32, bool, bool), Bucket> = BTreeMap::new();
     let cell_of = |p: Vec3, cell: f32| -> (i32, i32) {
         let far = p.x.abs() > 140.0 || p.z.abs() > 140.0;
         let size = if far { 256.0 } else { cell };
@@ -905,24 +908,51 @@ fn main() {
         if p.moving || p.skin.is_some() {
             continue;
         }
-        for t in &p.tris {
-            let c = (p.verts[t[0] as usize].pos + p.verts[t[1] as usize].pos + p.verts[t[2] as usize].pos) / 3.0;
-            let (cx, cz) = cell_of(c, a.cell);
+        let cells: Vec<(i32, i32)> = p
+            .tris
+            .iter()
+            .map(|t| cell_of((p.verts[t[0] as usize].pos + p.verts[t[1] as usize].pos + p.verts[t[2] as usize].pos) / 3.0, a.cell))
+            .collect();
+        // Edges (by position, across attribute seams) whose triangles land in
+        // different chunks.
+        let mut edge_cell: HashMap<([u32; 3], [u32; 3]), (i32, i32)> = HashMap::new();
+        let mut cut: HashSet<[u32; 3]> = HashSet::new();
+        for (t, &cell) in p.tris.iter().zip(&cells) {
+            for k in 0..3 {
+                let (ka, kb) = (geometry::pos_bits(p.verts[t[k] as usize].pos), geometry::pos_bits(p.verts[t[(k + 1) % 3] as usize].pos));
+                let e = if ka <= kb { (ka, kb) } else { (kb, ka) };
+                let first = *edge_cell.entry(e).or_insert(cell);
+                if first != cell {
+                    cut.insert(e.0);
+                    cut.insert(e.1);
+                }
+            }
+        }
+        for (t, &(cx, cz)) in p.tris.iter().zip(&cells) {
             let e = static_buckets.entry((p.material, cx, cz, p.no_reflect, p.baked)).or_default();
             let base = e.0.len() as u32;
             for &i in t {
+                let pos = p.verts[i as usize].pos;
                 e.0.push(p.verts[i as usize]);
-                scene_min = scene_min.min(p.verts[i as usize].pos);
-                scene_max = scene_max.max(p.verts[i as usize].pos);
+                if cut.contains(&geometry::pos_bits(pos)) {
+                    e.2.insert(geometry::pos_bits(pos));
+                }
+                scene_min = scene_min.min(pos);
+                scene_max = scene_max.max(pos);
             }
             e.1.push([base, base + 1, base + 2]);
         }
     }
-    let emit = |verts: &[Vertex], tris: &[[u32; 3]], material: u32, layout: pc::VertexLayout, node: Option<u32>, skin: Option<u32>, no_reflect: bool, blobs: &mut Blobs, draws: &mut Vec<pc::Draw>| {
+    let mats = cook.materials.clone();
+    #[allow(clippy::too_many_arguments)]
+    let emit = |verts: &[Vertex], tris: &[[u32; 3]], locks: Option<&HashSet<[u32; 3]>>, material: u32, layout: pc::VertexLayout, node: Option<u32>, skin: Option<u32>, no_reflect: bool, blobs: &mut Blobs, draws: &mut Vec<pc::Draw>| {
+        // Whole thin parts may vanish at distance only from static lit surfaces
+        // without emission: signs and lamps stay, and people keep their limbs.
+        let m = &mats[material as usize];
+        let drop_parts = locks.is_some() && m.kind == pc::Kind::Standard && m.emissive.iter().all(|&e| e <= 0.0) && m.emission.is_none();
         for (v, t) in geometry::split(verts, tris) {
-            // LOD1 for draws seen from afar: 40 % of the triangles, ≤ 6 cm off.
-            let lod = if node.is_none() { geometry::simplify(&v, &t, 0.4, 0.06) } else { None };
-            let b = geometry::build(&v, &t, layout, lod);
+            let locked: Vec<bool> = v.iter().map(|v| locks.is_some_and(|l| l.contains(&geometry::pos_bits(v.pos)))).collect();
+            let b = geometry::build(&v, &t, layout, geometry::lods(&v, &t, &locked, drop_parts));
             push_draw(b, material, layout, node, skin, no_reflect, blobs, draws);
         }
     };
@@ -956,13 +986,13 @@ fn main() {
                 let cards = geometry::cache_order(&cards, verts.len());
                 // Cards replace items beyond a few metres (a small nominal
                 // error puts the switch at ~4 m at 640×362).
-                let b = geometry::build(&verts, &tris, pc::VertexLayout::Static, Some((cards, 0.012)));
+                let b = geometry::build(&verts, &tris, pc::VertexLayout::Static, vec![(cards, 0.012)]);
                 push_draw(b, *material, pc::VertexLayout::Static, None, None, true, blobs, draws);
                 start = end;
             }
         }
     };
-    for ((material, _, _, no_reflect, baked), (verts, tris)) in &static_buckets {
+    for ((material, _, _, no_reflect, baked), (verts, tris, locks)) in &static_buckets {
         // Weld identical vertices inside the bucket.
         let mut map: HashMap<[u32; 11], u32> = HashMap::new();
         let mut uv: Vec<Vertex> = Vec::new();
@@ -992,7 +1022,7 @@ fn main() {
             ut.push(r);
         }
         let layout = if *baked { pc::VertexLayout::Baked } else { pc::VertexLayout::Static };
-        emit(&uv, &ut, *material, layout, None, None, *no_reflect, &mut cook.blobs, &mut draws);
+        emit(&uv, &ut, Some(locks), *material, layout, None, None, *no_reflect, &mut cook.blobs, &mut draws);
     }
     emit_stock(&mut cook.blobs, &mut draws);
     let static_draws = draws.len();
@@ -1003,7 +1033,7 @@ fn main() {
         let skin = p.skin.map(|s| skin_ids[&s]);
         let node = if skin.is_none() { node_ids.get(&p.mesh_node).copied() } else { None };
         let layout = if skin.is_some() { pc::VertexLayout::Skinned } else { pc::VertexLayout::Static };
-        emit(&p.verts, &p.tris, p.material, layout, node, skin, false, &mut cook.blobs, &mut draws);
+        emit(&p.verts, &p.tris, None, p.material, layout, node, skin, false, &mut cook.blobs, &mut draws);
     }
     let _ = &prims.iter().map(|p| p.world).count();
 

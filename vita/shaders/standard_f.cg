@@ -71,13 +71,19 @@ half2 rippleFrame(float2 uv, float frame)
 half4 main(
     float3 vWorld : TEXCOORD0,
     half3 vNormal : TEXCOORD1,
+#ifdef NORMAL_MAP
     half4 vTangent : TEXCOORD2,
-    float2 vUv : TEXCOORD3,
+#endif
+#if defined(PLANAR) && !defined(REFLECTION)
     float4 vScreen : TEXCOORD4,
+#endif
 #ifdef BAKED
     half3 vLight : TEXCOORD5,
 #endif
-    half4 vColor : COLOR0) : COLOR
+#ifdef VERTEX_COLOR
+    half4 vColor : COLOR0,
+#endif
+    float2 vUv : TEXCOORD3) : COLOR
 {
     // World positions, texture coordinates and distances stay float; the
     // shading itself runs in half precision (twice the ALU rate on SGX).
@@ -86,6 +92,43 @@ half4 main(
     half3 V = (half3)(toEye / dist);
     half3 Ng = normalize(vNormal);
     half rain = (half)uEnvK.w;
+
+#if defined(LITE) && defined(WET) && defined(PLANAR) && defined(BAKED) && !defined(REFLECTION)
+    // Wet ground at 60 fps: baked light × albedo, the puddle mask, one tap of
+    // the mirror image and a Schlick-style Fresnel for a flat surface, fog.
+    // No environment lookup, split-sum or ripple flipbook.
+    {
+        half4 a = (half4)uBase;
+#ifdef ALBEDO_MAP
+        half4 at = tex2D(uAlbedo, vUv);
+        a *= half4(srgbToLinear(at.rgb), at.a);
+#endif
+#ifdef VERTEX_COLOR
+        a *= half4(srgbToLinear(vColor.rgb), vColor.a);
+#endif
+        half2 pf = tex2D(uPuddles, vWorld.xz * uWet2.x).rg;
+        half field = pf.r * 0.8 + pf.g * 0.2;
+        half thr = (half)(0.71 - uWet.x * 0.25);
+        half puddle = smoothstep(thr - (half)0.012, thr + (half)0.03, field) * rain * (half)step(0.001, uWet.x);
+        a.rgb *= lerp((half)1.0, (half)uWet.y, rain);
+        a.rgb = lerp(a.rgb, a.rgb * (half)0.45, puddle);
+        half rough = lerp((half)uPbr.x, (half)(uPbr.x * uWet.z), rain);
+        rough = lerp(rough, (half)0.02, puddle);
+        float2 ruv = vScreen.xy / vScreen.w * float2(0.5, -0.5) + 0.5;
+        ruv += (float2)((pf - (half)0.5) * lerp((half)0.012, (half)0.004, puddle));
+        half3 refl = rough < (half)0.15 ? (half3)tex2D(uReflSharp, ruv).rgb : (half3)tex2D(uReflBlur, ruv).rgb;
+        half2 e2 = (half2)saturate(min(ruv, 1.0 - ruv) * 33.3);
+        half w = (half)uReflOn.x * ((half)1.0 - smoothstep((half)0.5, (half)0.8, rough)) * lerp((half)0.35, (half)1.0, e2.x * e2.y);
+        half k = (half)1.0 - saturate(V.y);
+        half k2 = k * k;
+        half fres = (half)0.04 + (half)0.96 * k2 * k2 * ((half)1.0 - rough);
+        half3 color = vLight * a.rgb + lerp((half3)uFog.rgb, refl, w) * fres + (half3)uEmissive.rgb;
+#ifdef FOG
+        color = lerp(color, (half3)uFog.rgb, (half)fogFactor(dist, uFog.w));
+#endif
+        return half4(color, (half)dist);
+    }
+#endif
 
     // ------------------------------------------------------------ material
     half4 albedo = (half4)uBase;

@@ -14,8 +14,10 @@
 //   bun tools/city.ts lint                          # parse/type-check Cg on the host
 //   bun tools/city.ts bench                         # frame cost per renderer feature
 //   bun tools/city.ts profile ['{"msaa":false}']    # GPU time per scene
+//   bun tools/city.ts sweep [--shots a,b] [--time 100] # frame time per shot × quality step
 //   bun tools/city.ts shots [--seconds 90]          # frame time per cinematic shot
-//   (bench, profile, shots: --render vita60|cinematic, default vita60)
+//   (bench, profile, sweep, shots: --render vita60|cinematic, default vita60;
+//    bench and profile: --shot NAME --time T, else the device's current view)
 //
 // The default title is Pocket Devkit (P3B1D7273, PocketJS apps/devkit), the
 // development container installed on the console: its native slots accept
@@ -150,7 +152,7 @@ async function lint(): Promise<void> {
   const cases: [string, string[]][] = [
     ["surface_v.cg", []], ["surface_v.cg", ["SKINNED", "MAX_BONES=24"]], ["surface_v.cg", ["BAKED"]],
     ["standard_f.cg", ["LIGHTS=2", "BAKED", "WET", "PLANAR", "ALBEDO_MAP", "NORMAL_MAP", "ORM_MAP", "FOG"]], ["debug_f.cg", []],
-    ["standard_f.cg", ["LIGHTS=0", "BAKED", "FAR", "DAMP", "ALBEDO_MAP", "NORMAL_MAP", "FOG"]], ["standard_f.cg", ["LIGHTS=2", "BAKED", "LITE", "WET", "PLANAR", "ALBEDO_MAP", "NORMAL_MAP", "FOG"]], ["glass_f.cg", ["LIGHTS=0", "BAKED", "FOG"]],
+    ["standard_f.cg", ["LIGHTS=0", "BAKED", "FAR", "DAMP", "ALBEDO_MAP", "NORMAL_MAP", "FOG"]], ["standard_f.cg", ["LIGHTS=2", "BAKED", "LITE", "WET", "PLANAR", "ALBEDO_MAP", "NORMAL_MAP", "FOG"]], ["glass_f.cg", ["LIGHTS=0", "BAKED", "FOG"]], ["glass_f.cg", ["LIGHTS=0", "BAKED", "LITE", "FOG"]],
     ["standard_f.cg", ["LIGHTS=4", ...lit]], ["standard_f.cg", ["LIGHTS=2", "DAMP", "CLEARCOAT", "ALPHA_TEST", "REFLECTION"]],
     ["standard_f.cg", ["LIGHTS=0", "INTERIOR", "ALBEDO_MAP"]], ["unlit_f.cg", ["ALBEDO_MAP", "VERTEX_COLOR", "FOG", "ALPHA_TEST"]],
     ["glass_f.cg", ["LIGHTS=4", "FOG"]], ["glass_f.cg", ["LIGHTS=0", "REFLECTION"]], ["window_f.cg", ["FOG"]], ["window_f.cg", ["REFLECTION"]],
@@ -176,27 +178,52 @@ async function lint(): Promise<void> {
   if (failed) throw new Error(`${failed} shader variants failed`);
 }
 
-// Renderer switches as the device starts; every measurement sends the full
-// set so no switch carries over from an earlier run.
+// Every measurement names the render profile, which resets the device's
+// switches and governor to the profile's; `settings` then overrides them.
 const RENDER = value("--render", "vita60");
-const DEFAULTS = { reflection: true, haze: true, bloom: true, rain: true, msaa: true, flat: false, maxLights: 4, fx: 63, skip: 0, hud: true, amortize: true, scale: 2 };
+const STATUS = resolve(ROOT, `.pocket-build/vita-usb/share/pocket-vita/${title}/status.json`);
+
+/** The device's engine status (the USB host replaces the file while it is read). */
+function engine(): any {
+  for (let i = 0; ; i++) {
+    try { return JSON.parse(readFileSync(STATUS, "utf8")).engine ?? {}; } catch (e) { if (i > 20) throw e; }
+    Bun.sleepSync(50);
+  }
+}
+
+interface Shot { name: string; from: { pos: number[]; target: number[]; fov: number }; to: { pos: number[]; target: number[]; fov: number } }
+
+/** The cinematic shots authored in the cooked scene (scene.glb extras). */
+function shotList(): Shot[] {
+  const b = readFileSync(resolve(ROOT, ".pocket-build/city/tokyo/scene.glb"));
+  const json = JSON.parse(b.subarray(20, 20 + b.readUInt32LE(12)).toString("utf8"));
+  return json.scenes[0].extras.pocketCity.camera.shots;
+}
+
+/** A shot's view halfway through its move, as the rig eases it. */
+function shotView(s: Shot): { pos: number[]; target: number[]; fov: number } {
+  const t = 0.5;
+  const mix = (a: number[], b: number[]) => a.map((x, i) => x + (b[i]! - x) * t);
+  return { pos: mix(s.from.pos, s.to.pos), target: mix(s.from.target, s.to.target), fov: s.from.fov + (s.to.fov - s.from.fov) * t };
+}
+
+/** `--shot NAME` (halfway view), else the device's current view; `--time` or the device's time. */
+function measuredView(): { view: { pos: number[]; target: number[]; fov: number }; time: number } {
+  const e = engine();
+  if (e.stage !== "running" || !e.view) throw new Error("the device is not running Pocket City");
+  const name = value("--shot", "");
+  const shot = name ? shotList().find((s) => s.name.toLowerCase() === name.toLowerCase()) : undefined;
+  if (name && !shot) throw new Error(`no shot ${name}: ${shotList().map((s) => s.name).join(", ")}`);
+  const view = shot ? shotView(shot) : { pos: e.view.pos, target: e.view.target, fov: e.view.fov };
+  return { view, time: Number(value("--time", String(e.time))) };
+}
 
 // Frame cost per renderer feature at a fixed view and time: each row turns
 // one feature off (or all of them) through control.json and averages the
 // frame times the device reports once the change has settled.
 async function bench(): Promise<void> {
-  const status = resolve(ROOT, `.pocket-build/vita-usb/share/pocket-vita/${title}/status.json`);
-  // The USB host replaces status.json while it is read; retry the read.
-  const engine = (): any => {
-    for (let i = 0; ; i++) {
-      try { return JSON.parse(readFileSync(status, "utf8")).engine ?? {}; } catch (e) { if (i > 20) throw e; }
-      Bun.sleepSync(50);
-    }
-  };
-  const view = engine().view;
-  if (engine().stage !== "running" || !view) throw new Error("the device is not running Pocket City");
-  const shot = { renderProfile: RENDER, view: { pos: view.pos, target: view.target, fov: view.fov }, time: engine().time };
-  const all = DEFAULTS;
+  const shot = { renderProfile: RENDER, ...measuredView() };
+  const base = argv[1] && !argv[1].startsWith("--") ? JSON.parse(argv[1]) : {};
   const bare = { reflection: false, haze: false, bloom: false, rain: false };
   const rows: [string, Record<string, boolean | number>][] = [
     ["full", {}], ["no reflection", { reflection: false }], ["no haze", { haze: false }],
@@ -208,7 +235,7 @@ async function bench(): Promise<void> {
   mkdirSync(SHARE, { recursive: true });
   console.log(`view ${JSON.stringify(shot)}`);
   for (const [name, off] of rows) {
-    await Bun.write(`${SHARE}/control.json`, JSON.stringify({ ...shot, settings: { ...all, ...off } }) + "\n");
+    await Bun.write(`${SHARE}/control.json`, JSON.stringify({ ...shot, settings: { ...base, ...off } }) + "\n");
     await Bun.sleep(3000);
     const sum = { frameMs: 0, cpuSubmitMs: 0, waitMs: 0, swapMs: 0 };
     for (let i = 0; i < 8; i++) {
@@ -219,40 +246,73 @@ async function bench(): Promise<void> {
     const f = (v: number) => v.toFixed(1).padStart(6);
     console.log(`${name.padEnd(14)} ${f(sum.frameMs)} ms ${(1000 / sum.frameMs).toFixed(1).padStart(5)} fps  cpu ${f(sum.cpuSubmitMs)}  gpu wait ${f(sum.waitMs)}  swap ${f(sum.swapMs)}`);
   }
-  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ settings: all }) + "\n");
+  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ renderProfile: RENDER }) + "\n");
 }
 
 // GPU time per scene at the current view: the device serializes the frame
 // while `profile` is on and reports each scene's duration.
 async function profile(): Promise<void> {
-  const status = resolve(ROOT, `.pocket-build/vita-usb/share/pocket-vita/${title}/status.json`);
-  const engine = (): any => {
-    for (let i = 0; ; i++) {
-      try { return JSON.parse(readFileSync(status, "utf8")).engine ?? {}; } catch (e) { if (i > 20) throw e; }
-      Bun.sleepSync(50);
-    }
-  };
-  const view = engine().view;
-  if (engine().stage !== "running" || !view) throw new Error("the device is not running Pocket City");
   const extra = argv[1] && !argv[1].startsWith("--") ? JSON.parse(argv[1]) : {};
-  const shot = { renderProfile: RENDER, view: { pos: view.pos, target: view.target, fov: view.fov }, time: engine().time };
-  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ ...shot, settings: { ...DEFAULTS, profile: true, ...extra } }) + "\n");
+  const shot = { renderProfile: RENDER, ...measuredView() };
+  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ ...shot, settings: { profile: true, ...extra } }) + "\n");
   await Bun.sleep(3000);
-  const sum = new Map<string, number>();
-  const n = 8;
+  // Reflection and haze redraw on alternate frames: each scene averages
+  // over the sampled frames that drew it, with the share of frames it ran in.
+  const sum = new Map<string, { ms: number; frames: number }>();
+  const n = 12;
   for (let i = 0; i < n; i++) {
-    await Bun.sleep(400);
+    // Jittered, so samples do not lock onto one parity of alternating frames.
+    await Bun.sleep(280 + Math.random() * 90);
     const seen = new Map<string, number>();
     for (const [name, ms] of engine().passes ?? []) seen.set(name, (seen.get(name) ?? 0) + ms);
-    for (const [name, ms] of seen) sum.set(name, (sum.get(name) ?? 0) + ms / n);
+    for (const [name, ms] of seen) {
+      const a = sum.get(name) ?? { ms: 0, frames: 0 };
+      sum.set(name, { ms: a.ms + ms, frames: a.frames + 1 });
+    }
   }
   let total = 0;
-  for (const [name, ms] of sum) {
-    total += ms;
-    console.log(`${name.padEnd(16)} ${ms.toFixed(2).padStart(7)} ms`);
+  let mean = 0;
+  for (const [name, a] of sum) {
+    total += a.ms / a.frames;
+    mean += a.ms / n;
+    const share = a.frames < n ? `  (${a.frames}/${n} frames)` : "";
+    console.log(`${name.padEnd(16)} ${(a.ms / a.frames).toFixed(2).padStart(7)} ms${share}`);
   }
-  console.log(`${"total".padEnd(16)} ${total.toFixed(2).padStart(7)} ms`);
-  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ ...shot, settings: { ...DEFAULTS, profile: false } }) + "\n");
+  console.log(`${"worst frame".padEnd(16)} ${total.toFixed(2).padStart(7)} ms`);
+  console.log(`${"mean frame".padEnd(16)} ${mean.toFixed(2).padStart(7)} ms`);
+  // Back to the camera rig with the profile's switches.
+  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ renderProfile: RENDER }) + "\n");
+}
+
+// Frame time per shot (halfway view, fixed time) at every quality step of
+// the profile, the governor held: which step each view sustains.
+async function sweep(): Promise<void> {
+  const extra = argv[1] && !argv[1].startsWith("--") ? JSON.parse(argv[1]) : {};
+  const names = value("--shots", "").split(",").filter(Boolean).map((n) => n.toLowerCase());
+  const shots = shotList().filter((s) => !names.length || names.includes(s.name.toLowerCase()));
+  const time = Number(value("--time", "100"));
+  const steps = Number(value("--steps", "6"));
+  mkdirSync(SHARE, { recursive: true });
+  console.log(`render profile ${RENDER}, time ${time} s, frame ms per step (cpu submit ms)`);
+  console.log(`${"".padEnd(10)} ${[...Array(steps).keys()].map((k) => `step ${k}`.padStart(13)).join("")}`);
+  for (const s of shots) {
+    const row: string[] = [];
+    for (let k = 0; k < steps; k++) {
+      await Bun.write(`${SHARE}/control.json`, JSON.stringify({ renderProfile: RENDER, view: shotView(s), time, settings: { step: k, hold: true, ...extra } }) + "\n");
+      await Bun.sleep(2500);
+      let ms = 0;
+      let cpu = 0;
+      for (let i = 0; i < 6; i++) {
+        await Bun.sleep(400);
+        const e = engine();
+        ms += e.frameMs / 6;
+        cpu += e.cpuSubmitMs / 6;
+      }
+      row.push(`${ms.toFixed(1)} (${cpu.toFixed(1)})`.padStart(13));
+    }
+    console.log(`${s.name.padEnd(10)} ${row.join("")}`);
+  }
+  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ renderProfile: RENDER }) + "\n");
 }
 
 // Standalone VPK (title PKCT00001 unless --title is given): the cooked pack
@@ -281,15 +341,14 @@ async function vpk(): Promise<void> {
 // Frame time per cinematic shot while the camera rig plays (render profile
 // and governor as they run for a viewer).
 async function shots(): Promise<void> {
-  const status = resolve(ROOT, `.pocket-build/vita-usb/share/pocket-vita/${title}/status.json`);
   const seconds = Number(value("--seconds", "90"));
-  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ renderProfile: RENDER, settings: { profile: false, scale: 4 } }) + "\n");
+  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ renderProfile: RENDER }) + "\n");
   await Bun.sleep(3000);
   const acc = new Map<string, { ms: number[]; steps: Set<number>; levels: Set<number> }>();
   const end = Date.now() + seconds * 1000;
   while (Date.now() < end) {
     try {
-      const e = JSON.parse(readFileSync(status, "utf8")).engine;
+      const e = JSON.parse(readFileSync(STATUS, "utf8")).engine;
       const a = acc.get(e.view.shot) ?? { ms: [], steps: new Set(), levels: new Set() };
       a.ms.push(e.frameMs);
       a.steps.add(e.settings.step);
@@ -329,6 +388,7 @@ else if (command === "lint") await lint();
 else if (command === "bench") await bench();
 else if (command === "profile") await profile();
 else if (command === "shots") await shots();
+else if (command === "sweep") await sweep();
 else if (command === "sync") sync();
 else if (command === "ctl") {
   mkdirSync(SHARE, { recursive: true });

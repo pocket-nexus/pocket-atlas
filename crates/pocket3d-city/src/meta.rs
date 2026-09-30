@@ -199,10 +199,11 @@ pub struct Draw {
     /// Drawn by the main camera only (not into the street reflection).
     pub no_reflect: bool,
     pub cast_shadow: bool,
-    /// Reduced index list over the same vertices, for draws far enough that
-    /// its error projects below the renderer's pixel threshold.
+    /// Reduced index lists over the same vertices (LOD1, LOD2), for draws
+    /// far enough that a level's error projects below the renderer's pixel
+    /// threshold.
     #[serde(default)]
-    pub lod: Option<DrawLod>,
+    pub lods: Vec<DrawLod>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

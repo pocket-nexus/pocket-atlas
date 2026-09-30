@@ -6,6 +6,7 @@
 //! the device and hot-reload when their source changes, `host0:city/control.json`
 //! steers camera and renderer settings, and status receipts report timings
 //! and draw statistics under `engine`.
+#![recursion_limit = "256"]
 
 mod camera;
 mod frame;
@@ -50,6 +51,27 @@ extern "C" {
     fn scePowerSetBusClockFrequency(freq: i32) -> i32;
     fn scePowerSetGpuClockFrequency(freq: i32) -> i32;
     fn scePowerSetGpuXbarClockFrequency(freq: i32) -> i32;
+    fn scePowerGetArmClockFrequency() -> i32;
+    fn scePowerGetBusClockFrequency() -> i32;
+    fn scePowerGetGpuClockFrequency() -> i32;
+    fn scePowerGetGpuXbarClockFrequency() -> i32;
+}
+
+/// ARM, bus, GPU and GPU crossbar clocks (MHz) the frame budgets assume.
+const CLOCKS: [i32; 4] = [444, 222, 222, 166];
+
+/// Sets the clocks; returns the four results.
+unsafe fn set_clocks() -> [i32; 4] {
+    [
+        scePowerSetArmClockFrequency(CLOCKS[0]),
+        scePowerSetBusClockFrequency(CLOCKS[1]),
+        scePowerSetGpuClockFrequency(CLOCKS[2]),
+        scePowerSetGpuXbarClockFrequency(CLOCKS[3]),
+    ]
+}
+
+unsafe fn clocks_now() -> [i32; 4] {
+    [scePowerGetArmClockFrequency(), scePowerGetBusClockFrequency(), scePowerGetGpuClockFrequency(), scePowerGetGpuXbarClockFrequency()]
 }
 
 unsafe fn text(font: *mut g::vita2d_pgf, x: i32, y: i32, color: u32, scale: f32, s: &str) {
@@ -120,12 +142,10 @@ struct Control {
 
 fn apply_control(v: &Value, rig: &mut Rig, r: &mut Renderer, ctl: &mut Control, hud: &mut bool) {
     *hud = v["settings"]["hud"].as_bool().unwrap_or(*hud);
-    // A profile switch resets the switches to the profile's, then the
-    // settings below override them.
+    // Naming a profile resets the switches and the governor to the
+    // profile's, then the settings below override them.
     if let Some(p) = v["renderProfile"].as_str().and_then(profile::by_name) {
-        if !core::ptr::eq(p, r.profile) {
-            r.set_profile(p);
-        }
+        r.set_profile(p);
     }
     let s = &mut r.settings;
     let flag = |k: &str, cur: bool| v["settings"][k].as_bool().unwrap_or(cur);
@@ -152,6 +172,11 @@ fn apply_control(v: &Value, rig: &mut Rig, r: &mut Renderer, ctl: &mut Control, 
     if let Some(n) = v["settings"]["maxLights"].as_u64() {
         s.max_lights = n.min(4) as usize;
     }
+    // Pins the governor's quality step; `hold` keeps it there.
+    if let Some(n) = v["settings"]["step"].as_u64() {
+        r.governor.step = (n as usize).min(r.profile.steps.len() - 1);
+    }
+    r.governor.hold = v["settings"]["hold"].as_bool().unwrap_or(r.governor.hold);
     r.timeline.on = v["settings"]["profile"].as_bool().unwrap_or(r.timeline.on);
     ctl.frozen = v["time"].as_f64().map(|t| t as f32);
     ctl.view = v["view"]["pos"].as_array().zip(v["view"]["target"].as_array()).map(|(p, t)| {
@@ -171,7 +196,10 @@ fn main() {
             pocketjs_vita::vita_log(format_args!("city: graphics {error}"));
             return;
         }
-        let clocks = [scePowerSetArmClockFrequency(444), scePowerSetBusClockFrequency(222), scePowerSetGpuClockFrequency(222), scePowerSetGpuXbarClockFrequency(166)];
+        let clocks = set_clocks();
+        // The system lowers the clocks again after a suspend or a power-mode
+        // change; they are checked once a second and set again.
+        let mut clock_resets = 0u32;
         input::init();
         let mut dev = dev::Host::new();
         let font = g::vita2d_load_default_pgf();
@@ -327,14 +355,17 @@ fn main() {
                 scene.door_open += (goal - scene.door_open) * (1.0 - (-dt * if near { 3.5 } else { 2.2 }).exp());
             }
             scene.update(time);
+            if frame_no % 60 == 0 && clocks_now().iter().zip(CLOCKS).any(|(&now, want)| now < want) {
+                set_clocks();
+                clock_resets += 1;
+            }
 
             // ------------------------------------------------------ render
             // Profiling serializes the GPU; its frame times would force the
             // lowest resolution.
             if !renderer.timeline.on {
-                // Work-limited frame time: the display-flip wait is not GPU load.
                 let p = renderer.profile;
-                renderer.governor.feedback(p, (frame_ms - swap_ms).max(0.0));
+                renderer.governor.feedback(p, frame_ms);
             }
             let fade = if ctl.view.is_some() { 0.0 } else { rig.fade };
             let bars = if ctl.view.is_some() { 0.0 } else { rig.bars };
@@ -375,8 +406,12 @@ fn main() {
             swap_ms = swap_ms * 0.9 + t_swap.elapsed().as_secs_f32() * 1000.0 * 0.1;
 
             let st = &renderer.stats;
-            let pass = |p: &frame::PassStats| json!({"draws": p.draws, "tris": p.tris, "lod": p.lod, "culled": p.culled, "missing": p.missing});
+            let pass = |p: &frame::PassStats| json!({"draws": p.draws, "tris": p.tris, "lod": p.lod, "culled": p.culled, "missing": p.missing, "lights": p.lights, "unbaked": p.unbaked});
             let s = &renderer.settings;
+            // Main-pass triangles by material, heaviest first (profiling).
+            let mut by: Vec<(usize, u32)> = renderer.stats.by_material.iter().copied().enumerate().filter(|x| x.1 > 0).collect();
+            by.sort_by(|a, b| b.1.cmp(&a.1));
+            let heavy: Vec<Value> = by.iter().take(10).map(|(i, t)| json!([scene.meta.materials[*i].name, t])).collect();
             dev.engine = json!({
                 "stage": "running",
                 "pack": pack_path,
@@ -390,10 +425,14 @@ fn main() {
                 "memory": {"textures": scene.bytes_tex, "geometry": scene.bytes_geom, "vram": scene.vram.reserved(), "main": scene.main.reserved()},
                 "loadMs": scene.load_ms,
                 "clocks": clocks,
+                "clockMhz": clocks_now(),
+                "clockResets": clock_resets,
                 "view": {"pos": view.pos.to_array(), "target": view.target.to_array(), "fov": view.fov_y, "mode": if rig.mode == Mode::Cinematic { "cinematic" } else { "free" }, "shot": rig.shot_name()},
-                "settings": {"msaa": s.msaa == Msaa::X4, "reflection": s.reflection, "haze": s.haze, "bloom": s.bloom, "rain": s.rain, "cullCw": s.cull_cw, "exposure": s.exposure, "maxLights": s.max_lights, "flat": s.flat, "scale": s.scale, "level": renderer.level(), "profile": renderer.profile.name, "step": renderer.governor.step, "budgetMs": renderer.profile.budget_ms, "fx": s.fx, "amortize": s.amortize},
+                "settings": {"msaa": s.msaa == Msaa::X4, "reflection": s.reflection, "haze": s.haze, "bloom": s.bloom, "rain": s.rain, "cullCw": s.cull_cw, "exposure": s.exposure, "maxLights": s.max_lights, "flat": s.flat, "scale": s.scale, "level": renderer.level(), "profile": renderer.profile.name, "step": renderer.governor.step, "hold": renderer.governor.hold, "budgetMs": renderer.profile.budget_ms, "fx": s.fx, "amortize": s.amortize},
                 "uptime": started.elapsed().as_secs(),
                 "passes": renderer.timeline.passes.iter().map(|(n, ms)| json!([n, ms])).collect::<Vec<_>>(),
+                "cpuPasses": renderer.timeline.cpu.iter().map(|(n, rec, end)| json!([n, rec, end])).collect::<Vec<_>>(),
+                "heavy": heavy,
             });
             dev.publish(frame_no, "city");
             serve(&mut dev, frame_no, action);

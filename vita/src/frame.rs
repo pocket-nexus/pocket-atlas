@@ -20,7 +20,7 @@ use crate::shaders::Key;
 pub const W: u32 = 960;
 pub const H: u32 = 544;
 /// Scene resolutions (the display stays 960×544).
-pub const SCALES: [(u32, u32); 4] = [(960, 544), (720, 408), (640, 362), (544, 308)];
+pub const SCALES: [(u32, u32); 5] = [(960, 544), (720, 408), (640, 362), (544, 308), (480, 272)];
 const LIGHTS_MAX: usize = 4;
 const REFL_LIGHTS: usize = 2;
 const HAZE_LIGHTS: usize = 6;
@@ -91,6 +91,10 @@ pub struct PassStats {
     pub tris: u32,
     pub culled: u32,
     pub missing: u32,
+    /// Lit draws by per-pixel light count (0, 2, 4), and lit draws
+    /// without baked lighting.
+    pub lights: [u32; 3],
+    pub unbaked: u32,
 }
 
 /// GPU time per scene, for profiling (`profile` control setting). Each scene
@@ -102,6 +106,10 @@ pub struct Timeline {
     value: u32,
     pub on: bool,
     pub passes: Vec<(&'static str, f32)>,
+    /// Without profiling: per scene, CPU ms recording it and ms inside its
+    /// sceGxmEndScene (GPU backpressure shows up in both).
+    pub cpu: Vec<(&'static str, f32, f32)>,
+    mark: std::time::Instant,
 }
 
 impl Timeline {
@@ -116,7 +124,7 @@ impl Timeline {
                 g::SceGxmNotification { address, value: 0 }
             })
             .collect();
-        Self { slots, value: 0, on: false, passes: Vec::new() }
+        Self { slots, value: 0, on: false, passes: Vec::new(), cpu: Vec::new(), mark: std::time::Instant::now() }
     }
 
     /// Ends the open scene on `ctx` (drawn into `target`) and, when
@@ -126,7 +134,12 @@ impl Timeline {
     /// A scene begun on `target` is open.
     unsafe fn end(&mut self, ctx: *mut g::SceGxmContext, target: &Target, name: &'static str) {
         if !self.on {
+            // CPU time recording the scene, then inside sceGxmEndScene.
+            let t = std::time::Instant::now();
             target.end(ctx, None);
+            let record = t.duration_since(self.mark).as_secs_f32() * 1000.0;
+            self.cpu.push((name, record, t.elapsed().as_secs_f32() * 1000.0));
+            self.mark = std::time::Instant::now();
             return;
         }
         self.value = self.value.wrapping_add(1);
@@ -142,6 +155,8 @@ impl Timeline {
 
 #[derive(Default)]
 pub struct Stats {
+    /// Main-pass triangles per material index (profiling).
+    pub by_material: Vec<u32>,
     pub reflection: PassStats,
     pub main: PassStats,
     pub fx_quads: u32,
@@ -318,6 +333,8 @@ fn tone(c: [f32; 3]) -> [f32; 3] {
 
 /// LUT texels: `LUT` slices of LUT×LUT side by side (blue picks the slice,
 /// red runs across it, green down), RGBA8 in sRGB.
+/// The colour table as a tiled texture: each 32×32 tile is one blue slice,
+/// stored row by row, so a lookup's two slices are 4 KiB blocks.
 fn tone_lut() -> Vec<u8> {
     let mut px = vec![0u8; LUT * LUT * LUT * 4];
     let at = |i: usize| (i as f32 / (LUT - 1) as f32 * 16.5 - 12.47393).exp2();
@@ -325,12 +342,61 @@ fn tone_lut() -> Vec<u8> {
         for g in 0..LUT {
             for r in 0..LUT {
                 let c = tone([at(r), at(g), at(b)]);
-                let o = (g * LUT * LUT + b * LUT + r) * 4;
+                let o = (b * LUT * LUT + g * LUT + r) * 4;
                 px[o..o + 4].copy_from_slice(&[(c[0] * 255.0).round() as u8, (c[1] * 255.0).round() as u8, (c[2] * 255.0).round() as u8, 255]);
             }
         }
     }
     px
+}
+
+const MASK_W: usize = 64;
+const MASK_H: usize = 256;
+/// The GPU may still read the two frames before this one.
+const MASK_BUFFERS: usize = 3;
+const VIGNETTE: f32 = 0.45;
+const GRAIN: usize = 64;
+
+/// An 8-bit single-channel tiled texture (32×32 tiles) over `px`.
+unsafe fn tiled_u8(px: *mut u8, w: usize, h: usize, linear: bool, repeat: bool) -> Result<g::SceGxmTexture, String> {
+    let mut t: g::SceGxmTexture = core::mem::zeroed();
+    let r = g::sceGxmTextureInitTiled(&mut t, px.cast(), g::SceGxmTextureFormat_SCE_GXM_TEXTURE_FORMAT_U8_R111, w as u32, h as u32, 0);
+    if r < 0 {
+        return Err(format!("tiled texture {w}x{h} 0x{:08x}", r as u32));
+    }
+    let f = if linear { g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_LINEAR } else { g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_POINT };
+    g::sceGxmTextureSetMinFilter(&mut t, f);
+    g::sceGxmTextureSetMagFilter(&mut t, f);
+    let a = if repeat { g::SceGxmTextureAddrMode_SCE_GXM_TEXTURE_ADDR_REPEAT } else { g::SceGxmTextureAddrMode_SCE_GXM_TEXTURE_ADDR_CLAMP };
+    g::sceGxmTextureSetUAddrMode(&mut t, a);
+    g::sceGxmTextureSetVAddrMode(&mut t, a);
+    Ok(t)
+}
+
+/// Byte offset of texel (x, y) in a tiled 8-bit texture `w` texels wide.
+fn tiled_at(x: usize, y: usize, w: usize) -> usize {
+    ((y / 32) * (w / 32) + x / 32) * 1024 + (y % 32) * 32 + x % 32
+}
+
+/// The screen mask the composite multiplies by: vignette, letterbox bars
+/// (`bars` = how far they have closed) and the dip to black.
+fn write_mask(px: *mut u8, fade: f32, bars: f32) {
+    let aspect = W as f32 / H as f32;
+    let bar = bars * (0.5 - (aspect / 2.39) * 0.5).max(0.0);
+    for y in 0..MASK_H {
+        let v = (y as f32 + 0.5) / MASK_H as f32;
+        // Row coverage outside the bars, antialiased over one row.
+        let open = ((v.min(1.0 - v) - bar) * MASK_H as f32 + 0.5).clamp(0.0, 1.0) * (1.0 - fade);
+        for x in 0..MASK_W {
+            let u = (x as f32 + 0.5) / MASK_W as f32;
+            let q = ((u - 0.5) * aspect, v - 0.5);
+            let r = (q.0 * q.0 + q.1 * q.1).sqrt();
+            let t = ((r - 1.05) / (0.25 - 1.05)).clamp(0.0, 1.0);
+            let vig = t * t * (3.0 - 2.0 * t);
+            let m = (1.0 - VIGNETTE * 0.55) + VIGNETTE * 0.55 * vig;
+            unsafe { *px.add(tiled_at(x, y, MASK_W)) = (m * open * 255.0).round() as u8 };
+        }
+    }
 }
 
 struct FxBuf {
@@ -363,6 +429,11 @@ pub struct Renderer {
     finals: Vec<Target>,
     down: Vec<Target>,
     up: Vec<Target>,
+    /// Screen mask (vignette × letterbox × fade), rewritten into the next
+    /// buffer when the letterbox or fade moves; `mask_at` = (buffer, key).
+    masks: Vec<(*mut u8, g::SceGxmTexture)>,
+    mask_at: Option<(usize, (u32, u32))>,
+    grain: g::SceGxmTexture,
     tri_vb: *const f32,
     tri_ib: *const u16,
     lut: g::SceGxmTexture,
@@ -484,7 +555,7 @@ impl Renderer {
         let lut_mem = vram.alloc(lut_px.len(), 512)?;
         core::ptr::copy_nonoverlapping(lut_px.as_ptr(), lut_mem, lut_px.len());
         let mut lut: g::SceGxmTexture = core::mem::zeroed();
-        let r = g::sceGxmTextureInitLinear(&mut lut, lut_mem.cast(), g::SceGxmTextureFormat_SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR, (LUT * LUT) as u32, LUT as u32, 0);
+        let r = g::sceGxmTextureInitTiled(&mut lut, lut_mem.cast(), g::SceGxmTextureFormat_SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR, (LUT * LUT) as u32, LUT as u32, 0);
         if r < 0 {
             return Err(format!("LUT texture 0x{:08x}", r as u32));
         }
@@ -492,6 +563,18 @@ impl Renderer {
         g::sceGxmTextureSetMagFilter(&mut lut, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_LINEAR);
         g::sceGxmTextureSetUAddrMode(&mut lut, g::SceGxmTextureAddrMode_SCE_GXM_TEXTURE_ADDR_CLAMP);
         g::sceGxmTextureSetVAddrMode(&mut lut, g::SceGxmTextureAddrMode_SCE_GXM_TEXTURE_ADDR_CLAMP);
+
+        let mut masks = Vec::new();
+        for _ in 0..MASK_BUFFERS {
+            let px = vram.alloc(MASK_W * MASK_H, 512)?;
+            masks.push((px, tiled_u8(px, MASK_W, MASK_H, true, false)?));
+        }
+        let grain_px = vram.alloc(GRAIN * GRAIN, 512)?;
+        let mut rng = Rng(0x9e37_79b9);
+        for i in 0..GRAIN * GRAIN {
+            *grain_px.add(i) = (rng.next() * 255.0) as u8;
+        }
+        let grain = tiled_u8(grain_px, GRAIN, GRAIN, false, true)?;
 
         let tri = mem.alloc(3 * 8, 16)?.cast::<f32>();
         for (i, v) in [-1.0f32, -1.0, 3.0, -1.0, -1.0, 3.0].iter().enumerate() {
@@ -542,6 +625,9 @@ impl Renderer {
             tri_vb: tri,
             tri_ib,
             lut,
+            masks,
+            mask_at: None,
+            grain,
             streaks,
             splashes,
             drips,
@@ -573,7 +659,12 @@ impl Renderer {
         for (v, mi) in seen {
             let m = &self.mats[mi as usize];
             let baked = v == 2;
-            gpu.want(&surface_key(v, false));
+            for tier in if m.lit { &[0usize, 1, 2][..] } else { &[0usize][..] } {
+                gpu.want(&surface_key(v, false, vs_needs(m, *tier, false)));
+            }
+            if m.reflect {
+                gpu.want(&surface_key(v, false, vs_needs(m, 0, true)));
+            }
             // Baked surfaces light only moving sources per pixel (at most 2).
             let main: &[usize] = if !m.lit { &[0] } else if baked { &[0, 2] } else { &[0, 2, 4] };
             for n in main {
@@ -609,10 +700,8 @@ impl Renderer {
     /// Switches profile: settings back to the profile's, governor to its
     /// best step, view-dependent buffers redrawn.
     pub fn set_profile(&mut self, profile: &'static Profile) {
-        let keep = (self.settings.skip, self.settings.flat, self.settings.fx);
         self.profile = profile;
         self.settings = Settings::for_profile(profile);
-        (self.settings.skip, self.settings.flat, self.settings.fx) = keep;
         self.governor = Governor::new();
         self.refl_ready = false;
         self.haze_ready = false;
@@ -658,6 +747,8 @@ impl Renderer {
         self.cur_fp = core::ptr::null_mut();
         self.stats = Stats::default();
         self.timeline.passes.clear();
+        self.timeline.cpu.clear();
+        self.timeline.mark = t0;
 
         let aspect = W as f32 / H as f32;
         let proj = camera::projection(view.fov_y, aspect, 0.1);
@@ -727,7 +818,13 @@ impl Renderer {
         haze_u.push((U::Curtain, [0.55, 0.6, 0.72, curtain]));
         let hi = self.profile.haze_size;
         haze_u[1].1[2] = haze_u[1].1[2].min(self.profile.haze_lights as f32);
-        if draw_haze {
+        // A step without haze skips the pass; its buffer is weighted out and
+        // redrawn in full when haze returns.
+        let step = self.step();
+        let haze_on = step.haze;
+        let haze_w = if haze_on { 1.0 } else { 0.0 };
+        self.haze_ready &= haze_on;
+        if haze_on && draw_haze {
             self.haze_ready = true;
             let (src, dst) = (&self.main_points[mi] as *const _, &mut self.hazes[hi] as *mut Target);
             self.post_arrays(ctx, gpu, &mut *dst, "haze_f.cg", &[(S::Scene, src)], &haze_u, &[(U::FogPos, &hz.pos[..]), (U::FogCol, &hz.col[..]), (U::FogDir, &hz.dir[..])], &frame)?;
@@ -736,12 +833,13 @@ impl Renderer {
         // Bloom: prefilter (bright scene + haze), then a mip blur. The full
         // chain runs W/4 → W/8 → W/16 → W/8 → W/4, the short one W/8 → W/16 → W/8.
         let mut bloom_tex: *const g::SceGxmTexture = &self.up[0].texture;
-        if self.settings.bloom {
+        let bloom = self.settings.bloom && step.bloom;
+        if bloom {
             let full = self.profile.bloom_full;
             let pre = &mut self.prefilters[if full { 0 } else { 1 }] as *mut Target;
             let (a, b) = (&self.mains[mi].texture as *const _, &self.hazes[hi].texture as *const _);
             let texel = [1.0 / self.mains[mi].width as f32, 1.0 / self.mains[mi].height as f32, 0.0, 0.0];
-            self.post(ctx, gpu, &mut *pre, "prefilter_f.cg", &[(S::Scene, a), (S::HazeTex, b)], &[(U::Texel, texel), (U::Threshold, [1.1, 0.4, 0.0, 0.0])], &frame)?;
+            self.post(ctx, gpu, &mut *pre, "prefilter_f.cg", &[(S::Scene, a), (S::HazeTex, b)], &[(U::Texel, texel), (U::Threshold, [1.1, 0.4, haze_w, 0.0])], &frame)?;
             let (d8, d16) = (&mut self.down[0] as *mut Target, &mut self.down[1] as *mut Target);
             let (u8_, u4) = (&mut self.up[0] as *mut Target, &mut self.up[1] as *mut Target);
             // (source, destination, support for upsamples)
@@ -763,17 +861,29 @@ impl Renderer {
         // Tone map and grade at scene resolution; the display scene scales.
         let lv = self.level();
         let (fw, fh) = (self.finals[lv].width as f32, self.finals[lv].height as f32);
-        let bloom_on = if self.settings.bloom { 0.85 } else { 0.0 };
+        let mask = self.mask(fade, bars);
         let scene_tex = &self.mains[mi].texture as *const _;
-        let (haze_tex, lut) = (&self.hazes[hi].texture as *const _, &self.lut as *const _);
+        let (haze_tex, lut, grain) = (&self.hazes[hi].texture as *const _, &self.lut as *const _, &self.grain as *const _);
         let dst = &mut self.finals[lv] as *mut Target;
-        self.post(
+        let mut defs: Vec<&'static str> = Vec::new();
+        if haze_on {
+            defs.push("HAZE");
+        }
+        if bloom {
+            defs.push("BLOOM");
+        }
+        // Grain moves to a new offset of its noise tile every frame.
+        let o = (self.tick as f32 * 0.618_034).fract();
+        let grain_k = [fw / GRAIN as f32, fh / GRAIN as f32, o, (self.tick as f32 * 0.414_214 + o).fract()];
+        self.post_keyed(
             ctx,
             gpu,
             &mut *dst,
-            "composite_f.cg",
-            &[(S::Scene, scene_tex), (S::HazeTex, haze_tex), (S::Bloom, bloom_tex), (S::Lut, lut)],
-            &[(U::BloomK, [bloom_on, self.settings.exposure, time, W as f32 / H as f32]), (U::Grade, [GRADE[0], GRADE[1], 0.03, 0.45]), (U::Grade2, [fade, bars, fw, fh])],
+            key_v("post_v.cg", &["GRAIN"]),
+            Key::new("composite_f.cg", &defs),
+            &[(S::Scene, scene_tex), (S::HazeTex, haze_tex), (S::Bloom, bloom_tex), (S::Lut, lut), (S::Mask, mask), (S::Grain, grain)],
+            &[(U::BloomK, [0.85, self.settings.exposure, 0.0, 0.0]), (U::Grade, [haze_w, 0.0, 0.03, 0.0]), (U::GrainK, grain_k)],
+            &[],
             &frame,
         )?;
         self.stats.cpu_submit_us = t0.elapsed().as_micros() as u32;
@@ -820,10 +930,27 @@ impl Renderer {
         arrays: &[(U, &[f32])],
         frame: &FrameConsts,
     ) -> Result<(), String> {
+        self.post_keyed(ctx, gpu, dst, key_v("post_v.cg", &[]), Key::new(fs, &[]), tex, uniforms, arrays, frame)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn post_keyed(
+        &mut self,
+        ctx: *mut g::SceGxmContext,
+        gpu: &mut Gpu,
+        dst: &mut Target,
+        vs: Key,
+        fs: Key,
+        tex: &[(S, *const g::SceGxmTexture)],
+        uniforms: &[(U, [f32; 4])],
+        arrays: &[(U, &[f32])],
+        frame: &FrameConsts,
+    ) -> Result<(), String> {
         dst.begin(ctx, 0.0)?;
         Self::viewport(ctx, dst.width, dst.height);
         let output = if dst.format == ColorFormat::Rgba8 { Out::Uchar4 } else { Out::Half4 };
-        let key = PipeKey { vs: key_v("post_v.cg", &[]), fs: Key::new(fs, &[]), layout: Layout::Pos2, blend: BlendMode::Opaque, output, msaa: Msaa::None.gxm() };
+        let label = fs.file;
+        let key = PipeKey { vs, fs, layout: Layout::Pos2, blend: BlendMode::Opaque, output, msaa: Msaa::None.gxm() };
         if let Some(p) = gpu.pipeline(&key) {
             let p = &*(p as *const Pipeline);
             self.use_pipeline(ctx, p);
@@ -846,8 +973,23 @@ impl Renderer {
             g::sceGxmSetVertexStream(ctx, 0, self.tri_vb.cast());
             g::sceGxmDraw(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, self.tri_ib.cast(), 3);
         }
-        self.timeline.end(ctx, dst, fs);
+        self.timeline.end(ctx, dst, label);
         Ok(())
+    }
+
+    /// The screen mask for this frame's letterbox and fade.
+    fn mask(&mut self, fade: f32, bars: f32) -> *const g::SceGxmTexture {
+        let key = ((fade.clamp(0.0, 1.0) * 255.0).round() as u32, (bars.clamp(0.0, 1.0) * 1023.0).round() as u32);
+        let i = match self.mask_at {
+            Some((i, k)) if k == key => i,
+            prev => {
+                let i = prev.map_or(0, |(i, _)| (i + 1) % MASK_BUFFERS);
+                write_mask(self.masks[i].0, key.0 as f32 / 255.0, key.1 as f32 / 1023.0);
+                self.mask_at = Some((i, key));
+                i
+            }
+        };
+        &self.masks[i].1
     }
 
     unsafe fn sky(&mut self, ctx: *mut g::SceGxmContext, gpu: &mut Gpu, f: &FrameConsts, out: Out, msaa: u32) {
@@ -891,8 +1033,8 @@ impl Renderer {
             }
             let c = (lo + hi) * 0.5;
             let dist = (c - f.eye3).length_squared();
-            let min_size = self.profile.reflection_min_size;
-            if mirror && (hi - lo).length_squared() * 0.25 < dist * min_size * min_size {
+            let min_size = if mirror { self.profile.reflection_min_size } else { self.step().cull_size };
+            if min_size > 0.0 && (hi - lo).length_squared() * 0.25 < dist * min_size * min_size {
                 st.culled += 1;
                 continue;
             }
@@ -923,8 +1065,16 @@ impl Renderer {
             let far = !mirror && self.mats[mi].lit && near_dist > step.detail_m;
             // 0 full detail, 1 LITE (no detail maps), 2 FAR.
             let tier = if far { 2 } else if !mirror && self.mats[mi].lit && !self.profile.detail_maps { 1 } else { 0 };
-            // The mirror image is blurred and small: LOD1 whenever there is one.
-            let lod = d.lod.filter(|l| mirror || l.2 < near_dist.max(0.1) * pixel * step.lod_pixels);
+            // The coarsest level whose error projects under the step's pixel
+            // threshold. The mirror image is small and blurred: twice the
+            // threshold there, and never finer than LOD1.
+            let limit = near_dist.max(0.1) * pixel * step.lod_pixels;
+            let lod = if mirror { d.lods.iter().rev().find(|l| l.2 < limit * 2.0).or(d.lods.first()) } else { d.lods.iter().rev().find(|l| l.2 < limit) };
+            // Every part of the draw is narrower than the level's error.
+            if lod.is_some_and(|l| l.1 == 0) {
+                st.culled += 1;
+                continue;
+            }
             let max_n = if d.baked { max_n.min(2) } else { max_n };
             let lights = if self.mats[mi].lit { select_lights(scene, lo, hi, max_n, d.baked) } else { LightSet::default() };
             let n = if lights.n == 0 { 0 } else if lights.n <= 2 { 2 } else { 4 };
@@ -932,7 +1082,7 @@ impl Renderer {
             let mut pp = self.pipe_cache[slot];
             if pp.is_null() {
                 let key = PipeKey {
-                    vs: surface_key(v, self.settings.flat),
+                    vs: surface_key(v, self.settings.flat, vs_needs(&self.mats[mi], tier, mirror)),
                     fs: if self.settings.flat { Key::new("debug_f.cg", &[]) } else { frag_key(&self.mats[mi], n, mirror, d.baked, tier) },
                     layout: [Layout::Static, Layout::Skinned, Layout::Baked][v],
                     blend: self.mats[mi].blend,
@@ -1029,6 +1179,16 @@ impl Renderer {
             st.draws += 1;
             st.tris += count / 3;
             st.lod += lod.is_some() as u32;
+            if self.mats[mi].lit {
+                st.lights[n / 2] += 1;
+                st.unbaked += !d.baked as u32;
+            }
+            if !mirror {
+                if self.stats.by_material.len() <= mi {
+                    self.stats.by_material.resize(mi + 1, 0);
+                }
+                self.stats.by_material[mi] += count / 3;
+            }
         }
         g::sceGxmSetFrontDepthBias(ctx, 0, 0);
         self.order = order;
@@ -1092,9 +1252,23 @@ fn variant(d: &crate::scene::DrawGpu) -> usize {
     }
 }
 
+/// Varyings a material program reads beyond world position, normal and
+/// UV: (tangent, vertex colour, clip position for the mirror lookup). The
+/// vertex program writes only these; unread varyings cost parameter-buffer
+/// bandwidth on the tiler.
+fn vs_needs(m: &Mat, tier: usize, mirror: bool) -> (bool, bool, bool) {
+    let has = |d: &str| m.defines.contains(&d);
+    match m.fs {
+        "standard_f.cg" => (has("NORMAL_MAP") && tier == 0 && !mirror, has("VERTEX_COLOR"), has("PLANAR") && !mirror),
+        "window_f.cg" | "skyline_f.cg" => (true, true, false),
+        "unlit_f.cg" | "products_f.cg" => (false, true, false),
+        _ => (false, false, false),
+    }
+}
+
 /// `flat`: profiling variant that outputs position and world only (pairs
 /// with debug_f.cg).
-fn surface_key(variant: usize, flat: bool) -> Key {
+fn surface_key(variant: usize, flat: bool, (tangent, color, screen): (bool, bool, bool)) -> Key {
     let mut defs: Vec<&str> = match variant {
         1 => vec!["SKINNED", "MAX_BONES=24"],
         2 => vec!["BAKED"],
@@ -1102,6 +1276,12 @@ fn surface_key(variant: usize, flat: bool) -> Key {
     };
     if flat {
         defs.push("FLAT");
+    } else {
+        for (on, d) in [(tangent, "TANGENT"), (color, "COLOR"), (screen, "SCREEN")] {
+            if on {
+                defs.push(d);
+            }
+        }
     }
     Key::new("surface_v.cg", &defs)
 }
@@ -1125,8 +1305,8 @@ fn frag_key(m: &Mat, lights: usize, reflection: bool, baked: bool, tier: usize) 
     if baked {
         defs.push("BAKED");
     }
-    // Only the standard program has the reduced tiers.
-    if m.fs == "standard_f.cg" {
+    // The standard and glass programs have the reduced tiers.
+    if m.fs == "standard_f.cg" || m.fs == "glass_f.cg" {
         match tier {
             1 => defs.push("LITE"),
             2 => defs.push("FAR"),
@@ -1145,7 +1325,10 @@ fn fixed_keys() -> Vec<Key> {
         Key::new("prefilter_f.cg", &[]),
         Key::new("down_f.cg", &[]),
         Key::new("up_f.cg", &[]),
+        Key::new("post_v.cg", &["GRAIN"]),
         Key::new("composite_f.cg", &[]),
+        Key::new("composite_f.cg", &["BLOOM"]),
+        Key::new("composite_f.cg", &["HAZE", "BLOOM"]),
         Key::new("blit_f.cg", &[]),
         Key::new("debug_f.cg", &[]),
     ];

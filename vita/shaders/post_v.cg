@@ -1,11 +1,16 @@
 // Full-screen triangle for post passes: texture UV (v down) and the world
-// view ray of each corner.
+// view ray of each corner. GRAIN adds the film-grain texture coordinate
+// (target pixels over the noise tile, plus a per-frame offset).
 
 void main(
     float2 aPosition,
     uniform float4 uRayZ,
     uniform float4 uRayX,
     uniform float4 uRayY,
+#ifdef GRAIN
+    uniform float4 uGrainK,
+    out float2 oGrain : TEXCOORD2,
+#endif
     out float4 oPosition : POSITION,
     out float2 oUv : TEXCOORD0,
     out float3 oRay : TEXCOORD1)
@@ -13,4 +18,7 @@ void main(
     oPosition = float4(aPosition, 0.5, 1.0);
     oUv = float2(aPosition.x * 0.5 + 0.5, 0.5 - aPosition.y * 0.5);
     oRay = uRayZ.xyz + uRayX.xyz * aPosition.x + uRayY.xyz * aPosition.y;
+#ifdef GRAIN
+    oGrain = oUv * uGrainK.xy + uGrainK.zw;
+#endif
 }

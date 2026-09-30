@@ -18,8 +18,9 @@ pub struct DrawGpu {
     /// Static lighting is in the vertices (Baked layout); only moving
     /// lights are evaluated per pixel.
     pub baked: bool,
-    /// LOD1 index list over the same vertices: (indices, count, error m).
-    pub lod: Option<(*const u16, u32, f32)>,
+    /// Coarser index lists over the same vertices, finest first:
+    /// (indices, count, error m).
+    pub lods: Vec<(*const u16, u32, f32)>,
     pub material: u32,
     /// Dequantisation: position = q × scale + offset.
     pub dequant: [f32; 8],
@@ -198,7 +199,7 @@ impl Scene {
                 count: d.index_count,
                 skinned: d.layout == pc::VertexLayout::Skinned,
                 baked: d.layout == pc::VertexLayout::Baked,
-                lod: d.lod.as_ref().map(|l| (geom.add(l.indices.offset as usize).cast::<u16>() as *const u16, l.index_count, l.error)),
+                lods: d.lods.iter().map(|l| (geom.add(l.indices.offset as usize).cast::<u16>() as *const u16, l.index_count, l.error)).collect(),
                 material: d.material,
                 dequant: [d.pos_scale[0], d.pos_scale[1], d.pos_scale[2], 0.0, d.pos_offset[0], d.pos_offset[1], d.pos_offset[2], 0.0],
                 uv: [d.uv_scale[0], d.uv_scale[1], d.uv_offset[0], d.uv_offset[1]],
