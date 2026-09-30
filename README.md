@@ -44,7 +44,8 @@ bun tools/city.ts cook                        # → .pocket-build/city/tokyo/tok
 bun tools/city.ts serve &                     # USB host
 bun tools/city.ts native                      # sync pack + shaders, build, run in Devkit's native slot
 bun tools/city.ts status                      # renderer telemetry under `engine`
-bun tools/city.ts profile                     # GPU time per scene
+bun tools/city.ts profile --shot Konbini      # GPU time per scene
+bun tools/city.ts sweep                       # frame time per shot × quality step
 bun tools/city.ts capture                     # → .pocket-build/validation/captures/
 
 # 3. Standalone package (title PKCT00001)
@@ -53,34 +54,41 @@ bun tools/city.ts vpk                         # → dist/vita/pocket-city-PKCT00
 
 Shader sources in `vita/shaders` hot-reload: `bun tools/city.ts sync` copies them to the USB share and the device recompiles the programs whose expanded source changed. Compiled programs are cached on the share by content hash; `vpk` packages the ones listed in the device's `gxp/manifest.txt`.
 
-`bun tools/city.ts ctl '{"view":…,"time":…,"settings":{…}}'` steers the camera and renderer switches (`reflection`, `haze`, `bloom`, `rain`, `msaa`, `scale` 0–3, `amortize`, `maxLights`, `fx`, `skip`, `flat`, `hud`, `profile`).
+`bun tools/city.ts ctl '{"renderProfile":"vita30","view":…,"time":…,"settings":{…}}'` steers the camera and the renderer. Naming a profile resets its switches and governor; `settings` then overrides them: `reflection`, `haze`, `bloom`, `rain`, `msaa`, `maxLights`, `fx`, `skip`, `flat`, `hud`, `profile` (serialized GPU timing), `step` and `hold` (pin a quality step), and the step or profile values `detailM`, `lodPixels`, `cullSize`, `hazeSize`, `hazeLights`, `bloomFull`, `reflSize`, `streaks`, `steam`, `detailMaps`, `vertexLights`.
 
 ## Render profiles
 
-`vita/src/profile.rs` fixes a GPU frame budget and what the renderer may spend to meet it. A governor walks the profile's quality steps (scene resolution, LOD and detail distances) from the measured frame time, so the budget holds before image quality is added back.
+`vita/src/profile.rs` fixes a frame period and what the renderer may spend to meet it. Frames are shown at that period (every second refresh for 30 fps). A governor walks the profile's quality steps from the measured frame time: it steps down after 10 frames over the period and probes one step up after holding it, doubling the wait after each failed probe.
 
-| | `vita60` (default) | `cinematic` |
-| --- | --- | --- |
-| Budget | 15.5 ms (60 fps with the display flip) | 55 ms |
-| Scene resolution steps | 720×408 → 640×362 → 544×308 | 960×544 → 720×408 → 640×362 |
-| Materials | baked diffuse + environment specular; no normal, ORM or streak maps | full detail maps within 12–18 m |
-| Planar reflection | 240×136, draws ≥ 10 % of their distance, LOD1 geometry | 480×272, draws ≥ 6 %, LOD1 geometry |
-| Haze | 120×68, 4 lights | 160×90, 6 lights |
-| Bloom | one level from W/8 | two levels from W/4 |
-| Rain | 3000 streaks, no steam | 7000 streaks, steam |
+| | `vita30` (default) | `vita60` | `cinematic` |
+| --- | --- | --- | --- |
+| Period | 33.3 ms | 16.7 ms | 50 ms |
+| Scene | 480×272 | 720×408 → 480×272 | 960×544 → 640×362 |
+| Materials | normal, ORM and streak maps within 8 m (4 m at the last step) | baked diffuse and environment specular, no detail maps | detail maps within 12–18 m |
+| Haze | 160×90 with 6 lights → 4 lights → 120×68 → off | 120×68, 2 lights, off below step 3 | 160×90, 6 lights |
+| Bloom | two levels → one level | one level, off at the last steps | two levels |
+| Reflection | 240×136, every frame | 240×136, alternate frames | 480×272, alternate frames |
+| Rain | 7000 streaks, steam | 1500 streaks | 7000 streaks, steam |
+| Moving lights | one per pixel on baked surfaces (only the wet ground beyond the detail distance), per vertex on people and the taxi | same | one per pixel on baked surfaces, four per pixel on people and the taxi |
 
-Static draws carry an LOD1 index list (meshoptimizer, borders locked, baked light and normals weighted); a draw switches to it when its error projects under the step's pixel threshold. Shelf stock switches to one card per item. Pick a profile at run time with `bun tools/city.ts ctl '{"renderProfile":"cinematic"}'`; `bun tools/city.ts shots --render vita60` reports the frame time per cinematic shot.
+Static draws carry LOD1 (≤ 6 cm) and LOD2 (≤ 25 cm) index lists: meshoptimizer with only the vertices on chunk-cell cuts locked, and parts of plain lit surfaces narrower than a level's error (window bars, rails, curb pieces) removed at that level. A draw takes the coarsest level whose error projects under the step's pixel threshold; the mirror pass uses twice the threshold. Shelf stock switches to one card per item.
+
+Variants that drop a material's ORM map (distant, LITE and mirror programs) scale roughness, metalness and occlusion by the map's per-channel means, stored in the pack.
 
 ## Status on hardware
 
-Measured on a PS Vita 2000 (CPU 444 MHz, GPU 222 MHz), fixed camera and clock, `scale` = 2 (640×362 scene, 4× MSAA, composited and scaled to 960×544), reflection and haze updates alternating between frames:
+Measured on a PS Vita 2000 (CPU 444 MHz, GPU 222 MHz) in Pocket Devkit, `vita30`, 4× MSAA, 480×272 composited and scaled to 960×544. `bun tools/city.ts sweep --time T` pins each step for each shot's halfway view:
 
-| View | Frame time | Rate |
+| Shot | t = 100 s: step 0 | t = 72 s (taxi passing): first step at 33.3 ms |
 | --- | --- | --- |
-| Konbini (street, storefront, both building rows) | 52.8 ms | 18.9 fps |
-| Puddles (low camera over the wet street) | 60.6 ms | 16.5 fps |
+| Konbini | 33.3 ms | step 2 (step 0: 38.0 ms) |
+| Puddles | 33.4 ms | step 1 (34.4 ms) |
+| Vending | 33.4 ms | step 1 (36.7 ms) |
+| Crossing | 33.3 ms | step 3 (37.4 ms) |
+| Inside | 33.4 ms | step 0 |
+| Wires | 33.4 ms | step 0 |
 
-At 720×408 the same views take 60.6 ms and 69.5 ms. `scale` 3 (the default) steps between 960×544, 720×408 and 640×362 from the measured frame time. `bun tools/city.ts profile` reports GPU time per scene; material shading of the wet street, the storefront glass and the lit walls is the largest remaining cost.
+With the camera rig and governor running (`bun tools/city.ts shots --seconds 130`), every shot averages 29.5–30.0 fps; the longest smoothed frame is 36.8 ms, while the taxi passes Konbini. Serialized GPU time at step 0 (t = 100 s) runs from 31.2 ms (Wires) to 40.7 ms (Puddles): main pass 16–23 ms, haze 5.6 ms, bloom 3.8 ms, composite 2.2 ms, reflection 3.1 ms, display scale 1.2 ms.
 
 ## License
 
