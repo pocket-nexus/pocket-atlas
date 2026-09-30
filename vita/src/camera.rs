@@ -27,6 +27,8 @@ pub struct Rig {
     pub bars: f32,
     yaw: f32,
     pitch: f32,
+    /// Eased look rate (rad/s across, up).
+    look: (f32, f32),
     pos: Vec3,
     fov: f32,
     idle: f32,
@@ -56,6 +58,7 @@ impl Rig {
             bars: 1.0,
             yaw: 0.0,
             pitch: 0.0,
+            look: (0.0, 0.0),
             pos: Vec3::new(4.0, 1.6, 8.0),
             fov: 50.0,
             idle: 0.0,
@@ -86,6 +89,7 @@ impl Rig {
             self.pitch = d.y.asin();
             self.fov = current.fov_y;
             self.fade = 0.0;
+            self.look = (0.0, 0.0);
         }
         let k = 1.0 - (-dt * 2.5).exp();
         match self.mode {
@@ -117,8 +121,14 @@ impl Rig {
                     self.idle = 0.0;
                     self.next_shot();
                 }
-                self.yaw += right.0 * dt * 1.6;
-                self.pitch = (self.pitch - right.1 * dt * 1.2).clamp(-1.3, 1.3);
+                // Look: squared response (fine aim near the centre), at most
+                // 70°/s across and 45°/s up and down, eased in over ~80 ms.
+                let want = (right.0 * right.0.abs() * 1.2, right.1 * right.1.abs() * 0.8);
+                let e = 1.0 - (-dt * 12.0).exp();
+                self.look.0 += (want.0 - self.look.0) * e;
+                self.look.1 += (want.1 - self.look.1) * e;
+                self.yaw += self.look.0 * dt;
+                self.pitch = (self.pitch - self.look.1 * dt).clamp(-1.3, 1.3);
                 let fwd = Vec3::new(self.yaw.sin() * self.pitch.cos(), self.pitch.sin(), -self.yaw.cos() * self.pitch.cos());
                 let flat = Vec3::new(self.yaw.sin(), 0.0, -self.yaw.cos());
                 let side = Vec3::new(self.yaw.cos(), 0.0, self.yaw.sin());

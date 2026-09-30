@@ -18,6 +18,9 @@ pub struct DrawGpu {
     /// Static lighting is in the vertices (Baked layout); only moving
     /// lights are evaluated per pixel.
     pub baked: bool,
+    /// Coarser index lists over the same vertices, finest first:
+    /// (indices, count, error m).
+    pub lods: Vec<(*const u16, u32, f32)>,
     pub material: u32,
     /// Dequantisation: position = q × scale + offset.
     pub dequant: [f32; 8],
@@ -196,6 +199,7 @@ impl Scene {
                 count: d.index_count,
                 skinned: d.layout == pc::VertexLayout::Skinned,
                 baked: d.layout == pc::VertexLayout::Baked,
+                lods: d.lods.iter().map(|l| (geom.add(l.indices.offset as usize).cast::<u16>() as *const u16, l.index_count, l.error)).collect(),
                 material: d.material,
                 dequant: [d.pos_scale[0], d.pos_scale[1], d.pos_scale[2], 0.0, d.pos_offset[0], d.pos_offset[1], d.pos_offset[2], 0.0],
                 uv: [d.uv_scale[0], d.uv_scale[1], d.uv_offset[0], d.uv_offset[1]],
@@ -313,6 +317,27 @@ impl Scene {
             now.power = power;
             now.dynamic = l.node.is_some();
             self.lights[i] = now;
+        }
+        // A car's two headlights (moving spots a lamp-width apart with the
+        // same colour and aim) light as one spot at their midpoint: moving
+        // lights are evaluated per pixel, the renderer's largest variable
+        // cost. The volumetric beams stay two (fog lights).
+        for i in 0..self.lights.len() {
+            let a = self.lights[i];
+            if !a.dynamic || a.spot_scale == 0.0 || a.power <= 0.0 {
+                continue;
+            }
+            for j in i + 1..self.lights.len() {
+                let b = self.lights[j];
+                if b.dynamic && b.power > 0.0 && b.spot_scale == a.spot_scale && b.color == a.color && a.dir.dot(b.dir) > 0.99 && a.pos.distance(b.pos) < 2.0 {
+                    self.lights[i].pos = (a.pos + b.pos) * 0.5;
+                    self.lights[i].color = a.color * 2.0;
+                    self.lights[i].power = a.power * 2.0;
+                    self.lights[j].color = Vec3::ZERO;
+                    self.lights[j].power = 0.0;
+                    break;
+                }
+            }
         }
 
         for (i, fl) in self.meta.fog_lights.iter().enumerate() {

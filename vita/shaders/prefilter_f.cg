@@ -1,10 +1,10 @@
-// Bloom input at half resolution: 4 bilinear taps (a 4×4 box) of scene +
-// haze, Karis-weighted against fireflies, soft luminance threshold.
+// Bloom input: 4 bilinear taps (a 4×4 box) of the scene plus haze,
+// Karis-weighted against fireflies, soft luminance threshold.
 
 uniform sampler2D uScene;
 uniform sampler2D uHazeTex;
 uniform float4 uTexel;     // 1 / scene size, -
-uniform float4 uThreshold; // threshold, smoothing, -, -
+uniform float4 uThreshold; // threshold, smoothing, haze weight, -
 
 float3 tap(float2 uv, out float w)
 {
@@ -19,7 +19,7 @@ float4 main(float2 vUv : TEXCOORD0) : COLOR
     float w0, w1, w2, w3;
     float3 c = tap(vUv + float2(-o.x, -o.y), w0) + tap(vUv + float2(o.x, -o.y), w1) + tap(vUv + float2(-o.x, o.y), w2) + tap(vUv + float2(o.x, o.y), w3);
     c /= (w0 + w1 + w2 + w3);
-    c += tex2D(uHazeTex, vUv).rgb;
+    c += tex2D(uHazeTex, vUv).rgb * uThreshold.z;
     float l = dot(c, float3(0.2126, 0.7152, 0.0722));
     float k = smoothstep(uThreshold.x, uThreshold.x + uThreshold.y, l);
     return float4(c * k, 1.0);

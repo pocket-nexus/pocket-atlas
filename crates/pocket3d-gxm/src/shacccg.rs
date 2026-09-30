@@ -130,6 +130,7 @@ pub struct Compiler {
     pub path: &'static str,
     pub version: String,
     source: Mutex<()>,
+    module: vitasdk_sys::SceUID,
 }
 
 /// Holds the text handed to the open-file callback during one compile.
@@ -189,9 +190,17 @@ impl Compiler {
                     CStr::from_ptr(v).to_string_lossy().into_owned()
                 }
             };
-            return Ok(Self { path, version, source: Mutex::new(()) });
+            return Ok(Self { path, version, source: Mutex::new(()), module: uid });
         }
         Err(last)
+    }
+
+    /// Stops and unloads the module. After a "fatal internal error" the
+    /// compiler fails every later program until it is loaded again.
+    pub fn unload(self) {
+        unsafe {
+            vitasdk_sys::sceKernelStopUnloadModule(self.module, 0, core::ptr::null_mut(), 0, core::ptr::null_mut(), core::ptr::null_mut());
+        }
     }
 
     /// Compiles one Cg program with entry point `main`.

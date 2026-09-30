@@ -65,6 +65,10 @@ pub struct Texture {
     pub wrap_s: Wrap,
     pub wrap_t: Wrap,
     pub has_alpha: bool,
+    /// Mean of each source channel (0..1, as stored): what a renderer uses
+    /// when it drops the map (an ORM map's occlusion, roughness, metalness).
+    #[serde(default)]
+    pub mean: [f32; 4],
 }
 
 // --------------------------------------------------------------- materials
@@ -199,6 +203,19 @@ pub struct Draw {
     /// Drawn by the main camera only (not into the street reflection).
     pub no_reflect: bool,
     pub cast_shadow: bool,
+    /// Reduced index lists over the same vertices (LOD1, LOD2), for draws
+    /// far enough that a level's error projects below the renderer's pixel
+    /// threshold.
+    #[serde(default)]
+    pub lods: Vec<DrawLod>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DrawLod {
+    pub indices: Range,
+    pub index_count: u32,
+    /// Largest geometric deviation from the full mesh (m).
+    pub error: f32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

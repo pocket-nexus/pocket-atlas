@@ -3,8 +3,11 @@
 // rigid moving parts. Skinned vertices blend up to four bone rows. Baked
 // vertices carry the static diffuse lighting as square-root RGBM.
 //
-// Defines: SKINNED, MAX_BONES, BAKED, FLAT (profiling: position and world
-// only).
+// Defines: SKINNED, MAX_BONES, BAKED; which varyings the fragment program
+// reads beyond world position, normal and UV: TANGENT, COLOR, SCREEN.
+// VERTEX_LIGHTS=n: diffuse irradiance from n lights per vertex (moving and
+// skinned meshes are dense enough), in the baked lighting varying.
+// FLAT (profiling) writes position and world only.
 
 void main(
     float4 aPosition,
@@ -21,6 +24,14 @@ void main(
     float4 aLight,
     out half3 oLight : TEXCOORD5,
 #endif
+#if defined(VERTEX_LIGHTS) && !defined(FLAT)
+    uniform float4 uLightPos[VERTEX_LIGHTS],   // position, 1 / range
+    uniform float4 uLightCol[VERTEX_LIGHTS],   // radiant intensity, spot offset
+    uniform float4 uLightDir[VERTEX_LIGHTS],   // emission direction, spot scale
+    uniform float4 uLightRight[VERTEX_LIGHTS], // rect width axis, half width
+    uniform float4 uLightUp[VERTEX_LIGHTS],    // rect height axis, half height
+    out half3 oLight : TEXCOORD5,
+#endif
     uniform float4 uModel[3],
     uniform float4 uDequant[2],
     uniform float4x4 uViewProj,
@@ -28,10 +39,16 @@ void main(
     out float4 oPosition : POSITION,
 #ifndef FLAT
     out half3 oNormal : TEXCOORD1,
-    out half4 oTangent : TEXCOORD2,
     out float2 oUv : TEXCOORD3,
+#ifdef TANGENT
+    out half4 oTangent : TEXCOORD2,
+#endif
+#ifdef SCREEN
     out float4 oScreen : TEXCOORD4,
+#endif
+#ifdef COLOR
     out half4 oColor : COLOR0,
+#endif
 #endif
     out float3 oWorld : TEXCOORD0)
 {
@@ -64,13 +81,44 @@ void main(
     oWorld = world;
 #ifndef FLAT
     oNormal = (half3)normalize(n);
-    oTangent = half4((half3)normalize(t), (half)aTangent.w);
     oUv = aUv * uUv.xy + uUv.zw;
+#ifdef TANGENT
+    oTangent = half4((half3)normalize(t), (half)aTangent.w);
+#endif
+#ifdef SCREEN
     oScreen = clipPos;
+#endif
+#ifdef COLOR
     oColor = (half4)aColor;
+#endif
 #endif
 #if defined(BAKED) && !defined(FLAT)
     float3 s = aLight.rgb * aLight.a;
     oLight = (half3)(s * s * 64.0);
+#endif
+#if defined(VERTEX_LIGHTS) && !defined(FLAT)
+    {
+        // As the fragment programs' lights (closest point of rect emitters,
+        // spot cone, three's distance falloff), Lambert only, over π.
+        float3 nw = normalize(n);
+        float3 acc = 0.0;
+        for (int i = 0; i < VERTEX_LIGHTS; i++) {
+            float3 P = uLightPos[i].xyz;
+            float3 d = world - P;
+            float4 R = uLightRight[i];
+            float4 U = uLightUp[i];
+            float3 q = P + R.xyz * clamp(dot(d, R.xyz), -R.w, R.w) + U.xyz * clamp(dot(d, U.xyz), -U.w, U.w);
+            float3 Lv = q - world;
+            float d2 = dot(Lv, Lv);
+            float3 L = Lv * rsqrt(max(d2, 1e-6));
+            float sp = saturate(dot(-L, uLightDir[i].xyz) * uLightDir[i].w + uLightCol[i].w);
+            sp = sp * sp * (3.0 - 2.0 * sp);
+            float dr = d2 + R.w * U.w;
+            float x = dr * uLightPos[i].w * uLightPos[i].w;
+            float w = saturate(1.0 - x * x);
+            acc += uLightCol[i].rgb * (w * w * sp * saturate(dot(nw, L)) / max(dr, 0.01));
+        }
+        oLight = (half3)(acc * 0.31830989);
+    }
 #endif
 }

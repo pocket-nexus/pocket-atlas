@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -52,6 +53,14 @@ impl Key {
         defines.sort();
         defines.dedup();
         Self { file, defines }
+    }
+
+    /// This key with one more definition.
+    pub fn with(mut self, define: &str) -> Self {
+        self.defines.push(define.to_string());
+        self.defines.sort();
+        self.defines.dedup();
+        self
     }
 
     pub fn stage(&self) -> Stage {
@@ -121,6 +130,8 @@ fn write_share(path: &str, bytes: &[u8]) {
 pub struct Service {
     requests: Sender<Key>,
     pub events: Receiver<Event>,
+    /// Programs the worker is still rebuilding after a source change.
+    pub rebuilding: Arc<AtomicUsize>,
 }
 
 impl Service {
@@ -128,11 +139,13 @@ impl Service {
     pub fn start(live: bool) -> Self {
         let (req_tx, req_rx) = mpsc::channel::<Key>();
         let (ev_tx, ev_rx) = mpsc::channel::<Event>();
+        let rebuilding = Arc::new(AtomicUsize::new(0));
+        let busy = rebuilding.clone();
         let _ = std::thread::Builder::new()
             .name("city-shaders".into())
             .stack_size(1024 * 1024)
-            .spawn(move || worker(live, req_rx, ev_tx));
-        Self { requests: req_tx, events: ev_rx }
+            .spawn(move || worker(live, req_rx, ev_tx, busy));
+        Self { requests: req_tx, events: ev_rx, rebuilding }
     }
 
     pub fn request(&self, key: Key) {
@@ -201,7 +214,21 @@ fn build(compiler: Option<&Compiler>, key: &Key, sources: &HashMap<String, Strin
     }
 }
 
-fn worker(live: bool, requests: Receiver<Key>, events: Sender<Event>) {
+/// `build`, loading the compiler again and retrying once when it hit an
+/// internal error (it then fails every later program until reloaded).
+fn build_retry(compiler: &mut Option<Compiler>, key: &Key, sources: &HashMap<String, String>, memo: &mut HashMap<u64, Arc<Vec<u8>>>) -> (Option<u64>, Event) {
+    let first = build(compiler.as_ref(), key, sources, memo);
+    if !matches!(&first.1, Event::Failed { error, .. } if error.contains("fatal internal error")) {
+        return first;
+    }
+    if let Some(c) = compiler.take() {
+        c.unload();
+    }
+    *compiler = Compiler::load().ok();
+    build(compiler.as_ref(), key, sources, memo)
+}
+
+fn worker(live: bool, requests: Receiver<Key>, events: Sender<Event>, rebuilding: Arc<AtomicUsize>) {
     let compiler = Compiler::load();
     let _ = events.send(Event::Compiler(compiler.as_ref().map(|c| c.version.clone()).map_err(|e| e.clone())));
     let mut compiler = compiler.ok();
@@ -220,7 +247,7 @@ fn worker(live: bool, requests: Receiver<Key>, events: Sender<Event>) {
                 if known.iter().any(|(k, _)| *k == key) {
                     continue;
                 }
-                let (h, ev) = build(compiler.as_ref(), &key, &sources, &mut memo);
+                let (h, ev) = build_retry(&mut compiler, &key, &sources, &mut memo);
                 known.push((key, h.unwrap_or(0)));
                 if events.send(ev).is_err() {
                     return;
@@ -240,7 +267,7 @@ fn worker(live: bool, requests: Receiver<Key>, events: Sender<Event>) {
                     compiler = Some(c);
                     for i in 0..known.len() {
                         let key = known[i].0.clone();
-                        let (h, ev) = build(compiler.as_ref(), &key, &sources, &mut memo);
+                        let (h, ev) = build_retry(&mut compiler, &key, &sources, &mut memo);
                         known[i].1 = h.unwrap_or(0);
                         if events.send(ev).is_err() {
                             return;
@@ -263,8 +290,9 @@ fn worker(live: bool, requests: Receiver<Key>, events: Sender<Event>) {
             if fresh != sources {
                 sources = fresh;
                 for i in 0..known.len() {
+                    rebuilding.store(known.len() - i, Ordering::Relaxed);
                     let key = known[i].0.clone();
-                    let (h, ev) = build(compiler.as_ref(), &key, &sources, &mut memo);
+                    let (h, ev) = build_retry(&mut compiler, &key, &sources, &mut memo);
                     if let Some(h) = h {
                         if h == known[i].1 {
                             continue;
@@ -275,6 +303,7 @@ fn worker(live: bool, requests: Receiver<Key>, events: Sender<Event>) {
                         return;
                     }
                 }
+                rebuilding.store(0, Ordering::Relaxed);
             }
         }
     }

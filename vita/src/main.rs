@@ -6,11 +6,13 @@
 //! the device and hot-reload when their source changes, `host0:city/control.json`
 //! steers camera and renderer settings, and status receipts report timings
 //! and draw statistics under `engine`.
+#![recursion_limit = "256"]
 
 mod camera;
 mod frame;
 mod gpu;
 mod hostfs;
+mod profile;
 mod provision;
 mod scene;
 mod shaders;
@@ -19,7 +21,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use camera::{Mode, Rig, View};
-use frame::{Renderer, Settings, Weather};
+use frame::{Renderer, Weather};
 use glam::Vec3;
 use gpu::Gpu;
 use pocket3d_gxm::target::{Fence, Msaa};
@@ -49,6 +51,29 @@ extern "C" {
     fn scePowerSetBusClockFrequency(freq: i32) -> i32;
     fn scePowerSetGpuClockFrequency(freq: i32) -> i32;
     fn scePowerSetGpuXbarClockFrequency(freq: i32) -> i32;
+    fn scePowerGetArmClockFrequency() -> i32;
+    fn scePowerGetBusClockFrequency() -> i32;
+    fn scePowerGetGpuClockFrequency() -> i32;
+    fn scePowerGetGpuXbarClockFrequency() -> i32;
+    fn sceDisplayGetVcount() -> i32;
+    fn sceDisplayWaitVblankStartMulti(vcount: u32) -> i32;
+}
+
+/// ARM, bus, GPU and GPU crossbar clocks (MHz) the frame budgets assume.
+const CLOCKS: [i32; 4] = [444, 222, 222, 166];
+
+/// Sets the clocks; returns the four results.
+unsafe fn set_clocks() -> [i32; 4] {
+    [
+        scePowerSetArmClockFrequency(CLOCKS[0]),
+        scePowerSetBusClockFrequency(CLOCKS[1]),
+        scePowerSetGpuClockFrequency(CLOCKS[2]),
+        scePowerSetGpuXbarClockFrequency(CLOCKS[3]),
+    ]
+}
+
+unsafe fn clocks_now() -> [i32; 4] {
+    [scePowerGetArmClockFrequency(), scePowerGetBusClockFrequency(), scePowerGetGpuClockFrequency(), scePowerGetGpuXbarClockFrequency()]
 }
 
 unsafe fn text(font: *mut g::vita2d_pgf, x: i32, y: i32, color: u32, scale: f32, s: &str) {
@@ -119,6 +144,12 @@ struct Control {
 
 fn apply_control(v: &Value, rig: &mut Rig, r: &mut Renderer, ctl: &mut Control, hud: &mut bool) {
     *hud = v["settings"]["hud"].as_bool().unwrap_or(*hud);
+    // Naming a profile resets the switches and the governor to the
+    // profile's, then the settings below override them.
+    if let Some(p) = v["renderProfile"].as_str().and_then(profile::by_name) {
+        r.set_profile(p);
+        r.timeline.on = false;
+    }
     let s = &mut r.settings;
     let flag = |k: &str, cur: bool| v["settings"][k].as_bool().unwrap_or(cur);
     s.reflection = flag("reflection", s.reflection);
@@ -132,7 +163,7 @@ fn apply_control(v: &Value, rig: &mut Rig, r: &mut Renderer, ctl: &mut Control, 
     s.msaa = if flag("msaa", s.msaa == Msaa::X4) { Msaa::X4 } else { Msaa::None };
     s.flat = flag("flat", s.flat);
     if let Some(n) = v["settings"]["scale"].as_u64() {
-        s.scale = n.min(3) as u32;
+        s.scale = n.min(frame::SCALES.len() as u64) as u32;
     }
     s.amortize = flag("amortize", s.amortize);
     if let Some(n) = v["settings"]["skip"].as_u64() {
@@ -144,6 +175,32 @@ fn apply_control(v: &Value, rig: &mut Rig, r: &mut Renderer, ctl: &mut Control, 
     if let Some(n) = v["settings"]["maxLights"].as_u64() {
         s.max_lights = n.min(4) as usize;
     }
+    let int = |k: &str| v["settings"][k].as_u64();
+    let num = |k: &str| v["settings"][k].as_f64().map(|x| x as f32);
+    if let Some(n) = int("reflSize") {
+        s.reflection_size = (n as usize).min(1);
+    }
+    if let Some(n) = int("hazeSize") {
+        s.haze_size = Some((n as usize).min(1));
+    }
+    if let Some(n) = int("hazeLights") {
+        s.haze_lights = Some(n as usize);
+    }
+    if let Some(n) = int("streaks") {
+        s.streaks = n as u32;
+    }
+    s.bloom_full = v["settings"]["bloomFull"].as_bool().or(s.bloom_full);
+    s.steam = flag("steam", s.steam);
+    s.detail_maps = flag("detailMaps", s.detail_maps);
+    s.vertex_lights = flag("vertexLights", s.vertex_lights);
+    s.detail_m = num("detailM").or(s.detail_m);
+    s.lod_pixels = num("lodPixels").or(s.lod_pixels);
+    s.cull_size = num("cullSize").or(s.cull_size);
+    // Pins the governor's quality step; `hold` keeps it there.
+    if let Some(n) = v["settings"]["step"].as_u64() {
+        r.governor.step = (n as usize).min(r.profile.steps.len() - 1);
+    }
+    r.governor.hold = v["settings"]["hold"].as_bool().unwrap_or(r.governor.hold);
     r.timeline.on = v["settings"]["profile"].as_bool().unwrap_or(r.timeline.on);
     ctl.frozen = v["time"].as_f64().map(|t| t as f32);
     ctl.view = v["view"]["pos"].as_array().zip(v["view"]["target"].as_array()).map(|(p, t)| {
@@ -163,7 +220,10 @@ fn main() {
             pocketjs_vita::vita_log(format_args!("city: graphics {error}"));
             return;
         }
-        let clocks = [scePowerSetArmClockFrequency(444), scePowerSetBusClockFrequency(222), scePowerSetGpuClockFrequency(222), scePowerSetGpuXbarClockFrequency(166)];
+        let clocks = set_clocks();
+        // The system lowers the clocks again after a suspend or a power-mode
+        // change; they are checked once a second and set again.
+        let mut clock_resets = 0u32;
         input::init();
         let mut dev = dev::Host::new();
         let font = g::vita2d_load_default_pgf();
@@ -211,7 +271,7 @@ fn main() {
                 frame = frame.wrapping_add(1);
             }
         };
-        let mut renderer = match Renderer::new(Settings::default(), &scene) {
+        let mut renderer = match Renderer::new(&profile::VITA30, &scene) {
             Ok(r) => r,
             Err(e) => {
                 let mut frame = 0u32;
@@ -239,6 +299,7 @@ fn main() {
         let mut frame_no = 0u32;
         let mut clock = 0.0f32;
         let mut frame_ms = 0.0f32;
+        let mut last_vcount = sceDisplayGetVcount();
         let mut wait_ms = 0.0f32;
         let mut swap_ms = 0.0f32;
         let mut hud = live;
@@ -301,9 +362,10 @@ fn main() {
             if pressed & vitasdk_sys::SCE_CTRL_TRIANGLE != 0 {
                 rig.next_shot();
             }
+            // Dead zone, then 0..1 over the remaining travel (no step at its edge).
             let axis = |v: u8| {
-                let f = (v as f32 - 128.0) / 127.0;
-                if f.abs() < 0.18 { 0.0 } else { f }
+                let f = ((v as f32 - 128.0) / 127.0).clamp(-1.0, 1.0);
+                ((f.abs() - 0.18) / 0.82).max(0.0).copysign(f)
             };
             let lift = if buttons & vitasdk_sys::SCE_CTRL_RTRIGGER != 0 { 1.0 } else if buttons & vitasdk_sys::SCE_CTRL_LTRIGGER != 0 { -1.0 } else { 0.0 };
             let menu_open = dev.menu.visible;
@@ -319,12 +381,17 @@ fn main() {
                 scene.door_open += (goal - scene.door_open) * (1.0 - (-dt * if near { 3.5 } else { 2.2 }).exp());
             }
             scene.update(time);
+            if frame_no % 60 == 0 && clocks_now().iter().zip(CLOCKS).any(|(&now, want)| now < want) {
+                set_clocks();
+                clock_resets += 1;
+            }
 
             // ------------------------------------------------------ render
             // Profiling serializes the GPU; its frame times would force the
             // lowest resolution.
             if !renderer.timeline.on {
-                renderer.feedback(frame_ms);
+                let p = renderer.profile;
+                renderer.governor.feedback(p, frame_ms);
             }
             let fade = if ctl.view.is_some() { 0.0 } else { rig.fade };
             let bars = if ctl.view.is_some() { 0.0 } else { rig.bars };
@@ -360,30 +427,47 @@ fn main() {
                 fence.wait((frame_no % 2) as usize);
                 renderer.timeline.passes.push(("display", t_display.elapsed().as_secs_f32() * 1000.0));
             }
+            // Frames are shown every `interval` refreshes (two for a 30 fps
+            // profile): a frame that finishes early waits, so frame times stay
+            // even instead of alternating between one and two refreshes.
+            let interval = (renderer.profile.budget_ms / 16.68).round().max(1.0) as i32;
+            let since = sceDisplayGetVcount().wrapping_sub(last_vcount);
+            if interval > 1 && (0..interval).contains(&since) {
+                sceDisplayWaitVblankStartMulti((interval - since) as u32);
+            }
+            last_vcount = sceDisplayGetVcount();
             let t_swap = Instant::now();
             g::vita2d_swap_buffers();
             swap_ms = swap_ms * 0.9 + t_swap.elapsed().as_secs_f32() * 1000.0 * 0.1;
 
             let st = &renderer.stats;
-            let pass = |p: &frame::PassStats| json!({"draws": p.draws, "tris": p.tris, "culled": p.culled, "missing": p.missing});
+            let pass = |p: &frame::PassStats| json!({"draws": p.draws, "tris": p.tris, "lod": p.lod, "culled": p.culled, "missing": p.missing, "lights": p.lights, "unbaked": p.unbaked});
             let s = &renderer.settings;
+            // Main-pass triangles by material, heaviest first (profiling).
+            let mut by: Vec<(usize, u32)> = renderer.stats.by_material.iter().copied().enumerate().filter(|x| x.1 > 0).collect();
+            by.sort_by(|a, b| b.1.cmp(&a.1));
+            let heavy: Vec<Value> = by.iter().take(10).map(|(i, t)| json!([scene.meta.materials[*i].name, t])).collect();
             dev.engine = json!({
                 "stage": "running",
                 "pack": pack_path,
                 "fps": fps, "frameMs": frame_ms, "cpuSubmitMs": st.cpu_submit_us as f32 / 1000.0, "waitMs": wait_ms, "swapMs": swap_ms,
                 "time": time,
                 "reflection": pass(&st.reflection), "main": pass(&st.main), "fxQuads": st.fx_quads,
-                "programs": gpu.programs.len(), "compiled": gpu.compiled, "compileMs": gpu.compile_ms, "shaderGeneration": gpu.generation,
+                "programs": gpu.programs.len(), "pending": gpu.pending(), "compiled": gpu.compiled, "compileMs": gpu.compile_ms, "shaderGeneration": gpu.generation,
                 "errors": gpu.errors, "renderError": render_error,
                 "compiler": format!("{:?}", gpu.compiler),
                 "patcher": gpu.own.usage(),
                 "memory": {"textures": scene.bytes_tex, "geometry": scene.bytes_geom, "vram": scene.vram.reserved(), "main": scene.main.reserved()},
                 "loadMs": scene.load_ms,
                 "clocks": clocks,
+                "clockMhz": clocks_now(),
+                "clockResets": clock_resets,
                 "view": {"pos": view.pos.to_array(), "target": view.target.to_array(), "fov": view.fov_y, "mode": if rig.mode == Mode::Cinematic { "cinematic" } else { "free" }, "shot": rig.shot_name()},
-                "settings": {"msaa": s.msaa == Msaa::X4, "reflection": s.reflection, "haze": s.haze, "bloom": s.bloom, "rain": s.rain, "cullCw": s.cull_cw, "exposure": s.exposure, "maxLights": s.max_lights, "flat": s.flat, "scale": s.scale, "level": renderer.level(), "fx": s.fx, "amortize": s.amortize},
+                "settings": {"msaa": s.msaa == Msaa::X4, "reflection": s.reflection, "haze": s.haze, "bloom": s.bloom, "rain": s.rain, "cullCw": s.cull_cw, "exposure": s.exposure, "maxLights": s.max_lights, "flat": s.flat, "scale": s.scale, "level": renderer.level(), "profile": renderer.profile.name, "step": renderer.governor.step, "steps": renderer.profile.steps.len(), "hold": renderer.governor.hold, "budgetMs": renderer.profile.budget_ms, "fx": s.fx, "amortize": s.amortize, "reflSize": s.reflection_size, "hazeSize": renderer.step().haze_size, "hazeLights": renderer.step().haze_lights, "bloomFull": renderer.step().bloom_full, "streaks": s.streaks, "steam": s.steam, "detailMaps": s.detail_maps, "vertexLights": s.vertex_lights, "detailM": renderer.step().detail_m, "lodPixels": renderer.step().lod_pixels},
                 "uptime": started.elapsed().as_secs(),
                 "passes": renderer.timeline.passes.iter().map(|(n, ms)| json!([n, ms])).collect::<Vec<_>>(),
+                "cpuPasses": renderer.timeline.cpu.iter().map(|(n, rec, end)| json!([n, rec, end])).collect::<Vec<_>>(),
+                "heavy": heavy,
             });
             dev.publish(frame_no, "city");
             serve(&mut dev, frame_no, action);

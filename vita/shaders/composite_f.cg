@@ -1,20 +1,18 @@
-// Final frame: scene + upsampled haze + bloom, tone mapped and
-// graded through the colour table (AgX, contrast, saturation, split toning,
-// sRGB encoding), then vignette, grain, letterbox and dip to black.
+// Final frame: scene + upsampled haze + bloom, tone mapped and graded
+// through the colour table (AgX, contrast, saturation, split toning, sRGB
+// encoding), then film grain and the screen mask (vignette, letterbox, dip
+// to black).
+//
+// Defines: HAZE, BLOOM (each buffer is read only when its pass ran).
 
 uniform sampler2D uScene;   // full-resolution HDR, alpha = eye distance
 uniform sampler2D uHazeTex; // quarter resolution, bilinear
 uniform sampler2D uBloom;
 uniform sampler2D uLut;     // colour table (see tone)
-uniform float4 uBloomK;     // intensity, exposure, time, aspect
-uniform float4 uGrade;      // contrast, saturation, grain, vignette
-uniform float4 uGrade2;     // fade, letterbox, resolution x, resolution y
-
-// Interleaved gradient noise (Jimenez): film grain in four instructions.
-float ign(float2 px)
-{
-    return frac(52.9829189 * frac(dot(px, float2(0.06711056, 0.00583715))));
-}
+uniform sampler2D uMask;    // vignette × letterbox × fade (frame.rs `Mask`)
+uniform sampler2D uGrain;   // 64² white noise, repeated
+uniform float4 uBloomK;     // bloom intensity, exposure, -, -
+uniform float4 uGrade;      // haze weight, -, grain, -
 
 // AgX, contrast, saturation, lift/gain and sRGB encoding, baked by the CPU
 // into a 32³ table over AgX's log2 domain (frame.rs `tone_lut`): 32 slices
@@ -29,28 +27,23 @@ half3 tone(float3 c)
     return lerp(lo, hi, (half)(l.b - b0));
 }
 
-float4 main(float2 vUv : TEXCOORD0) : COLOR
+// The mask and grain coordinates come straight from the vertex outputs, so
+// the texture unit fetches them before the shader runs; the per-pixel
+// vignette and letterbox math cost 1 ms at 480×272.
+half4 main(float2 vUv : TEXCOORD0, float2 vGrain : TEXCOORD2) : COLOR
 {
-    float4 scene = tex2D(uScene, vUv);
-    float dist = scene.a;
-
-    // Haze is soft: one bilinear tap of the quarter-resolution buffer (a
+    half3 c = tex2D(uScene, vUv).rgb;
+#ifdef HAZE
+    // Haze is soft: one bilinear tap of the low-resolution buffer (a
     // bilateral 4-tap upsample cost 6.4 ms per frame on the device).
-    float3 haze = tex2D(uHazeTex, vUv).rgb;
-
-    float3 c = scene.rgb + haze;
-    c += tex2D(uBloom, vUv).rgb * uBloomK.x;
-    half3 d = tone(c * uBloomK.y);
-
-    // Screen-space finish on the encoded colour: vignette (scaled for the
-    // sRGB curve), grain strongest in the shadows, dip to black, letterbox.
-    float2 q = (vUv - 0.5) * float2(uBloomK.w, 1.0);
-    half v = (half)smoothstep(1.05, 0.25, length(q));
-    d *= lerp((half)(1.0 - uGrade.w * 0.55), (half)1.0, v);
-    float n = ign(vUv * uGrade2.zw + frac(uBloomK.z * 7.13) * 64.0) - 0.5;
-    d += (half)(n * uGrade.z * 2.4) * (1.0 - d.g * 0.7);
-    d *= (half)(1.0 - uGrade2.x);
-    float bar = uGrade2.y * max(0.0, 0.5 - (uBloomK.w / 2.39) * 0.5);
-    d *= (half)smoothstep(bar - 0.001, bar + 0.001, min(vUv.y, 1.0 - vUv.y));
-    return float4(d, 1.0);
+    c += tex2D(uHazeTex, vUv).rgb * (half)uGrade.x;
+#endif
+#ifdef BLOOM
+    c += tex2D(uBloom, vUv).rgb * (half)uBloomK.x;
+#endif
+    half3 d = tone((float3)(c * (half)uBloomK.y));
+    // Grain on the encoded colour, strongest in the shadows.
+    half n = tex2D(uGrain, vGrain).r - (half)0.5;
+    d += n * (half)(uGrade.z * 2.4) * ((half)1.0 - d.g * (half)0.7);
+    return half4(d * tex2D(uMask, vUv).r, 1.0);
 }
