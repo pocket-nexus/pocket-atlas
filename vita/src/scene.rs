@@ -136,7 +136,26 @@ impl Scene {
     ///
     /// # Safety
     /// GXM initialised; call from the render thread.
-    pub unsafe fn load(path: &str, mut progress: impl FnMut(usize, usize, &str)) -> Result<Self, String> {
+    pub unsafe fn load(path: &str, progress: impl FnMut(usize, usize, &str)) -> Result<Self, String> {
+        let mut vram = Arena::new(Kind::Cdram, 16 << 20);
+        let mut main = Arena::new(Kind::Main, 8 << 20);
+        match Self::load_in(path, progress, &mut vram, &mut main) {
+            Ok(mut s) => {
+                s.vram = vram;
+                s.main = main;
+                Ok(s)
+            }
+            Err(e) => {
+                // Uploads may still be in flight into these blocks.
+                vita2d_sys::sceGxmTransferFinish();
+                vram.free();
+                main.free();
+                Err(e)
+            }
+        }
+    }
+
+    unsafe fn load_in(path: &str, mut progress: impl FnMut(usize, usize, &str), vram: &mut Arena, main: &mut Arena) -> Result<Self, String> {
         let t0 = std::time::Instant::now();
         let mut f = Seq::open(path)?;
         let mut head = [0u8; 16];
@@ -155,8 +174,6 @@ impl Scene {
         drop(meta_bytes);
         let total = meta.textures.len() + 3;
 
-        let mut vram = Arena::new(Kind::Cdram, 16 << 20);
-        let mut main = Arena::new(Kind::Main, 8 << 20);
         let mut up = Uploader::new(4 << 20)?;
         let mut order: Vec<usize> = (0..meta.textures.len()).collect();
         order.sort_by_key(|&i| meta.textures[i].data.offset);
@@ -168,7 +185,7 @@ impl Scene {
             progress(1 + k, total, &t.name);
             buf.resize(t.data.size as usize, 0);
             f.read_at((s_tex.offset + t.data.offset) as u64, &mut buf)?;
-            let mut tex = up.texture(&mut vram, fmt(t.format), t.width, t.height, t.mips, &buf).map_err(|e| format!("texture {}: {e}", t.name))?;
+            let mut tex = up.texture(vram, fmt(t.format), t.width, t.height, t.mips, &buf).map_err(|e| format!("texture {}: {e}", t.name))?;
             tex.set_wrap(wrap(t.wrap_s), wrap(t.wrap_t));
             if matches!(t.role, pc::TexRole::Color | pc::TexRole::Normal | pc::TexRole::Orm) {
                 // No anisotropic filtering on GXM: keep ground textures crisp at grazing angles.
@@ -222,8 +239,8 @@ impl Scene {
             textures,
             draws,
             anim,
-            vram,
-            main,
+            vram: Arena::new(Kind::Cdram, 16 << 20),
+            main: Arena::new(Kind::Main, 8 << 20),
             load_ms: 0,
             bytes_tex,
             bytes_geom: s_geom.size as usize,

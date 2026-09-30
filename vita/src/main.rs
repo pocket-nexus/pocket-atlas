@@ -112,7 +112,9 @@ fn fetch(name: &str) {
 fn control_watcher() -> mpsc::Receiver<Value> {
     let (tx, rx) = mpsc::channel();
     let _ = std::thread::Builder::new().name("atlas-control".into()).stack_size(256 * 1024).spawn(move || {
-        let mut last = Vec::new();
+        // What is there at launch is left over from an earlier run: only
+        // changes after it count.
+        let mut last = hostfs::read("host0:atlas/control.json", 64 * 1024).unwrap_or_default();
         loop {
             std::thread::sleep(Duration::from_millis(400));
             if let Some(bytes) = hostfs::read("host0:atlas/control.json", 64 * 1024) {
@@ -251,15 +253,25 @@ unsafe fn run_atlas(app: &mut App, select: Option<String>) -> Next {
     atlas::Atlas::warm(&mut app.gpu);
     let mut error = String::new();
     let mut loaded = None;
-    for &path in atlas::pack_paths() {
-        match atlas::Atlas::load(path) {
-            Ok(a) => {
-                loaded = Some(a);
-                break;
+    // Right after a native replacement the previous process's video memory
+    // can still be on its way back: an allocation failure is retried.
+    for attempt in 0..6 {
+        error.clear();
+        for &path in atlas::pack_paths() {
+            match atlas::Atlas::load(path) {
+                Ok(a) => {
+                    loaded = Some(a);
+                    break;
+                }
+                Err(e) if error.is_empty() || !e.contains("No such file") => error = e,
+                Err(_) => {}
             }
-            Err(e) if error.is_empty() || !e.contains("No such file") => error = e,
-            Err(_) => {}
         }
+        if loaded.is_some() || !error.contains("AllocMemBlock") {
+            break;
+        }
+        pocketjs_vita::vita_log(format_args!("atlas: {error} (attempt {attempt})"));
+        std::thread::sleep(Duration::from_millis(500));
     }
     let Some(mut atlas) = loaded else {
         // Development builds without an atlas pack go straight to a place.
@@ -291,6 +303,20 @@ unsafe fn run_atlas(app: &mut App, select: Option<String>) -> Next {
             if v["atlas"].as_bool() == Some(true) {
                 if let Some(id) = v["select"].as_str() {
                     atlas.select(id);
+                }
+                let pr = &v["probe"];
+                let flag = |k: &str| pr[k].as_bool().unwrap_or(false);
+                atlas.probe = atlas::Probe { no_ui: flag("ui"), no_globe: flag("globe"), no_bloom: flag("bloom"), no_markers: flag("markers"), no_space: flag("space") };
+                if let Some(sz) = pr["scale"].as_array() {
+                    let (w, h) = (sz[0].as_u64().unwrap_or(960) as u32, sz[1].as_u64().unwrap_or(544) as u32);
+                    let msaa = match pr["msaa"].as_u64() {
+                        Some(4) => Msaa::X4,
+                        Some(2) => Msaa::X2,
+                        _ => Msaa::None,
+                    };
+                    if let Err(e) = atlas.resize(w, h, msaa) {
+                        pocketjs_vita::vita_log(format_args!("atlas: resize {e}"));
+                    }
                 }
                 continue;
             }
@@ -324,13 +350,19 @@ unsafe fn run_atlas(app: &mut App, select: Option<String>) -> Next {
             app.clock_resets += 1;
         }
 
+        let t_cpu = Instant::now();
         let render_error = atlas.render(&mut app.gpu).err();
+        let cpu_ms = t_cpu.elapsed().as_secs_f32() * 1000.0;
+        let t_wait = Instant::now();
         app.fence.wait((app.frame_no.wrapping_sub(1) % 2) as usize);
+        let wait_ms = t_wait.elapsed().as_secs_f32() * 1000.0;
         g::vita2d_pool_reset();
         g::vita2d_start_drawing_advanced(core::ptr::null_mut(), 0);
         atlas.present(&mut app.gpu);
         g::sceGxmSetViewport(ctx, 480.0, 480.0, 272.0, -272.0, 0.5, 0.5);
+        let t_ui = Instant::now();
         atlas.ui(app.font);
+        let ui_ms = t_ui.elapsed().as_secs_f32() * 1000.0;
         if app.hud {
             text(app.font, 12, 540, 0x90ff_ffff, 0.6, &format!("{:.1} fps  {:.1} ms", 1000.0 / frame_ms.max(0.1), frame_ms));
         }
@@ -354,6 +386,8 @@ unsafe fn run_atlas(app: &mut App, select: Option<String>) -> Next {
             "places": atlas.meta.places.iter().map(|p| json!({"id": p.id, "enterable": p.enterable})).collect::<Vec<_>>(),
             "globe": {"lat": atlas.lat, "lon": atlas.lon},
             "fps": 1000.0 / frame_ms.max(0.1), "frameMs": frame_ms,
+            "cpuMs": cpu_ms, "waitMs": wait_ms, "uiMs": ui_ms,
+            "size": [atlas.size.0, atlas.size.1], "msaa": format!("{:?}", atlas.msaa),
             "loadMs": atlas.load_ms,
             "errors": app.gpu.errors, "renderError": render_error,
             "clockMhz": clocks_now(), "clockResets": app.clock_resets,
@@ -474,6 +508,8 @@ unsafe fn run_place(app: &mut App, id: &str, name: &str, first: Option<Value>) -
             let mut renderer = match Renderer::new(&profile::VITA30, &scene) {
                 Ok(r) => r,
                 Err(e) => {
+                    g::sceGxmFinish(g::vita2d_get_context());
+                    core::ptr::read(&scene).release();
                     let mut frame = 0u32;
                     loop {
                         dev.engine = json!({"stage": "error", "place": id, "error": e});

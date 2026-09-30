@@ -42,11 +42,12 @@ pub struct Atlas {
     textures: Vec<Texture>,
     vram: Arena,
     mem: Arena,
-    hdr: Target,
-    pre: Target,
-    down: [Target; 2],
-    up: [Target; 2],
-    fin: Target,
+    /// Render targets live in their own arenas, rebuilt when the resolution
+    /// or MSAA changes.
+    rt: Targets,
+    /// 3D resolution (the display scales it to 960×544) and MSAA.
+    pub size: (u32, u32),
+    pub msaa: Msaa,
     sphere_vb: *const u8,
     sphere_ib: *const u16,
     sphere_count: u32,
@@ -69,6 +70,64 @@ pub struct Atlas {
     tick: u32,
     toast: Option<(String, f32)>,
     pub load_ms: u32,
+    /// Profiling switches (`{"atlas": true, "probe": {...}}`).
+    pub probe: Probe,
+}
+
+struct Targets {
+    vram: Arena,
+    mem: Arena,
+    hdr: Target,
+    pre: Target,
+    down: [Target; 2],
+    up: [Target; 2],
+    fin: Target,
+}
+
+impl Targets {
+    unsafe fn new(w: u32, h: u32, msaa: Msaa) -> Result<Self, String> {
+        let mut vram = Arena::new(Kind::Cdram, 4 << 20);
+        let mut mem = Arena::new(Kind::Main, 4 << 20);
+        let r = (|| -> Result<_, String> {
+            let f = ColorFormat::Rgba16f;
+            let hdr = Target::new(&mut vram, &mut mem, w, h, f, msaa, Depth::Transient)?;
+            let pre = Target::new(&mut vram, &mut mem, w / 2, h / 2, f, Msaa::None, Depth::None)?;
+            let down = [Target::new(&mut vram, &mut mem, w / 4, h / 4, f, Msaa::None, Depth::None)?, Target::new(&mut vram, &mut mem, w / 8, h / 8, f, Msaa::None, Depth::None)?];
+            let up = [Target::new(&mut vram, &mut mem, w / 4, h / 4, f, Msaa::None, Depth::None)?, Target::new(&mut vram, &mut mem, w / 2, h / 2, f, Msaa::None, Depth::None)?];
+            let fin = Target::new(&mut vram, &mut mem, w, h, ColorFormat::Rgba8, Msaa::None, Depth::None)?;
+            Ok((hdr, pre, down, up, fin))
+        })();
+        match r {
+            Ok((hdr, pre, down, up, fin)) => Ok(Self { vram, mem, hdr, pre, down, up, fin }),
+            Err(e) => {
+                vram.free();
+                mem.free();
+                Err(e)
+            }
+        }
+    }
+
+    /// # Safety
+    /// GPU idle with respect to the targets.
+    unsafe fn release(self) {
+        self.hdr.destroy();
+        self.pre.destroy();
+        for t in self.down.into_iter().chain(self.up) {
+            t.destroy();
+        }
+        self.fin.destroy();
+        self.vram.free();
+        self.mem.free();
+    }
+}
+
+#[derive(Default, Clone, Copy)]
+pub struct Probe {
+    pub no_ui: bool,
+    pub no_globe: bool,
+    pub no_bloom: bool,
+    pub no_markers: bool,
+    pub no_space: bool,
 }
 
 fn tex_index(meta: &AtlasMeta, name: &str) -> Result<usize, String> {
@@ -164,6 +223,25 @@ impl Atlas {
     /// # Safety
     /// GXM initialised; render thread.
     pub unsafe fn load(path: &str) -> Result<Self, String> {
+        let mut vram = Arena::new(Kind::Cdram, 16 << 20);
+        let mut mem = Arena::new(Kind::Main, 2 << 20);
+        match Self::load_in(path, &mut vram, &mut mem) {
+            Ok(mut a) => {
+                a.vram = vram;
+                a.mem = mem;
+                Ok(a)
+            }
+            Err(e) => {
+                // Uploads may still be in flight into these blocks.
+                g::sceGxmTransferFinish();
+                vram.free();
+                mem.free();
+                Err(e)
+            }
+        }
+    }
+
+    unsafe fn load_in(path: &str, vram: &mut Arena, mem: &mut Arena) -> Result<Self, String> {
         let t0 = std::time::Instant::now();
         let mut f = Seq::open(path)?;
         let mut head = [0u8; 16];
@@ -179,8 +257,6 @@ impl Atlas {
         f.read_at(s_meta.offset as u64, &mut meta_bytes)?;
         let meta: AtlasMeta = serde_json::from_slice(&meta_bytes).map_err(|e| format!("atlas META: {e}"))?;
 
-        let mut vram = Arena::new(Kind::Cdram, 16 << 20);
-        let mut mem = Arena::new(Kind::Main, 2 << 20);
         let mut up = Uploader::new(4 << 20)?;
         let mut order: Vec<usize> = (0..meta.textures.len()).collect();
         order.sort_by_key(|&i| meta.textures[i].data.offset);
@@ -190,7 +266,7 @@ impl Atlas {
             let t = &meta.textures[i];
             buf.resize(t.data.size as usize, 0);
             f.read_at((s_tex.offset + t.data.offset) as u64, &mut buf)?;
-            let mut tex = up.texture(&mut vram, fmt(t.format), t.width, t.height, t.mips, &buf).map_err(|e| format!("atlas texture {}: {e}", t.name))?;
+            let mut tex = up.texture(vram, fmt(t.format), t.width, t.height, t.mips, &buf).map_err(|e| format!("atlas texture {}: {e}", t.name))?;
             tex.set_wrap(wrap(t.wrap_s), wrap(t.wrap_t));
             tex.set_filter(true, t.mips > 1);
             slots[i] = Some(tex);
@@ -201,17 +277,7 @@ impl Atlas {
             tex_index(&meta, n)?;
         }
 
-        let hdr = Target::new(&mut vram, &mut mem, W, H, ColorFormat::Rgba16f, Msaa::X4, Depth::Transient)?;
-        let pre = Target::new(&mut vram, &mut mem, W / 2, H / 2, ColorFormat::Rgba16f, Msaa::None, Depth::None)?;
-        let down = [
-            Target::new(&mut vram, &mut mem, W / 4, H / 4, ColorFormat::Rgba16f, Msaa::None, Depth::None)?,
-            Target::new(&mut vram, &mut mem, W / 8, H / 8, ColorFormat::Rgba16f, Msaa::None, Depth::None)?,
-        ];
-        let up_t = [
-            Target::new(&mut vram, &mut mem, W / 4, H / 4, ColorFormat::Rgba16f, Msaa::None, Depth::None)?,
-            Target::new(&mut vram, &mut mem, W / 2, H / 2, ColorFormat::Rgba16f, Msaa::None, Depth::None)?,
-        ];
-        let fin = Target::new(&mut vram, &mut mem, W, H, ColorFormat::Rgba8, Msaa::None, Depth::None)?;
+        let rt = Targets::new(W, H, Msaa::X4)?;
 
         let (sv, si) = sphere();
         let sphere_vb = mem.alloc(sv.len() * 4, 16)?;
@@ -259,13 +325,11 @@ impl Atlas {
         let (lat, lon) = (meta.globe.start_lat, meta.globe.start_lon);
         let mut atlas = Self {
             textures,
-            vram,
-            mem,
-            hdr,
-            pre,
-            down,
-            up: up_t,
-            fin,
+            vram: Arena::new(Kind::Cdram, 16 << 20),
+            mem: Arena::new(Kind::Main, 2 << 20),
+            rt,
+            size: (W, H),
+            msaa: Msaa::X4,
             sphere_vb,
             sphere_ib,
             sphere_count: si.len() as u32,
@@ -286,6 +350,7 @@ impl Atlas {
             tick: 0,
             toast: None,
             load_ms: 0,
+            probe: Probe::default(),
             meta,
         };
         atlas.focus_selected();
@@ -462,16 +527,17 @@ impl Atlas {
         let rot = self.earth_rot();
         let rows = rot.transpose();
         let earth_rot = [rows.x_axis.to_array(), rows.y_axis.to_array(), rows.z_axis.to_array()].concat();
-        let msaa = Msaa::X4.gxm();
+        let msaa = self.msaa.gxm();
 
         // ------------------------------------------------ globe (HDR, MSAA)
-        let hdr = &mut self.hdr as *mut Target;
+        let hdr = &mut self.rt.hdr as *mut Target;
+        let (w, h) = self.size;
         (*hdr).begin(ctx, 0.0)?;
-        Self::viewport(ctx, W, H);
+        Self::viewport(ctx, w, h);
         g::sceGxmSetCullMode(ctx, g::SceGxmCullMode_SCE_GXM_CULL_NONE);
         // Sky, stars and the halo, baked for this camera.
         let key = PipeKey { vs: Key::new("post_v.cg", &[]), fs: Key::new("blit_f.cg", &[]), layout: Layout::Pos2, blend: BlendMode::Opaque, output: Out::Half4, msaa };
-        if let Some(p) = gpu.pipeline(&key) {
+        if let Some(p) = gpu.pipeline(&key).filter(|_| !self.probe.no_space) {
             let p = &*(p as *const Pipeline);
             Self::use_pipeline(ctx, p);
             g::sceGxmSetFrontDepthFunc(ctx, g::SceGxmDepthFunc_SCE_GXM_DEPTH_FUNC_ALWAYS);
@@ -484,7 +550,7 @@ impl Atlas {
         }
         // The Earth and its cloud shell.
         let key = PipeKey { vs: Key::new("globe_v.cg", &[]), fs: Key::new("globe_f.cg", &[]), layout: Layout::Globe, blend: BlendMode::Opaque, output: Out::Half4, msaa };
-        if let Some(p) = gpu.pipeline(&key) {
+        if let Some(p) = gpu.pipeline(&key).filter(|_| !self.probe.no_globe) {
             let p = &*(p as *const Pipeline);
             Self::use_pipeline(ctx, p);
             g::sceGxmSetFrontDepthFunc(ctx, g::SceGxmDepthFunc_SCE_GXM_DEPTH_FUNC_GREATER_EQUAL);
@@ -509,7 +575,7 @@ impl Atlas {
         }
         // Place markers, added over the frame.
         let key = PipeKey { vs: Key::new("marker_v.cg", &[]), fs: Key::new("marker_f.cg", &[]), layout: Layout::Pos2, blend: BlendMode::Additive, output: Out::Half4, msaa };
-        if let Some(p) = gpu.pipeline(&key) {
+        if let Some(p) = gpu.pipeline(&key).filter(|_| !self.probe.no_markers) {
             let p = &*(p as *const Pipeline);
             Self::use_pipeline(ctx, p);
             g::sceGxmSetFrontDepthFunc(ctx, g::SceGxmDepthFunc_SCE_GXM_DEPTH_FUNC_ALWAYS);
@@ -543,11 +609,13 @@ impl Atlas {
         // ------------------------------------------------ bloom
         let v = |f: &'static str| Key::new(f, &[]);
         let scene = &(*hdr).texture as *const _;
-        let texel = [1.0 / W as f32, 1.0 / H as f32, 0.0, 0.0];
-        let pre = &mut self.pre as *mut Target;
+        let texel = [1.0 / w as f32, 1.0 / h as f32, 0.0, 0.0];
+        let pre = &mut self.rt.pre as *mut Target;
+        let bloom_on = !self.probe.no_bloom;
+        let (d0, d1) = (&mut self.rt.down[0] as *mut Target, &mut self.rt.down[1] as *mut Target);
+        let (u0, u1) = (&mut self.rt.up[0] as *mut Target, &mut self.rt.up[1] as *mut Target);
+        if bloom_on {
         self.post(ctx, gpu, &mut *pre, v("post_v.cg"), v("prefilter_f.cg"), &[(S::Scene, scene), (S::HazeTex, scene)], &[(U::Texel, texel), (U::Threshold, [gl.bloom_threshold, gl.bloom_smoothing, 0.0, 0.0])])?;
-        let (d0, d1) = (&mut self.down[0] as *mut Target, &mut self.down[1] as *mut Target);
-        let (u0, u1) = (&mut self.up[0] as *mut Target, &mut self.up[1] as *mut Target);
         for (src, dst, support) in [(pre, d0, None), (d0, d1, None), (d1, u0, Some(d0)), (u0, u1, Some(pre))] {
             let texel = [1.0 / (*src).width as f32, 1.0 / (*src).height as f32, 0.7, 0.0];
             match support {
@@ -555,11 +623,12 @@ impl Atlas {
                 Some(s) => self.post(ctx, gpu, &mut *dst, v("post_v.cg"), v("up_f.cg"), &[(S::Source, &(*src).texture), (S::Support, &(*s).texture)], &[(U::Texel, texel)])?,
             }
         }
+        }
 
         // ------------------------------------------------ composite
         let o = (self.tick as f32 * 0.618_034).fract();
-        let grain_k = [W as f32 / GRAIN as f32, H as f32 / GRAIN as f32, o, (self.tick as f32 * 0.414_214 + o).fract()];
-        let fin = &mut self.fin as *mut Target;
+        let grain_k = [w as f32 / GRAIN as f32, h as f32 / GRAIN as f32, o, (self.tick as f32 * 0.414_214 + o).fract()];
+        let fin = &mut self.rt.fin as *mut Target;
         let bloom = &(*u1).texture as *const _;
         self.post(
             ctx,
@@ -568,7 +637,7 @@ impl Atlas {
             Key::new("post_v.cg", &["GRAIN"]),
             Key::new("composite_f.cg", &["BLOOM"]),
             &[(S::Scene, scene), (S::Bloom, bloom), (S::Lut, &self.lut), (S::Mask, &self.mask), (S::Grain, &self.grain)],
-            &[(U::BloomK, [gl.bloom_intensity, 1.0, 0.0, 0.0]), (U::Grade, [0.0, 0.0, gl.grain, 0.0]), (U::GrainK, grain_k)],
+            &[(U::BloomK, [if bloom_on { gl.bloom_intensity } else { 0.0 }, 1.0, 0.0, 0.0]), (U::Grade, [0.0, 0.0, gl.grain, 0.0]), (U::GrainK, grain_k)],
         )?;
         Ok(())
     }
@@ -589,7 +658,7 @@ impl Atlas {
         Self::use_pipeline(ctx, p);
         let u = Uniforms::reserve(ctx, p);
         u.set(p, U::RayZ, &[0.0; 4]);
-        bind(ctx, p, S::Source, &self.fin.texture);
+        bind(ctx, p, S::Source, &self.rt.fin.texture);
         g::sceGxmSetVertexStream(ctx, 0, self.tri_vb.cast());
         g::sceGxmDraw(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, self.tri_ib.cast(), 3);
     }
@@ -600,6 +669,9 @@ impl Atlas {
     /// # Safety
     /// Inside the vita2d display scene.
     pub unsafe fn ui(&self, font: *mut g::vita2d_pgf) {
+        if self.probe.no_ui {
+            return;
+        }
         let text = |x: i32, y: i32, color: u32, scale: f32, s: &str| {
             let c = std::ffi::CString::new(s.replace('\0', " ")).unwrap();
             g::vita2d_pgf_draw_text(font, x, y, color, scale, c.as_ptr());
@@ -660,15 +732,36 @@ impl Atlas {
     /// # Safety
     /// GPU idle with respect to every atlas resource.
     pub unsafe fn release(self) {
-        let Self { hdr, pre, down, up, fin, vram, mem, .. } = self;
-        hdr.destroy();
-        pre.destroy();
-        for t in down.into_iter().chain(up) {
-            t.destroy();
-        }
-        fin.destroy();
+        let Self { rt, vram, mem, .. } = self;
+        rt.release();
         vram.free();
         mem.free();
+    }
+
+    /// Rebuilds the render targets at another 3D resolution or MSAA mode.
+    ///
+    /// # Safety
+    /// Render thread, outside any scene.
+    pub unsafe fn resize(&mut self, w: u32, h: u32, msaa: Msaa) -> Result<(), String> {
+        if (w, h) == self.size && msaa == self.msaa {
+            return Ok(());
+        }
+        g::sceGxmFinish(g::vita2d_get_context());
+        let rt = core::ptr::read(&self.rt);
+        rt.release();
+        match Targets::new(w, h, msaa) {
+            Ok(t) => core::ptr::write(&mut self.rt, t),
+            Err(e) => {
+                // Back to the smallest set, which fits wherever the first one did.
+                core::ptr::write(&mut self.rt, Targets::new(480, 272, Msaa::None)?);
+                self.size = (480, 272);
+                self.msaa = Msaa::None;
+                return Err(e);
+            }
+        }
+        self.size = (w, h);
+        self.msaa = msaa;
+        Ok(())
     }
 }
 
