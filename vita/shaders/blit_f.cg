@@ -1,0 +1,8 @@
+// Scales the finished 8-bit frame (scene resolution) onto the display.
+
+uniform sampler2D uSource;
+
+half4 main(float2 vUv : TEXCOORD0) : COLOR
+{
+    return half4(tex2D(uSource, vUv).rgb, 1.0);
+}

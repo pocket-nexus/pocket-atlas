@@ -66,6 +66,27 @@ unsafe fn loading_frame(font: *mut g::vita2d_pgf, lines: &[String], dev: &dev::H
     graphics::present();
 }
 
+/// Copies `host0:city/outbox/<name>` to `ux0:data/pocket-city/<name>` (a
+/// packaged build to install from VitaShell) and records the result next to
+/// the source as `<name>.done`.
+fn fetch(name: &str) {
+    let result = (|| -> Result<u64, String> {
+        if name.is_empty() || name.contains(['/', '\\', ':']) || name.contains("..") {
+            return Err(format!("refusing file name {name:?}"));
+        }
+        let _ = std::fs::create_dir_all("ux0:data/pocket-city");
+        let mut src = std::fs::File::open(format!("host0:city/outbox/{name}")).map_err(|e| e.to_string())?;
+        let to = format!("ux0:data/pocket-city/{name}");
+        let mut dst = std::fs::File::create(&to).map_err(|e| format!("{to}: {e}"))?;
+        std::io::copy(&mut src, &mut dst).map_err(|e| e.to_string())
+    })();
+    let text = match result {
+        Ok(n) => format!("ok {n} ux0:data/pocket-city/{name}"),
+        Err(e) => format!("error {e}"),
+    };
+    let _ = hostfs::write(&format!("host0:city/outbox/{name}.done"), text.as_bytes());
+}
+
 /// Remote control: `host0:city/control.json`, polled off the render thread.
 fn control_watcher() -> mpsc::Receiver<Value> {
     let (tx, rx) = mpsc::channel();
@@ -77,6 +98,9 @@ fn control_watcher() -> mpsc::Receiver<Value> {
                 if bytes != last {
                     last = bytes.clone();
                     if let Ok(v) = serde_json::from_slice::<Value>(&bytes) {
+                        if let Some(name) = v["fetch"].as_str() {
+                            fetch(name);
+                        }
                         if tx.send(v).is_err() {
                             return;
                         }
@@ -93,7 +117,8 @@ struct Control {
     view: Option<View>,
 }
 
-fn apply_control(v: &Value, rig: &mut Rig, r: &mut Renderer, ctl: &mut Control) {
+fn apply_control(v: &Value, rig: &mut Rig, r: &mut Renderer, ctl: &mut Control, hud: &mut bool) {
+    *hud = v["settings"]["hud"].as_bool().unwrap_or(*hud);
     let s = &mut r.settings;
     let flag = |k: &str, cur: bool| v["settings"][k].as_bool().unwrap_or(cur);
     s.reflection = flag("reflection", s.reflection);
@@ -106,7 +131,13 @@ fn apply_control(v: &Value, rig: &mut Rig, r: &mut Renderer, ctl: &mut Control) 
     }
     s.msaa = if flag("msaa", s.msaa == Msaa::X4) { Msaa::X4 } else { Msaa::None };
     s.flat = flag("flat", s.flat);
-    s.reduced = flag("reduced", s.reduced);
+    if let Some(n) = v["settings"]["scale"].as_u64() {
+        s.scale = n.min(3) as u32;
+    }
+    s.amortize = flag("amortize", s.amortize);
+    if let Some(n) = v["settings"]["skip"].as_u64() {
+        s.skip = n as u32;
+    }
     if let Some(n) = v["settings"]["fx"].as_u64() {
         s.fx = n as u32;
     }
@@ -196,7 +227,8 @@ fn main() {
         };
         renderer.warm(&mut gpu, &scene);
         let mut rig = Rig::new(&scene.meta.camera);
-        let control = control_watcher();
+        // Packaged builds have no USB share to be steered from.
+        let control = if live { control_watcher() } else { mpsc::channel().1 };
         let mut ctl = Control { frozen: None, view: None };
 
         // ---------------------------------------------------------- run
@@ -210,7 +242,7 @@ fn main() {
         let mut wait_ms = 0.0f32;
         let mut swap_ms = 0.0f32;
         let mut hud = live;
-        let mut manifest_generation = u32::MAX;
+        let mut manifest_state = (u32::MAX, 0usize);
         let mut prev_buttons = 0u32;
         let mut view = View { pos: Vec3::new(10.0, 3.0, 12.0), target: Vec3::new(2.0, 1.5, -3.0), fov_y: 45.0 };
         let mut compiling_since = Some(Instant::now());
@@ -221,7 +253,7 @@ fn main() {
             prev_buttons = buttons;
             gpu.poll();
             while let Ok(v) = control.try_recv() {
-                apply_control(&v, &mut rig, &mut renderer, &mut ctl);
+                apply_control(&v, &mut rig, &mut renderer, &mut ctl, &mut hud);
             }
 
             let now = Instant::now();
@@ -252,9 +284,11 @@ fn main() {
                 continue;
             }
             compiling_since = None;
-            // The programs this build uses, for packaging (`city.ts vpk`).
-            if live && manifest_generation != gpu.generation && gpu.pending() == 0 {
-                manifest_generation = gpu.generation;
+            // The programs this build uses, for packaging (`city.ts vpk`):
+            // rewritten after a hot reload or when a program is first needed.
+            let state = (gpu.generation, gpu.programs.len());
+            if live && manifest_state != state && gpu.pending() == 0 {
+                manifest_state = state;
                 let _ = hostfs::write("host0:city/gxp/manifest.txt", gpu.manifest().as_bytes());
             }
 
@@ -287,15 +321,20 @@ fn main() {
             scene.update(time);
 
             // ------------------------------------------------------ render
-            let render_error = renderer.render(&mut gpu, &scene, &view, time, &weather).err();
+            // Profiling serializes the GPU; its frame times would force the
+            // lowest resolution.
+            if !renderer.timeline.on {
+                renderer.feedback(frame_ms);
+            }
+            let fade = if ctl.view.is_some() { 0.0 } else { rig.fade };
+            let bars = if ctl.view.is_some() { 0.0 } else { rig.bars };
+            let render_error = renderer.render(&mut gpu, &scene, &view, time, &weather, fade, bars).err();
             let t_wait = Instant::now();
             fence.wait((frame_no.wrapping_sub(1) % 2) as usize);
             wait_ms = wait_ms * 0.9 + t_wait.elapsed().as_secs_f32() * 1000.0 * 0.1;
             g::vita2d_pool_reset();
             g::vita2d_start_drawing_advanced(core::ptr::null_mut(), 0);
-            let fade = if ctl.view.is_some() { 0.0 } else { rig.fade };
-            let bars = if ctl.view.is_some() { 0.0 } else { rig.bars };
-            renderer.composite(&mut gpu, time, fade, bars);
+            renderer.present(&mut gpu);
             g::sceGxmSetViewport(ctx, 480.0, 480.0, 272.0, -272.0, 0.5, 0.5);
             if hud {
                 let st = &renderer.stats;
@@ -342,7 +381,7 @@ fn main() {
                 "loadMs": scene.load_ms,
                 "clocks": clocks,
                 "view": {"pos": view.pos.to_array(), "target": view.target.to_array(), "fov": view.fov_y, "mode": if rig.mode == Mode::Cinematic { "cinematic" } else { "free" }, "shot": rig.shot_name()},
-                "settings": {"msaa": s.msaa == Msaa::X4, "reflection": s.reflection, "haze": s.haze, "bloom": s.bloom, "rain": s.rain, "cullCw": s.cull_cw, "exposure": s.exposure, "maxLights": s.max_lights, "flat": s.flat, "reduced": s.reduced, "fx": s.fx},
+                "settings": {"msaa": s.msaa == Msaa::X4, "reflection": s.reflection, "haze": s.haze, "bloom": s.bloom, "rain": s.rain, "cullCw": s.cull_cw, "exposure": s.exposure, "maxLights": s.max_lights, "flat": s.flat, "scale": s.scale, "level": renderer.level(), "fx": s.fx, "amortize": s.amortize},
                 "uptime": started.elapsed().as_secs(),
                 "passes": renderer.timeline.passes.iter().map(|(n, ms)| json!([n, ms])).collect::<Vec<_>>(),
             });

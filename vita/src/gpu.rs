@@ -56,18 +56,14 @@ pub enum U {
     FogCol,
     FogDir,
     Opacity,
-    Color,
-    Offset,
     BoxMin,
     BoxMax,
     Texel,
     Threshold,
-    HazeSize,
     BloomK,
     Grade,
     Grade2,
-    Lift,
-    Gain,
+    Curtain,
     Count,
 }
 
@@ -75,8 +71,8 @@ const UNIFORM_NAMES: [&str; U::Count as usize] = [
     "uModel", "uDequant", "uViewProj", "uUv", "uBones", "uBase", "uEmissive", "uPbr", "uEnvK", "uWet", "uWet2", "uEye", "uFog", "uHemiSky",
     "uHemiGround", "uRipple", "uReflOn", "uLightPos", "uLightCol", "uLightDir", "uLightRight", "uLightUp", "uHaze", "uRayZ", "uRayX", "uRayY",
     "uZenith", "uHorizon", "uGlow", "uCam", "uTime", "uBox", "uWind", "uCenter", "uAmbient", "uDry", "uFogPos", "uFogCol", "uFogDir",
-    "uOpacity", "uColor", "uOffset", "uBoxMin", "uBoxMax", "uTexel", "uThreshold", "uHazeSize", "uBloomK", "uGrade", "uGrade2",
-    "uLift", "uGain",
+    "uOpacity", "uBoxMin", "uBoxMax", "uTexel", "uThreshold", "uBloomK", "uGrade", "uGrade2",
+    "uCurtain",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,7 +87,6 @@ pub enum S {
     Ripples,
     ReflSharp,
     ReflBlur,
-    ReflSoft,
     Beads,
     Clouds,
     Scene,
@@ -104,7 +99,7 @@ pub enum S {
 }
 
 const SAMPLER_NAMES: [&str; S::Count as usize] = [
-    "uAlbedo", "uNormalMap", "uOrm", "uEmission", "uEnv", "uPuddles", "uRipples", "uReflSharp", "uReflBlur", "uReflSoft", "uBeads", "uClouds",
+    "uAlbedo", "uNormalMap", "uOrm", "uEmission", "uEnv", "uPuddles", "uRipples", "uReflSharp", "uReflBlur", "uBeads", "uClouds",
     "uScene", "uHazeTex", "uBloom", "uSource", "uSupport", "uLut",
 ];
 
@@ -153,8 +148,6 @@ pub enum Layout {
     Fx,
     /// f32×2 (full-screen triangles).
     Pos2,
-    /// f32×3 (generated meshes).
-    Pos3,
 }
 
 impl Layout {
@@ -180,7 +173,6 @@ impl Layout {
             ),
             Layout::Fx => (&[("aSeed", 0, U16N, 4), ("aCorner", 8, F32, 2), ("aA", 16, F32, 3), ("aB", 28, F32, 3)], 40),
             Layout::Pos2 => (&[("aPosition", 0, F32, 2)], 8),
-            Layout::Pos3 => (&[("aPosition", 0, F32, 3)], 12),
         }
     }
 }

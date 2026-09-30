@@ -53,7 +53,18 @@ bun tools/city.ts vpk                         # → dist/vita/pocket-city-PKCT00
 
 Shader sources in `vita/shaders` hot-reload: `bun tools/city.ts sync` copies them to the USB share and the device recompiles the programs whose expanded source changed. Compiled programs are cached on the share by content hash; `vpk` packages the ones listed in the device's `gxp/manifest.txt`.
 
-`bun tools/city.ts ctl '{"view":…,"time":…,"settings":{…}}'` steers the camera and renderer switches (`reflection`, `haze`, `bloom`, `rain`, `msaa`, `reduced`, `maxLights`, `fx`, `flat`, `profile`).
+`bun tools/city.ts ctl '{"view":…,"time":…,"settings":{…}}'` steers the camera and renderer switches (`reflection`, `haze`, `bloom`, `rain`, `msaa`, `scale` 0–3, `amortize`, `maxLights`, `fx`, `skip`, `flat`, `hud`, `profile`).
+
+## Status on hardware
+
+Measured on a PS Vita 2000 (CPU 444 MHz, GPU 222 MHz), fixed camera and clock, `scale` = 2 (640×362 scene, 4× MSAA, composited and scaled to 960×544), reflection and haze updates alternating between frames:
+
+| View | Frame time | Rate |
+| --- | --- | --- |
+| Konbini (street, storefront, both building rows) | 52.8 ms | 18.9 fps |
+| Puddles (low camera over the wet street) | 60.6 ms | 16.5 fps |
+
+At 720×408 the same views take 60.6 ms and 69.5 ms. `scale` 3 (the default) steps between 960×544, 720×408 and 640×362 from the measured frame time. `bun tools/city.ts profile` reports GPU time per scene; material shading of the wet street, the storefront glass and the lit walls is the largest remaining cost.
 
 ## License
 

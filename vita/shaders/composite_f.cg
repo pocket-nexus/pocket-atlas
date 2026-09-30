@@ -1,21 +1,19 @@
-// Final frame: scene + bilateral-upsampled haze + bloom, tone mapped and
+// Final frame: scene + upsampled haze + bloom, tone mapped and
 // graded through the colour table (AgX, contrast, saturation, split toning,
 // sRGB encoding), then vignette, grain, letterbox and dip to black.
 
 uniform sampler2D uScene;   // full-resolution HDR, alpha = eye distance
-uniform sampler2D uHazeTex; // quarter resolution, alpha = distance (point sampled)
+uniform sampler2D uHazeTex; // quarter resolution, bilinear
 uniform sampler2D uBloom;
 uniform sampler2D uLut;     // colour table (see tone)
-uniform float4 uHazeSize;   // haze size, 1 / haze size
 uniform float4 uBloomK;     // intensity, exposure, time, aspect
 uniform float4 uGrade;      // contrast, saturation, grain, vignette
 uniform float4 uGrade2;     // fade, letterbox, resolution x, resolution y
 
-float gHash(float2 p)
+// Interleaved gradient noise (Jimenez): film grain in four instructions.
+float ign(float2 px)
 {
-    float3 p3 = frac(p.xyx * 0.1031);
-    p3 += dot(p3, p3.yzx + 33.33);
-    return frac((p3.x + p3.y) * p3.z);
+    return frac(52.9829189 * frac(dot(px, float2(0.06711056, 0.00583715))));
 }
 
 // AgX, contrast, saturation, lift/gain and sRGB encoding, baked by the CPU
@@ -36,19 +34,9 @@ float4 main(float2 vUv : TEXCOORD0) : COLOR
     float4 scene = tex2D(uScene, vUv);
     float dist = scene.a;
 
-    // Bilateral upsample: bilinear weights × distance similarity.
-    float2 p = vUv * uHazeSize.xy - 0.5;
-    float2 f = frac(p);
-    float2 base = (floor(p) + 0.5) * uHazeSize.zw;
-    float4 h00 = tex2D(uHazeTex, base);
-    float4 h10 = tex2D(uHazeTex, base + float2(uHazeSize.z, 0.0));
-    float4 h01 = tex2D(uHazeTex, base + float2(0.0, uHazeSize.w));
-    float4 h11 = tex2D(uHazeTex, base + uHazeSize.zw);
-    float4 w = float4((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
-    float4 dd = abs(float4(h00.a, h10.a, h01.a, h11.a) - dist) / max(dist, 0.5);
-    w *= 1.0 / (1.0 + dd * dd * 64.0);
-    w += 1e-4;
-    float3 haze = (h00.rgb * w.x + h10.rgb * w.y + h01.rgb * w.z + h11.rgb * w.w) / dot(w, 1.0);
+    // Haze is soft: one bilinear tap of the quarter-resolution buffer (a
+    // bilateral 4-tap upsample cost 6.4 ms per frame on the device).
+    float3 haze = tex2D(uHazeTex, vUv).rgb;
 
     float3 c = scene.rgb + haze;
     c += tex2D(uBloom, vUv).rgb * uBloomK.x;
@@ -59,7 +47,7 @@ float4 main(float2 vUv : TEXCOORD0) : COLOR
     float2 q = (vUv - 0.5) * float2(uBloomK.w, 1.0);
     half v = (half)smoothstep(1.05, 0.25, length(q));
     d *= lerp((half)(1.0 - uGrade.w * 0.55), (half)1.0, v);
-    float n = gHash(vUv * uGrade2.zw + frac(uBloomK.z * 7.13) * 911.0) - 0.5;
+    float n = ign(vUv * uGrade2.zw + frac(uBloomK.z * 7.13) * 64.0) - 0.5;
     d += (half)(n * uGrade.z * 2.4) * (1.0 - d.g * 0.7);
     d *= (half)(1.0 - uGrade2.x);
     float bar = uGrade2.y * max(0.0, 0.5 - (uBloomK.w / 2.39) * 0.5);

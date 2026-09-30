@@ -25,34 +25,6 @@ uniform float4 uLightRight[LIGHTS];
 uniform float4 uLightUp[LIGHTS];
 #endif
 
-// Running drops: one lane per column, a bead head with a wet trail.
-float3 runners(float2 uv, float t)
-{
-    float lanes = 9.0;
-    float px = uv.x * lanes;
-    float lane = floor(px);
-    float h = hash12(float2(lane, 3.7));
-    float h2 = hash12(float2(lane, 9.1));
-    float speed = 0.18 + h * 0.4;
-    float period = 2.2 + h2 * 2.5;
-    float y = frac(uv.y / period + t * speed / period + h * 5.0);
-    float wob = sin(uv.y * 22.0 + h * 40.0) * 0.06 + sin(uv.y * 7.0 + h2 * 9.0) * 0.08;
-    float fx = frac(px) - 0.5 - wob;
-    float3 acc = 0.0;
-    float2 d = float2(fx, (y - 0.9) * period * lanes * 0.55);
-    float l = length(d);
-    if (l < 0.22) {
-        float k = l / 0.22;
-        acc.xy += d / 0.22 * sqrt(1.0 - k * k) * 1.6;
-        acc.z = smoothstep(1.0, 0.6, k);
-    }
-    float trail = smoothstep(0.9, 0.55, y) * step(y, 0.9);
-    float tw = smoothstep(0.08, 0.0, abs(fx));
-    acc.z = max(acc.z, trail * tw * 0.5);
-    acc.x += -sign(fx) * trail * tw * 0.3;
-    return acc;
-}
-
 half4 main(
     float3 vWorld : TEXCOORD0,
 #ifdef BAKED
@@ -73,7 +45,10 @@ half4 main(
         float2 guv = xFacing ? vWorld.zy : vWorld.xy;
         half3 b = tex2D(uBeads, guv).rgb;
         half3 beads = half3((b.xy - 0.5) * 4.0, b.z);
-        half3 all = (beads + (half3)runners(guv * float2(1.3, 1.0), uEye.w)) * (half)(uEnvK.w * uEnvK.y);
+        // Running drops: the bead pattern stretched and scrolled down.
+        half3 r = tex2D(uBeads, guv * float2(1.3, 0.35) + float2(0.0, uEye.w * 0.09)).rgb;
+        half3 runs = half3((r.xy - 0.5) * 2.5, r.z * 0.6);
+        half3 all = (beads + runs) * (half)(uEnvK.w * uEnvK.y);
         drop = saturate(all.z);
         half3 tU = xFacing ? half3(0.0, 0.0, 1.0) : half3(1.0, 0.0, 0.0);
         N = normalize(N + (tU * all.x + half3(0.0, 1.0, 0.0) * all.y) * (half)0.9);

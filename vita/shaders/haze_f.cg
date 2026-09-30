@@ -1,10 +1,11 @@
 // Single scattering from point and spot lights in homogeneous rain haze,
 // integrated in closed form along each view ray up to the scene distance
 // (∫ dt / (d² + r²) = atan terms). The dry shop interior is cut out of the
-// ray. Runs at quarter resolution; alpha keeps the distance for the
-// bilateral upsample.
+// ray. The far rain curtain (streak columns on a 16 m cylinder around the
+// camera) is added where the ray meets it in front of the scene. Runs at
+// quarter resolution.
 
-#define HAZE_LIGHTS 10
+#define HAZE_LIGHTS 6
 
 uniform sampler2D uScene;   // main HDR target, alpha = eye distance (point sampled)
 uniform float4 uEye;        // camera position, -
@@ -15,6 +16,36 @@ uniform float4 uBoxMax;
 uniform float4 uFogPos[HAZE_LIGHTS]; // position, radius
 uniform float4 uFogCol[HAZE_LIGHTS]; // colour × gain, cos outer (< -1.5: omni)
 uniform float4 uFogDir[HAZE_LIGHTS]; // spot direction, cos inner
+uniform float4 uCurtain;    // rain curtain colour, opacity (0: off)
+
+float cHash(float2 p)
+{
+    float3 p3 = frac(p.xyx * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return frac((p3.x + p3.y) * p3.z);
+}
+
+float atan2Fast(float y, float x)
+{
+    float ax = abs(x);
+    float ay = abs(y);
+    float a = min(ax, ay) / max(max(ax, ay), 1e-6);
+    float r = a * (0.7853982 - (a - 1.0) * (0.2447 + 0.0663 * a));
+    r = ay > ax ? 1.5707963 - r : r;
+    r = x < 0.0 ? 3.1415927 - r : r;
+    return y < 0.0 ? -r : r;
+}
+
+float curtainLayer(float2 uv, float speed, float cols)
+{
+    float col = floor(uv.x * cols);
+    float h = cHash(float2(col, 1.0));
+    float s = uv.y * 0.6 + uEye.w * speed * (0.8 + 0.4 * h) + h * 11.0;
+    float y = frac(s);
+    float streak = smoothstep(0.0, 0.08, y) * smoothstep(0.35, 0.1, y);
+    float xw = abs(frac(uv.x * cols) - 0.5);
+    return streak * smoothstep(0.22, 0.0, xw) * step(0.55, cHash(float2(col, floor(s))));
+}
 
 // atan on the whole line, max error 0.0015 rad.
 float atanFast(float x)
@@ -70,5 +101,15 @@ float4 main(float2 vUv : TEXCOORD0, float3 vRay : TEXCOORD1) : COLOR
     }
     float outside = cut ? dist - (in1 - in0) : dist;
     float amb = 1.0 - exp(-outside * uHaze.y);
-    return float4(acc * uHaze.x + uAmbient.rgb * amb, dist);
+    float3 col = acc * uHaze.x + uAmbient.rgb * amb;
+
+    float tc = 16.0 / max(length(rd.xz), 1e-3);
+    float cy = ro.y + rd.y * tc;
+    if (uCurtain.w > 0.0 && tc < dist && cy > -2.0 && cy < 24.0) {
+        float2 uv = float2(atan2Fast(rd.z, rd.x) * 6.0, cy * 0.35);
+        float r = curtainLayer(uv, 1.6, 30.0) + curtainLayer(uv * 1.7 + 3.0, 2.1, 30.0) * 0.7;
+        float fadeY = smoothstep(-1.0, 3.0, cy) * (1.0 - smoothstep(12.0, 22.0, cy));
+        col += uCurtain.rgb * (r * uCurtain.w * fadeY);
+    }
+    return float4(col, dist);
 }
