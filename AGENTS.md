@@ -7,3 +7,5 @@
 - Commit an image only when something consumes it (LiveArea art under `vita/assets`, a test fixture).
 - Separate evidence kinds when reporting: host build, on-device compile, device GPU timing (`bun tools/city.ts profile`), and what a person saw on the screen.
 - Shader programs are compiled on the device by SceShaccCg; `bun tools/city.ts lint` catches syntax and type errors on the host but not SceShaccCg's overload ambiguities (mixing `half` and `float` in `lerp`/`smoothstep`), so cast explicitly.
+- Upload uniform arrays at the program's declared length: `sceGxmSetUniformDataF` writes past a shorter parameter into the rest of the uniform buffer (it crashed the device).
+- After the app dies on the device, restart `bun tools/city.ts serve`: the kernel driver reconnects, but the old host session stays dead and Devkit cannot report status.
