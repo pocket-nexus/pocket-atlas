@@ -7,6 +7,7 @@
 // VERTEX_COLOR, ALPHA_TEST, WET, PLANAR, DAMP, CLEARCOAT, INTERIOR, FOG,
 // REFLECTION (mirror pass: cheaper film, no planar lookup), BAKED (static
 // diffuse lighting from the vertices; LIGHTS then counts moving lights only),
+// VERTEX_LIGHTS (lights evaluated per vertex, added to the irradiance),
 // LITE (no normal, ORM or streak maps), FAR (LITE beyond the detail
 // distance, without environment specular off the wet ground).
 
@@ -77,7 +78,7 @@ half4 main(
 #if defined(PLANAR) && !defined(REFLECTION)
     float4 vScreen : TEXCOORD4,
 #endif
-#ifdef BAKED
+#if defined(BAKED) || defined(VERTEX_LIGHTS)
     half3 vLight : TEXCOORD5,
 #endif
 #ifdef VERTEX_COLOR
@@ -95,8 +96,8 @@ half4 main(
 
 #if defined(LITE) && defined(WET) && defined(PLANAR) && defined(BAKED) && !defined(REFLECTION)
     // Wet ground at 60 fps: baked light × albedo, the puddle mask, one tap of
-    // the mirror image and a Schlick-style Fresnel for a flat surface, fog.
-    // No environment lookup, split-sum or ripple flipbook.
+    // the mirror image with the split-sum Fresnel, fog. No environment
+    // lookup or ripple flipbook.
     {
         half4 a = (half4)uBase;
 #ifdef ALBEDO_MAP
@@ -119,10 +120,11 @@ half4 main(
         half3 refl = rough < (half)0.15 ? (half3)tex2D(uReflSharp, ruv).rgb : (half3)tex2D(uReflBlur, ruv).rgb;
         half2 e2 = (half2)saturate(min(ruv, 1.0 - ruv) * 33.3);
         half w = (half)uReflOn.x * ((half)1.0 - smoothstep((half)0.5, (half)0.8, rough)) * lerp((half)0.35, (half)1.0, e2.x * e2.y);
-        half k = (half)1.0 - saturate(V.y);
-        half k2 = k * k;
-        half fres = (half)0.04 + (half)0.96 * k2 * k2 * ((half)1.0 - rough);
-        half3 color = vLight * a.rgb + lerp((half3)uFog.rgb, refl, w) * fres + (half3)uEmissive.rgb;
+        // Split-sum Fresnel for the roughness (rough asphalt reflects little
+        // even at grazing angles); off the mirror, the dim sky irradiance.
+        half2 dfg = DFGApprox(rough, saturate(V.y));
+        half3 sky = (half3)uHemiSky.rgb * (half)uEnvK.x;
+        half3 color = vLight * a.rgb + lerp(sky, refl, w) * ((half)0.04 * dfg.x + dfg.y) + (half3)uEmissive.rgb;
 #ifdef FOG
         color = lerp(color, (half3)uFog.rgb, (half)fogFactor(dist, uFog.w));
 #endif
@@ -144,12 +146,15 @@ half4 main(
 #endif
     half roughness = (half)uPbr.x;
     half metalness = (half)uPbr.y;
-    half ao = 1.0;
 #ifdef ORM_MAP
     half3 orm = tex2D(uOrm, vUv).rgb;
     roughness *= orm.g;
     metalness *= orm.b;
-    ao = (orm.r - 1.0) * (half)uPbr.w + 1.0;
+    half ao = (orm.r - 1.0) * (half)uPbr.w + 1.0;
+#else
+    // Without the map (or with it dropped) the renderer passes roughness and
+    // metalness already scaled by its means, and the occlusion in w.
+    half ao = (half)uPbr.w;
 #endif
 
     half3 N = Ng;
@@ -210,7 +215,31 @@ half4 main(
     // ------------------------------------------------------------ direct
     half3 diffuse = 0.0;
     half3 specular = 0.0;
-#if LIGHTS > 0 && !defined(INTERIOR)
+#if LIGHTS > 0 && !defined(INTERIOR) && defined(BAKED)
+    {
+        // Moving lights on baked surfaces (a passing car's headlights):
+        // points and spots, Lambert and a Blinn-Phong lobe for the wet sheen,
+        // in half precision after the float light vector. The float GGX loop
+        // took 45 temporaries against the wet shader's 17, and with them most
+        // of the pixels in flight (13 ms at 480×272 for one light).
+        half e = min((half)2.0 / max(roughness * roughness * roughness * roughness, (half)0.001), (half)1024.0);
+        half norm = (e + (half)8.0) * (half)(1.0 / 25.13274);
+        for (int i = 0; i < LIGHTS; i++) {
+            half3 Lv = (half3)(uLightPos[i].xyz - vWorld);
+            half d2 = max(dot(Lv, Lv), (half)0.01);
+            half il = rsqrt(d2);
+            half3 L = Lv * il;
+            half s = saturate(dot(-L, (half3)uLightDir[i].xyz) * (half)uLightDir[i].w + (half)uLightCol[i].w);
+            half x = d2 * (half)(uLightPos[i].w * uLightPos[i].w);
+            half wr = saturate((half)1.0 - x * x);
+            half3 E = (half3)uLightCol[i].rgb * (wr * wr * s * s * ((half)3.0 - (half)2.0 * s) * il * il * saturate(dot(N, L)));
+            half nh = saturate(dot(N, normalize(L + V)));
+            diffuse += E * diffuseColor * (half)INV_PI;
+            // nh^e as exp2(e·log2 nh), with log nh ≈ nh − 1 near the peak.
+            specular += E * specularColor * (norm * exp2(e * (half)1.4427 * (nh - (half)1.0)));
+        }
+    }
+#elif LIGHTS > 0 && !defined(INTERIOR)
     {
         float alpha = roughness * roughness;
         float3 d3 = 0.0;
@@ -242,6 +271,10 @@ half4 main(
 #else
     half3 irradiance = lerp((half3)uHemiGround.rgb, (half3)uHemiSky.rgb, N.y * 0.5 + 0.5) * (half)INV_PI;
     irradiance += tex2Dlod(uEnv, float4(octUv((float3)N), 0.0, 5.0)).rgb * envK;
+#ifdef VERTEX_LIGHTS
+    // Lights evaluated per vertex (diffuse, already over π).
+    irradiance += vLight;
+#endif
 #endif
 #ifdef NO_SPECULAR
     half3 color = diffuse + irradiance * diffuseColor * ao;

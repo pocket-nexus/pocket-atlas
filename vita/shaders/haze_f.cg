@@ -5,11 +5,14 @@
 // camera) is added where the ray meets it in front of the scene. Runs at
 // quarter resolution.
 
+// HAZE_LIGHTS: lights integrated per pixel (the profile's count).
+#ifndef HAZE_LIGHTS
 #define HAZE_LIGHTS 6
+#endif
 
 uniform sampler2D uScene;   // main HDR target, alpha = eye distance (point sampled)
 uniform float4 uEye;        // camera position, -
-uniform float4 uHaze;       // density, ambient density, count, far
+uniform float4 uHaze;       // density, ambient density, -, far
 uniform float4 uAmbient;    // ambient in-scatter colour
 uniform float4 uBoxMin;
 uniform float4 uBoxMax;
@@ -57,24 +60,13 @@ float atanFast(float x)
     return x < 0.0 ? -r : r;
 }
 
-float segment(float3 ro, float3 rd, float t0, float t1, int i)
+// ∫ dt / (t² + 1) from b to a (both in units of the light's distance from
+// the ray): atan(a) - atan(b) as one atan, plus π when the interval wraps
+// past the closest point with both ends far from it.
+float arc(float b, float a)
 {
-    float3 L = uFogPos[i].xyz - ro;
-    float tca = dot(L, rd);
-    float r = uFogPos[i].w;
-    float h = sqrt(max(dot(L, L) - tca * tca, 0.0) + r * r);
-    // atan(a) - atan(b) as one atan (plus π when the segment wraps past
-    // the closest point with both ends far from it).
-    float a = (t1 - tca) / h;
-    float b = (t0 - tca) / h;
     float k = 1.0 + a * b;
-    float I = (atanFast((a - b) / k) + (k < 0.0 ? 3.1415927 : 0.0)) / h;
-    if (uFogCol[i].w > -1.5) {
-        float3 P = ro + rd * clamp(tca, t0, t1);
-        float cs = dot(normalize(P - uFogPos[i].xyz), uFogDir[i].xyz);
-        I *= smoothstep(uFogCol[i].w, uFogDir[i].w, cs);
-    }
-    return I;
+    return atanFast((a - b) / k) + (k < 0.0 ? 3.1415927 : 0.0);
 }
 
 float4 main(float2 vUv : TEXCOORD0, float3 vRay : TEXCOORD1) : COLOR
@@ -94,10 +86,22 @@ float4 main(float2 vUv : TEXCOORD0, float3 vRay : TEXCOORD1) : COLOR
     bool cut = by > bx && in1 > in0;
     float3 acc = 0.0;
     for (int i = 0; i < HAZE_LIGHTS; i++) {
-        if (i < uHaze.z) {
-            float I = cut ? segment(ro, rd, 0.0, in0, i) + segment(ro, rd, in1, dist, i) : segment(ro, rd, 0.0, dist, i);
-            acc += uFogCol[i].rgb * I;
+        // Closest approach of the ray to the light (softened by its radius);
+        // the interval ends are measured from there in units of that distance.
+        float3 L = uFogPos[i].xyz - ro;
+        float tca = dot(L, rd);
+        float r = uFogPos[i].w;
+        float ih = rsqrt(max(dot(L, L) - tca * tca, 0.0) + r * r);
+        float t0 = -tca * ih;
+        float t1 = (dist - tca) * ih;
+        float I = cut ? arc(t0, (in0 - tca) * ih) + arc((in1 - tca) * ih, t1) : arc(t0, t1);
+        I *= ih;
+        if (uFogCol[i].w > -1.5) {
+            float3 P = ro + rd * clamp(tca, 0.0, dist);
+            float cs = dot(normalize(P - uFogPos[i].xyz), uFogDir[i].xyz);
+            I *= smoothstep(uFogCol[i].w, uFogDir[i].w, cs);
         }
+        acc += uFogCol[i].rgb * I;
     }
     float outside = cut ? dist - (in1 - in0) : dist;
     float amb = 1.0 - exp(-outside * uHaze.y);

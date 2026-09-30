@@ -289,8 +289,10 @@ impl Gpu {
         lines.join("\n") + "\n"
     }
 
+    /// Programs waiting for their first build, plus those being rebuilt
+    /// after a source change.
     pub fn pending(&self) -> usize {
-        self.programs.values().filter(|s| matches!(s, Slot::Pending)).count()
+        self.programs.values().filter(|s| matches!(s, Slot::Pending)).count() + self.service.rebuilding.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Applies finished compiles. A replaced program drops every pipeline

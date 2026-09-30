@@ -122,6 +122,14 @@ impl<'a> Cook<'a> {
             other => panic!("unsupported image format {other:?}"),
         };
         let has_alpha = alpha_wanted && rgba.chunks_exact(4).any(|p| p[3] < 250);
+        let mut mean = [0.0f64; 4];
+        for p in rgba.chunks_exact(4) {
+            for (m, &c) in mean.iter_mut().zip(p) {
+                *m += c as f64;
+            }
+        }
+        let texels = (rgba.len() / 4).max(1) as f64;
+        let mean = mean.map(|m| (m / texels / 255.0) as f32);
         let src = textures::from_rgba8(img.width, img.height, &rgba, role);
         let cap = if img.width.max(img.height) >= 4096 { cap.max(2048) } else { cap };
         let enc = textures::encode(&src, role, cap, has_alpha);
@@ -145,6 +153,7 @@ impl<'a> Cook<'a> {
             wrap_s: wrap(sampler.wrap_s()),
             wrap_t: wrap(sampler.wrap_t()),
             has_alpha,
+            mean,
         });
         let i = (self.textures.len() - 1) as u32;
         self.tex_keys.insert(key, i);
@@ -854,6 +863,7 @@ fn main() {
                 wrap_s: pc::Wrap::Clamp,
                 wrap_t: pc::Wrap::Clamp,
                 has_alpha: false,
+                mean: [0.0; 4],
             });
             (cook.textures.len() - 1) as u32
         })
@@ -1159,6 +1169,7 @@ fn main() {
             wrap_s: wrap,
             wrap_t: wrap,
             has_alpha: false,
+            mean: [0.0; 4],
         });
         (cook.textures.len() - 1) as u32
     };

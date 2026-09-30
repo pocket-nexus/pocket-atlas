@@ -16,7 +16,7 @@
 //   bun tools/city.ts profile ['{"msaa":false}']    # GPU time per scene
 //   bun tools/city.ts sweep [--shots a,b] [--time 100] # frame time per shot × quality step
 //   bun tools/city.ts shots [--seconds 90]          # frame time per cinematic shot
-//   (bench, profile, sweep, shots: --render vita60|cinematic, default vita60;
+//   (bench, profile, sweep, shots: --render vita30|vita60|cinematic, default vita30;
 //    bench and profile: --shot NAME --time T, else the device's current view)
 //
 // The default title is Pocket Devkit (P3B1D7273, PocketJS apps/devkit), the
@@ -150,7 +150,8 @@ async function lint(): Promise<void> {
     }).join("\n");
   const lit = ["ALBEDO_MAP", "NORMAL_MAP", "ORM_MAP", "EMISSION_MAP", "VERTEX_COLOR", "WET", "PLANAR", "FOG"];
   const cases: [string, string[]][] = [
-    ["surface_v.cg", []], ["surface_v.cg", ["SKINNED", "MAX_BONES=24"]], ["surface_v.cg", ["BAKED"]],
+    ["surface_v.cg", []], ["surface_v.cg", ["SKINNED", "MAX_BONES=24"]], ["surface_v.cg", ["BAKED"]], ["surface_v.cg", ["SKINNED", "MAX_BONES=24", "VERTEX_LIGHTS=4"]],
+    ["standard_f.cg", ["LIGHTS=0", "VERTEX_LIGHTS", "ALBEDO_MAP", "NORMAL_MAP", "FOG"]],
     ["standard_f.cg", ["LIGHTS=2", "BAKED", "WET", "PLANAR", "ALBEDO_MAP", "NORMAL_MAP", "ORM_MAP", "FOG"]], ["debug_f.cg", []],
     ["standard_f.cg", ["LIGHTS=0", "BAKED", "FAR", "DAMP", "ALBEDO_MAP", "NORMAL_MAP", "FOG"]], ["standard_f.cg", ["LIGHTS=2", "BAKED", "LITE", "WET", "PLANAR", "ALBEDO_MAP", "NORMAL_MAP", "FOG"]], ["glass_f.cg", ["LIGHTS=0", "BAKED", "FOG"]], ["glass_f.cg", ["LIGHTS=0", "BAKED", "LITE", "FOG"]],
     ["standard_f.cg", ["LIGHTS=4", ...lit]], ["standard_f.cg", ["LIGHTS=2", "DAMP", "CLEARCOAT", "ALPHA_TEST", "REFLECTION"]],
@@ -159,7 +160,7 @@ async function lint(): Promise<void> {
     ["products_f.cg", []], ["skyline_f.cg", []], ["tower_f.cg", []], ["sky_v.cg", []], ["sky_f.cg", []],
     ...["STREAK", "SPLASH", "DRIP", "STEAM", "BEACON"].map((d): [string, string[]] => ["fx_v.cg", [d]]),
     ...["STREAK", "SPLASH", "STEAM", "BEACON"].map((d): [string, string[]] => ["fx_f.cg", [d]]),
-    ["post_v.cg", []], ["haze_f.cg", []], ["prefilter_f.cg", []], ["down_f.cg", []], ["up_f.cg", []], ["composite_f.cg", []], ["blit_f.cg", []],
+    ["post_v.cg", []], ["post_v.cg", ["GRAIN"]], ["haze_f.cg", ["HAZE_LIGHTS=2"]], ["haze_f.cg", ["HAZE_LIGHTS=6"]], ["prefilter_f.cg", []], ["down_f.cg", []], ["up_f.cg", []], ["composite_f.cg", []], ["composite_f.cg", ["HAZE", "BLOOM"]], ["blit_f.cg", []],
   ];
   const tmp = resolve(ROOT, ".pocket-build/city/lint");
   mkdirSync(tmp, { recursive: true });
@@ -180,7 +181,7 @@ async function lint(): Promise<void> {
 
 // Every measurement names the render profile, which resets the device's
 // switches and governor to the profile's; `settings` then overrides them.
-const RENDER = value("--render", "vita60");
+const RENDER = value("--render", "vita30");
 const STATUS = resolve(ROOT, `.pocket-build/vita-usb/share/pocket-vita/${title}/status.json`);
 
 /** The device's engine status (the USB host replaces the file while it is read). */
@@ -255,7 +256,7 @@ async function profile(): Promise<void> {
   const extra = argv[1] && !argv[1].startsWith("--") ? JSON.parse(argv[1]) : {};
   const shot = { renderProfile: RENDER, ...measuredView() };
   await Bun.write(`${SHARE}/control.json`, JSON.stringify({ ...shot, settings: { profile: true, ...extra } }) + "\n");
-  await Bun.sleep(3000);
+  await settle();
   // Reflection and haze redraw on alternate frames: each scene averages
   // over the sampled frames that drew it, with the share of frames it ran in.
   const sum = new Map<string, { ms: number; frames: number }>();
@@ -284,6 +285,22 @@ async function profile(): Promise<void> {
   await Bun.write(`${SHARE}/control.json`, JSON.stringify({ renderProfile: RENDER }) + "\n");
 }
 
+/**
+ * Waits for a control change to apply and for every program the frame uses
+ * to be compiled (after a shader sync the device recompiles each changed
+ * variant, and draws without a program are skipped meanwhile).
+ */
+async function settle(): Promise<void> {
+  await Bun.sleep(2000);
+  for (let i = 0; i < 600; i++) {
+    const e = engine();
+    if (!(e.main?.missing || e.reflection?.missing || e.pending)) return;
+    if (i % 10 === 0) console.log(`waiting for programs: ${e.pending ?? 0} compiling, ${e.main?.missing ?? 0} + ${e.reflection?.missing ?? 0} draws missing`);
+    await Bun.sleep(500);
+  }
+  throw new Error("programs still compiling after 5 minutes");
+}
+
 // Frame time per shot (halfway view, fixed time) at every quality step of
 // the profile, the governor held: which step each view sustains.
 async function sweep(): Promise<void> {
@@ -291,15 +308,17 @@ async function sweep(): Promise<void> {
   const names = value("--shots", "").split(",").filter(Boolean).map((n) => n.toLowerCase());
   const shots = shotList().filter((s) => !names.length || names.includes(s.name.toLowerCase()));
   const time = Number(value("--time", "100"));
-  const steps = Number(value("--steps", "6"));
   mkdirSync(SHARE, { recursive: true });
+  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ renderProfile: RENDER }) + "\n");
+  await Bun.sleep(1500);
+  const steps = Number(value("--steps", String(engine().settings?.steps ?? 1)));
   console.log(`render profile ${RENDER}, time ${time} s, frame ms per step (cpu submit ms)`);
   console.log(`${"".padEnd(10)} ${[...Array(steps).keys()].map((k) => `step ${k}`.padStart(13)).join("")}`);
   for (const s of shots) {
     const row: string[] = [];
     for (let k = 0; k < steps; k++) {
       await Bun.write(`${SHARE}/control.json`, JSON.stringify({ renderProfile: RENDER, view: shotView(s), time, settings: { step: k, hold: true, ...extra } }) + "\n");
-      await Bun.sleep(2500);
+      await settle();
       let ms = 0;
       let cpu = 0;
       for (let i = 0; i < 6; i++) {

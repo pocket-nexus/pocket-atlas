@@ -19,24 +19,51 @@ use pocket3d_gxm::target::Msaa;
 pub struct Step {
     /// Scene resolution level (index into `frame::SCALES`).
     pub level: usize,
-    /// A draw switches to its LOD1 once that LOD's error projects under
-    /// this many scene pixels.
+    /// A draw switches to a coarser LOD once that LOD's error projects
+    /// under this many scene pixels.
     pub lod_pixels: f32,
     /// Lit draws beyond this distance (m) use the FAR material variant.
     pub detail_m: f32,
     /// Main-pass draws whose bounding radius is under this fraction of their
     /// distance are skipped (a few pixels on screen).
     pub cull_size: f32,
-    /// Lit haze and bloom, the first effects a 60 fps step gives up.
+    /// Lit haze: off, or its buffer (0 = 160×90, 1 = 120×68) and the lights
+    /// integrated per pixel (2, 4 or 6).
     pub haze: bool,
+    pub haze_size: usize,
+    pub haze_lights: usize,
+    /// Bloom, from a quarter of 960×544 (two levels) or an eighth (one).
     pub bloom: bool,
+    pub bloom_full: bool,
+}
+
+impl Step {
+    const fn new(level: usize, lod_pixels: f32, detail_m: f32, cull_size: f32) -> Self {
+        Self { level, lod_pixels, detail_m, cull_size, haze: true, haze_size: 0, haze_lights: 6, bloom: true, bloom_full: true }
+    }
+
+    const fn haze(self, size: usize, lights: usize) -> Self {
+        Self { haze_size: size, haze_lights: lights, ..self }
+    }
+
+    const fn no_haze(self) -> Self {
+        Self { haze: false, ..self }
+    }
+
+    const fn bloom(self, full: bool) -> Self {
+        Self { bloom_full: full, ..self }
+    }
+
+    const fn no_bloom(self) -> Self {
+        Self { bloom: false, ..self }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Profile {
     pub name: &'static str,
     /// Frame period the governor holds (ms): a multiple of the 16.7 ms
-    /// display refresh.
+    /// display refresh; frames are shown at that period.
     pub budget_ms: f32,
     /// Quality steps, best first.
     pub steps: &'static [Step],
@@ -46,16 +73,11 @@ pub struct Profile {
     /// `reflection_min_size` × their distance.
     pub reflection_size: usize,
     pub reflection_min_size: f32,
-    /// Haze buffer: 0 = 160×90, 1 = 120×68; lights integrated per pixel.
-    pub haze_size: usize,
-    pub haze_lights: usize,
-    /// Bloom chain from quarter resolution (two levels) or from an eighth
-    /// (one level).
-    pub bloom_full: bool,
     /// Rain streak quads, and whether the steam vents draw.
     pub streaks: u32,
     pub steam: bool,
-    /// Per-pixel lights per draw for moving sources (static light is baked).
+    /// Per-pixel lights per draw (baked draws light only moving sources,
+    /// at most one).
     pub dynamic_lights: usize,
     /// Near materials keep normal, ORM and rain-streak maps; without them
     /// every draw inside the detail distance uses the LITE variant.
@@ -63,28 +85,26 @@ pub struct Profile {
     /// Redraw reflection and haze on alternate frames while the camera is
     /// slow.
     pub alternate: bool,
+    /// Moving and skinned meshes (people, the taxi) take their lights per
+    /// vertex, diffuse only: they are dense, and 4 per-pixel lights on a
+    /// pedestrian near the camera cost ~15 ms at 480×272.
+    pub vertex_lights: bool,
 }
 
 /// The full effect set, around 20 fps.
 pub const CINEMATIC: Profile = Profile {
     name: "cinematic",
     budget_ms: 50.0,
-    steps: &[
-        Step { level: 0, lod_pixels: 0.75, detail_m: 18.0, cull_size: 0.0, haze: true, bloom: true },
-        Step { level: 1, lod_pixels: 1.0, detail_m: 12.0, cull_size: 0.0, haze: true, bloom: true },
-        Step { level: 2, lod_pixels: 1.5, detail_m: 12.0, cull_size: 0.0, haze: true, bloom: true },
-    ],
+    steps: &[Step::new(0, 0.75, 18.0, 0.0), Step::new(1, 1.0, 12.0, 0.0), Step::new(2, 1.5, 12.0, 0.0)],
     msaa: Msaa::X4,
     reflection_size: 0,
     reflection_min_size: 0.06,
-    haze_size: 0,
-    haze_lights: 6,
-    bloom_full: true,
     streaks: 7000,
     steam: true,
     dynamic_lights: 4,
     detail_maps: true,
     alternate: true,
+    vertex_lights: false,
 };
 
 /// 60 fps. Measured on the device (Konbini view, 544×308): haze costs
@@ -94,27 +114,53 @@ pub const VITA60: Profile = Profile {
     name: "vita60",
     budget_ms: 16.7,
     steps: &[
-        Step { level: 1, lod_pixels: 1.0, detail_m: 10.0, cull_size: 0.004, haze: true, bloom: true },
-        Step { level: 2, lod_pixels: 1.5, detail_m: 8.0, cull_size: 0.006, haze: true, bloom: true },
-        Step { level: 3, lod_pixels: 2.0, detail_m: 6.0, cull_size: 0.008, haze: true, bloom: true },
-        Step { level: 3, lod_pixels: 2.5, detail_m: 5.0, cull_size: 0.01, haze: false, bloom: true },
-        Step { level: 3, lod_pixels: 3.0, detail_m: 4.0, cull_size: 0.012, haze: false, bloom: false },
-        Step { level: 4, lod_pixels: 3.0, detail_m: 4.0, cull_size: 0.015, haze: false, bloom: false },
+        Step::new(1, 1.0, 10.0, 0.004).haze(1, 2).bloom(false),
+        Step::new(2, 1.5, 8.0, 0.006).haze(1, 2).bloom(false),
+        Step::new(3, 2.0, 6.0, 0.008).haze(1, 2).bloom(false),
+        Step::new(3, 2.5, 5.0, 0.01).no_haze().bloom(false),
+        Step::new(3, 3.0, 4.0, 0.012).no_haze().no_bloom(),
+        Step::new(4, 3.0, 4.0, 0.015).no_haze().no_bloom(),
     ],
     msaa: Msaa::X4,
     reflection_size: 1,
     reflection_min_size: 0.1,
-    haze_size: 1,
-    haze_lights: 2,
-    bloom_full: false,
     streaks: 1500,
     steam: false,
     dynamic_lights: 2,
     detail_maps: false,
     alternate: true,
+    vertex_lights: true,
 };
 
-pub const ALL: [&Profile; 2] = [&VITA60, &CINEMATIC];
+/// 30 fps at 480×272 (the display doubles it to 960×544): the full effect
+/// set, with rain on the street, haze and bloom. Measured on the device at
+/// step 0 (serialized GPU time): 31–41 ms across the shots, with a passing
+/// car's headlights adding ~8 ms. The governor gives up LOD and detail
+/// distance, then haze lights and resolution, then the bloom chain, and
+/// haze last. Reflection and haze redraw every frame, so a moving camera
+/// costs what a still one does.
+pub const VITA30: Profile = Profile {
+    name: "vita30",
+    budget_ms: 33.3,
+    steps: &[
+        Step::new(4, 1.0, 8.0, 0.0),
+        Step::new(4, 1.5, 6.0, 0.002).haze(0, 4),
+        Step::new(4, 2.0, 5.0, 0.004).haze(1, 4),
+        Step::new(4, 2.5, 4.0, 0.006).haze(1, 4).bloom(false),
+        Step::new(4, 3.0, 4.0, 0.008).no_haze().bloom(false),
+    ],
+    msaa: Msaa::X4,
+    reflection_size: 1,
+    reflection_min_size: 0.06,
+    streaks: 7000,
+    steam: true,
+    dynamic_lights: 4,
+    detail_maps: true,
+    alternate: false,
+    vertex_lights: true,
+};
+
+pub const ALL: [&Profile; 3] = [&VITA30, &VITA60, &CINEMATIC];
 
 pub fn by_name(name: &str) -> Option<&'static Profile> {
     ALL.into_iter().find(|p| p.name == name)

@@ -318,6 +318,27 @@ impl Scene {
             now.dynamic = l.node.is_some();
             self.lights[i] = now;
         }
+        // A car's two headlights (moving spots a lamp-width apart with the
+        // same colour and aim) light as one spot at their midpoint: moving
+        // lights are evaluated per pixel, the renderer's largest variable
+        // cost. The volumetric beams stay two (fog lights).
+        for i in 0..self.lights.len() {
+            let a = self.lights[i];
+            if !a.dynamic || a.spot_scale == 0.0 || a.power <= 0.0 {
+                continue;
+            }
+            for j in i + 1..self.lights.len() {
+                let b = self.lights[j];
+                if b.dynamic && b.power > 0.0 && b.spot_scale == a.spot_scale && b.color == a.color && a.dir.dot(b.dir) > 0.99 && a.pos.distance(b.pos) < 2.0 {
+                    self.lights[i].pos = (a.pos + b.pos) * 0.5;
+                    self.lights[i].color = a.color * 2.0;
+                    self.lights[i].power = a.power * 2.0;
+                    self.lights[j].color = Vec3::ZERO;
+                    self.lights[j].power = 0.0;
+                    break;
+                }
+            }
+        }
 
         for (i, fl) in self.meta.fog_lights.iter().enumerate() {
             let mut pos = Vec3::from(fl.position);

@@ -65,6 +65,10 @@ pub struct Texture {
     pub wrap_s: Wrap,
     pub wrap_t: Wrap,
     pub has_alpha: bool,
+    /// Mean of each source channel (0..1, as stored): what a renderer uses
+    /// when it drops the map (an ORM map's occlusion, roughness, metalness).
+    #[serde(default)]
+    pub mean: [f32; 4],
 }
 
 // --------------------------------------------------------------- materials

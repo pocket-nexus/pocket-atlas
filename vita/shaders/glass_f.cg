@@ -79,8 +79,13 @@ half4 main(
         float3 L = Lv * rsqrt(max(d2, 1e-6));
         float s = saturate(dot(-L, uLightDir[i].xyz) * uLightDir[i].w + uLightCol[i].w);
         s = s * s * (3.0 - 2.0 * s);
+        // Outside the spot cone or the range nothing is lit: skip the BRDF
+        // (a passing car's headlights reach whole street chunks, lit in a
+        // narrow beam).
         float att = distanceFalloff(d2 + R.w * U.w, uLightPos[i].w) * s;
-        directLight(L, uLightCol[i].rgb * att, (float3)N, (float3)V, diffuseColor, specularColor, alpha, diffuse, specular);
+        if (att > 0.0) {
+            directLight(L, uLightCol[i].rgb * att, (float3)N, (float3)V, diffuseColor, specularColor, alpha, diffuse, specular);
+        }
     }
 #endif
     half dotNV = saturate(dot(N, V));
