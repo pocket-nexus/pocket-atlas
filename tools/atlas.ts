@@ -3,13 +3,14 @@
 // sources, fetch captures, and package the standalone VPK.
 //
 //   bun tools/atlas.ts cook [--place ID]            # scene.glb → <place>.place
+//   bun tools/atlas.ts cook-atlas                   # web export-atlas → atlas.pack (globe + places)
 //   bun tools/atlas.ts serve                         # USB host (keep running)
 //   bun tools/atlas.ts build  [--title P3B1D7273] [--debug]
 //   bun tools/atlas.ts vpk                          # standalone PKAT00001 VPK
 //   bun tools/atlas.ts push-vpk [file.vpk]          # → ux0:data/pocket-atlas/ via the dev build
 //   bun tools/atlas.ts native [--title P3B1D7273]   # build + USB SELF replacement
 //   bun tools/atlas.ts status|capture [--title ...]
-//   bun tools/atlas.ts sync                         # pack + shader sources → host0:atlas/
+//   bun tools/atlas.ts sync                         # packs + shader sources → host0:atlas/
 //   bun tools/atlas.ts ctl '{"settings":{"haze":false}}' # host0:atlas/control.json
 //   bun tools/atlas.ts lint                          # parse/type-check Cg on the host
 //   bun tools/atlas.ts bench                         # frame cost per renderer feature
@@ -117,8 +118,27 @@ async function dev(...args: string[]): Promise<void> {
 }
 
 const SHARE = resolve(ROOT, ".pocket-build/vita-usb/share/atlas");
-const PLACE_DIR = resolve(ROOT, `.pocket-build/places/${PLACE}`);
+const PLACES_DIR = resolve(ROOT, ".pocket-build/places");
+const PLACE_DIR = `${PLACES_DIR}/${PLACE}`;
 const PACK = `${PLACE_DIR}/${PLACE}.place`;
+/** The globe and place list (`cook-atlas`, from web/scripts/export-atlas.ts). */
+const ATLAS_PACK = resolve(ROOT, ".pocket-build/atlas/atlas.pack");
+
+/** Every cooked place pack: [id, path]. */
+function cookedPlaces(): [string, string][] {
+  if (!existsSync(PLACES_DIR)) return [];
+  return readdirSync(PLACES_DIR)
+    .map((id): [string, string] => [id, `${PLACES_DIR}/${id}/${id}.place`])
+    .filter(([, path]) => existsSync(path));
+}
+
+/** Copies `src` to `dst` unless the bytes are already there; true when copied. */
+function copyIfChanged(src: string, dst: string): boolean {
+  const same = existsSync(dst) && Bun.file(dst).size === Bun.file(src).size &&
+    createHash("sha256").update(readFileSync(dst)).digest("hex") === createHash("sha256").update(readFileSync(src)).digest("hex");
+  if (!same) cpSync(src, dst);
+  return !same;
+}
 
 // The device reads the pack and shader sources from the USB share; shaders
 // recompile on the device when their source changes.
@@ -131,12 +151,11 @@ function sync(): void {
   const stamp = createHash("sha256");
   for (const f of readdirSync(`${APP_DIR}/shaders`).sort()) stamp.update(f).update(readFileSync(`${APP_DIR}/shaders/${f}`));
   writeFileSync(`${SHARE}/shaders/stamp`, stamp.digest("hex"));
-  if (!existsSync(PACK)) throw new Error(`${PACK} missing: run the cooker first`);
-  const dst = `${SHARE}/places/${PLACE}.place`;
-  const same = existsSync(dst) && Bun.file(dst).size === Bun.file(PACK).size &&
-    createHash("sha256").update(readFileSync(dst)).digest("hex") === createHash("sha256").update(readFileSync(PACK)).digest("hex");
-  if (!same) cpSync(PACK, dst);
-  console.log(`atlas: synced shaders${same ? "" : " and pack"} to ${SHARE}`);
+  const places = cookedPlaces();
+  if (!places.length) throw new Error(`no cooked place under ${PLACES_DIR}: run \`bun tools/atlas.ts cook\` first`);
+  const copied = places.filter(([id, path]) => copyIfChanged(path, `${SHARE}/places/${id}.place`)).map(([id]) => id);
+  if (existsSync(ATLAS_PACK) && copyIfChanged(ATLAS_PACK, `${SHARE}/atlas.pack`)) copied.push("atlas");
+  console.log(`atlas: synced shaders${copied.length ? ` and ${copied.join(", ")}` : ""} to ${SHARE}`);
 }
 
 // Host-side Cg check through open-shacccg's glslang front end (set
@@ -227,7 +246,7 @@ function measuredView(): { view: { pos: number[]; target: number[]; fov: number 
 // one feature off (or all of them) through control.json and averages the
 // frame times the device reports once the change has settled.
 async function bench(): Promise<void> {
-  const shot = { renderProfile: RENDER, ...measuredView() };
+  const shot = { place: PLACE, renderProfile: RENDER, ...measuredView() };
   const base = argv[1] && !argv[1].startsWith("--") ? JSON.parse(argv[1]) : {};
   const bare = { reflection: false, haze: false, bloom: false, rain: false };
   const rows: [string, Record<string, boolean | number>][] = [
@@ -251,14 +270,14 @@ async function bench(): Promise<void> {
     const f = (v: number) => v.toFixed(1).padStart(6);
     console.log(`${name.padEnd(14)} ${f(sum.frameMs)} ms ${(1000 / sum.frameMs).toFixed(1).padStart(5)} fps  cpu ${f(sum.cpuSubmitMs)}  gpu wait ${f(sum.waitMs)}  swap ${f(sum.swapMs)}`);
   }
-  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ renderProfile: RENDER }) + "\n");
+  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ place: PLACE, renderProfile: RENDER }) + "\n");
 }
 
 // GPU time per scene at the current view: the device serializes the frame
 // while `profile` is on and reports each scene's duration.
 async function profile(): Promise<void> {
   const extra = argv[1] && !argv[1].startsWith("--") ? JSON.parse(argv[1]) : {};
-  const shot = { renderProfile: RENDER, ...measuredView() };
+  const shot = { place: PLACE, renderProfile: RENDER, ...measuredView() };
   await Bun.write(`${SHARE}/control.json`, JSON.stringify({ ...shot, settings: { profile: true, ...extra } }) + "\n");
   await settle();
   // Reflection and haze redraw on alternate frames: each scene averages
@@ -286,7 +305,7 @@ async function profile(): Promise<void> {
   console.log(`${"worst frame".padEnd(16)} ${total.toFixed(2).padStart(7)} ms`);
   console.log(`${"mean frame".padEnd(16)} ${mean.toFixed(2).padStart(7)} ms`);
   // Back to the camera rig with the profile's switches.
-  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ renderProfile: RENDER }) + "\n");
+  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ place: PLACE, renderProfile: RENDER }) + "\n");
 }
 
 /**
@@ -313,7 +332,7 @@ async function sweep(): Promise<void> {
   const shots = shotList().filter((s) => !names.length || names.includes(s.name.toLowerCase()));
   const time = Number(value("--time", "100"));
   mkdirSync(SHARE, { recursive: true });
-  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ renderProfile: RENDER }) + "\n");
+  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ place: PLACE, renderProfile: RENDER }) + "\n");
   await Bun.sleep(1500);
   const steps = Number(value("--steps", String(engine().settings?.steps ?? 1)));
   console.log(`render profile ${RENDER}, time ${time} s, frame ms per step (cpu submit ms)`);
@@ -321,7 +340,7 @@ async function sweep(): Promise<void> {
   for (const s of shots) {
     const row: string[] = [];
     for (let k = 0; k < steps; k++) {
-      await Bun.write(`${SHARE}/control.json`, JSON.stringify({ renderProfile: RENDER, view: shotView(s), time, settings: { step: k, hold: true, ...extra } }) + "\n");
+      await Bun.write(`${SHARE}/control.json`, JSON.stringify({ place: PLACE, renderProfile: RENDER, view: shotView(s), time, settings: { step: k, hold: true, ...extra } }) + "\n");
       await settle();
       let ms = 0;
       let cpu = 0;
@@ -335,7 +354,7 @@ async function sweep(): Promise<void> {
     }
     console.log(`${s.name.padEnd(10)} ${row.join("")}`);
   }
-  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ renderProfile: RENDER }) + "\n");
+  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ place: PLACE, renderProfile: RENDER }) + "\n");
 }
 
 // Standalone VPK (title PKAT00001 unless --title is given): the cooked pack
@@ -355,10 +374,12 @@ async function vpk(): Promise<void> {
     if (!existsSync(gxp)) throw new Error(`${gxp} missing`);
     cpSync(gxp, `${stage}/gxp/${h}.gxp`);
   }
-  if (!existsSync(PACK)) throw new Error(`${PACK} missing: run the cooker first`);
   mkdirSync(`${stage}/places`, { recursive: true });
-  cpSync(PACK, `${stage}/places/${PLACE}.place`);
-  console.log(`atlas: staged ${hashes.length} programs and the pack in ${stage}`);
+  const places = cookedPlaces();
+  for (const [id, path] of places) cpSync(path, `${stage}/places/${id}.place`);
+  if (!existsSync(ATLAS_PACK)) throw new Error(`${ATLAS_PACK} missing: run \`bun tools/atlas.ts cook-atlas\` first`);
+  cpSync(ATLAS_PACK, `${stage}/atlas.pack`);
+  console.log(`atlas: staged ${hashes.length} programs, the atlas and ${places.map(([id]) => id).join(", ")} in ${stage}`);
   await build({ standalone: true, assets: stage });
 }
 
@@ -366,7 +387,7 @@ async function vpk(): Promise<void> {
 // and governor as they run for a viewer).
 async function shots(): Promise<void> {
   const seconds = Number(value("--seconds", "90"));
-  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ renderProfile: RENDER }) + "\n");
+  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ place: PLACE, renderProfile: RENDER }) + "\n");
   await Bun.sleep(3000);
   const acc = new Map<string, { ms: number[]; steps: Set<number>; levels: Set<number> }>();
   const end = Date.now() + seconds * 1000;
@@ -428,6 +449,8 @@ else if (command === "ctl") {
   await dev("serve");
 } else if (command === "cook") {
   await $`cargo run --release -p pocket3d-place-cook -- --in ${PLACE_DIR}`.cwd(ROOT);
+} else if (command === "cook-atlas") {
+  await $`cargo run --release -p pocket3d-place-cook -- atlas --in ${resolve(ROOT, ".pocket-build/atlas/globe")} --out ${ATLAS_PACK}`.cwd(ROOT);
 } else if (command === "capture") {
   const out = value("--out", resolve(ROOT, `.pocket-build/validation/captures/${new Date().toISOString().replace(/[:.]/g, "-")}.png`));
   await dev("capture", "--out", out);

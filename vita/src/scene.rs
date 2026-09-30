@@ -80,7 +80,7 @@ pub struct Scene {
     pub bytes_geom: usize,
 }
 
-fn fmt(f: pc::TexFormat) -> Format {
+pub(crate) fn fmt(f: pc::TexFormat) -> Format {
     match f {
         pc::TexFormat::Rgba8 => Format::Rgba8,
         pc::TexFormat::Bc1 => Format::Bc1,
@@ -90,7 +90,7 @@ fn fmt(f: pc::TexFormat) -> Format {
     }
 }
 
-fn wrap(w: pc::Wrap) -> Wrap {
+pub(crate) fn wrap(w: pc::Wrap) -> Wrap {
     match w {
         pc::Wrap::Repeat => Wrap::Repeat,
         pc::Wrap::Clamp => Wrap::Clamp,
@@ -100,7 +100,7 @@ fn wrap(w: pc::Wrap) -> Wrap {
 
 /// Forward-only reads: the USB host file system does not seek, so a pack is
 /// read in file order and a backward jump reopens the file.
-struct Seq {
+pub(crate) struct Seq {
     path: String,
     f: File,
     pos: u64,
@@ -108,11 +108,11 @@ struct Seq {
 }
 
 impl Seq {
-    fn open(path: &str) -> Result<Self, String> {
+    pub(crate) fn open(path: &str) -> Result<Self, String> {
         Ok(Self { path: path.into(), f: File::open(path).map_err(|e| format!("{path}: {e}"))?, pos: 0, scratch: vec![0; 64 * 1024] })
     }
 
-    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+    pub(crate) fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
         if offset < self.pos {
             self.f = File::open(&self.path).map_err(|e| format!("{}: {e}", self.path))?;
             self.pos = 0;
@@ -231,6 +231,15 @@ impl Scene {
         scene.update(0.0);
         scene.load_ms = t0.elapsed().as_millis() as u32;
         Ok(scene)
+    }
+
+    /// Frees the pack's textures and geometry.
+    ///
+    /// # Safety
+    /// GPU idle with respect to every draw of this scene.
+    pub unsafe fn release(self) {
+        self.vram.free();
+        self.main.free();
     }
 
     fn track(&self, r: &pc::Range, stride: usize, frame: f32, out: &mut [f32]) {

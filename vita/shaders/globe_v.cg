@@ -1,0 +1,23 @@
+// Atlas globe: the unit sphere in object space (a UV sphere whose seam has
+// its own vertices, so the maps' longitude never wraps inside a triangle),
+// turned by the Earth rotation and seen by the fixed atlas camera. The clip
+// position addresses the atmosphere maps baked for that camera.
+
+void main(
+    float3 aPosition,
+    float2 aUv,
+    uniform float4x4 uViewProj,
+    uniform float4 uEarthRot[3], // rows of the object → world rotation
+    out float4 oPosition : POSITION,
+    out float3 oObj : TEXCOORD0,
+    out float3 oWorld : TEXCOORD1,
+    out float2 oUv : TEXCOORD2,
+    out float4 oScreen : TEXCOORD3)
+{
+    float3 w = float3(dot(uEarthRot[0].xyz, aPosition), dot(uEarthRot[1].xyz, aPosition), dot(uEarthRot[2].xyz, aPosition));
+    oPosition = mul(uViewProj, float4(w, 1.0));
+    oObj = aPosition;
+    oWorld = w;
+    oUv = aUv;
+    oScreen = oPosition;
+}

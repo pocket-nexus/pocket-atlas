@@ -340,7 +340,7 @@ const GRADE: [f32; 2] = [1.16, 1.18];
 const LIFT: [f32; 3] = [0.1, 0.35, 0.45];
 const GAIN: [f32; 3] = [1.04, 0.99, 0.94];
 /// LUT cells per axis over AgX's log2 domain [-12.47393, 4.02607].
-const LUT: usize = 32;
+pub(crate) const LUT: usize = 32;
 
 /// AgX (as three.js) followed by the grade and sRGB encoding, for one
 /// scene-linear colour: what the composite program looked up per pixel.
@@ -391,15 +391,15 @@ fn tone_lut() -> Vec<u8> {
     px
 }
 
-const MASK_W: usize = 64;
-const MASK_H: usize = 256;
+pub(crate) const MASK_W: usize = 64;
+pub(crate) const MASK_H: usize = 256;
 /// The GPU may still read the two frames before this one.
 const MASK_BUFFERS: usize = 3;
 const VIGNETTE: f32 = 0.45;
-const GRAIN: usize = 64;
+pub(crate) const GRAIN: usize = 64;
 
 /// An 8-bit single-channel tiled texture (32×32 tiles) over `px`.
-unsafe fn tiled_u8(px: *mut u8, w: usize, h: usize, linear: bool, repeat: bool) -> Result<g::SceGxmTexture, String> {
+pub(crate) unsafe fn tiled_u8(px: *mut u8, w: usize, h: usize, linear: bool, repeat: bool) -> Result<g::SceGxmTexture, String> {
     let mut t: g::SceGxmTexture = core::mem::zeroed();
     let r = g::sceGxmTextureInitTiled(&mut t, px.cast(), g::SceGxmTextureFormat_SCE_GXM_TEXTURE_FORMAT_U8_R111, w as u32, h as u32, 0);
     if r < 0 {
@@ -415,7 +415,7 @@ unsafe fn tiled_u8(px: *mut u8, w: usize, h: usize, linear: bool, repeat: bool) 
 }
 
 /// Byte offset of texel (x, y) in a tiled 8-bit texture `w` texels wide.
-fn tiled_at(x: usize, y: usize, w: usize) -> usize {
+pub(crate) fn tiled_at(x: usize, y: usize, w: usize) -> usize {
     ((y / 32) * (w / 32) + x / 32) * 1024 + (y % 32) * 32 + x % 32
 }
 
@@ -503,10 +503,10 @@ pub struct Renderer {
     haze_index: usize,
 }
 
-struct Rng(u32);
+pub(crate) struct Rng(pub(crate) u32);
 
 impl Rng {
-    fn next(&mut self) -> f32 {
+    pub(crate) fn next(&mut self) -> f32 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 17;
         self.0 ^= self.0 << 5;
@@ -694,6 +694,23 @@ impl Renderer {
     }
 
     /// Every program the scene needs, so compiles start before the first frame.
+    /// Frees the renderer's targets and memory.
+    ///
+    /// # Safety
+    /// GPU idle with respect to every resource of this renderer.
+    pub unsafe fn release(self) {
+        let Self { refls, mains, hazes, prefilters, finals, down, up, _vram, _mem, .. } = self;
+        for (a, b) in refls {
+            a.destroy();
+            b.destroy();
+        }
+        for t in mains.into_iter().chain(hazes).chain(prefilters).chain(finals).chain(down).chain(up) {
+            t.destroy();
+        }
+        _vram.free();
+        _mem.free();
+    }
+
     pub fn warm(&self, gpu: &mut Gpu, scene: &Scene) {
         let mut seen = std::collections::BTreeSet::new();
         for d in &scene.draws {

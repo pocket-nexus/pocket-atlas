@@ -9,6 +9,7 @@
 //! meshes keep joints and inverse binds. Textures are fitted to powers of two,
 //! mipmapped and block-compressed; animation is resampled uniformly.
 
+mod atlas;
 mod bake;
 mod env;
 mod geometry;
@@ -464,6 +465,14 @@ fn push_draw(b: geometry::Built, material: u32, layout: pc::VertexLayout, node: 
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("atlas") {
+        let argv: Vec<String> = std::env::args().collect();
+        let get = |k: &str| argv.iter().position(|x| x == k).and_then(|i| argv.get(i + 1)).cloned();
+        let input = PathBuf::from(get("--in").unwrap_or_else(|| ".pocket-build/atlas/globe".into()));
+        let output = get("--out").map(PathBuf::from).unwrap_or_else(|| input.parent().unwrap_or(&input).join("atlas.pack"));
+        atlas::cook(&input, &output);
+        return;
+    }
     let a = args();
     let t0 = Instant::now();
     let glb = a.input.join("scene.glb");
