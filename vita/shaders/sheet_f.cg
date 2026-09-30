@@ -22,10 +22,22 @@ float layer(float2 uv, float speed, float cols)
     return streak * smoothstep(0.22, 0.0, xw) * step(0.55, sHash(float2(col, floor(s))));
 }
 
+// atan2 to within 0.0015 rad: the columns only need a continuous angle.
+float atan2Fast(float y, float x)
+{
+    float ax = abs(x);
+    float ay = abs(y);
+    float a = min(ax, ay) / max(max(ax, ay), 1e-6);
+    float r = a * (0.7853982 - (a - 1.0) * (0.2447 + 0.0663 * a));
+    r = ay > ax ? 1.5707963 - r : r;
+    r = x < 0.0 ? 3.1415927 - r : r;
+    return y < 0.0 ? -r : r;
+}
+
 float4 main(float3 vWorld : TEXCOORD0) : COLOR
 {
-    float3 d = normalize(vWorld - uEye.xyz);
-    float ang = atan2(d.z, d.x);
+    float2 d = vWorld.xz - uEye.xz;
+    float ang = atan2Fast(d.y, d.x);
     float2 uv = float2(ang * 6.0, vWorld.y * 0.35);
     float r = layer(uv, 1.6, 30.0) + layer(uv * 1.7 + 3.0, 2.1, 30.0) * 0.7;
     float fadeY = smoothstep(-1.0, 3.0, vWorld.y) * (1.0 - smoothstep(12.0, 22.0, vWorld.y));

@@ -837,7 +837,7 @@ fn main() {
     let (mut baked_prims, mut tris_before, mut tris_after) = (0usize, 0usize, 0usize);
     for p in prims.iter_mut() {
         let m = &cook.materials[p.material as usize];
-        if p.moving || p.skin.is_some() || m.kind != pc::Kind::Standard {
+        if p.moving || p.skin.is_some() || !matches!(m.kind, pc::Kind::Standard | pc::Kind::Glass) {
             continue;
         }
         // Shop interiors are shaded without the lights (as at runtime).
