@@ -2,7 +2,7 @@
  * Headless capture for visual checks. Needs a running dev server
  * (`bun run dev`) and a local Google Chrome.
  *
- *   bun scripts/shot.ts "/?shot&q=high#/city/tokyo" out.png --wait 8000 --size 1600x900
+ *   bun scripts/shot.ts "/?shot&q=high#/place/tokyo-konbini" out.png --wait 8000 --size 1600x900
  *
  * Prints page console errors so shader compile failures surface in the log.
  */

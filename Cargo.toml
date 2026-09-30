@@ -3,7 +3,7 @@
 # own workspaces.
 [workspace]
 resolver = "2"
-members = ["crates/pocket3d-city", "crates/pocket3d-city-cook"]
+members = ["crates/pocket3d-place", "crates/pocket3d-place-cook"]
 exclude = ["crates/pocket3d-gxm", "vita", "vendor"]
 
 [profile.release]

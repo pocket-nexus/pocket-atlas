@@ -1,11 +1,11 @@
 [package]
-name = "pocket-city-vita"
+name = "pocket-atlas-vita"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Pocket City on PS Vita: the Tokyo rain scene on the programmable GXM renderer"
+description = "Pocket Atlas on PS Vita: places rendered on the programmable GXM renderer"
 
-# Vita-only binary built through cargo-vita (tools/city.ts); excluded from the
+# Vita-only binary built through cargo-vita (tools/atlas.ts); excluded from the
 # desktop workspace in the repository root.
 [workspace]
 resolver = "2"
@@ -13,7 +13,7 @@ resolver = "2"
 [dependencies]
 pocketjs-vita = { path = "../vendor/pocketjs/hosts/vita", default-features = false }
 pocket3d-gxm = { path = "../crates/pocket3d-gxm" }
-pocket3d-city = { path = "../crates/pocket3d-city" }
+pocket3d-place = { path = "../crates/pocket3d-place" }
 glam = "0.33"
 serde_json = "1"
 
@@ -26,8 +26,8 @@ default = ["usb-debug"]
 usb-debug = ["pocketjs-vita/usb-debug"]
 
 [package.metadata.vita]
-title_id = "PKCT00001"
-title_name = "Pocket City"
+title_id = "PKAT00001"
+title_name = "Pocket Atlas"
 build_std = "std,panic_abort"
 
 [package.metadata.vita.profile.release]

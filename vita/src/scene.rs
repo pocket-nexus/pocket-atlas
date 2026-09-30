@@ -1,4 +1,4 @@
-//! A cooked city pack on the GPU: textures in video memory, geometry in
+//! A cooked place pack on the GPU: textures in video memory, geometry in
 //! GPU-mapped main memory (read straight from the file, no staging copy),
 //! animation tracks, and per-frame node / light / fog-light state.
 
@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::Read;
 
 use glam::{Mat4, Quat, Vec3, Vec4};
-use pocket3d_city as pc;
+use pocket3d_place as pc;
 use pocket3d_gxm::mem::{Arena, Kind};
 use pocket3d_gxm::texture::{Format, Texture, Uploader, Wrap};
 

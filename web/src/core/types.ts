@@ -18,7 +18,7 @@ export interface StageContext {
 }
 
 /**
- * A full-screen experience (the globe, or one city). The App owns exactly one
+ * A full-screen experience (the globe, or one place). The App owns exactly one
  * active stage; the stage owns its scene, camera, post-processing chain and
  * any GPU resources, and releases them in dispose().
  */
@@ -35,32 +35,34 @@ export interface Stage {
   dispose(): void;
 }
 
-export interface CityModule {
-  createStage(ctx: StageContext, city: CityDef, progress: Progress): Promise<Stage>;
+export interface PlaceModule {
+  createStage(ctx: StageContext, place: PlaceDef, progress: Progress): Promise<Stage>;
 }
 
-export type CityStatus = "live" | "soon";
+export type PlaceStatus = "live" | "soon";
 
-export interface CityDef {
+/** One place on the globe: a remembered spot, not a whole city. */
+export interface PlaceDef {
   id: string;
   name: string;
-  /** Name in the local script. */
+  /** Place name in the local script. */
   native: string;
+  /** Town or city the place is in, and its name in the local script. */
+  locality: string;
+  localityNative: string;
   country: string;
   lat: number;
   lon: number;
   /** IANA zone for the live clock shown in the UI. */
   timeZone: string;
-  status: CityStatus;
-  scene: string;
-  sceneNative: string;
+  status: PlaceStatus;
   weather: string;
   accent: string;
-  load?: () => Promise<CityModule>;
+  load?: () => Promise<PlaceModule>;
 }
 
 /** What stages may ask of the app shell. */
 export interface Navigator {
-  openCity(city: CityDef): void;
-  closeCity(): void;
+  openPlace(place: PlaceDef): void;
+  closePlace(): void;
 }

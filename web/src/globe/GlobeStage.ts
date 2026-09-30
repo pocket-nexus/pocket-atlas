@@ -38,9 +38,9 @@ import {
   type Texture,
   type WebGLRenderTarget,
 } from "three";
-import { CITIES } from "../cities/registry";
+import { PLACES } from "../places/registry";
 import { Rng } from "../core/random";
-import type { CityDef, Navigator, Stage, StageContext } from "../core/types";
+import type { PlaceDef, Navigator, Stage, StageContext } from "../core/types";
 import { bakeAlbedo, bakeClouds, bakeNormals, bakeRelief, bakeSky, bakeTransmittance, GpuBaker } from "./bake/gpu";
 import { buildCoastPatch } from "./bake/coastPatch";
 import { loadLand, SMALL_H, SMALL_W } from "./bake/land";
@@ -73,11 +73,11 @@ const GAL_C = new Vector3(0.3, 0.55, -1).projectOnPlane(GAL_N).normalize();
 const START = { lat: 31, lon: 131 };
 const FOV = 30;
 const IDLE_DEG_PER_S = 1.6;
-/** Fly-in timeline (s): facing turn, vista over the city, end of plunge. */
+/** Fly-in timeline (s): facing turn, vista over the place, end of plunge. */
 const DIVE_ROTATE = 1.25;
 const DIVE_VISTA = 2.75;
 const DIVE_TOTAL = 3.6;
-/** Camera-to-city distances (planet radii) at the vista and at the end of the plunge. */
+/** Camera-to-place distances (planet radii) at the vista and at the end of the plunge. */
 const VISTA_ALT = 0.075;
 const DIVE_END_ALT = 0.0135;
 
@@ -189,8 +189,8 @@ class GlobeStage implements Stage {
   private mode: Mode = "free";
   private modeT = 0;
   private from: Snapshot | null = null;
-  private diveCity = -1;
-  private lastCity: CityDef | null = null;
+  private divePlace = -1;
+  private lastPlace: PlaceDef | null = null;
   private entered = false;
   private visible = false;
   private fadeStarted = false;
@@ -350,7 +350,7 @@ class GlobeStage implements Stage {
     const atmosphere = new Mesh(atmoGeo, this.atmoMat);
     atmosphere.renderOrder = 4;
 
-    this.markers = new Markers(CITIES);
+    this.markers = new Markers(PLACES);
 
     this.earthGroup.add(earth, this.cloudMesh, this.markers.group);
     this.scene.add(this.earthGroup, atmosphere);
@@ -391,7 +391,7 @@ class GlobeStage implements Stage {
 
   /** High-resolution coastline for the fly-in, built in a worker while the globe is already on screen. */
   private loadCoastPatch(): void {
-    const live = CITIES.find((c) => c.status === "live");
+    const live = PLACES.find((c) => c.status === "live");
     if (!live) return;
     const t0 = performance.now();
     const job = buildCoastPatch(live.lat, live.lon);
@@ -497,8 +497,8 @@ class GlobeStage implements Stage {
       this.entered = true;
       if (this.ctx.params.shot) this.snapToOverview();
       else this.startIntro();
-    } else if (this.lastCity) {
-      this.startReturn(this.lastCity);
+    } else if (this.lastPlace) {
+      this.startReturn(this.lastPlace);
     } else {
       this.mode = "free";
     }
@@ -540,7 +540,7 @@ class GlobeStage implements Stage {
     let freeH = h;
     let sx = 0;
     let sy = 0;
-    const list = this.ctx.overlay.root.querySelector<HTMLElement>(".pc-city-list");
+    const list = this.ctx.overlay.root.querySelector<HTMLElement>(".pc-place-list");
     const r = list?.getBoundingClientRect();
     if (r && r.width > 0 && r.height > 0) {
       if (r.left > w * 0.45) {
@@ -584,8 +584,8 @@ class GlobeStage implements Stage {
     this.earthMat.uniforms.uDetail.value = zoomDetail;
     const target = this.cloudMat.uniforms.uTarget.value as Vector4;
     const nadir = this.cloudMat.uniforms.uNadir.value as Vector4;
-    if (this.mode === "dive" && this.diveCity >= 0) {
-      const c = CITIES[this.diveCity];
+    if (this.mode === "dive" && this.divePlace >= 0) {
+      const c = PLACES[this.divePlace];
       const d = latLonToVec(c.lat, c.lon);
       target.set(d.x, d.y, d.z, 1);
       const n = this.nadirTmp.copy(this.camera.position).applyQuaternion(this.invQuat.copy(this.earthGroup.quaternion).invert()).normalize();
@@ -605,7 +605,7 @@ class GlobeStage implements Stage {
     const active = this.hovered >= 0 ? this.hovered : this.cardHover;
     const diveT = (this.debugDiveT ?? this.modeT);
     const diveFade = this.mode === "dive" ? smoothstep(DIVE_ROTATE * 0.9, DIVE_VISTA - 0.5, diveT) : 0;
-    this.markers.update(dt, time, active, pxPerUnit, this.mode === "dive" ? Math.max(0.001, diveFade) : 0, this.diveCity);
+    this.markers.update(dt, time, active, pxPerUnit, this.mode === "dive" ? Math.max(0.001, diveFade) : 0, this.divePlace);
 
     this.post.render(dt, this.ctx.params.shot);
   }
@@ -650,16 +650,16 @@ class GlobeStage implements Stage {
     this.from = { ...this.snapshot(), lon: START.lon + 38, lat: START.lat - 6, alt: (this.baseDist - 1) * 2.3 };
   }
 
-  private startReturn(city: CityDef): void {
+  private startReturn(place: PlaceDef): void {
     this.mode = "return";
     this.modeT = 0;
-    this.diveCity = -1;
+    this.divePlace = -1;
     this.fadeStarted = false;
     this.focus = null;
     this.zoom = this.zoomTarget = 1;
-    this.from = { lat: city.lat, lon: city.lon, alt: 0.035, fov: 22, shiftX: 0, shiftY: 0, pitch: 28 * DEG };
-    this.lat = city.lat;
-    this.lon = city.lon;
+    this.from = { lat: place.lat, lon: place.lon, alt: 0.035, fov: 22, shiftX: 0, shiftY: 0, pitch: 28 * DEG };
+    this.lat = place.lat;
+    this.lon = place.lon;
   }
 
   private updateMotion(dt: number): void {
@@ -733,17 +733,17 @@ class GlobeStage implements Stage {
   }
 
   /**
-   * Fly-in: turn the city to face the camera, descend while pitching up until
+   * Fly-in: turn the place to face the camera, descend while pitching up until
    * the limb and airglow sit at the top of frame over the city lights, hold a
    * beat, then plunge through the cloud deck while the image fades to black.
    */
   private updateDive(): void {
     const f = this.from!;
-    const city = CITIES[this.diveCity];
+    const place = PLACES[this.divePlace];
     const t = this.debugDiveT ?? this.modeT;
     const a = easeInOutCubic(clamp(t / DIVE_ROTATE, 0, 1));
-    this.lon = f.lon + wrapDeg(city.lon - f.lon) * a;
-    this.lat = f.lat + (city.lat - f.lat) * a;
+    this.lon = f.lon + wrapDeg(place.lon - f.lon) * a;
+    this.lat = f.lat + (place.lat - f.lat) * a;
     this.shiftX = f.shiftX * (1 - a);
     this.shiftY = f.shiftY * (1 - a);
 
@@ -769,7 +769,7 @@ class GlobeStage implements Stage {
     if (t >= DIVE_TOTAL + 0.05) {
       this.mode = "done";
       this.post.setZoomBlur(0, 0.5, 0.5);
-      this.nav.openCity(city);
+      this.nav.openPlace(place);
     }
   }
 
@@ -877,7 +877,7 @@ class GlobeStage implements Stage {
         if (moved < 6 && quick && e.type === "pointerup") {
           this.vLon = this.vLat = 0;
           const hit = this.markers.pick(this.camera, e.clientX, e.clientY, this.w, this.h, e.pointerType === "touch" ? 28 : 18);
-          if (hit) this.select(hit.city.id);
+          if (hit) this.select(hit.place.id);
         }
       }
       if (this.pointers.size === 1) {
@@ -919,11 +919,11 @@ class GlobeStage implements Stage {
   }
 
   private onCardHover(id: string | null): void {
-    const i = id ? CITIES.findIndex((c) => c.id === id) : -1;
+    const i = id ? PLACES.findIndex((c) => c.id === id) : -1;
     this.cardHover = i;
     if (i >= 0 && this.mode === "free" && !this.dragging) {
-      const c = CITIES[i];
-      // Turn gently: bring the city into the lit-limb-free part of the disc without fully centring it.
+      const c = PLACES[i];
+      // Turn gently: bring the place into the lit-limb-free part of the disc without fully centring it.
       this.focus = { lat: clamp(c.lat * 0.75, -40, 55), lon: c.lon - 4, until: Infinity };
     } else if (i < 0 && this.focus && this.focus.until === Infinity) {
       this.focus = null;
@@ -932,24 +932,24 @@ class GlobeStage implements Stage {
   }
 
   private select(id: string): void {
-    const i = CITIES.findIndex((c) => c.id === id);
+    const i = PLACES.findIndex((c) => c.id === id);
     if (i < 0 || !this.interactive()) return;
-    const city = CITIES[i];
+    const place = PLACES[i];
     this.touch();
-    if (city.status === "live" && city.load) {
+    if (place.status === "live" && place.load) {
       this.startDive(i);
     } else {
       if (this.mode !== "free") this.mode = "free";
-      this.focus = { lat: clamp(city.lat * 0.8, -45, 60), lon: city.lon, until: this.time + 4.5 };
-      this.ctx.overlay.toast(`${city.name} is under construction`);
+      this.focus = { lat: clamp(place.lat * 0.8, -45, 60), lon: place.lon, until: this.time + 4.5 };
+      this.ctx.overlay.toast(`${place.name} (${place.locality}) is under construction`);
     }
   }
 
   private startDive(i: number): void {
     this.mode = "dive";
     this.modeT = 0;
-    this.diveCity = i;
-    this.lastCity = CITIES[i];
+    this.divePlace = i;
+    this.lastPlace = PLACES[i];
     this.fadeStarted = false;
     this.soundStarted = false;
     this.focus = null;
@@ -969,7 +969,7 @@ class GlobeStage implements Stage {
     let next = -1;
     if (this.interactive() && this.pointerInside && !this.dragging && this.pointers.size === 0) {
       const hit = this.markers.pick(this.camera, this.pointerX, this.pointerY, this.w, this.h, 18);
-      if (hit) next = CITIES.indexOf(hit.city);
+      if (hit) next = PLACES.indexOf(hit.place);
     }
     if (next !== this.hovered) {
       this.hovered = next;
@@ -978,12 +978,12 @@ class GlobeStage implements Stage {
     const active = this.mode === "dive" ? -1 : this.hovered >= 0 ? this.hovered : this.cardHover;
     if (active !== this.shownHover) {
       this.shownHover = active;
-      if (this.visible) overlay.setHovered(active >= 0 ? CITIES[active].id : null);
+      if (this.visible) overlay.setHovered(active >= 0 ? PLACES[active].id : null);
       if (active < 0) overlay.hideTooltip();
     }
     if (active >= 0 && this.visible) {
       const sp = this.markers.screenPos(active, this.camera, this.w, this.h);
-      if (sp) overlay.showTooltip(CITIES[active], sp.x, sp.y);
+      if (sp) overlay.showTooltip(PLACES[active], sp.x, sp.y);
       else overlay.hideTooltip();
     }
   }
@@ -1046,7 +1046,7 @@ class GlobeStage implements Stage {
       scene: this.scene,
       hover: (id: string | null) => this.onCardHover(id),
       pointAt: (id: string) => {
-        const i = CITIES.findIndex((c) => c.id === id);
+        const i = PLACES.findIndex((c) => c.id === id);
         this.applyView();
         const sp = this.markers.screenPos(i, this.camera, this.w, this.h);
         if (!sp) return;
@@ -1054,7 +1054,7 @@ class GlobeStage implements Stage {
         this.pointerY = sp.y;
         this.pointerInside = true;
       },
-      screen: (id: string) => this.markers.screenPos(CITIES.findIndex((c) => c.id === id), this.camera, this.w, this.h),
+      screen: (id: string) => this.markers.screenPos(PLACES.findIndex((c) => c.id === id), this.camera, this.w, this.h),
       select: (id: string) => this.select(id),
       view: (lat: number, lon: number, zoom = 1) => {
         this.mode = "free";
@@ -1066,7 +1066,7 @@ class GlobeStage implements Stage {
         this.lastInteract = this.time + 1e6;
       },
       freezeDive: (t: number) => {
-        const i = CITIES.findIndex((c) => c.status === "live");
+        const i = PLACES.findIndex((c) => c.status === "live");
         if (this.mode !== "dive") this.startDive(i);
         this.debugDiveT = t;
         this.modeT = t;

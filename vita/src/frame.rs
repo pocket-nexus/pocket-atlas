@@ -6,7 +6,7 @@
 //! bloom prefilter → 4 downsamples → 3 upsamples → display.
 
 use glam::{Mat4, Vec3, Vec4};
-use pocket3d_city as pc;
+use pocket3d_place as pc;
 use pocket3d_gxm::mem::{Arena, Kind};
 use pocket3d_gxm::target::{ColorFormat, Depth, Msaa, Target};
 use vita2d_sys as g;

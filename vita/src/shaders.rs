@@ -1,8 +1,8 @@
 //! Shader programs. Cg sources are embedded in the executable and, during
-//! development, replaced by the copies in the USB share (`host0:city/shaders`)
+//! development, replaced by the copies in the USB share (`host0:atlas/shaders`)
 //! so edits on the computer recompile on the device without a rebuild. A
 //! worker thread compiles with SceShaccCg and caches every GXP by a hash of
-//! its expanded source and defines: `host0:city/gxp/<hash>.gxp` in
+//! its expanded source and defines: `host0:atlas/gxp/<hash>.gxp` in
 //! development, `app0:gxp/<hash>.gxp` in packaged builds, which therefore run
 //! without the runtime compiler.
 
@@ -38,7 +38,7 @@ pub const SOURCES: &[(&str, &str)] = &[
     ("debug_f.cg", include_str!("../shaders/debug_f.cg")),
 ];
 
-const SHARE: &str = "host0:city";
+const SHARE: &str = "host0:atlas";
 
 /// A program: source file plus preprocessor definitions ("NAME" or "NAME=V").
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -142,7 +142,7 @@ impl Service {
         let rebuilding = Arc::new(AtomicUsize::new(0));
         let busy = rebuilding.clone();
         let _ = std::thread::Builder::new()
-            .name("city-shaders".into())
+            .name("atlas-shaders".into())
             .stack_size(1024 * 1024)
             .spawn(move || worker(live, req_rx, ev_tx, busy));
         Self { requests: req_tx, events: ev_rx, rebuilding }
@@ -237,7 +237,7 @@ fn worker(live: bool, requests: Receiver<Key>, events: Sender<Event>, rebuilding
     let mut known: Vec<(Key, u64)> = Vec::new();
     let mut memo: HashMap<u64, Arc<Vec<u8>>> = HashMap::new();
     let mut last_watch = Instant::now();
-    // One small stamp file (written by `city.ts sync`) is polled instead of
+    // One small stamp file (written by `atlas.ts sync`) is polled instead of
     // every source: the USB channel is shared with the debug link.
     let mut stamp = if live { read_share(&format!("{SHARE}/shaders/stamp")) } else { None };
 

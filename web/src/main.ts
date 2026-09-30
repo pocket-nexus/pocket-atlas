@@ -11,10 +11,10 @@ const canvas = document.getElementById("view") as HTMLCanvasElement;
 const ui = document.getElementById("ui") as HTMLElement;
 
 if (!document.createElement("canvas").getContext("webgl2")) {
-  fail("Pocket City needs WebGL 2. Try a current Chrome, Edge, Firefox or Safari.");
+  fail("Pocket Atlas needs WebGL 2. Try a current Chrome, Edge, Firefox or Safari.");
 } else {
   const app = new App(canvas, ui, readParams());
-  (window as unknown as { pocketCity: App }).pocketCity = app;
+  (window as unknown as { pocketAtlas: App }).pocketAtlas = app;
   app.start().catch((err) => {
     console.error(err);
     fail(`Something went wrong while starting: ${(err as Error).message}`);

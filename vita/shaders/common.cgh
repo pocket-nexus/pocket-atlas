@@ -1,4 +1,4 @@
-// Shared helpers for the Pocket City GXM shaders (SceShaccCg dialect of Cg).
+// Shared helpers for the Pocket Atlas GXM shaders (SceShaccCg dialect of Cg).
 // Lighting follows three.js MeshPhysicalMaterial so the Vita build matches
 // the browser reference renderer.
 

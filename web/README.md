@@ -1,8 +1,8 @@
-# Pocket City
+# Pocket Atlas — web reference
 
-A standalone three.js demo: a night-side globe where you pick a city, and a
+A standalone three.js app: a night-side globe where you pick a place, and a
 rain-soaked Tokyo backstreet with a 24-hour konbini as the first enterable
-scene. It does not use any PocketJS runtime, build tooling or packages — it is
+place. It does not use any PocketJS runtime, build tooling or packages — it is
 a plain Vite + TypeScript project with its own lockfile.
 
 Every asset is generated at load time: Earth textures are rasterised from
@@ -26,7 +26,7 @@ Requires WebGL 2. Tested in Chrome on Apple silicon (ANGLE / Metal).
 | Where | Input | Action |
 | --- | --- | --- |
 | Globe | drag / wheel / pinch | spin, zoom |
-| Globe | click a beacon or a card | fly in (Tokyo) or preview (others) |
+| Globe | click a beacon or a card | fly in (open places) or preview (others) |
 | Tokyo | drag, wheel, WASD / arrows, Q/E | orbit, dolly, move the focus, raise/lower |
 | Tokyo | `C` | cinematic camera on/off (also starts after 40 s idle) |
 | Tokyo | walk up to the door | the automatic door opens with its chime |
@@ -36,7 +36,7 @@ Requires WebGL 2. Tested in Chrome on Apple silicon (ANGLE / Metal).
 
 | Switch | Effect |
 | --- | --- |
-| `#/city/tokyo` | open Tokyo directly |
+| `#/place/<id>` | open a place directly (`#/place/tokyo-konbini`) |
 | `?q=low\|medium\|high\|ultra` | force a quality preset (otherwise picked from the GPU, persisted when changed in the UI) |
 | `?shot` | capture mode: no UI, no intro, muted |
 | `?cam=Konbini\|Puddles\|Vending\|Crossing\|Inside\|Wires` | start at a named shot |
@@ -48,10 +48,10 @@ Requires WebGL 2. Tested in Chrome on Apple silicon (ANGLE / Metal).
 example:
 
 ```sh
-bun scripts/shot.ts "/?shot&stats&q=high&cam=Puddles#/city/tokyo" out.png --wait 20000
+bun scripts/shot.ts "/?shot&stats&q=high&cam=Puddles#/place/tokyo-konbini" out.png --wait 20000
 ```
 
-## How the Tokyo scene is put together
+## How Rainy Night Konbini is put together
 
 - **Wet ground.** One planar reflection (mirrored camera with an oblique near
   plane, half resolution, plus a vertically stretched blur chain) feeds every
@@ -85,7 +85,7 @@ bun scripts/shot.ts "/?shot&stats&q=high&cam=Puddles#/city/tokyo" out.png --wait
   `world/people`).
 - **Sound.** Rain layers, drops on hard surfaces, gutter drips, traffic rumble,
   the shop's 100 Hz hum near the entrance and the door chime are all
-  synthesised (`tokyo/audio.ts`). Rain intensity and wind gusts vary over
+  synthesised (`audio.ts`). Rain intensity and wind gusts vary over
   time and drive both the streaks and the audio.
 
 ## Layout
@@ -93,11 +93,13 @@ bun scripts/shot.ts "/?shot&stats&q=high&cam=Puddles#/city/tokyo" out.png --wait
 ```
 src/
   core/        app shell, stage lifecycle, quality presets, audio, params
-  ui/          DOM overlay: city list, tooltip, loading screen, HUD
-  cities/      city registry (only Tokyo is enterable)
+  ui/          DOM overlay: place list, tooltip, loading screen, HUD
   globe/       the globe stage
-  tokyo/       the Tokyo stage
-    gfx/       baking, materials, wet/glass/interior shaders, reflection
-    fx/        rain, post-processing
-    world/     street plan, ground, konbini, neighbours, props, traffic, people, sky
+  places/
+    registry.ts          every place on the globe (which ones are enterable)
+    tokyo-konbini/       Rainy Night Konbini
+      gfx/       baking, materials, wet/glass/interior shaders, reflection
+      fx/        rain, post-processing
+      world/     street plan, ground, konbini, neighbours, props, traffic, people, sky
+      export.ts  glTF + extras.pocketAtlas for the cooker (scripts/export-place.ts)
 ```
