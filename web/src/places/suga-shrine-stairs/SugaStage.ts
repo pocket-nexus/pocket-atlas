@@ -273,8 +273,8 @@ export class SugaStage implements Stage {
           ...c.special,
           tracks: c.tracks,
           post: this.postMeta(),
-          // The cooker's vertex bake stands in for N8AO: sky occlusion by ray casts.
-          bake: { skyOcclusion: { rays: 48, reach: 8, foliage: 0.55 } },
+          // The cooker's vertex bake stands in for N8AO (radius 0.9 m): sky occlusion by ray casts within 1.5 m.
+          bake: { skyOcclusion: { rays: 48, reach: 1.5, foliage: 0.55 } },
         }),
         onProgress: (label) => console.info(`[export] ${label}`),
       });

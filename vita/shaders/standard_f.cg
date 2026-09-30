@@ -12,7 +12,9 @@
 // VERTEX_LIGHTS (lights evaluated per vertex, added to the irradiance),
 // LITE (no normal, ORM or streak maps), FAR (LITE beyond the detail
 // distance, without environment specular off the wet ground), SUN (a
-// directional light per pixel with the sun's shadow map; not in the bake).
+// directional light per pixel with the sun's shadow map; not in the bake;
+// FAR draws, outside the map's reach, skip the lookup), SUN_SPEC (its
+// highlight, for smooth or metallic materials).
 
 #include "common.cgh"
 
@@ -303,17 +305,24 @@ half4 main(
 
 #ifdef SUN
     {
+#ifdef FAR
+        float lit = 1.0;
+#else
         // Offset along the geometric normal against self-shadowing acne.
         float lit = sunLit(vWorld + (float3)Ng * uSunRad.w);
-        if (lit > 0.0) {
-            float3 d3 = 0.0;
-            float3 s3 = 0.0;
-            directLight(uSunDir.xyz, uSunRad.rgb * lit, (float3)N, (float3)V, diffuseColor, specularColor, (float)(roughness * roughness), d3, s3);
-            diffuse += (half3)d3;
-#ifndef NO_SPECULAR
-            specular += (half3)s3;
 #endif
+        float3 L = uSunDir.xyz;
+        float ndl = saturate(dot((float3)N, L));
+        float3 E = uSunRad.rgb * (lit * ndl);
+        diffuse += (half3)(E * INV_PI) * diffuseColor;
+#if defined(SUN_SPEC) && !defined(NO_SPECULAR)
+        if (lit * ndl > 0.0) {
+            float3 H = normalize(L + (float3)V);
+            float alpha = (float)(roughness * roughness);
+            float dotNV = saturate(dot((float3)N, (float3)V));
+            specular += (half3)(E * (float3)F_Schlick(specularColor, (half)saturate(dot((float3)V, H))) * (V_GGX_SmithCorrelated(alpha, ndl, dotNV) * D_GGX(alpha, saturate(dot((float3)N, H)))));
         }
+#endif
     }
 #endif
 

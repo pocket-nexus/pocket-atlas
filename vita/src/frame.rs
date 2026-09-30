@@ -261,6 +261,12 @@ fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: boo
         }
         if sun && !m.interior {
             defines.push("SUN");
+            // The sun's highlight only shows on smooth or metallic surfaces.
+            let rough = m.orm.map_or(m.roughness, |t| m.roughness * textures[t as usize].mean[1]);
+            let metal = m.orm.map_or(m.metalness, |t| m.metalness * textures[t as usize].mean[2]);
+            if rough < 0.6 || metal > 0.3 {
+                defines.push("SUN_SPEC");
+            }
         }
     }
     if m.vertex_color && matches!(m.kind, pc::Kind::Standard | pc::Kind::Unlit) {
