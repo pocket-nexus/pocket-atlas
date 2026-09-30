@@ -1,0 +1,225 @@
+// Lit surface: three.js physical shading (Lambert + GGX, split-sum IBL from
+// the octahedral environment), rain film, puddles with ripples and the
+// planar street reflection, FogExp2. Writes HDR radiance and, in alpha, the
+// eye distance the haze pass integrates to.
+//
+// Defines: LIGHTS (0..4), ALBEDO_MAP, NORMAL_MAP, ORM_MAP, EMISSION_MAP,
+// VERTEX_COLOR, ALPHA_TEST, WET, PLANAR, DAMP, CLEARCOAT, INTERIOR, FOG,
+// REFLECTION (mirror pass: cheaper film, no planar lookup), BAKED (static
+// diffuse lighting from the vertices; LIGHTS then counts moving lights only).
+
+#include "common.cgh"
+
+uniform sampler2D uAlbedo;
+uniform sampler2D uNormalMap;
+uniform sampler2D uOrm;
+uniform sampler2D uEmission;
+uniform sampler2D uEnv;
+uniform sampler2D uPuddles;
+uniform sampler2D uRipples;
+uniform sampler2D uReflSharp;
+uniform sampler2D uReflBlur;
+uniform sampler2D uReflSoft;
+
+uniform float4 uBase;       // linear albedo, opacity
+uniform float4 uEmissive;   // linear HDR emission, alpha-test threshold
+uniform float4 uPbr;        // roughness, metalness, normal scale, AO strength
+uniform float4 uEnvK;       // env intensity, clearcoat, clearcoat roughness, rain
+uniform float4 uWet;        // puddles, darken, roughness factor, ripple strength
+uniform float4 uWet2;       // 1 / puddle scale, damp darken, damp roughness, damp streaks
+uniform float4 uEye;        // camera position, time (s)
+uniform float4 uFog;        // FogExp2 colour, density
+uniform float4 uHemiSky;    // hemisphere irradiance from above
+uniform float4 uHemiGround; // … and from below
+uniform float4 uRipple;     // frame a, frame b, blend, 1 / tile (m)
+uniform float4 uReflOn;     // planar weight, -, -, -
+#if LIGHTS > 0
+uniform float4 uLightPos[LIGHTS];   // position, 1 / range
+uniform float4 uLightCol[LIGHTS];   // radiant intensity, spot offset
+uniform float4 uLightDir[LIGHTS];   // emission direction, spot scale
+uniform float4 uLightRight[LIGHTS]; // rect width axis, half width
+uniform float4 uLightUp[LIGHTS];    // rect height axis, half height
+#endif
+
+// One frame of the ripple flipbook (4×4 atlas, frames laid out row-major).
+half2 rippleFrame(float2 uv, float frame)
+{
+    float2 cell = float2(fmod(frame, 4.0), floor(frame * 0.25));
+    float2 local = clamp(frac(uv), 0.004, 0.996);
+    return (half2)(tex2D(uRipples, (cell + local) * 0.25).rg * 2.0 - 1.0);
+}
+
+half4 main(
+    float3 vWorld : TEXCOORD0,
+    half3 vNormal : TEXCOORD1,
+    half4 vTangent : TEXCOORD2,
+    float2 vUv : TEXCOORD3,
+    float4 vScreen : TEXCOORD4,
+#ifdef BAKED
+    half3 vLight : TEXCOORD5,
+#endif
+    half4 vColor : COLOR0) : COLOR
+{
+    // World positions, texture coordinates and distances stay float; the
+    // shading itself runs in half precision (twice the ALU rate on SGX).
+    float3 toEye = uEye.xyz - vWorld;
+    float dist = length(toEye);
+    half3 V = (half3)(toEye / dist);
+    half3 Ng = normalize(vNormal);
+    half rain = (half)uEnvK.w;
+
+    // ------------------------------------------------------------ material
+    half4 albedo = (half4)uBase;
+#ifdef ALBEDO_MAP
+    half4 at = tex2D(uAlbedo, vUv);
+    albedo *= half4(srgbToLinear(at.rgb), at.a);
+#endif
+#ifdef VERTEX_COLOR
+    albedo *= half4(srgbToLinear(vColor.rgb), vColor.a);
+#endif
+#ifdef ALPHA_TEST
+    if (albedo.a < (half)uEmissive.w) discard;
+#endif
+    half roughness = (half)uPbr.x;
+    half metalness = (half)uPbr.y;
+    half ao = 1.0;
+#ifdef ORM_MAP
+    half3 orm = tex2D(uOrm, vUv).rgb;
+    roughness *= orm.g;
+    metalness *= orm.b;
+    ao = (orm.r - 1.0) * (half)uPbr.w + 1.0;
+#endif
+
+    half3 N = Ng;
+#ifdef NORMAL_MAP
+    {
+        half2 nm = (tex2D(uNormalMap, vUv).rg * 2.0 - 1.0) * (half)uPbr.z;
+        half nz = sqrt(saturate(1.0 - dot(nm, nm)));
+        half3 T = normalize(vTangent.xyz);
+        half3 B = cross(Ng, T) * vTangent.w;
+        N = normalize(T * nm.x + B * nm.y + Ng * nz);
+    }
+#endif
+
+    // ------------------------------------------------------------ rain film
+#ifdef WET
+    half puddle = 0.0;
+    half3 wetN = half3(0.0, 1.0, 0.0);
+    {
+        half2 pf = tex2D(uPuddles, vWorld.xz * uWet2.x).rg;
+        half field = pf.r * 0.8 + pf.g * 0.2;
+        half thr = (half)(0.71 - uWet.x * 0.25);
+        puddle = smoothstep(thr - 0.012, thr + 0.03, field) * rain * (half)step(0.001, uWet.x);
+        half damp = smoothstep(thr - 0.09, thr, field);
+        albedo.rgb *= lerp((half)1.0, (half)uWet.y, rain) * lerp((half)1.0, (half)0.82, damp * rain);
+        albedo.rgb = lerp(albedo.rgb, albedo.rgb * (half)0.45 + half3(0.002, 0.0025, 0.003), puddle);
+        half2 rip = 0.0;
+#ifndef REFLECTION
+        if (puddle > 0.01) {
+            float2 ua = vWorld.xz * uRipple.w;
+            rip = lerp(rippleFrame(ua, uRipple.x), rippleFrame(ua, uRipple.y), (half)uRipple.z) * (half)1.4 * rain;
+        }
+#endif
+        half2 micro = (pf - 0.5) * 0.06;
+        half ws = (half)uWet.w;
+        wetN = normalize(half3(-(rip.x * ws + micro.x), 1.0, -(rip.y * ws + micro.y)));
+        roughness = lerp(roughness, roughness * (half)uWet.z, rain);
+        roughness = lerp(roughness, (half)0.02, puddle);
+        N = normalize(lerp(N, wetN, puddle * (half)0.96));
+    }
+#endif
+#ifdef DAMP
+    {
+        float u = vWorld.x + vWorld.z;
+        half lane = tex2D(uPuddles, float2(u * 1.75, vWorld.y * 0.0875)).r;
+        half lane2 = tex2D(uPuddles, float2(u * 4.75 + 0.75, vWorld.y * 0.2 - uEye.w * 0.0125)).g;
+        half streak = smoothstep((half)0.55, (half)0.85, lane) * (0.6 + 0.4 * lane2) * (half)uWet2.w;
+        albedo.rgb *= lerp((half)1.0, (half)uWet2.y, rain) * (1.0 - streak * (half)0.35 * rain);
+        roughness = lerp(roughness, roughness * (half)uWet2.z, rain);
+        roughness = lerp(roughness, (half)0.12, streak * rain);
+    }
+#endif
+
+    roughness = clamp(roughness, (half)0.0525, (half)1.0);
+    half3 diffuseColor = albedo.rgb * (1.0 - metalness);
+    half3 specularColor = lerp(half3(0.04, 0.04, 0.04), albedo.rgb, metalness);
+    half dotNV = saturate(dot(N, V));
+
+    // ------------------------------------------------------------ direct
+    half3 diffuse = 0.0;
+    half3 specular = 0.0;
+#if LIGHTS > 0 && !defined(INTERIOR)
+    {
+        float alpha = roughness * roughness;
+        float3 d3 = 0.0;
+        float3 s3 = 0.0;
+        for (int i = 0; i < LIGHTS; i++) {
+            float3 P = uLightPos[i].xyz;
+            float3 d = vWorld - P;
+            float4 R = uLightRight[i];
+            float4 U = uLightUp[i];
+            float3 q = P + R.xyz * clamp(dot(d, R.xyz), -R.w, R.w) + U.xyz * clamp(dot(d, U.xyz), -U.w, U.w);
+            float3 Lv = q - vWorld;
+            float d2 = dot(Lv, Lv);
+            float3 L = Lv * rsqrt(max(d2, 1e-6));
+            float s = saturate(dot(-L, uLightDir[i].xyz) * uLightDir[i].w + uLightCol[i].w);
+            s = s * s * (3.0 - 2.0 * s);
+            float att = distanceFalloff(d2 + R.w * U.w, uLightPos[i].w) * s;
+            directLight(L, uLightCol[i].rgb * att, (float3)N, (float3)V, diffuseColor, specularColor, alpha, d3, s3);
+        }
+        diffuse = (half3)d3;
+        specular = (half3)s3;
+    }
+#endif
+
+    // ------------------------------------------------------------ indirect
+    half envK = (half)uEnvK.x;
+#ifdef BAKED
+    // Static lights, hemisphere and environment diffuse, already over π.
+    half3 irradiance = vLight;
+#else
+    half3 irradiance = lerp((half3)uHemiGround.rgb, (half3)uHemiSky.rgb, N.y * 0.5 + 0.5) * (half)INV_PI;
+    irradiance += tex2Dlod(uEnv, float4(octUv((float3)N), 0.0, 5.0)).rgb * envK;
+#endif
+    half3 R = reflect(-V, N);
+    half3 radiance = tex2Dlod(uEnv, float4(octUv((float3)R), 0.0, roughness * 5.0)).rgb * envK;
+#if defined(PLANAR) && !defined(REFLECTION)
+    {
+        float2 ruv = vScreen.xy / vScreen.w * float2(0.5, -0.5) + 0.5;
+        half3 nW = normalize(lerp(half3(0.0, 1.0, 0.0), wetN, max(puddle, (half)0.35)));
+        ruv += (float2)nW.xz * float2(0.05, 0.09);
+        half3 rs = tex2D(uReflSharp, ruv).rgb;
+        half3 rb = tex2D(uReflBlur, ruv).rgb;
+        half3 refl = lerp(rs, rb, smoothstep((half)0.05, (half)0.3, roughness));
+        half2 e2 = (half2)saturate(min(ruv, 1.0 - ruv) * 33.3);
+        half w = (half)uReflOn.x * (1.0 - smoothstep((half)0.5, (half)0.8, roughness)) * lerp((half)0.35, (half)1.0, e2.x * e2.y);
+        radiance = lerp(radiance, refl, w);
+    }
+#endif
+    half2 dfg = DFGApprox(roughness, dotNV);
+    half3 specEnv = specularColor * dfg.x + dfg.y;
+    half3 color = diffuse + specular + irradiance * diffuseColor * ao + radiance * specEnv * ao;
+
+#ifdef CLEARCOAT
+    {
+        half fc = F_Schlick(half3(0.04, 0.04, 0.04), dotNV).x * (half)uEnvK.y;
+        half3 cc = tex2Dlod(uEnv, float4(octUv((float3)reflect(-V, Ng)), 0.0, uEnvK.z * 5.0)).rgb * envK;
+        color = color * (1.0 - fc) + cc * fc;
+    }
+#endif
+
+    half3 emission = (half3)uEmissive.rgb;
+#ifdef EMISSION_MAP
+    emission *= srgbToLinear(tex2D(uEmission, vUv).rgb);
+#endif
+    color += emission;
+
+#if defined(FOG) && !defined(INTERIOR)
+    color = lerp(color, (half3)uFog.rgb, (half)fogFactor(dist, uFog.w));
+#endif
+#ifdef REFLECTION
+    return half4(color, 1.0);
+#else
+    return half4(color, (half)dist);
+#endif
+}

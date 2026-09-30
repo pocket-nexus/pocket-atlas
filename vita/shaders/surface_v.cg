@@ -1,0 +1,71 @@
+// Vertex stage for every mesh material. Positions arrive quantised (s16n)
+// and are dequantised by uModel, which also carries the node transform for
+// rigid moving parts. Skinned vertices blend up to four bone rows. Baked
+// vertices carry the static diffuse lighting as square-root RGBM.
+//
+// Defines: SKINNED, MAX_BONES, BAKED.
+
+void main(
+    float4 aPosition,
+    float4 aNormal,
+    float4 aTangent,
+    float2 aUv,
+    float4 aColor,
+#ifdef SKINNED
+    float4 aJoints,
+    float4 aWeights,
+    uniform float4 uBones[3 * MAX_BONES],
+#endif
+#ifdef BAKED
+    float4 aLight,
+    out half3 oLight : TEXCOORD5,
+#endif
+    uniform float4 uModel[3],
+    uniform float4 uDequant[2],
+    uniform float4x4 uViewProj,
+    uniform float4 uUv,
+    out float4 oPosition : POSITION,
+    out float3 oWorld : TEXCOORD0,
+    out half3 oNormal : TEXCOORD1,
+    out half4 oTangent : TEXCOORD2,
+    out float2 oUv : TEXCOORD3,
+    out float4 oScreen : TEXCOORD4,
+    out half4 oColor : COLOR0)
+{
+    float4 local = float4(aPosition.xyz * uDequant[0].xyz + uDequant[1].xyz, 1.0);
+    float3 n = aNormal.xyz;
+    float3 t = aTangent.xyz;
+#ifdef SKINNED
+    float3 sp = 0.0;
+    float3 sn = 0.0;
+    float3 st = 0.0;
+    for (int k = 0; k < 4; k++) {
+        int j = (int)aJoints[k] * 3;
+        float w = aWeights[k];
+        float4 r0 = uBones[j];
+        float4 r1 = uBones[j + 1];
+        float4 r2 = uBones[j + 2];
+        sp += w * float3(dot(r0, local), dot(r1, local), dot(r2, local));
+        sn += w * float3(dot(r0.xyz, n), dot(r1.xyz, n), dot(r2.xyz, n));
+        st += w * float3(dot(r0.xyz, t), dot(r1.xyz, t), dot(r2.xyz, t));
+    }
+    local = float4(sp, 1.0);
+    n = sn;
+    t = st;
+#endif
+    float3 world = float3(dot(uModel[0], local), dot(uModel[1], local), dot(uModel[2], local));
+    n = float3(dot(uModel[0].xyz, n), dot(uModel[1].xyz, n), dot(uModel[2].xyz, n));
+    t = float3(dot(uModel[0].xyz, t), dot(uModel[1].xyz, t), dot(uModel[2].xyz, t));
+    float4 clipPos = mul(uViewProj, float4(world, 1.0));
+    oPosition = clipPos;
+    oWorld = world;
+    oNormal = (half3)normalize(n);
+    oTangent = half4((half3)normalize(t), (half)aTangent.w);
+    oUv = aUv * uUv.xy + uUv.zw;
+    oScreen = clipPos;
+    oColor = (half4)aColor;
+#ifdef BAKED
+    float3 s = aLight.rgb * aLight.a;
+    oLight = (half3)(s * s * 64.0);
+#endif
+}

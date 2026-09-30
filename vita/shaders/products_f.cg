@@ -1,0 +1,37 @@
+// Shelf stock under the shop's even LED light (carried as emission): the
+// instance colour seeds a design from the packaging atlas; alpha of the
+// vertex colour is the item-local height.
+//
+// Defines: REFLECTION.
+
+#include "common.cgh"
+
+uniform sampler2D uAlbedo; // packaging atlas: 8 bands of goods
+uniform float4 uBase;      // linear colour, lit multiplier
+uniform float4 uEye;
+
+float pHash(float n) { return frac(sin(n * 12.9898) * 43758.5453); }
+
+float4 main(
+    float3 vWorld : TEXCOORD0,
+    float2 vUv : TEXCOORD3,
+    half4 vColor : COLOR0) : COLOR
+{
+    float3 c = srgbToLinear(vColor.rgb);
+    float runSeed = dot(c, float3(12.9898, 78.233, 37.719));
+    float h1 = pHash(runSeed * 0.37 + 1.0);
+    float h2 = pHash(runSeed * 0.71 + 7.0);
+    float y = vColor.a;
+    float band = floor(h2 * 8.0);
+    float2 puv = float2(h1 * 0.93 + frac(vUv.x) * 0.055, (band + 0.08 + saturate(vUv.y) * 0.8) / 8.0);
+    float3 pack = srgbToLinear(tex2D(uAlbedo, puv).rgb);
+    float side = step(0.004, y) * step(y, 0.996);
+    float3 col = uBase.rgb * c;
+    col = lerp(col, pack * 1.15, 0.85 * side * (0.75 + 0.25 * h1));
+    col *= (0.78 + 0.22 * saturate(y)) * uBase.a;
+#ifdef REFLECTION
+    return float4(col, 1.0);
+#else
+    return float4(col, length(uEye.xyz - vWorld));
+#endif
+}

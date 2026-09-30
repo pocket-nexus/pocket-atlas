@@ -1,0 +1,9 @@
+// Profiling stand-in for every material: constant colour, eye distance in
+// alpha like the real programs. Selected by the `flat` control setting.
+
+uniform float4 uEye;
+
+float4 main(float3 vWorld : TEXCOORD0) : COLOR
+{
+    return float4(0.18, 0.18, 0.2, length(uEye.xyz - vWorld));
+}

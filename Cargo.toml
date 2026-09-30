@@ -1,0 +1,10 @@
+# Host-side crates: the pack format and the cooker. The Vita runtime (vita/)
+# and its GXM layer (crates/pocket3d-gxm) build through cargo-vita as their
+# own workspaces.
+[workspace]
+resolver = "2"
+members = ["crates/pocket3d-city", "crates/pocket3d-city-cook"]
+exclude = ["crates/pocket3d-gxm", "vita", "vendor"]
+
+[profile.release]
+debug = false

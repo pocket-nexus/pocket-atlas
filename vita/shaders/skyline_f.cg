@@ -1,0 +1,44 @@
+// Distant skyline boxes with procedural window grids; vertex colour holds
+// four per-box random values, the tangent is the facade's horizontal axis.
+//
+// Defines: REFLECTION.
+
+#include "common.cgh"
+
+uniform float4 uEye;
+uniform float4 uHaze;  // haze colour, -
+
+float4 main(
+    float3 vWorld : TEXCOORD0,
+    half3 vNormal : TEXCOORD1,
+    half4 vTangent : TEXCOORD2,
+    half4 vColor : COLOR0) : COLOR
+{
+    float3 n = normalize((float3)vNormal);
+    float4 info = vColor;
+    float3 col = float3(0.018, 0.019, 0.024) * (0.6 + info.y * 0.8);
+    if (abs(n.y) < 0.5) {
+        float u = dot(vWorld, (float3)vTangent.xyz);
+        float v = vWorld.y;
+        float fw = 1.8 + info.z * 1.2;
+        float2 g = float2(u / fw, v / 3.3);
+        float2 cell = floor(g);
+        float2 f = g - cell;
+        float win = step(0.28, f.x) * step(f.x, 0.72) * step(0.35, f.y) * step(f.y, 0.75);
+        float r = hash12(cell + info.w * 113.0);
+        float lit = step(1.0 - (0.08 + info.x * 0.22), r);
+        float3 wc = lerp(float3(1.0, 0.72, 0.42), float3(0.7, 0.85, 1.0), step(0.6, hash12(cell * 1.7 + 5.0))) * (0.4 + 0.6 * hash12(cell + 3.3));
+        col += wc * win * lit * 0.8;
+        if (info.z > 0.8)
+            col += float3(0.7, 0.85, 1.0) * 0.12 * step(0.4, f.y) * step(f.y, 0.75) * step(0.7, hash12(float2(cell.y, info.w)));
+    }
+    float dist = length(vWorld - uEye.xyz);
+    float fog = 1.0 - exp(-dist * 0.0032);
+    float heightFade = exp(-max(vWorld.y, 0.0) * 0.004);
+    col = lerp(col, uHaze.rgb, clamp(fog * lerp(0.75, 1.0, heightFade), 0.0, 0.97));
+#ifdef REFLECTION
+    return float4(col, 1.0);
+#else
+    return float4(col, dist);
+#endif
+}

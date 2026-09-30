@@ -1,0 +1,47 @@
+// Particle fragments; destination alpha (eye distance) is never written.
+//
+// Defines (one of): STREAK (also drips), SPLASH, STEAM, BEACON.
+
+uniform sampler2D uPuddles; // noise source for steam
+uniform float4 uOpacity;    // opacity, -
+
+float4 main(
+    half3 vColor : TEXCOORD0,
+    half2 vUv : TEXCOORD1,
+    half2 vLife : TEXCOORD2) : COLOR
+{
+#ifdef STREAK
+    half e = 1.0 - abs(vUv.x * 2.0 - 1.0);
+    half along = smoothstep(0.0, 0.35, vUv.y) * smoothstep(1.0, 0.75, vUv.y);
+    half a = e * e * along * vLife.y * uOpacity.x;
+    return float4(vColor * a, a);
+#endif
+#ifdef SPLASH
+    float t = vLife.x;
+    float kind = vLife.y;
+    float a = 0.0;
+    for (int i = 0; i < 5; i++) {
+        float dir = (i - 2.0) * 0.5;
+        float x = dir * t * 0.9;
+        float y = (4.0 * t * (1.0 - t)) * (0.55 + 0.35 * frac(i * 0.618 + kind));
+        float2 d = float2(vUv.x - x, vUv.y - y);
+        a += smoothstep(0.08, 0.0, length(d * float2(1.0, 0.8)));
+    }
+    float ring = abs(length(float2(vUv.x, vUv.y * 5.0)) - t * 0.9);
+    a += smoothstep(0.06, 0.0, ring) * 0.6 * step(vUv.y, 0.12);
+    a *= (1.0 - t) * (1.0 - t) * uOpacity.x;
+    return float4(vColor * a, a);
+#endif
+#ifdef STEAM
+    float r = length((float2)vUv);
+    float n = tex2D(uPuddles, (float2)vUv * 0.75 + 1.25).g * 0.6 + tex2D(uPuddles, (float2)vUv * 1.75).r * 0.4;
+    float a = smoothstep(1.0, 0.0, r + (n - 0.5) * 0.6);
+    a = a * a * vLife.y * uOpacity.x;
+    return float4(vColor * a * 0.28, a * 0.16);
+#endif
+#ifdef BEACON
+    float d = length((float2)vUv);
+    float a = smoothstep(1.0, 0.0, d);
+    return float4(vColor * a, a);
+#endif
+}

@@ -1,0 +1,15 @@
+// Dual-filter downsample (centre × 4 + four diagonal bilinear taps) / 8.
+
+uniform sampler2D uSource;
+uniform float4 uTexel; // half texel of the source, -
+
+float4 main(float2 vUv : TEXCOORD0) : COLOR
+{
+    float2 o = uTexel.xy;
+    float3 c = tex2D(uSource, vUv).rgb * 4.0;
+    c += tex2D(uSource, vUv - o).rgb;
+    c += tex2D(uSource, vUv + o).rgb;
+    c += tex2D(uSource, vUv + float2(o.x, -o.y)).rgb;
+    c += tex2D(uSource, vUv - float2(o.x, -o.y)).rgb;
+    return float4(c * 0.125, 1.0);
+}

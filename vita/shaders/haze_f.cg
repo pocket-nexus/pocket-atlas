@@ -1,0 +1,74 @@
+// Single scattering from point and spot lights in homogeneous rain haze,
+// integrated in closed form along each view ray up to the scene distance
+// (∫ dt / (d² + r²) = atan terms). The dry shop interior is cut out of the
+// ray. Runs at quarter resolution; alpha keeps the distance for the
+// bilateral upsample.
+
+#define HAZE_LIGHTS 10
+
+uniform sampler2D uScene;   // main HDR target, alpha = eye distance (point sampled)
+uniform float4 uEye;        // camera position, -
+uniform float4 uHaze;       // density, ambient density, count, far
+uniform float4 uAmbient;    // ambient in-scatter colour
+uniform float4 uBoxMin;
+uniform float4 uBoxMax;
+uniform float4 uFogPos[HAZE_LIGHTS]; // position, radius
+uniform float4 uFogCol[HAZE_LIGHTS]; // colour × gain, cos outer (< -1.5: omni)
+uniform float4 uFogDir[HAZE_LIGHTS]; // spot direction, cos inner
+
+// atan on the whole line, max error 0.0015 rad.
+float atanFast(float x)
+{
+    float a = abs(x);
+    float z = a > 1.0 ? 1.0 / a : a;
+    float r = z * (0.7853982 - (z - 1.0) * (0.2447 + 0.0663 * z));
+    r = a > 1.0 ? 1.5707963 - r : r;
+    return x < 0.0 ? -r : r;
+}
+
+float segment(float3 ro, float3 rd, float t0, float t1, int i)
+{
+    float3 L = uFogPos[i].xyz - ro;
+    float tca = dot(L, rd);
+    float r = uFogPos[i].w;
+    float h = sqrt(max(dot(L, L) - tca * tca, 0.0) + r * r);
+    // atan(a) - atan(b) as one atan (plus π when the segment wraps past
+    // the closest point with both ends far from it).
+    float a = (t1 - tca) / h;
+    float b = (t0 - tca) / h;
+    float k = 1.0 + a * b;
+    float I = (atanFast((a - b) / k) + (k < 0.0 ? 3.1415927 : 0.0)) / h;
+    if (uFogCol[i].w > -1.5) {
+        float3 P = ro + rd * clamp(tca, t0, t1);
+        float cs = dot(normalize(P - uFogPos[i].xyz), uFogDir[i].xyz);
+        I *= smoothstep(uFogCol[i].w, uFogDir[i].w, cs);
+    }
+    return I;
+}
+
+float4 main(float2 vUv : TEXCOORD0, float3 vRay : TEXCOORD1) : COLOR
+{
+    float dist = min(tex2D(uScene, vUv).a, uHaze.w);
+    float3 rd = normalize(vRay);
+    float3 ro = uEye.xyz;
+    float3 inv = 1.0 / rd;
+    float3 a = (uBoxMin.xyz - ro) * inv;
+    float3 b = (uBoxMax.xyz - ro) * inv;
+    float3 lo = min(a, b);
+    float3 hi = max(a, b);
+    float bx = max(max(lo.x, lo.y), lo.z);
+    float by = min(min(hi.x, hi.y), hi.z);
+    float in0 = max(bx, 0.0);
+    float in1 = min(by, dist);
+    bool cut = by > bx && in1 > in0;
+    float3 acc = 0.0;
+    for (int i = 0; i < HAZE_LIGHTS; i++) {
+        if (i < uHaze.z) {
+            float I = cut ? segment(ro, rd, 0.0, in0, i) + segment(ro, rd, in1, dist, i) : segment(ro, rd, 0.0, dist, i);
+            acc += uFogCol[i].rgb * I;
+        }
+    }
+    float outside = cut ? dist - (in1 - in0) : dist;
+    float amb = 1.0 - exp(-outside * uHaze.y);
+    return float4(acc * uHaze.x + uAmbient.rgb * amb, dist);
+}

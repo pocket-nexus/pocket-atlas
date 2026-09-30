@@ -1,0 +1,103 @@
+// Shared helpers for the Pocket City GXM shaders (SceShaccCg dialect of Cg).
+// Lighting follows three.js MeshPhysicalMaterial so the Vita build matches
+// the browser reference renderer.
+
+#define PI 3.14159265
+#define INV_PI 0.31830989
+
+float pow2(float x) { return x * x; }
+
+float hash12(float2 p)
+{
+    float3 p3 = frac(p.xyx * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return frac((p3.x + p3.y) * p3.z);
+}
+
+float3 hash32(float2 p)
+{
+    float3 p3 = frac(p.xyx * float3(0.1031, 0.1030, 0.0973));
+    p3 += dot(p3, p3.yxz + 33.33);
+    return frac((p3.xxy + p3.yzz) * p3.zyx);
+}
+
+// sRGB-encoded 8-bit colour to linear (fitted polynomial, max error 0.4%).
+half3 srgbToLinear(half3 c)
+{
+    return c * (c * (c * 0.305306011 + 0.682171111) + 0.012522878);
+}
+
+// Octahedral direction → UV; inverse of the cooker's oct_decode (y folded).
+float2 octUv(float3 d)
+{
+    d /= abs(d.x) + abs(d.y) + abs(d.z);
+    float2 p = d.xz;
+    if (d.y < 0.0) {
+        float2 s = step(float2(0.0, 0.0), p) * 2.0 - 1.0;
+        p = (1.0 - abs(p.yx)) * s;
+    }
+    return p * 0.5 + 0.5;
+}
+
+// ---------------------------------------------------------------- BRDF
+
+half3 F_Schlick(half3 f0, half dotVH)
+{
+    half fresnel = exp2((-5.55473 * dotVH - 6.98316) * dotVH);
+    return f0 * (1.0 - fresnel) + fresnel;
+}
+
+float V_GGX_SmithCorrelated(float alpha, float dotNL, float dotNV)
+{
+    float a2 = alpha * alpha;
+    float gv = dotNL * sqrt(a2 + (1.0 - a2) * dotNV * dotNV);
+    float gl = dotNV * sqrt(a2 + (1.0 - a2) * dotNL * dotNL);
+    return 0.5 / max(gv + gl, 1e-6);
+}
+
+float D_GGX(float alpha, float dotNH)
+{
+    float a2 = alpha * alpha;
+    float d = dotNH * dotNH * (a2 - 1.0) + 1.0;
+    return INV_PI * a2 / (d * d);
+}
+
+// Split-sum environment BRDF (Karis), as three's DFGApprox.
+half2 DFGApprox(half roughness, half dotNV)
+{
+    half4 r = roughness * half4(-1.0, -0.0275, -0.572, 0.022) + half4(1.0, 0.0425, 1.04, -0.04);
+    half a004 = min(r.x * r.x, exp2(-9.28 * dotNV)) * r.x + r.y;
+    return half2(-1.04, 1.04) * a004 + r.zw;
+}
+
+// Direct light: irradiance × (Lambert + GGX); accumulates into diffuse/specular.
+void directLight(float3 L, float3 irradiance, float3 N, float3 V, half3 diffuseColor, half3 specularColor, float alpha,
+                 inout float3 diffuse, inout float3 specular)
+{
+    float dotNL = saturate(dot(N, L));
+    if (dotNL <= 0.0) return;
+    float3 H = normalize(L + V);
+    float dotNV = saturate(dot(N, V));
+    float dotNH = saturate(dot(N, H));
+    float dotVH = saturate(dot(V, H));
+    float3 E = irradiance * dotNL;
+    diffuse += E * diffuseColor * INV_PI;
+    specular += E * F_Schlick(specularColor, dotVH) * (V_GGX_SmithCorrelated(alpha, dotNL, dotNV) * D_GGX(alpha, dotNH));
+}
+
+// three's getDistanceAttenuation with decay 2 and a cutoff range.
+float distanceFalloff(float d2, float invRange)
+{
+    float falloff = 1.0 / max(d2, 0.01);
+    float x = d2 * invRange * invRange;
+    float w = saturate(1.0 - x * x);
+    return falloff * w * w;
+}
+
+// ---------------------------------------------------------------- fog
+
+// FogExp2 as in three: 1 - exp(-density² d²).
+float fogFactor(float dist, float density)
+{
+    return 1.0 - exp(-density * density * dist * dist);
+}

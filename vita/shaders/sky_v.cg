@@ -1,0 +1,14 @@
+// Full-screen triangle on the far plane (reversed depth: z = 0) carrying the
+// world-space view ray for each corner.
+
+void main(
+    float2 aPosition,
+    uniform float4 uRayZ,  // camera forward
+    uniform float4 uRayX,  // right × tan(fov x / 2)
+    uniform float4 uRayY,  // up × tan(fov y / 2)
+    out float4 oPosition : POSITION,
+    out float3 oRay : TEXCOORD0)
+{
+    oPosition = float4(aPosition, 0.0, 1.0);
+    oRay = uRayZ.xyz + uRayX.xyz * aPosition.x + uRayY.xyz * aPosition.y;
+}

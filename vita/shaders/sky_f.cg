@@ -1,0 +1,27 @@
+// Night sky: zenith-horizon gradient and a low rain-cloud deck lit from
+// below by the city (sodium orange at the horizon, violet overhead).
+
+uniform sampler2D uClouds;
+uniform float4 uZenith;  // colour, time
+uniform float4 uHorizon; // colour, 1 / cloud tile cells
+uniform float4 uGlow;    // colour, far distance written for the haze
+
+float4 main(float3 vRay : TEXCOORD0) : COLOR
+{
+    float3 d = normalize(vRay);
+    float h = max(d.y, 0.0);
+    float3 col = lerp(uHorizon.rgb, uZenith.rgb, pow(h + 1e-4, 0.4));
+    float2 uv = d.xz / max(d.y + 0.06, 0.03);
+    float t = uZenith.w;
+    float c1 = tex2D(uClouds, (uv * 0.28 + float2(t * 0.005, t * 0.002)) * uHorizon.w).r;
+    float c2 = tex2D(uClouds, (uv * 0.85 - float2(t * 0.009, 0.0)) * uHorizon.w).g;
+    float dens = c1 * 0.72 + c2 * 0.28;
+    float clouds = smoothstep(0.42, 0.78, dens);
+    float under = smoothstep(0.5, 0.7, c2);
+    float lit = exp(-h * 3.2);
+    float3 cityGlow = lerp(uGlow.rgb, float3(0.16, 0.1, 0.22), smoothstep(0.05, 0.5, h));
+    col += cityGlow * clouds * (0.35 + 0.65 * lit) * (0.7 + 0.5 * under);
+    col += uGlow.rgb * lit * lit * 0.3;
+    col *= lerp(0.72, 1.0, clouds);
+    return float4(col, uGlow.w);
+}

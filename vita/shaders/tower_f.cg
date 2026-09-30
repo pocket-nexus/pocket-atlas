@@ -1,0 +1,25 @@
+// Tokyo Tower: additive lattice glow (legs, chords, X-bracing), decks and
+// the blinking aviation light. Blend: ONE, ONE on colour, destination alpha kept.
+
+uniform float4 uEye;
+
+float4 main(
+    float3 vWorld : TEXCOORD0,
+    float2 vUv : TEXCOORD3) : COLOR
+{
+    float y = vWorld.y;
+    float fu = frac(vUv.x * 4.0);
+    float legs = smoothstep(0.07, 0.0, min(fu, 1.0 - fu));
+    float t = frac(y / 22.0);
+    float chord = smoothstep(0.05, 0.0, min(t, 1.0 - t));
+    float diag = smoothstep(0.045, 0.0, min(abs(fu - t), abs(fu - (1.0 - t))));
+    float lattice = max(max(legs, chord * 0.8), diag * 0.6);
+    float3 orange = float3(1.0, 0.38, 0.1);
+    float3 white = float3(1.0, 0.92, 0.82);
+    float3 col = lerp(orange, white, smoothstep(215.0, 262.0, y) * 0.6) * lattice * 1.6;
+    col += orange * 0.12;
+    col += white * 3.0 * (smoothstep(4.0, 0.0, abs(y - 150.0)) + smoothstep(2.5, 0.0, abs(y - 250.0)));
+    col += float3(1.0, 0.05, 0.02) * 30.0 * smoothstep(3.0, 0.0, abs(y - 330.0)) * step(0.5, frac(uEye.w * 0.5));
+    float fog = 1.0 - exp(-length(vWorld.xz) * 0.00045);
+    return float4(col * (1.0 - fog * 0.6), 0.0);
+}

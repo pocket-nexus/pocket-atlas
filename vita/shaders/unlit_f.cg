@@ -1,0 +1,38 @@
+// HDR colour × texture × vertex colour, no lighting (signs, screens, lamps).
+//
+// Defines: ALBEDO_MAP, VERTEX_COLOR, FOG, ALPHA_TEST, REFLECTION.
+
+#include "common.cgh"
+
+uniform sampler2D uAlbedo;
+uniform float4 uBase;     // linear HDR colour (× flicker gain), opacity
+uniform float4 uEmissive; // -, -, -, alpha-test threshold
+uniform float4 uEye;
+uniform float4 uFog;
+
+float4 main(
+    float3 vWorld : TEXCOORD0,
+    float2 vUv : TEXCOORD3,
+    half4 vColor : COLOR0) : COLOR
+{
+    float4 c = uBase;
+#ifdef ALBEDO_MAP
+    half4 t = tex2D(uAlbedo, vUv);
+    c *= float4(srgbToLinear(t.rgb), t.a);
+#endif
+#ifdef VERTEX_COLOR
+    c *= float4(srgbToLinear(vColor.rgb), vColor.a);
+#endif
+#ifdef ALPHA_TEST
+    if (c.a < uEmissive.w) discard;
+#endif
+    float dist = length(uEye.xyz - vWorld);
+#ifdef FOG
+    c.rgb = lerp(c.rgb, uFog.rgb, fogFactor(dist, uFog.w));
+#endif
+#ifdef REFLECTION
+    return float4(c.rgb, 1.0);
+#else
+    return float4(c.rgb, dist);
+#endif
+}

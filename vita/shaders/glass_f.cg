@@ -1,0 +1,116 @@
+// Storefront glass, premultiplied: specular (lights + environment) at full
+// strength, tint scaled by coverage, rain beads and running drops bending
+// the normal. Blend: ONE, ONE_MINUS_SRC_ALPHA on colour; destination alpha
+// (eye distance) is preserved.
+//
+// Defines: LIGHTS, FOG, REFLECTION.
+
+#include "common.cgh"
+
+uniform sampler2D uEnv;
+uniform sampler2D uBeads;
+uniform float4 uBase;     // linear tint, opacity
+uniform float4 uPbr;      // roughness, metalness, -, -
+uniform float4 uEnvK;     // env intensity, drops, -, rain
+uniform float4 uEye;
+uniform float4 uFog;
+uniform float4 uHemiSky;
+uniform float4 uHemiGround;
+#if LIGHTS > 0
+uniform float4 uLightPos[LIGHTS];
+uniform float4 uLightCol[LIGHTS];
+uniform float4 uLightDir[LIGHTS];
+uniform float4 uLightRight[LIGHTS];
+uniform float4 uLightUp[LIGHTS];
+#endif
+
+// Running drops: one lane per column, a bead head with a wet trail.
+float3 runners(float2 uv, float t)
+{
+    float lanes = 9.0;
+    float px = uv.x * lanes;
+    float lane = floor(px);
+    float h = hash12(float2(lane, 3.7));
+    float h2 = hash12(float2(lane, 9.1));
+    float speed = 0.18 + h * 0.4;
+    float period = 2.2 + h2 * 2.5;
+    float y = frac(uv.y / period + t * speed / period + h * 5.0);
+    float wob = sin(uv.y * 22.0 + h * 40.0) * 0.06 + sin(uv.y * 7.0 + h2 * 9.0) * 0.08;
+    float fx = frac(px) - 0.5 - wob;
+    float3 acc = 0.0;
+    float2 d = float2(fx, (y - 0.9) * period * lanes * 0.55);
+    float l = length(d);
+    if (l < 0.22) {
+        float k = l / 0.22;
+        acc.xy += d / 0.22 * sqrt(1.0 - k * k) * 1.6;
+        acc.z = smoothstep(1.0, 0.6, k);
+    }
+    float trail = smoothstep(0.9, 0.55, y) * step(y, 0.9);
+    float tw = smoothstep(0.08, 0.0, abs(fx));
+    acc.z = max(acc.z, trail * tw * 0.5);
+    acc.x += -sign(fx) * trail * tw * 0.3;
+    return acc;
+}
+
+float4 main(
+    float3 vWorld : TEXCOORD0,
+    half3 vNormal : TEXCOORD1) : COLOR
+{
+    float3 toEye = uEye.xyz - vWorld;
+    float dist = length(toEye);
+    float3 V = toEye / dist;
+    float3 N = normalize((float3)vNormal);
+    if (dot(N, V) < 0.0) N = -N;
+
+    float drop = 0.0;
+#ifndef REFLECTION
+    {
+        bool xFacing = abs(N.x) > abs(N.z);
+        float2 guv = xFacing ? vWorld.zy : vWorld.xy;
+        float3 b = tex2D(uBeads, guv).rgb;
+        float3 beads = float3((b.xy - 0.5) * 4.0, b.z);
+        float3 all = (beads + runners(guv * float2(1.3, 1.0), uEye.w)) * (uEnvK.w * uEnvK.y);
+        drop = saturate(all.z);
+        float3 tU = xFacing ? float3(0.0, 0.0, 1.0) : float3(1.0, 0.0, 0.0);
+        N = normalize(N + (tU * all.x + float3(0.0, 1.0, 0.0) * all.y) * 0.9);
+    }
+#endif
+
+    float roughness = max(uPbr.x, 0.0525);
+    float alpha = roughness * roughness;
+    half3 diffuseColor = uBase.rgb;
+    half3 specularColor = half3(0.04, 0.04, 0.04);
+    float3 diffuse = 0.0;
+    float3 specular = 0.0;
+#if LIGHTS > 0
+    for (int i = 0; i < LIGHTS; i++) {
+        float3 P = uLightPos[i].xyz;
+        float3 d = vWorld - P;
+        float4 R = uLightRight[i];
+        float4 U = uLightUp[i];
+        float3 q = P + R.xyz * clamp(dot(d, R.xyz), -R.w, R.w) + U.xyz * clamp(dot(d, U.xyz), -U.w, U.w);
+        float3 Lv = q - vWorld;
+        float d2 = dot(Lv, Lv);
+        float3 L = Lv * rsqrt(max(d2, 1e-6));
+        float s = saturate(dot(-L, uLightDir[i].xyz) * uLightDir[i].w + uLightCol[i].w);
+        s = s * s * (3.0 - 2.0 * s);
+        float att = distanceFalloff(d2 + R.w * U.w, uLightPos[i].w) * s;
+        directLight(L, uLightCol[i].rgb * att, N, V, diffuseColor, specularColor, alpha, diffuse, specular);
+    }
+#endif
+    float dotNV = saturate(dot(N, V));
+    float3 irradiance = lerp(uHemiGround.rgb, uHemiSky.rgb, N.y * 0.5 + 0.5) * INV_PI;
+    irradiance += tex2Dlod(uEnv, float4(octUv(N), 0.0, 5.0)).rgb * uEnvK.x;
+    float3 radiance = tex2Dlod(uEnv, float4(octUv(reflect(-V, N)), 0.0, roughness * 5.0)).rgb * uEnvK.x;
+    half2 dfg = DFGApprox((half)roughness, (half)dotNV);
+    specular += radiance * (specularColor * dfg.x + dfg.y);
+    diffuse += irradiance * diffuseColor;
+
+    float cover = saturate(uBase.a + drop * 0.12);
+    float3 color = diffuse * cover + specular * (1.0 + drop * 0.6);
+#ifdef FOG
+    float f = fogFactor(dist, uFog.w);
+    color = lerp(color, uFog.rgb * cover, f);
+#endif
+    return float4(color, cover);
+}

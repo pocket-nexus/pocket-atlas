@@ -1,0 +1,166 @@
+// Rain and atmosphere particles, animated entirely on the GPU from per-vertex
+// seeds (every quad repeats its seed on four corners). Lit by the nearest
+// haze lights with a soft 1 / (d² + r²) falloff.
+//
+// Defines (one of): STREAK, SPLASH, DRIP, STEAM, BEACON.
+
+#define FX_LIGHTS 8
+
+uniform float4x4 uViewProj;
+uniform float4 uCam;      // camera position, pixel footprint at 1 m
+uniform float4 uTime;     // time, speed, length, width
+uniform float4 uBox;      // streak box size, -
+uniform float4 uWind;     // wind velocity (m/s), -
+uniform float4 uCenter;   // splash area centre, area size
+uniform float4 uAmbient;  // ambient light on drops
+uniform float4 uDry[4];   // two dry boxes: min, max, min, max
+uniform float4 uFogPos[FX_LIGHTS];
+uniform float4 uFogCol[FX_LIGHTS];
+
+float rHash(float2 p)
+{
+    float3 p3 = frac(p.xyx * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return frac((p3.x + p3.y) * p3.z);
+}
+
+float3 lightAt(float3 p)
+{
+    float3 c = uAmbient.rgb;
+    for (int i = 0; i < FX_LIGHTS; i++) {
+        float3 d = uFogPos[i].xyz - p;
+        float r2 = uFogPos[i].w * uFogPos[i].w;
+        c += uFogCol[i].rgb * r2 / (dot(d, d) + r2);
+    }
+    return c;
+}
+
+bool isDry(float3 p)
+{
+    bool a = all(p > uDry[0].xyz) && all(p < uDry[1].xyz);
+    bool b = all(p > uDry[2].xyz) && all(p < uDry[3].xyz);
+    return a || b;
+}
+
+void main(
+    float4 aSeed,
+    float2 aCorner,
+#if defined(DRIP) || defined(STEAM)
+    float3 aA,
+    float3 aB,
+#endif
+#ifdef BEACON
+    float3 aA,
+#endif
+    out float4 oPosition : POSITION,
+    out half3 oColor : TEXCOORD0,
+    out half2 oUv : TEXCOORD1,
+    out half2 oLife : TEXCOORD2)
+{
+    float t = uTime.x;
+    float3 cam = uCam.xyz;
+    float3 wp;
+    bool hidden = false;
+    float alpha = 1.0;
+    float life = 0.0;
+    float2 uv = aCorner;
+    float3 color;
+#ifdef STREAK
+    {
+        float sp = uTime.y * (0.85 + 0.3 * aSeed.w);
+        float3 vel = float3(uWind.x, -sp, uWind.z);
+        float3 box = uBox.xyz;
+        float3 origin = cam - float3(box.x * 0.5, box.y * 0.3, box.z * 0.5);
+        float3 p = aSeed.xyz * box + vel * t;
+        float3 r = p - origin;
+        p = origin + r - box * floor(r / box);
+        float3 toCam = cam - p;
+        float dist = length(toCam);
+        hidden = p.y < 0.0 || isDry(p);
+        float3 axis = normalize(vel);
+        float3 side = normalize(cross(axis, toCam / dist));
+        float wdt = max(uTime.w, dist * uCam.w * 1.3);
+        float len = uTime.z * (0.7 + 0.6 * aSeed.w);
+        wp = p + side * aCorner.x * wdt + axis * (aCorner.y - 0.5) * len;
+        uv = float2(aCorner.x + 0.5, aCorner.y);
+        color = lightAt(p);
+        alpha = (uTime.w / wdt) * smoothstep(0.35, 1.4, dist) * (1.0 - smoothstep(box.x * 0.32, box.x * 0.5, dist));
+    }
+#endif
+#ifdef SPLASH
+    {
+        float rate = 1.1 + aSeed.z * 1.3;
+        float cyc = t * rate + aSeed.w * 17.0;
+        float id = floor(cyc);
+        life = frac(cyc);
+        float2 r = float2(rHash(aSeed.xy * 131.7 + id), rHash(aSeed.yx * 71.3 + id * 1.7));
+        float area = uCenter.w;
+        float3 p = float3(uCenter.x + (r.x - 0.5) * area, 0.0, uCenter.z + (r.y - 0.5) * area);
+        alpha = rHash(float2(id, aSeed.z * 97.0));
+        float size = lerp(0.05, 0.11, aSeed.x);
+        float3 toCam = cam - p;
+        float3 right = normalize(cross(float3(0.0, 1.0, 0.0), toCam));
+        wp = p + right * aCorner.x * size * 2.0 + float3(0.0, 1.0, 0.0) * aCorner.y * size * 1.4;
+        float d = length(toCam);
+        hidden = isDry(p + float3(0.0, 0.05, 0.0)) || d > area * 0.55;
+        color = lightAt(p + float3(0.0, 0.1, 0.0)) * smoothstep(area * 0.55, area * 0.3, d);
+    }
+#endif
+#ifdef DRIP
+    {
+        float3 edge = lerp(aA, aB, aSeed.x);
+        float period = 0.35 + aSeed.y * 1.1;
+        float ph = frac(t / period + aSeed.z * 7.0);
+        float fallT = ph * period;
+        float y = edge.y - 4.9 * fallT * fallT;
+        float3 p = float3(edge.x, y, edge.z);
+        float len = clamp((9.8 * fallT + 0.5) * 0.02, 0.03, 0.25);
+        float3 toCam = cam - p;
+        float dist = length(toCam);
+        float3 axis = float3(0.0, -1.0, 0.0);
+        float3 side = normalize(cross(axis, toCam / dist));
+        float wdt = max(0.006, dist * 0.0012);
+        wp = p + side * aCorner.x * wdt + axis * (aCorner.y - 0.5) * len;
+        hidden = y < 0.0;
+        uv = float2(aCorner.x + 0.5, aCorner.y);
+        color = lightAt(p) * 1.4;
+        alpha = (0.006 / wdt) * smoothstep(0.3, 1.0, dist) * (1.0 - smoothstep(18.0, 30.0, dist));
+    }
+#endif
+#ifdef STEAM
+    {
+        float lifeS = 3.2 + aSeed.y * 1.6;
+        float tt = frac(t / lifeS + aSeed.x);
+        float age = tt * lifeS;
+        float3 p = aA + aB * (1.0 - exp(-age * 2.2)) * 0.55;
+        p.y += age * 0.42 + age * age * 0.04;
+        p.x += sin(age * 1.3 + aSeed.z * 6.28) * 0.12 * age + age * 0.18;
+        p.z += cos(age * 1.1 + aSeed.w * 6.28) * 0.08 * age;
+        float size = 0.18 + age * 0.34;
+        float3 toCam = normalize(cam - p);
+        float3 right = normalize(cross(float3(0.0, 1.0, 0.0), toCam));
+        float3 up = cross(toCam, right);
+        float rot = aSeed.w * 6.28 + age * 0.4;
+        float2 q = float2(cos(rot) * aCorner.x - sin(rot) * aCorner.y, sin(rot) * aCorner.x + cos(rot) * aCorner.y);
+        wp = p + (right * q.x + up * q.y) * size;
+        color = lightAt(p);
+        alpha = smoothstep(0.0, 0.08, tt) * (1.0 - tt) * (1.0 - tt);
+    }
+#endif
+#ifdef BEACON
+    {
+        float3 toCam = cam - aA;
+        float dist = length(toCam);
+        float3 right = normalize(cross(float3(0.0, 1.0, 0.0), toCam));
+        float3 up = normalize(cross(toCam, right));
+        float size = clamp(900.0 / dist, 1.5, 6.0) * dist * uCam.w * 0.5;
+        wp = aA + (right * aCorner.x + up * aCorner.y) * size;
+        color = float3(1.0, 0.08, 0.04) * 6.0 * (0.35 + 0.65 * step(0.45, frac(t * 0.55 + aA.x * 0.0003)));
+    }
+#endif
+    oPosition = mul(uViewProj, float4(wp, 1.0));
+    if (hidden) oPosition = float4(2.0, 2.0, 2.0, 1.0);
+    oColor = (half3)color;
+    oUv = (half2)uv;
+    oLife = half2(life, alpha);
+}

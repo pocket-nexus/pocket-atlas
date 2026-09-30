@@ -1,0 +1,126 @@
+// Apartment and office windows: a view ray traced through a box room behind
+// the pane (interior mapping), curtains and blinds just behind the glass,
+// plus the pane's own environment reflection. UV: floor = per-window seed,
+// frac = position across the pane; vertex colour RG = pane size / 16 m.
+//
+// Defines: FOG, REFLECTION.
+
+#include "common.cgh"
+
+uniform sampler2D uEnv;
+uniform sampler2D uPuddles;
+uniform float4 uEmissive; // room intensity, -, -, -
+uniform float4 uEnvK;     // env intensity
+uniform float4 uEye;
+uniform float4 uFog;
+
+float3 roomLight(float3 h, float3 room, float3 lampCol, float lit)
+{
+    float3 lamp = float3(room.x * 0.5, room.y - 0.25, room.z * 0.55);
+    float3 d = h - lamp;
+    return lampCol * lit * (0.25 + 1.6 / (1.0 + dot(d, d) * 0.45));
+}
+
+float4 main(
+    float3 vWorld : TEXCOORD0,
+    half3 vNormal : TEXCOORD1,
+    half4 vTangent : TEXCOORD2,
+    float2 vUv : TEXCOORD3,
+    half4 vColor : COLOR0) : COLOR
+{
+    float3 toEye = uEye.xyz - vWorld;
+    float dist = length(toEye);
+    float3 V = -toEye / dist;
+    float3 n = normalize((float3)vNormal);
+    float3 t = normalize((float3)vTangent.xyz);
+    float3 b = cross(n, t) * vTangent.w;
+    float W = max(vColor.r * 16.0, 0.3);
+    float H = max(vColor.g * 16.0, 0.3);
+    float2 seed = floor(vUv);
+    float2 local = frac(vUv);
+
+    float3 inside = 0.0;
+#ifndef REFLECTION
+    {
+        float3 h3 = hash32(seed * 1.37 + 0.5);
+        float h4 = hash12(seed + 17.1);
+        float3 room = float3(W + 1.4, 2.6, 3.2 + h3.z * 2.5);
+        float sill = H < 1.7 ? 0.85 : 0.18;
+        float3 p = float3(0.7 + local.x * W, sill + local.y * H, 0.0);
+        float3 d = normalize(float3(dot(V, t), dot(V, b), -dot(V, n)));
+        d.z = max(d.z, 0.05);
+        float3 tw;
+        tw.x = (d.x > 0.0 ? room.x - p.x : -p.x) / d.x;
+        tw.y = (d.y > 0.0 ? room.y - p.y : -p.y) / d.y;
+        tw.z = (room.z - p.z) / d.z;
+        float tt = min(min(tw.x, tw.y), tw.z);
+        float3 h = p + d * tt;
+
+        bool lit = h3.x < 0.62;
+        bool tv = !lit && h3.y < 0.35;
+        float3 lampCol = h4 < 0.68 ? float3(1.0, 0.72, 0.45) : float3(0.82, 0.9, 1.0);
+        float bright = 0.55 + h3.y * 0.9;
+        float3 wallCol = lerp(float3(0.78, 0.74, 0.66), float3(0.62, 0.66, 0.68), hash12(seed + 3.0));
+        float3 floorCol = h3.z < 0.4 ? float3(0.55, 0.36, 0.2) : (h3.z < 0.7 ? float3(0.6, 0.56, 0.36) : float3(0.4, 0.4, 0.42));
+        float3 albedo;
+        if (tt == tw.z) {
+            albedo = wallCol;
+            float k = hash12(seed + 9.0);
+            if (h.y < 0.75 && abs(h.x - room.x * (0.3 + k * 0.4)) < 0.9) albedo *= 0.35;
+            if (k > 0.5 && h.y > 0.9 && h.y < 2.0 && abs(h.x - room.x * 0.2) < 0.35) albedo = float3(0.15, 0.12, 0.1);
+            if (abs(h.x - room.x * 0.65) < 0.35 && abs(h.y - 1.5) < 0.25) albedo = lerp(albedo, float3(0.3, 0.4, 0.6), 0.7);
+        } else if (tt == tw.x) {
+            albedo = wallCol * 0.92;
+            if (h.y < 2.05 && h.y > 0.0 && abs(h.z - room.z * 0.6) < 0.4) albedo *= 0.55;
+        } else {
+            albedo = d.y < 0.0 ? floorCol : float3(0.5, 0.5, 0.5);
+        }
+        float3 light = lit ? roomLight(h, room, lampCol, bright) : float3(0.015, 0.016, 0.02);
+        if (tv) {
+            float f = 0.6 + 0.4 * sin(uEye.w * 7.0 + h3.x * 40.0) * sin(uEye.w * 3.1 + h3.z * 11.0);
+            float3 dd = h - float3(room.x * 0.5, 0.7, room.z - 0.2);
+            light += float3(0.35, 0.55, 1.0) * f * 0.9 / (1.0 + dot(dd, dd) * 1.2);
+        }
+        float3 col = albedo * light;
+
+        float style = hash12(seed + 5.5);
+        float curtainA = 0.0;
+        float3 curtainCol = 0.0;
+        float3 cloth = lerp(float3(0.85, 0.8, 0.7), float3(0.6, 0.3, 0.25), step(0.7, hash12(seed + 8.0)));
+        if (style < 0.35) {
+            float open = 0.25 + 0.35 * hash12(seed + 2.0);
+            curtainA = (local.x < open || local.x > 1.0 - open * 0.7) ? 0.92 : 0.0;
+            curtainCol = cloth * (0.85 + 0.15 * sin(local.x * 60.0));
+        } else if (style < 0.55) {
+            float slat = step(0.35, frac(local.y * H * 12.0));
+            curtainA = slat * 0.85 * step(local.y, 0.4 + 0.6 * hash12(seed + 4.0) + 0.001);
+            curtainCol = float3(0.8, 0.8, 0.78);
+        } else if (style < 0.75) {
+            curtainA = 0.55;
+            curtainCol = float3(0.92, 0.9, 0.86) * (0.9 + 0.1 * tex2D(uPuddles, local * float2(20.0, 10.0)).g);
+        }
+        float3 glow = lit ? lampCol * bright * 0.9 : float3(0.01, 0.01, 0.01);
+        if (tv) glow += float3(0.1, 0.18, 0.35);
+        inside = lerp(col, curtainCol * glow, curtainA);
+        float2 e = min(local, 1.0 - local);
+        inside *= smoothstep(0.0, 0.04, min(e.x, e.y)) * 0.85 + 0.15;
+        inside *= uEmissive.x;
+    }
+#else
+    inside = float3(0.02, 0.018, 0.015) * uEmissive.x;
+#endif
+    // Pane: dark glass, roughness 0.06.
+    float3 N = n;
+    float dotNV = saturate(dot(N, -V));
+    float3 radiance = tex2Dlod(uEnv, float4(octUv(reflect(V, N)), 0.0, 0.3)).rgb * uEnvK.x;
+    half2 dfg = DFGApprox(0.06, (half)dotNV);
+    float3 color = inside + radiance * (0.04 * dfg.x + dfg.y);
+#ifdef FOG
+    color = lerp(color, uFog.rgb, fogFactor(dist, uFog.w));
+#endif
+#ifdef REFLECTION
+    return float4(color, 1.0);
+#else
+    return float4(color, dist);
+#endif
+}

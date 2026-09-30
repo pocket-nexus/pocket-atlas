@@ -1,0 +1,12 @@
+# Build output
+/target/
+/vita/target/
+/crates/pocket3d-gxm/target/
+/dist/
+node_modules/
+/web/dist/
+
+# Cooked packs, USB share, validation captures, local provisioning helpers
+/.pocket-build/
+
+.DS_Store

@@ -1,0 +1,22 @@
+// Mip-blur upsample: tent filter over the coarser level, blended with this
+// level's downsample by the bloom radius.
+
+uniform sampler2D uSource;   // coarser upsampled level
+uniform sampler2D uSupport;  // this level's downsample
+uniform float4 uTexel;       // texel of the source, radius, -
+
+float4 main(float2 vUv : TEXCOORD0) : COLOR
+{
+    float2 o = uTexel.xy;
+    float3 c = tex2D(uSource, vUv + float2(-o.x, 0.0)).rgb * 2.0;
+    c += tex2D(uSource, vUv + float2(o.x, 0.0)).rgb * 2.0;
+    c += tex2D(uSource, vUv + float2(0.0, -o.y)).rgb * 2.0;
+    c += tex2D(uSource, vUv + float2(0.0, o.y)).rgb * 2.0;
+    c += tex2D(uSource, vUv + float2(-o.x, -o.y)).rgb;
+    c += tex2D(uSource, vUv + float2(o.x, -o.y)).rgb;
+    c += tex2D(uSource, vUv + float2(-o.x, o.y)).rgb;
+    c += tex2D(uSource, vUv + float2(o.x, o.y)).rgb;
+    c /= 12.0;
+    float3 s = tex2D(uSupport, vUv).rgb;
+    return float4(lerp(s, c, uTexel.z), 1.0);
+}
