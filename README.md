@@ -31,7 +31,7 @@ Controls and URL switches are listed in `web/README.md`.
 
 ## Vita
 
-Requirements: VitaSDK at `~/vitasdk`, `cargo-vita`, Rust `nightly-2026-05-28` with `rust-src`, a Vita with HENkaku/Ensō, and `ur0:data/libshacccg.suprx` (extracted from Sony's PSM Runtime, for example with ShaRKBR33D) on the development console. Packaged builds carry compiled programs and do not need the compiler.
+Requirements: VitaSDK at `~/vitasdk`, `cargo-vita`, Rust `nightly-2026-05-28` with `rust-src`, a Vita with HENkaku/Ensō and **Pocket Devkit** installed (build it with `bun tools/vita.ts devkit --release` in `vendor/pocketjs`; see its `docs/VITA-USB.md`), and `ur0:data/libshacccg.suprx` (extracted from Sony's PSM Runtime, for example with ShaRKBR33D) on the development console. Packaged builds carry compiled programs and do not need the compiler.
 
 ```sh
 git submodule update --init
@@ -40,9 +40,9 @@ git submodule update --init
 (cd web && bun scripts/export-city.ts)       # → .pocket-build/city/tokyo/scene.glb
 bun tools/city.ts cook                        # → .pocket-build/city/tokyo/tokyo.pcity
 
-# 2. Development loop on a console running the PocketJS Hero dev runtime
+# 2. Development loop on a console running Pocket Devkit (PocketJS apps/devkit)
 bun tools/city.ts serve &                     # USB host
-bun tools/city.ts native                      # sync pack + shaders, build, replace Hero's native slot
+bun tools/city.ts native                      # sync pack + shaders, build, run in Devkit's native slot
 bun tools/city.ts status                      # renderer telemetry under `engine`
 bun tools/city.ts profile                     # GPU time per scene
 bun tools/city.ts capture                     # → .pocket-build/validation/captures/

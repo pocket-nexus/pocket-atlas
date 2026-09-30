@@ -4,10 +4,10 @@
 //
 //   bun tools/city.ts cook                          # scene.glb → tokyo.pcity
 //   bun tools/city.ts serve                         # USB host (keep running)
-//   bun tools/city.ts build  [--title P6424D941] [--debug]
+//   bun tools/city.ts build  [--title P3B1D7273] [--debug]
 //   bun tools/city.ts vpk                           # standalone PKCT00001 VPK
-//   bun tools/city.ts push-vpk                      # → ux0:data/pocket-city/ via the dev build
-//   bun tools/city.ts native [--title P6424D941]   # build + USB SELF replacement
+//   bun tools/city.ts push-vpk [file.vpk]           # → ux0:data/pocket-city/ via the dev build
+//   bun tools/city.ts native [--title P3B1D7273]   # build + USB SELF replacement
 //   bun tools/city.ts status|capture [--title ...]
 //   bun tools/city.ts sync                          # pack + shader sources → host0:city/
 //   bun tools/city.ts ctl '{"settings":{"haze":false}}' # host0:city/control.json
@@ -17,9 +17,10 @@
 //   bun tools/city.ts shots [--seconds 90]          # frame time per cinematic shot
 //   (bench, profile, shots: --render vita60|cinematic, default vita60)
 //
-// The default title is the installed Pocket Hero development runtime, whose
-// native slot accepts replacement SELFs; reopening its LiveArea bubble
-// restores Hero. `--title PKCT00001` builds the standalone Pocket City VPK.
+// The default title is Pocket Devkit (P3B1D7273, PocketJS apps/devkit), the
+// development container installed on the console: its native slots accept
+// replacement SELFs and reopening its LiveArea bubble returns to it. `vpk`
+// builds the standalone Pocket City package (PKCT00001).
 
 import { $ } from "bun";
 import { createHash, randomBytes } from "node:crypto";
@@ -43,7 +44,9 @@ function value(flag: string, fallback: string): string {
   return i >= 0 && argv[i + 1] ? argv[i + 1]! : fallback;
 }
 
-const title = value("--title", command === "vpk" ? "PKCT00001" : "P6424D941");
+/** Pocket Devkit's title: vitaTitleId("dev.pocket-stack.devkit"). */
+const DEVKIT = "P3B1D7273";
+const title = value("--title", command === "vpk" ? "PKCT00001" : DEVKIT);
 const release = !argv.includes("--debug");
 const output = `pocket-city-${title}`;
 
@@ -306,8 +309,8 @@ async function shots(): Promise<void> {
 // Copies the standalone VPK to ux0:data/pocket-city/ through the running
 // development build, ready to install from VitaShell.
 async function pushVpk(): Promise<void> {
-  const name = "pocket-city-PKCT00001.vpk";
-  const vpkPath = `${OUT_DIR}/${name}`;
+  const vpkPath = argv[1] && !argv[1].startsWith("--") ? resolve(argv[1]) : `${OUT_DIR}/pocket-city-PKCT00001.vpk`;
+  const name = vpkPath.split("/").pop()!;
   if (!existsSync(vpkPath)) throw new Error(`${vpkPath} missing: run \`bun tools/city.ts vpk\` first`);
   mkdirSync(`${SHARE}/outbox`, { recursive: true });
   rmSync(`${SHARE}/outbox/${name}.done`, { force: true });
