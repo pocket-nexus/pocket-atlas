@@ -1,10 +1,12 @@
 // Lit surface: three.js physical shading (Lambert + GGX, split-sum IBL from
 // the octahedral environment), rain film, puddles with ripples and the
 // planar street reflection, FogExp2. Writes HDR radiance and, in alpha, the
-// eye distance the haze pass integrates to.
+// eye distance the haze pass integrates to; blended materials write their
+// opacity there instead (the blend keeps the destination's distance).
 //
 // Defines: LIGHTS (0..4), ALBEDO_MAP, NORMAL_MAP, ORM_MAP, EMISSION_MAP,
-// VERTEX_COLOR, ALPHA_TEST, WET, PLANAR, DAMP, CLEARCOAT, INTERIOR, FOG,
+// VERTEX_COLOR, ALPHA_TEST, BLEND (alpha-blended), WET, PLANAR, DAMP,
+// CLEARCOAT, INTERIOR, FOG,
 // REFLECTION (mirror pass: cheaper film, no planar lookup), BAKED (static
 // diffuse lighting from the vertices; LIGHTS then counts moving lights only),
 // VERTEX_LIGHTS (lights evaluated per vertex, added to the irradiance),
@@ -128,7 +130,11 @@ half4 main(
 #ifdef FOG
         color = lerp(color, (half3)uFog.rgb, (half)fogFactor(dist, uFog.w));
 #endif
+#ifdef BLEND
+        return half4(color, a.a);
+#else
         return half4(color, (half)dist);
+#endif
     }
 #endif
 
@@ -316,7 +322,9 @@ half4 main(
 #if defined(FOG) && !defined(INTERIOR)
     color = lerp(color, (half3)uFog.rgb, (half)fogFactor(dist, uFog.w));
 #endif
-#ifdef REFLECTION
+#if defined(BLEND)
+    return half4(color, albedo.a);
+#elif defined(REFLECTION)
     return half4(color, 1.0);
 #else
     return half4(color, (half)dist);

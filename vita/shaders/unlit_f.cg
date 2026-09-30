@@ -1,6 +1,7 @@
 // HDR colour × texture × vertex colour, no lighting (signs, screens, lamps).
 //
-// Defines: ALBEDO_MAP, VERTEX_COLOR, FOG, ALPHA_TEST, REFLECTION.
+// Defines: ALBEDO_MAP, VERTEX_COLOR, FOG, ALPHA_TEST, BLEND (alpha-blended:
+// opacity in alpha instead of the eye distance), REFLECTION.
 
 #include "common.cgh"
 
@@ -30,7 +31,9 @@ float4 main(
 #ifdef FOG
     c.rgb = lerp(c.rgb, uFog.rgb, fogFactor(dist, uFog.w));
 #endif
-#ifdef REFLECTION
+#if defined(BLEND)
+    return c;
+#elif defined(REFLECTION)
     return float4(c.rgb, 1.0);
 #else
     return float4(c.rgb, dist);
