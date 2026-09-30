@@ -21,6 +21,22 @@ export const PLACES: PlaceDef[] = [
     load: () => import("./tokyo-konbini/index"),
   },
   {
+    // Stair head 35.68502, 139.72330 (29.4 m); looking down the flight faces a bearing of ~33°.
+    id: "suga-shrine-stairs",
+    name: "Suga Shrine Stairs",
+    native: "須賀神社の男坂",
+    locality: "Yotsuya, Tokyo",
+    localityNative: "四谷",
+    country: "Japan",
+    lat: 35.68502,
+    lon: 139.7233,
+    timeZone: "Asia/Tokyo",
+    status: "live",
+    weather: "Clear · 31°C",
+    accent: "#ff5a4e",
+    load: () => import("./suga-shrine-stairs/index"),
+  },
+  {
     id: "hong-kong-dai-pai-dong",
     name: "Dai Pai Dong under Neon",
     native: "霓虹大排檔",

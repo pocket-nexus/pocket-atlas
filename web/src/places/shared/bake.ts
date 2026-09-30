@@ -51,7 +51,7 @@ export class Baker {
     width: number,
     height: number,
     body: string,
-    opts: { srgb?: boolean; uniforms?: Record<string, IUniform>; repeat?: boolean; mipmaps?: boolean; header?: string } = {},
+    opts: { srgb?: boolean; uniforms?: Record<string, IUniform>; repeat?: boolean; mipmaps?: boolean; header?: string; tiles?: number } = {},
   ): Texture {
     const mip = opts.mipmaps !== false;
     const rt = new WebGLRenderTarget(width, height, {
@@ -89,7 +89,21 @@ export class Baker {
     this.quad.material = mat;
     const prev = this.renderer.getRenderTarget();
     this.renderer.setRenderTarget(rt);
-    this.quad.render(this.renderer);
+    const tiles = Math.max(1, opts.tiles ?? 1);
+    if (tiles === 1) this.quad.render(this.renderer);
+    else {
+      // Expensive bakes run as horizontal strips so no single draw stalls the GPU.
+      rt.scissorTest = true;
+      for (let i = 0; i < tiles; i++) {
+        const y0 = Math.floor((height * i) / tiles);
+        const y1 = Math.floor((height * (i + 1)) / tiles);
+        rt.scissor.set(0, y0, width, y1 - y0);
+        this.renderer.setRenderTarget(rt);
+        this.quad.render(this.renderer);
+        this.renderer.getContext().flush();
+      }
+      rt.scissorTest = false;
+    }
     this.renderer.setRenderTarget(prev);
     mat.dispose();
     this.targets.push(rt);

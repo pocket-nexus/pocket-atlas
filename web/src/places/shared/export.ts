@@ -567,8 +567,32 @@ export async function exportPlace(input: ExportInput): Promise<ExportOutput> {
     if (blob) files.push({ name: f.name, bytes: new Uint8Array(await blob.arrayBuffer()) });
   }
 
+  // Scene statistics: draws are meshes (after batching), triangles are indexed faces.
+  let draws = 0;
+  let triangles = 0;
+  const texStats = new Map<string, string>();
+  clone.traverse((o) => {
+    const m = o as Mesh;
+    if (!m.isMesh) return;
+    draws++;
+    const g = m.geometry;
+    triangles += (g.index ? g.index.count : g.getAttribute("position").count) / 3;
+    for (const mat of Array.isArray(m.material) ? m.material : [m.material]) {
+      for (const v of Object.values(mat)) {
+        const t = v as Texture | null;
+        if (t && typeof t === "object" && t.isTexture && t.image) {
+          const img = t.image as { width?: number; height?: number };
+          texStats.set(t.uuid, `${t.name || mat.name}:${img.width}x${img.height}`);
+        }
+      }
+    }
+  });
+
   const report = {
     ms: Math.round(performance.now() - started),
+    draws,
+    triangles: Math.round(triangles),
+    textures: [...texStats.values()].sort(),
     glbBytes: glb.byteLength,
     animatedNodes: rec.tracks.length,
     tracks: clipTracks.length,
