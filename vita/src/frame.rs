@@ -214,7 +214,7 @@ struct Mat {
     wet2: [f32; 4],
 }
 
-fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture]) -> Mat {
+fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: bool) -> Mat {
     let orm_mean = if m.kind == pc::Kind::Standard { m.orm.map(|t| textures[t as usize].mean) } else { None };
     let mut defines: Vec<&'static str> = Vec::new();
     let mut tex = [None; 4];
@@ -258,6 +258,9 @@ fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture]) -> Mat {
         }
         if m.interior {
             defines.push("INTERIOR");
+        }
+        if sun && !m.interior {
+            defines.push("SUN");
         }
     }
     if m.vertex_color && matches!(m.kind, pc::Kind::Standard | pc::Kind::Unlit) {
@@ -336,15 +339,42 @@ fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture]) -> Mat {
 }
 
 /// Grade applied through the colour LUT: contrast, saturation, lift, gain.
-const GRADE: [f32; 2] = [1.16, 1.18];
-const LIFT: [f32; 3] = [0.1, 0.35, 0.45];
-const GAIN: [f32; 3] = [1.04, 0.99, 0.94];
 /// LUT cells per axis over AgX's log2 domain [-12.47393, 4.02607].
 pub(crate) const LUT: usize = 32;
 
-/// AgX (as three.js) followed by the grade and sRGB encoding, for one
-/// scene-linear colour: what the composite program looked up per pixel.
-fn tone(c: [f32; 3]) -> [f32; 3] {
+/// three.js ACESFilmicToneMapping (exposure applied by the caller), linear out.
+fn aces(c: [f32; 3]) -> [f32; 3] {
+    let x = c.map(|v| v / 0.6);
+    // Column vectors, as the GLSL mat3 constructors.
+    let input = [[0.59719, 0.07600, 0.02840], [0.35458, 0.90834, 0.13383], [0.04823, 0.01566, 0.83777]];
+    let output = [[1.60475, -0.10208, -0.00327], [-0.53108, 1.10813, -0.07276], [-0.07367, -0.00605, 1.07602]];
+    let mul = |m: [[f32; 3]; 3], v: [f32; 3]| -> [f32; 3] { std::array::from_fn(|j| m[0][j] * v[0] + m[1][j] * v[1] + m[2][j] * v[2]) };
+    let v = mul(input, x).map(|v| (v * (v + 0.0245786) - 0.000090537) / (v * (0.983729 * v + 0.4329510) + 0.238081));
+    mul(output, v).map(|v| v.clamp(0.0, 1.0))
+}
+
+/// The place's tone curve (AgX or ACES, as three.js) followed by its grade
+/// (the web's grade effect: contrast, saturation, lift, gain) and sRGB
+/// encoding, for one scene-linear colour.
+fn tone(c: [f32; 3], post: &pc::Post) -> [f32; 3] {
+    let c = c.map(|v| v * post.exposure);
+    let v = if post.tone == pc::ToneCurve::Aces { aces(c) } else { agx(c) };
+    let v = v.map(|x| 0.18 * (x.max(0.0) / 0.18).powf(post.contrast));
+    let l = 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
+    let smooth = |a: f32, b: f32, x: f32| {
+        let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    let (sh, hi) = (1.0 - smooth(0.0, 0.35, l), smooth(0.35, 1.0, l));
+    std::array::from_fn(|k| {
+        let x = (l + (v[k] - l) * post.saturation + post.lift[k] * sh * 0.04) * (1.0 + (post.gain[k] - 1.0) * hi);
+        let x = x.clamp(0.0, 1.0);
+        if x < 0.0031308 { x * 12.92 } else { 1.055 * x.powf(1.0 / 2.4) - 0.055 }
+    })
+}
+
+/// AgX (as three.js), display-linear out.
+fn agx(c: [f32; 3]) -> [f32; 3] {
     let mul = |v: [f32; 3], m: [[f32; 3]; 3]| -> [f32; 3] { std::array::from_fn(|j| v[0] * m[0][j] + v[1] * m[1][j] + v[2] * m[2][j]) };
     let to2020 = [[0.6274, 0.0691, 0.0164], [0.3293, 0.9195, 0.0880], [0.0433, 0.0113, 0.8956]];
     let inset = [[0.856627153315983, 0.137318972929847, 0.11189821299995], [0.0951212405381588, 0.761241990602591, 0.0767994186031903], [0.0482516061458583, 0.101439036467562, 0.811302368396859]];
@@ -357,32 +387,20 @@ fn tone(c: [f32; 3]) -> [f32; 3] {
         *x = 15.5 * x4 * x2 - 40.14 * x4 * l + 31.96 * x4 - 6.868 * x2 * l + 0.4298 * x2 + 0.1191 * l - 0.00232;
     }
     v = mul(v, outset).map(|x| x.max(0.0).powf(2.2));
-    v = mul(v, to_srgb).map(|x| x.clamp(0.0, 1.0));
-    v = v.map(|x| 0.18 * (x / 0.18).powf(GRADE[0]));
-    let l = 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
-    let smooth = |a: f32, b: f32, x: f32| {
-        let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
-        t * t * (3.0 - 2.0 * t)
-    };
-    let (sh, hi) = (1.0 - smooth(0.0, 0.35, l), smooth(0.35, 1.0, l));
-    std::array::from_fn(|k| {
-        let x = (l + (v[k] - l) * GRADE[1] + LIFT[k] * sh * 0.04) * (1.0 + (GAIN[k] - 1.0) * hi);
-        let x = x.clamp(0.0, 1.0);
-        if x < 0.0031308 { x * 12.92 } else { 1.055 * x.powf(1.0 / 2.4) - 0.055 }
-    })
+    mul(v, to_srgb).map(|x| x.clamp(0.0, 1.0))
 }
 
 /// LUT texels: `LUT` slices of LUT×LUT side by side (blue picks the slice,
 /// red runs across it, green down), RGBA8 in sRGB.
 /// The colour table as a tiled texture: each 32×32 tile is one blue slice,
 /// stored row by row, so a lookup's two slices are 4 KiB blocks.
-fn tone_lut() -> Vec<u8> {
+fn tone_lut(post: &pc::Post) -> Vec<u8> {
     let mut px = vec![0u8; LUT * LUT * LUT * 4];
     let at = |i: usize| (i as f32 / (LUT - 1) as f32 * 16.5 - 12.47393).exp2();
     for b in 0..LUT {
         for g in 0..LUT {
             for r in 0..LUT {
-                let c = tone([at(r), at(g), at(b)]);
+                let c = tone([at(r), at(g), at(b)], post);
                 let o = (b * LUT * LUT + g * LUT + r) * 4;
                 px[o..o + 4].copy_from_slice(&[(c[0] * 255.0).round() as u8, (c[1] * 255.0).round() as u8, (c[2] * 255.0).round() as u8, 255]);
             }
@@ -395,7 +413,6 @@ pub(crate) const MASK_W: usize = 64;
 pub(crate) const MASK_H: usize = 256;
 /// The GPU may still read the two frames before this one.
 const MASK_BUFFERS: usize = 3;
-const VIGNETTE: f32 = 0.45;
 pub(crate) const GRAIN: usize = 64;
 
 /// An 8-bit single-channel tiled texture (32×32 tiles) over `px`.
@@ -421,7 +438,7 @@ pub(crate) fn tiled_at(x: usize, y: usize, w: usize) -> usize {
 
 /// The screen mask the composite multiplies by: vignette, letterbox bars
 /// (`bars` = how far they have closed) and the dip to black.
-fn write_mask(px: *mut u8, fade: f32, bars: f32) {
+fn write_mask(px: *mut u8, fade: f32, bars: f32, vignette: f32) {
     let aspect = W as f32 / H as f32;
     let bar = bars * (0.5 - (aspect / 2.39) * 0.5).max(0.0);
     for y in 0..MASK_H {
@@ -434,7 +451,7 @@ fn write_mask(px: *mut u8, fade: f32, bars: f32) {
             let r = (q.0 * q.0 + q.1 * q.1).sqrt();
             let t = ((r - 1.05) / (0.25 - 1.05)).clamp(0.0, 1.0);
             let vig = t * t * (3.0 - 2.0 * t);
-            let m = (1.0 - VIGNETTE * 0.55) + VIGNETTE * 0.55 * vig;
+            let m = (1.0 - vignette) + vignette * vig;
             unsafe { *px.add(tiled_at(x, y, MASK_W)) = (m * open * 255.0).round() as u8 };
         }
     }
@@ -501,6 +518,64 @@ pub struct Renderer {
     refl_ready: bool,
     haze_ready: bool,
     haze_index: usize,
+    /// The place's tone, grade and bloom.
+    post: pc::Post,
+    /// The sun's shadow map (places with a sun).
+    sun: Option<SunPass>,
+    has_rain: bool,
+    has_haze: bool,
+    has_reflection: bool,
+    day_sky: bool,
+}
+
+/// The sun's shadow map: the static scene rendered once from the sun, its
+/// distance along the light packed into RGB (`shadow_f.cg`).
+struct SunPass {
+    target: Target,
+    /// Point-sampled view of the map (the packed depth must not be filtered).
+    map: g::SceGxmTexture,
+    vp: [f32; 16],
+    dir: [f32; 4],
+    rad: [f32; 4],
+    mat: [f32; 8],
+    k: [f32; 4],
+    ready: bool,
+}
+
+impl SunPass {
+    unsafe fn new(vram: &mut Arena, mem: &mut Arena, sun: &pc::Sun) -> Result<Self, String> {
+        let l = Vec3::from(sun.direction).normalize_or(Vec3::Y);
+        let sh = sun.shadow.clone().unwrap_or(pc::SunShadow { position: (l * 80.0).to_array(), ortho: [-40.0, 40.0, -40.0, 40.0, 1.0, 160.0], map_size: 2048, bias: 0.0, normal_bias: 0.02, radius: 1.0 });
+        let size = sh.map_size.clamp(512, 2048);
+        let target = Target::new(vram, mem, size, size, ColorFormat::Rgba8, Msaa::None, Depth::Transient)?;
+        let mut map = target.texture;
+        g::sceGxmTextureSetMinFilter(&mut map, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_POINT);
+        g::sceGxmTextureSetMagFilter(&mut map, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_POINT);
+        let pos = Vec3::from(sh.position);
+        let up = if l.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
+        let view = glam::camera::rh::view::look_at_mat4(pos, pos - l, up);
+        let o = sh.ortho;
+        let proj = glam::camera::rh::proj::directx::orthographic(o[0], o[1], o[2], o[3], o[4], o[5]);
+        let vp = proj * view;
+        let r = vp.transpose();
+        // World → uv: u = x·½ + ½, v = ½ − y·½ (the viewport puts NDC +y on row 0).
+        let (rx, ry, rw) = (r.x_axis, r.y_axis, r.w_axis);
+        let urow = rx * 0.5 + rw * 0.5;
+        let vrow = ry * -0.5 + rw * 0.5;
+        let near = pos.dot(-l) + o[4];
+        let range = (o[5] - o[4]).max(1.0);
+        Ok(Self {
+            target,
+            map,
+            vp: rows4x4(&vp),
+            dir: [l.x, l.y, l.z, 0.0],
+            rad: [sun.radiance[0], sun.radiance[1], sun.radiance[2], sh.normal_bias.max(0.01)],
+            mat: [urow.x, urow.y, urow.z, urow.w, vrow.x, vrow.y, vrow.z, vrow.w],
+            // Bias: the authored depth bias over the range, at least ~2 cm.
+            k: [near, 1.0 / range, sh.bias.abs().max(0.02 / range), sh.radius.max(0.5) * 0.5 / size as f32],
+            ready: false,
+        })
+    }
 }
 
 pub(crate) struct Rng(pub(crate) u32);
@@ -593,7 +668,7 @@ impl Renderer {
             finals.push(Target::new(&mut vram, &mut mem, w, h, ColorFormat::Rgba8, Msaa::None, Depth::None)?);
         }
 
-        let lut_px = tone_lut();
+        let lut_px = tone_lut(&scene.meta.post);
         let lut_mem = vram.alloc(lut_px.len(), 512)?;
         core::ptr::copy_nonoverlapping(lut_px.as_ptr(), lut_mem, lut_px.len());
         let mut lut: g::SceGxmTexture = core::mem::zeroed();
@@ -648,7 +723,16 @@ impl Renderer {
         let beacons = fx_quads(&mut mem, beacons.len(), [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]], |i| ([0.0; 4], beacons[i], [0.0; 3]))?;
 
         let env_scene = scene.meta.atmosphere.environment_strength;
-        let mats = scene.meta.materials.iter().map(|m| material(m, env_scene, &scene.meta.textures)).collect();
+        let has_sun = scene.meta.sun.is_some();
+        let mats: Vec<Mat> = scene.meta.materials.iter().map(|m| material(m, env_scene, &scene.meta.textures, has_sun)).collect();
+        let sun = match &scene.meta.sun {
+            Some(s) => Some(SunPass::new(&mut vram, &mut mem, s)?),
+            None => None,
+        };
+        // What this place has: the rain, its haze and the street mirror.
+        let has_rain = scene.meta.rain.active;
+        let has_haze = !scene.meta.fog_lights.is_empty();
+        let has_reflection = mats.iter().any(|m| m.defines.contains(&"PLANAR"));
         Ok(Self {
             settings,
             mats,
@@ -690,16 +774,24 @@ impl Renderer {
             refl_ready: false,
             haze_ready: false,
             haze_index: 0,
+            post: scene.meta.post.clone(),
+            sun,
+            has_rain,
+            has_haze,
+            has_reflection,
+            day_sky: scene.meta.day_sky.is_some(),
         })
     }
 
-    /// Every program the scene needs, so compiles start before the first frame.
     /// Frees the renderer's targets and memory.
     ///
     /// # Safety
     /// GPU idle with respect to every resource of this renderer.
     pub unsafe fn release(self) {
-        let Self { refls, mains, hazes, prefilters, finals, down, up, _vram, _mem, .. } = self;
+        let Self { refls, mains, hazes, prefilters, finals, down, up, _vram, _mem, sun, .. } = self;
+        if let Some(s) = sun {
+            s.target.destroy();
+        }
         for (a, b) in refls {
             a.destroy();
             b.destroy();
@@ -711,6 +803,7 @@ impl Renderer {
         _mem.free();
     }
 
+    /// Every program the scene needs, so compiles start before the first frame.
     pub fn warm(&self, gpu: &mut Gpu, scene: &Scene) {
         let mut seen = std::collections::BTreeSet::new();
         for d in &scene.draws {
@@ -754,6 +847,85 @@ impl Renderer {
         for k in fixed_keys() {
             gpu.want(&k);
         }
+        if self.sun.is_some() {
+            for d in &scene.draws {
+                if let Some((vs, fs, _)) = self.shadow_keys(d) {
+                    gpu.want(&vs);
+                    gpu.want(&fs);
+                }
+            }
+            gpu.want(&Key::new("fill_f.cg", &[]));
+        }
+        if self.day_sky {
+            gpu.want(&Key::new("sky_day_f.cg", &[]));
+        }
+    }
+
+    /// Shadow-pass programs for a draw that casts: static, opaque or cut out.
+    fn shadow_keys(&self, d: &crate::scene::DrawGpu) -> Option<(Key, Key, Layout)> {
+        let m = &self.mats[d.material as usize];
+        let v = variant(d);
+        if v == 1 || d.node.is_some() || m.transparent || m.class == 2 || m.class == 3 {
+            return None;
+        }
+        let vs = surface_key(v, !m.alpha_test, (false, false, false));
+        let fs = Key::new("shadow_f.cg", if m.alpha_test { &["ALPHA_TEST"][..] } else { &[] });
+        Some((vs, fs, [Layout::Static, Layout::Skinned, Layout::Baked][v]))
+    }
+
+    /// Draws the sun's shadow map once every program it needs is ready.
+    unsafe fn shadow_pass(&mut self, ctx: *mut g::SceGxmContext, gpu: &mut Gpu, scene: &Scene) -> Result<(), String> {
+        let Some(sp) = self.sun.as_mut().map(|s| s as *mut SunPass) else { return Ok(()) };
+        let fill = PipeKey { vs: key_v("post_v.cg", &[]), fs: Key::new("fill_f.cg", &[]), layout: Layout::Pos2, blend: BlendMode::Opaque, output: Out::Uchar4, msaa: Msaa::None.gxm() };
+        let Some(fill) = gpu.pipeline(&fill).map(|p| p as *const Pipeline) else { return Ok(()) };
+        let mut draws = Vec::new();
+        for (i, d) in scene.draws.iter().enumerate() {
+            let Some((vs, fs, layout)) = self.shadow_keys(d) else { continue };
+            let key = PipeKey { vs, fs, layout, blend: BlendMode::Opaque, output: Out::Uchar4, msaa: Msaa::None.gxm() };
+            match gpu.pipeline(&key) {
+                Some(p) => draws.push((i, p as *const Pipeline)),
+                None => return Ok(()),
+            }
+        }
+        let size = (*sp).target.width;
+        (*sp).target.begin(ctx, 1.0)?;
+        Self::viewport(ctx, size, size);
+        g::sceGxmSetCullMode(ctx, g::SceGxmCullMode_SCE_GXM_CULL_NONE);
+        g::sceGxmSetFrontDepthBias(ctx, 0, 0);
+        // Everything starts at the far end of the light (lit).
+        self.use_pipeline(ctx, &*fill);
+        g::sceGxmSetFrontDepthFunc(ctx, g::SceGxmDepthFunc_SCE_GXM_DEPTH_FUNC_ALWAYS);
+        g::sceGxmSetFrontDepthWriteEnable(ctx, g::SceGxmDepthWriteMode_SCE_GXM_DEPTH_WRITE_DISABLED);
+        let u = Uniforms::reserve(ctx, &*fill);
+        u.set(&*fill, U::RayZ, &[0.0; 4]);
+        u.set(&*fill, U::Base, &[1.0; 4]);
+        g::sceGxmSetVertexStream(ctx, 0, self.tri_vb.cast());
+        g::sceGxmDraw(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, self.tri_ib.cast(), 3);
+        g::sceGxmSetFrontDepthFunc(ctx, g::SceGxmDepthFunc_SCE_GXM_DEPTH_FUNC_LESS_EQUAL);
+        g::sceGxmSetFrontDepthWriteEnable(ctx, g::SceGxmDepthWriteMode_SCE_GXM_DEPTH_WRITE_ENABLED);
+        for (i, p) in draws {
+            let d = &scene.draws[i];
+            let p = &*p;
+            self.use_pipeline(ctx, p);
+            let m = &self.mats[d.material as usize];
+            let u = Uniforms::reserve(ctx, p);
+            u.set(p, U::Model, &scene.model_rows(d));
+            u.set(p, U::Dequant, &d.dequant);
+            u.set(p, U::ViewProj, &(*sp).vp);
+            u.set(p, U::Uv, &d.uv);
+            u.set(p, U::SunDir, &(*sp).dir);
+            u.set(p, U::ShadowK, &(*sp).k);
+            u.set(p, U::Base, &m.base);
+            u.set(p, U::Emissive, &m.emissive);
+            if let Some(t) = m.tex[0] {
+                bind(ctx, p, S::Albedo, &scene.textures[t].gxm);
+            }
+            g::sceGxmSetVertexStream(ctx, 0, d.vb.cast());
+            g::sceGxmDraw(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, d.ib.cast(), d.count);
+        }
+        (*sp).target.end(ctx, None);
+        (*sp).ready = true;
+        Ok(())
     }
 
     fn mi(&self) -> usize {
@@ -845,10 +1017,16 @@ impl Renderer {
         let all = !self.settings.amortize || moving;
         let draw_refl = all || !self.refl_ready || self.tick % 2 == 0;
         let draw_haze = all || !self.haze_ready || self.tick % 2 == 1;
-        self.refl_ready &= self.settings.reflection;
+        let reflection = self.settings.reflection && self.has_reflection;
+        self.refl_ready &= reflection;
+
+        // ---------------------------------------------------- sun shadow
+        if self.sun.as_ref().is_some_and(|s| !s.ready) {
+            self.shadow_pass(ctx, gpu, scene)?;
+        }
 
         // ---------------------------------------------------- reflection
-        if self.settings.reflection && draw_refl {
+        if reflection && draw_refl {
             self.refl_ready = true;
             let vpm = vp * camera::mirror();
             let mut eye = view.pos;
@@ -882,7 +1060,7 @@ impl Renderer {
             self.sky(ctx, gpu, &frame, Out::Half4, msaa);
         }
         self.draw_meshes(ctx, gpu, scene, &frame, &planes, false, true, &mut st);
-        if self.settings.rain {
+        if self.settings.rain && self.has_rain {
             self.particles(ctx, gpu, scene, &frame, rain);
         }
         self.timeline.end(ctx, &self.mains[mi], "main");
@@ -895,7 +1073,7 @@ impl Renderer {
             haze_u[1].1 = [0.0, 0.0, 0.0, SKY_FAR];
         }
         // Far rain curtain, traced in the haze pass (bit 0 of `fx`).
-        let curtain = if self.settings.rain && self.settings.fx & 1 != 0 { 0.08 * rain.intensity } else { 0.0 };
+        let curtain = if self.settings.rain && self.has_rain && self.settings.fx & 1 != 0 { 0.08 * rain.intensity } else { 0.0 };
         haze_u.push((U::Curtain, [0.55, 0.6, 0.72, curtain]));
         let step = self.step();
         let hi = step.haze_size;
@@ -912,7 +1090,7 @@ impl Renderer {
         };
         // A step without haze skips the pass; its buffer is weighted out and
         // redrawn in full when haze returns.
-        let haze_on = step.haze;
+        let haze_on = step.haze && self.has_haze;
         let haze_w = if haze_on { 1.0 } else { 0.0 };
         self.haze_ready &= haze_on;
         if haze_on && draw_haze {
@@ -934,7 +1112,7 @@ impl Renderer {
             let pre = &mut self.prefilters[if full { 0 } else { 1 }] as *mut Target;
             let (a, b) = (&self.mains[mi].texture as *const _, &self.hazes[hi].texture as *const _);
             let texel = [1.0 / self.mains[mi].width as f32, 1.0 / self.mains[mi].height as f32, 0.0, 0.0];
-            self.post(ctx, gpu, &mut *pre, "prefilter_f.cg", &[(S::Scene, a), (S::HazeTex, b)], &[(U::Texel, texel), (U::Threshold, [1.1, 0.4, haze_w, 0.0])], &frame)?;
+            self.post(ctx, gpu, &mut *pre, "prefilter_f.cg", &[(S::Scene, a), (S::HazeTex, b)], &[(U::Texel, texel), (U::Threshold, [self.post.bloom_threshold, self.post.bloom_smoothing, haze_w, 0.0])], &frame)?;
             let (d8, d16) = (&mut self.down[0] as *mut Target, &mut self.down[1] as *mut Target);
             let (u8_, u4) = (&mut self.up[0] as *mut Target, &mut self.up[1] as *mut Target);
             // (source, destination, support for upsamples)
@@ -977,7 +1155,7 @@ impl Renderer {
             key_v("post_v.cg", &["GRAIN"]),
             Key::new("composite_f.cg", &defs),
             &[(S::Scene, scene_tex), (S::HazeTex, haze_tex), (S::Bloom, bloom_tex), (S::Lut, lut), (S::Mask, mask), (S::Grain, grain)],
-            &[(U::BloomK, [0.85, self.settings.exposure, 0.0, 0.0]), (U::Grade, [haze_w, 0.0, 0.03, 0.0]), (U::GrainK, grain_k)],
+            &[(U::BloomK, [self.post.bloom_intensity, self.settings.exposure, 0.0, 0.0]), (U::Grade, [haze_w, 0.0, self.post.grain, 0.0]), (U::GrainK, grain_k)],
             &[],
             &frame,
         )?;
@@ -1079,7 +1257,7 @@ impl Renderer {
             Some((i, k)) if k == key => i,
             prev => {
                 let i = prev.map_or(0, |(i, _)| (i + 1) % MASK_BUFFERS);
-                write_mask(self.masks[i].0, key.0 as f32 / 255.0, key.1 as f32 / 1023.0);
+                write_mask(self.masks[i].0, key.0 as f32 / 255.0, key.1 as f32 / 1023.0, self.post.vignette);
                 self.mask_at = Some((i, key));
                 i
             }
@@ -1088,7 +1266,8 @@ impl Renderer {
     }
 
     unsafe fn sky(&mut self, ctx: *mut g::SceGxmContext, gpu: &mut Gpu, f: &FrameConsts, out: Out, msaa: u32) {
-        let key = PipeKey { vs: key_v("sky_v.cg", &[]), fs: Key::new("sky_f.cg", &[]), layout: Layout::Pos2, blend: BlendMode::Opaque, output: out, msaa };
+        let fs = if self.day_sky { "sky_day_f.cg" } else { "sky_f.cg" };
+        let key = PipeKey { vs: key_v("sky_v.cg", &[]), fs: Key::new(fs, &[]), layout: Layout::Pos2, blend: BlendMode::Opaque, output: out, msaa };
         let Some(p) = gpu.pipeline(&key) else { return };
         let p = &*(p as *const Pipeline);
         self.use_pipeline(ctx, p);
@@ -1102,6 +1281,14 @@ impl Renderer {
         u.set(p, U::Zenith, &f.zenith);
         u.set(p, U::Horizon, &f.horizon);
         u.set(p, U::Glow, &f.glow);
+        if let Some(d) = &f.day {
+            u.set(p, U::SkyDay, &d.day);
+            u.set(p, U::SkySun, &d.sun);
+            u.set(p, U::SkyGlow, &d.glow);
+            u.set(p, U::SkyDisc, &d.disc);
+            u.set(p, U::CloudSun, &d.cloud_sun);
+            u.set(p, U::CloudAmb, &d.cloud_amb);
+        }
         bind(ctx, p, S::Clouds, f.clouds);
         g::sceGxmSetVertexStream(ctx, 0, self.tri_vb.cast());
         g::sceGxmDraw(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, self.tri_ib.cast(), 3);
@@ -1264,8 +1451,15 @@ impl Renderer {
             u.set(p, U::HemiSky, &f.hemi_sky);
             u.set(p, U::HemiGround, &f.hemi_ground);
             u.set(p, U::Ripple, &f.ripple);
-            u.set(p, U::ReflOn, &[if self.settings.reflection { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0]);
+            u.set(p, U::ReflOn, &[if self.settings.reflection && self.has_reflection { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0]);
             u.set(p, U::Haze, &f.skyline_haze);
+            if let Some(sp) = &self.sun {
+                u.set(p, U::SunDir, &sp.dir);
+                u.set(p, U::SunRad, &sp.rad);
+                u.set(p, U::SunMat, &sp.mat);
+                u.set(p, U::ShadowK, &sp.k);
+                bind(ctx, p, S::Shadow, &sp.map);
+            }
             if n > 0 {
                 let k = n * 4;
                 u.set(p, U::LightPos, &lights.pos[..k]);
@@ -1585,6 +1779,17 @@ struct FrameConsts {
     clouds: *const g::SceGxmTexture,
     haze: HazeConsts,
     fx: FxConsts,
+    day: Option<DaySkyConsts>,
+}
+
+/// `sky_day_f.cg` uniforms.
+struct DaySkyConsts {
+    day: [f32; 4],
+    sun: [f32; 4],
+    glow: [f32; 4],
+    disc: [f32; 4],
+    cloud_sun: [f32; 4],
+    cloud_amb: [f32; 4],
 }
 
 impl FrameConsts {
@@ -1672,15 +1877,37 @@ impl FrameConsts {
             ray_x: [right.x * tx, right.y * tx, right.z * tx, 0.0],
             ray_y: [up.x * ty, up.y * ty, up.z * ty, 0.0],
             ray_z: [fwd.x, fwd.y, fwd.z, 0.0],
-            zenith: [a.sky_zenith[0], a.sky_zenith[1], a.sky_zenith[2], time],
-            horizon: [a.sky_horizon[0], a.sky_horizon[1], a.sky_horizon[2], 1.0 / fx_meta.cloud_cells.max(1.0)],
-            glow: [a.sky_glow[0], a.sky_glow[1], a.sky_glow[2], SKY_FAR],
+            zenith: match &scene.meta.day_sky {
+                Some(d) => [d.zenith[0], d.zenith[1], d.zenith[2], d.gradient_power],
+                None => [a.sky_zenith[0], a.sky_zenith[1], a.sky_zenith[2], time],
+            },
+            horizon: match &scene.meta.day_sky {
+                Some(d) => [d.horizon[0], d.horizon[1], d.horizon[2], d.ground_blend],
+                None => [a.sky_horizon[0], a.sky_horizon[1], a.sky_horizon[2], 1.0 / fx_meta.cloud_cells.max(1.0)],
+            },
+            glow: match &scene.meta.day_sky {
+                Some(d) => [d.ground[0], d.ground[1], d.ground[2], SKY_FAR],
+                None => [a.sky_glow[0], a.sky_glow[1], a.sky_glow[2], SKY_FAR],
+            },
+            day: scene.meta.day_sky.as_ref().map(|d| {
+                let sc = |k: f32| [d.sun_color[0] * k, d.sun_color[1] * k, d.sun_color[2] * k];
+                let g = sc(d.glow);
+                let c = sc(d.disc);
+                DaySkyConsts {
+                    day: [(time * d.drift).fract(), d.fade_elevation.max(1e-3), d.clouds.is_some() as u32 as f32, d.glow_tight[1]],
+                    sun: [d.sun_direction[0], d.sun_direction[1], d.sun_direction[2], 0.0],
+                    glow: [g[0], g[1], g[2], d.glow_wide[0]],
+                    disc: [c[0], c[1], c[2], d.disc_cos_outer],
+                    cloud_sun: [d.cloud_sun[0], d.cloud_sun[1], d.cloud_sun[2], d.glow_wide[1]],
+                    cloud_amb: [d.cloud_ambient[0], d.cloud_ambient[1], d.cloud_ambient[2], d.disc_cos_inner],
+                }
+            }),
             pixel: 2.0 * ty / H as f32,
             env: tex(a.environment),
             puddles: tex(fx_meta.puddles),
             ripples: tex(fx_meta.ripples),
             beads: tex(fx_meta.beads),
-            clouds: tex(fx_meta.clouds),
+            clouds: tex(scene.meta.day_sky.as_ref().and_then(|d| d.clouds).or(fx_meta.clouds)),
             haze,
             fx,
         }

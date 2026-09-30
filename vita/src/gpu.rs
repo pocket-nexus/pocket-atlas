@@ -72,6 +72,16 @@ pub enum U {
     Marker,
     MarkerCol,
     MarkerK,
+    SunDir,
+    SunRad,
+    SunMat,
+    ShadowK,
+    SkyDay,
+    SkySun,
+    SkyGlow,
+    SkyDisc,
+    CloudSun,
+    CloudAmb,
     Count,
 }
 
@@ -81,6 +91,7 @@ const UNIFORM_NAMES: [&str; U::Count as usize] = [
     "uZenith", "uHorizon", "uGlow", "uCam", "uTime", "uBox", "uWind", "uCenter", "uAmbient", "uDry", "uFogPos", "uFogCol", "uFogDir",
     "uOpacity", "uBoxMin", "uBoxMax", "uTexel", "uThreshold", "uBloomK", "uGrade",
     "uCurtain", "uGrainK", "uEarthRot", "uSun", "uGlobeK", "uGlobeK2", "uCloudOff", "uMarker", "uMarkerCol", "uMarkerK",
+    "uSunDir", "uSunRad", "uSunMat", "uShadowK", "uSkyDay", "uSkySun", "uSkyGlow", "uSkyDisc", "uCloudSun", "uCloudAmb",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,12 +120,13 @@ pub enum S {
     SunTrans,
     Inscatter,
     Transmit,
+    Shadow,
     Count,
 }
 
 const SAMPLER_NAMES: [&str; S::Count as usize] = [
     "uAlbedo", "uNormalMap", "uOrm", "uEmission", "uEnv", "uPuddles", "uRipples", "uReflSharp", "uReflBlur", "uBeads", "uClouds",
-    "uScene", "uHazeTex", "uBloom", "uSource", "uSupport", "uLut", "uMask", "uGrain", "uLights", "uSunTrans", "uInscatter", "uTransmit",
+    "uScene", "uHazeTex", "uBloom", "uSource", "uSupport", "uLut", "uMask", "uGrain", "uLights", "uSunTrans", "uInscatter", "uTransmit", "uShadow",
 ];
 
 pub type Param = *const g::SceGxmProgramParameter;

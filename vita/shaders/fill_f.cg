@@ -1,0 +1,8 @@
+// A constant colour over the whole target (clears a map before it is drawn).
+
+uniform float4 uBase;
+
+float4 main() : COLOR
+{
+    return uBase;
+}

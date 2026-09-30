@@ -272,9 +272,32 @@ export class SugaStage implements Stage {
           camera: c.camera,
           ...c.special,
           tracks: c.tracks,
+          post: this.postMeta(),
+          // The cooker's vertex bake stands in for N8AO: sky occlusion by ray casts.
+          bake: { skyOcclusion: { rays: 48, reach: 8, foliage: 0.55 } },
         }),
         onProgress: (label) => console.info(`[export] ${label}`),
       });
+    };
+  }
+
+  /** The grade and bloom as uniforms hold them, for handheld ports. */
+  private postMeta(): Record<string, unknown> {
+    const u = this.post.grade.uniforms;
+    const v3 = (k: string) => (u.get(k)!.value as Vector3).toArray();
+    const b = this.post.bloom;
+    return {
+      tone: "aces",
+      exposure: this.ctx.renderer.toneMappingExposure,
+      contrast: u.get("uContrast")!.value,
+      saturation: u.get("uSaturation")!.value,
+      lift: v3("uLift"),
+      gain: v3("uGain"),
+      vignette: u.get("uVignette")!.value,
+      grain: u.get("uGrain")!.value,
+      bloomThreshold: b.luminanceMaterial.threshold,
+      bloomSmoothing: b.luminanceMaterial.smoothing,
+      bloomIntensity: b.intensity,
     };
   }
 

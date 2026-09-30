@@ -11,7 +11,8 @@
 // diffuse lighting from the vertices; LIGHTS then counts moving lights only),
 // VERTEX_LIGHTS (lights evaluated per vertex, added to the irradiance),
 // LITE (no normal, ORM or streak maps), FAR (LITE beyond the detail
-// distance, without environment specular off the wet ground).
+// distance, without environment specular off the wet ground), SUN (a
+// directional light per pixel with the sun's shadow map; not in the bake).
 
 #include "common.cgh"
 
@@ -55,6 +56,31 @@ uniform float4 uHemiSky;    // hemisphere irradiance from above
 uniform float4 uHemiGround; // … and from below
 uniform float4 uRipple;     // frame a, frame b, blend, 1 / tile (m)
 uniform float4 uReflOn;     // planar weight, -, -, -
+#ifdef SUN
+uniform sampler2D uShadow;
+uniform float4 uSunDir;    // direction towards the sun, -
+uniform float4 uSunRad;    // radiance (colour × intensity), normal offset (m)
+uniform float4 uSunMat[2]; // world → shadow-map uv
+uniform float4 uShadowK;   // near-plane distance along the light, 1 / range, bias, tap offset (uv)
+
+// Packed distance along the light (shadow_f.cg).
+float shadowDepth(float2 uv)
+{
+    return dot(tex2D(uShadow, uv).rgb, float3(1.0, 1.0 / 255.0, 1.0 / 65025.0));
+}
+
+// Share of four taps around `sp` that the sun reaches.
+float sunLit(float3 sp)
+{
+    float4 wp = float4(sp, 1.0);
+    float2 uv = float2(dot(uSunMat[0], wp), dot(uSunMat[1], wp));
+    float d = (-dot(uSunDir.xyz, sp) - uShadowK.x) * uShadowK.y - uShadowK.z;
+    float o = uShadowK.w;
+    float lit = step(d, shadowDepth(uv + float2(-o, -o))) + step(d, shadowDepth(uv + float2(o, -o)))
+              + step(d, shadowDepth(uv + float2(-o, o))) + step(d, shadowDepth(uv + float2(o, o)));
+    return lit * 0.25;
+}
+#endif
 #if LIGHTS > 0
 uniform float4 uLightPos[LIGHTS];   // position, 1 / range
 uniform float4 uLightCol[LIGHTS];   // radiant intensity, spot offset
@@ -266,6 +292,22 @@ half4 main(
         }
         diffuse = (half3)d3;
         specular = (half3)s3;
+    }
+#endif
+
+#ifdef SUN
+    {
+        // Offset along the geometric normal against self-shadowing acne.
+        float lit = sunLit(vWorld + (float3)Ng * uSunRad.w);
+        if (lit > 0.0) {
+            float3 d3 = 0.0;
+            float3 s3 = 0.0;
+            directLight(uSunDir.xyz, uSunRad.rgb * lit, (float3)N, (float3)V, diffuseColor, specularColor, (float)(roughness * roughness), d3, s3);
+            diffuse += (half3)d3;
+#ifndef NO_SPECULAR
+            specular += (half3)s3;
+#endif
+        }
     }
 #endif
 

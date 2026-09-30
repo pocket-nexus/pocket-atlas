@@ -1,0 +1,40 @@
+// Daytime sky (the web's gradient-sun-cloudpanorama model): zenith/horizon
+// gradient, the sun's glow and disc, and a cloud panorama: two 180° halves of
+// azimuth side by side in v, rows by the square root of elevation (R opacity,
+// G sunlit, B skylit; the cooker stores its rows so that v runs as on the web).
+
+#define PI 3.14159265
+
+uniform sampler2D uClouds;
+uniform float4 uZenith;   // colour, gradient power
+uniform float4 uHorizon;  // colour, ground blend
+uniform float4 uGlow;     // ground colour, far distance written for the haze
+uniform float4 uSkyDay;   // panorama drift (turns), cloud fade elevation, has clouds, tight glow exponent
+uniform float4 uSkySun;   // direction towards the sun, -
+uniform float4 uSkyGlow;  // sun colour × glow, wide glow weight
+uniform float4 uSkyDisc;  // sun colour × disc, disc cos outer
+uniform float4 uCloudSun; // sunlit cloud colour, wide glow exponent
+uniform float4 uCloudAmb; // skylit cloud colour, disc cos inner
+
+float4 main(float3 vRay : TEXCOORD0) : COLOR
+{
+    float3 d = normalize(vRay);
+    float h = d.y;
+    float3 col = lerp(uHorizon.rgb, uZenith.rgb, pow(saturate(h) + 1e-5, uZenith.w));
+    if (h < 0.0)
+        col = lerp(uHorizon.rgb, uGlow.rgb, saturate(-h * uHorizon.w));
+    float mu = max(dot(d, uSkySun.xyz), 0.0);
+    col += uSkyGlow.rgb * (uSkyGlow.w * pow(mu, uCloudSun.w) + pow(mu, uSkyDay.w));
+    col += uSkyDisc.rgb * smoothstep(uSkyDisc.w, uCloudAmb.w, mu);
+    if (h > 0.0 && uSkyDay.z > 0.5) {
+        float a01 = frac(atan2(d.x, -d.z) / (2.0 * PI) + uSkyDay.x);
+        float halfIndex = floor(a01 * 2.0);
+        float u = frac(a01 * 2.0);
+        float lv = sqrt(asin(saturate(h)) / (PI * 0.5));
+        float v = (halfIndex + clamp(lv, 0.5 / 512.0, 1.0 - 0.5 / 512.0)) * 0.5;
+        float3 c = tex2D(uClouds, float2(u, v)).rgb;
+        float f = smoothstep(0.0, uSkyDay.y, h);
+        col = col * (1.0 - c.r * f) + (uCloudSun.rgb * c.g + uCloudAmb.rgb * c.b) * f;
+    }
+    return float4(col, uGlow.w);
+}

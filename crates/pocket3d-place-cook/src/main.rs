@@ -13,6 +13,7 @@ mod atlas;
 mod bake;
 mod env;
 mod geometry;
+mod occlusion;
 mod procedural;
 mod textures;
 
@@ -890,6 +891,60 @@ fn main() {
         (&cook.blobs.tex[t.data.offset as usize..(t.data.offset + t.data.size) as usize], t.width, t.mips)
     });
     let baker = bake::Baker::new(&out_lights, (v3(&hemi["sky"]).map(|c| c * hemi_k), v3(&hemi["ground"]).map(|c| c * hemi_k)), env_arg);
+    // Sky occlusion (`extras.bake.skyOcclusion`): every static surface that is
+    // not glass or blended blocks the sky; cut-out foliage blocks part of it.
+    let so = &sx["bake"]["skyOcclusion"];
+    let occluder = so.is_object().then(|| {
+        let t_occ = Instant::now();
+        let mut tris = Vec::new();
+        for p in prims.iter() {
+            let m = &cook.materials[p.material as usize];
+            if p.moving || p.skin.is_some() || m.kind == pc::Kind::Glass || m.blend != pc::Blend::Opaque {
+                continue;
+            }
+            let opacity = if m.alpha_test > 0.0 { f(so, "foliage", 0.55) } else { 1.0 };
+            for t in &p.tris {
+                let (a, b, c) = (p.verts[t[0] as usize].pos, p.verts[t[1] as usize].pos, p.verts[t[2] as usize].pos);
+                tris.push(occlusion::Tri { a, e1: b - a, e2: c - a, opacity });
+            }
+        }
+        let n = tris.len();
+        let occ = occlusion::Occluder::new(tris, f(so, "rays", 48.0) as usize, f(so, "reach", 8.0));
+        println!("sky occlusion over {n} triangles (BVH in {} ms)", t_occ.elapsed().as_millis());
+        occ
+    });
+    // Occlusion varies everywhere a surface meets another; split for it
+    // only down to a coarser edge than for lamp pools.
+    let tolerance = if occluder.is_some() {
+        // Where the camera goes: the walkable boxes and every shot's ends.
+        let cam = &sx["camera"];
+        let mut lo = Vec3::splat(f32::MAX);
+        let mut hi = Vec3::splat(f32::MIN);
+        for b in cam["walkable"].as_array().into_iter().flatten() {
+            let v: Vec<f32> = b.as_array().map(|a| a.iter().map(|x| x.as_f64().unwrap_or(0.0) as f32).collect()).unwrap_or_default();
+            if v.len() == 6 {
+                lo = lo.min(Vec3::new(v[0], v[1], v[2]));
+                hi = hi.max(Vec3::new(v[3], v[4], v[5]));
+            }
+        }
+        for s in cam["shots"].as_array().into_iter().flatten() {
+            for k in ["from", "to"] {
+                let p = Vec3::from(v3(&s[k]["pos"]));
+                lo = lo.min(p);
+                hi = hi.max(p);
+            }
+        }
+        bake::Tolerance {
+            min_edge: f(so, "minEdge", 1.0),
+            abs: f(so, "abs", 0.004),
+            rel: f(so, "rel", 0.25),
+            rounds: f(so, "rounds", 4.0) as u32,
+            focus: (lo.x <= hi.x).then_some((lo, hi)),
+            grow: f(so, "grow", 0.2),
+        }
+    } else {
+        bake::LIGHTS
+    };
     let (mut baked_prims, mut tris_before, mut tris_after) = (0usize, 0usize, 0usize);
     for p in prims.iter_mut() {
         let m = &cook.materials[p.material as usize];
@@ -899,10 +954,23 @@ fn main() {
         // Shop interiors are shaded without the lights (as at runtime).
         let (env_k, direct) = (m.env_strength * env_scene, !m.interior);
         tris_before += p.tris.len();
-        let r = bake::refine(std::mem::take(&mut p.verts), std::mem::take(&mut p.tris), &|pos, n| baker.irradiance(pos, n, env_k, direct));
+        let before = p.tris.len();
+        let r = bake::refine(
+            std::mem::take(&mut p.verts),
+            std::mem::take(&mut p.tris),
+            &|pos, n| {
+                let sky = occluder.as_ref().map_or(1.0, |o| o.visibility(pos, n));
+                baker.irradiance(pos, n, env_k, direct, sky)
+            },
+            tolerance,
+        );
         p.verts = r.verts;
         p.tris = r.tris;
         p.baked = true;
+        if std::env::var_os("POCKET_ATLAS_BAKE_REPORT").is_some() {
+            let (lo, hi) = p.verts.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), v| (lo.min(v.pos), hi.max(v.pos)));
+            println!("  bake {:>7} → {:>7}  {:40}  {:?}..{:?}", before, p.tris.len(), cook.materials[p.material as usize].name, lo.round(), hi.round());
+        }
         tris_after += p.tris.len();
         baked_prims += 1;
     }
@@ -1129,6 +1197,7 @@ fn main() {
     };
     let pairs = |k: &str| -> Vec<[[f32; 3]; 2]> { sx["rain"][k].as_array().map(|a| a.iter().map(|p| [v3(&p[0]), v3(&p[1])]).collect()).unwrap_or_default() };
     let rain = pc::Rain {
+        active: sx["rain"].is_object(),
         dry_boxes: pairs("dryBoxes"),
         drip_edges: pairs("dripEdges"),
         steam_vents: sx["rain"]["steamVents"].as_array().map(|a| a.iter().map(|v| [v3(&v["origin"]), v3(&v["dir"])]).collect()).unwrap_or_default(),
@@ -1212,9 +1281,104 @@ fn main() {
         "animationBytes": cook.blobs.anim.len(),
         "cookMs": t0.elapsed().as_millis() as u64,
     });
+    // ---- sun, daytime sky, post
+    let sun = sx["directionalLights"].as_array().and_then(|a| a.first()).map(|d| {
+        let c = v3(&d["color"]);
+        let i = f(d, "intensity", 1.0);
+        let sh = &d["shadow"];
+        pc::Sun {
+            direction: v3(&d["direction"]),
+            radiance: [c[0] * i, c[1] * i, c[2] * i],
+            shadow: (d["castShadow"].as_bool() == Some(true) && sh.is_object()).then(|| {
+                let o: Vec<f32> = sh["ortho"].as_array().map(|a| a.iter().map(|x| x.as_f64().unwrap_or(0.0) as f32).collect()).unwrap_or_default();
+                pc::SunShadow {
+                    position: v3(&sh["position"]),
+                    ortho: [o[0], o[1], o[2], o[3], o[4], o[5]],
+                    map_size: sh["mapSize"].as_u64().unwrap_or(2048) as u32,
+                    bias: f(sh, "bias", 0.0),
+                    normal_bias: f(sh, "normalBias", 0.0),
+                    radius: f(sh, "radius", 1.0),
+                }
+            }),
+        }
+    });
+    let sky_day = &sx["sky"];
+    let day_sky = (sky_day["model"] == "gradient-sun-cloudpanorama").then(|| {
+        let cl = &sky_day["clouds"];
+        let clouds = cl["file"].as_str().and_then(|file| {
+            let img = image::open(a.input.join(file)).ok()?.to_rgba8();
+            let (w, h) = img.dimensions();
+            // The panorama's rows run bottom-up (three.js flipY); texture rows here run top-down.
+            let mut rows = Vec::with_capacity((w * h * 4) as usize);
+            for y in (0..h).rev() {
+                rows.extend_from_slice(&img.as_raw()[(y * w * 4) as usize..((y + 1) * w * 4) as usize]);
+            }
+            let src = textures::from_rgba8(w, h, &rows, pc::TexRole::Data);
+            let e = textures::encode_as(&src, pc::TexRole::Data, pc::TexFormat::Rgba8, 1024, 1);
+            let data = Blobs::push(&mut cook.blobs.tex, &e.data, 4096);
+            cook.textures.push(pc::Texture {
+                name: "sky-clouds".into(),
+                role: pc::TexRole::Data,
+                format: e.format,
+                width: e.width,
+                height: e.height,
+                mips: e.mips,
+                data,
+                wrap_s: pc::Wrap::Repeat,
+                wrap_t: pc::Wrap::Clamp,
+                has_alpha: false,
+                mean: [0.0; 4],
+            });
+            Some((cook.textures.len() - 1) as u32)
+        });
+        let pair = |v: &Value| [v[0].as_f64().unwrap_or(0.0) as f32, v[1].as_f64().unwrap_or(1.0) as f32];
+        let sun_scale = f(cl, "sunScale", 1.0);
+        let cs = v3(&cl["sunColor"]);
+        pc::DaySky {
+            zenith: v3(&sky_day["zenith"]),
+            horizon: v3(&sky_day["horizon"]),
+            ground: v3(&sky_day["ground"]),
+            gradient_power: f(sky_day, "gradientPower", 0.5),
+            ground_blend: f(sky_day, "groundBlend", 6.0),
+            sun_direction: v3(&sky_day["sunDirection"]),
+            sun_color: v3(&sky_day["sunColor"]),
+            glow: f(&sky_day["glow"], "intensity", 0.0),
+            glow_wide: pair(&sky_day["glow"]["wide"]),
+            glow_tight: pair(&sky_day["glow"]["tight"]),
+            disc: f(&sky_day["disc"], "intensity", 0.0),
+            disc_cos_inner: f(&sky_day["disc"], "cosInner", 1.0),
+            disc_cos_outer: f(&sky_day["disc"], "cosOuter", 1.0),
+            clouds,
+            cloud_sun: [cs[0] * sun_scale, cs[1] * sun_scale, cs[2] * sun_scale],
+            cloud_ambient: v3(&cl["ambientColor"]),
+            fade_elevation: f(cl, "fadeElevation", 0.04),
+            drift: f(cl, "driftTurnsPerSecond", 0.0),
+        }
+    });
+    let px = &sx["post"];
+    let post = if px.is_object() {
+        let d = pc::Post::default();
+        pc::Post {
+            tone: if px["tone"] == "aces" { pc::ToneCurve::Aces } else { pc::ToneCurve::Agx },
+            exposure: f(px, "exposure", d.exposure),
+            contrast: f(px, "contrast", d.contrast),
+            saturation: f(px, "saturation", d.saturation),
+            lift: if px["lift"].is_array() { v3(&px["lift"]) } else { d.lift },
+            gain: if px["gain"].is_array() { v3(&px["gain"]) } else { d.gain },
+            vignette: f(px, "vignette", d.vignette),
+            grain: f(px, "grain", d.grain),
+            bloom_threshold: f(px, "bloomThreshold", d.bloom_threshold),
+            bloom_smoothing: f(px, "bloomSmoothing", d.bloom_smoothing),
+            bloom_intensity: f(px, "bloomIntensity", d.bloom_intensity),
+        }
+    } else {
+        pc::Post::default()
+    };
+    let place = a.input.file_name().and_then(|n| n.to_str()).unwrap_or("place").to_string();
     let meta = pc::Meta {
         version: pc::VERSION,
-        name: "tokyo".into(),
+        name: place,
+        kind: sx["kind"].as_str().unwrap_or("night-street").to_string(),
         min: scene_min.to_array(),
         max: scene_max.to_array(),
         textures: cook.textures,
@@ -1234,6 +1398,9 @@ fn main() {
         doors,
         beacons,
         effects,
+        sun,
+        day_sky,
+        post,
         stats: stats.clone(),
     };
     let meta_json = serde_json::to_vec(&meta).unwrap();
