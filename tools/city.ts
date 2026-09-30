@@ -14,6 +14,8 @@
 //   bun tools/city.ts lint                          # parse/type-check Cg on the host
 //   bun tools/city.ts bench                         # frame cost per renderer feature
 //   bun tools/city.ts profile ['{"msaa":false}']    # GPU time per scene
+//   bun tools/city.ts shots [--seconds 90]          # frame time per cinematic shot
+//   (bench, profile, shots: --render vita60|cinematic, default vita60)
 //
 // The default title is the installed Pocket Hero development runtime, whose
 // native slot accepts replacement SELFs; reopening its LiveArea bubble
@@ -145,7 +147,7 @@ async function lint(): Promise<void> {
   const cases: [string, string[]][] = [
     ["surface_v.cg", []], ["surface_v.cg", ["SKINNED", "MAX_BONES=24"]], ["surface_v.cg", ["BAKED"]],
     ["standard_f.cg", ["LIGHTS=2", "BAKED", "WET", "PLANAR", "ALBEDO_MAP", "NORMAL_MAP", "ORM_MAP", "FOG"]], ["debug_f.cg", []],
-    ["standard_f.cg", ["LIGHTS=0", "BAKED", "FAR", "DAMP", "ALBEDO_MAP", "NORMAL_MAP", "FOG"]], ["glass_f.cg", ["LIGHTS=0", "BAKED", "FOG"]],
+    ["standard_f.cg", ["LIGHTS=0", "BAKED", "FAR", "DAMP", "ALBEDO_MAP", "NORMAL_MAP", "FOG"]], ["standard_f.cg", ["LIGHTS=2", "BAKED", "LITE", "WET", "PLANAR", "ALBEDO_MAP", "NORMAL_MAP", "FOG"]], ["glass_f.cg", ["LIGHTS=0", "BAKED", "FOG"]],
     ["standard_f.cg", ["LIGHTS=4", ...lit]], ["standard_f.cg", ["LIGHTS=2", "DAMP", "CLEARCOAT", "ALPHA_TEST", "REFLECTION"]],
     ["standard_f.cg", ["LIGHTS=0", "INTERIOR", "ALBEDO_MAP"]], ["unlit_f.cg", ["ALBEDO_MAP", "VERTEX_COLOR", "FOG", "ALPHA_TEST"]],
     ["glass_f.cg", ["LIGHTS=4", "FOG"]], ["glass_f.cg", ["LIGHTS=0", "REFLECTION"]], ["window_f.cg", ["FOG"]], ["window_f.cg", ["REFLECTION"]],
@@ -173,7 +175,8 @@ async function lint(): Promise<void> {
 
 // Renderer switches as the device starts; every measurement sends the full
 // set so no switch carries over from an earlier run.
-const DEFAULTS = { reflection: true, haze: true, bloom: true, rain: true, msaa: true, flat: false, maxLights: 4, fx: 63, skip: 0, hud: true, amortize: true, scale: 1 };
+const RENDER = value("--render", "vita60");
+const DEFAULTS = { reflection: true, haze: true, bloom: true, rain: true, msaa: true, flat: false, maxLights: 4, fx: 63, skip: 0, hud: true, amortize: true, scale: 2 };
 
 // Frame cost per renderer feature at a fixed view and time: each row turns
 // one feature off (or all of them) through control.json and averages the
@@ -189,7 +192,7 @@ async function bench(): Promise<void> {
   };
   const view = engine().view;
   if (engine().stage !== "running" || !view) throw new Error("the device is not running Pocket City");
-  const shot = { view: { pos: view.pos, target: view.target, fov: view.fov }, time: engine().time };
+  const shot = { renderProfile: RENDER, view: { pos: view.pos, target: view.target, fov: view.fov }, time: engine().time };
   const all = DEFAULTS;
   const bare = { reflection: false, haze: false, bloom: false, rain: false };
   const rows: [string, Record<string, boolean | number>][] = [
@@ -228,8 +231,8 @@ async function profile(): Promise<void> {
   };
   const view = engine().view;
   if (engine().stage !== "running" || !view) throw new Error("the device is not running Pocket City");
-  const extra = argv[1] ? JSON.parse(argv[1]) : {};
-  const shot = { view: { pos: view.pos, target: view.target, fov: view.fov }, time: engine().time };
+  const extra = argv[1] && !argv[1].startsWith("--") ? JSON.parse(argv[1]) : {};
+  const shot = { renderProfile: RENDER, view: { pos: view.pos, target: view.target, fov: view.fov }, time: engine().time };
   await Bun.write(`${SHARE}/control.json`, JSON.stringify({ ...shot, settings: { ...DEFAULTS, profile: true, ...extra } }) + "\n");
   await Bun.sleep(3000);
   const sum = new Map<string, number>();
@@ -272,6 +275,34 @@ async function vpk(): Promise<void> {
   await build({ standalone: true, assets: stage });
 }
 
+// Frame time per cinematic shot while the camera rig plays (render profile
+// and governor as they run for a viewer).
+async function shots(): Promise<void> {
+  const status = resolve(ROOT, `.pocket-build/vita-usb/share/pocket-vita/${title}/status.json`);
+  const seconds = Number(value("--seconds", "90"));
+  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ renderProfile: RENDER, settings: { profile: false, scale: 4 } }) + "\n");
+  await Bun.sleep(3000);
+  const acc = new Map<string, { ms: number[]; steps: Set<number>; levels: Set<number> }>();
+  const end = Date.now() + seconds * 1000;
+  while (Date.now() < end) {
+    try {
+      const e = JSON.parse(readFileSync(status, "utf8")).engine;
+      const a = acc.get(e.view.shot) ?? { ms: [], steps: new Set(), levels: new Set() };
+      a.ms.push(e.frameMs);
+      a.steps.add(e.settings.step);
+      a.levels.add(e.settings.level);
+      acc.set(e.view.shot, a);
+    } catch { /* replaced while read */ }
+    await Bun.sleep(500);
+  }
+  console.log(`render profile ${RENDER}`);
+  for (const [shot, a] of acc) {
+    const ms = a.ms.slice(2).length ? a.ms.slice(2) : a.ms;
+    const mean = ms.reduce((x, y) => x + y, 0) / ms.length;
+    console.log(`${shot.padEnd(10)} ${mean.toFixed(1).padStart(6)} ms ${(1000 / mean).toFixed(1).padStart(5)} fps  max ${Math.max(...ms).toFixed(1)} ms  steps ${[...a.steps].join(",")}  levels ${[...a.levels].join(",")}`);
+  }
+}
+
 // Copies the standalone VPK to ux0:data/pocket-city/ through the running
 // development build, ready to install from VitaShell.
 async function pushVpk(): Promise<void> {
@@ -294,6 +325,7 @@ else if (command === "vpk") await vpk();
 else if (command === "lint") await lint();
 else if (command === "bench") await bench();
 else if (command === "profile") await profile();
+else if (command === "shots") await shots();
 else if (command === "sync") sync();
 else if (command === "ctl") {
   mkdirSync(SHARE, { recursive: true });

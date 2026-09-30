@@ -11,6 +11,7 @@ mod camera;
 mod frame;
 mod gpu;
 mod hostfs;
+mod profile;
 mod provision;
 mod scene;
 mod shaders;
@@ -19,7 +20,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use camera::{Mode, Rig, View};
-use frame::{Renderer, Settings, Weather};
+use frame::{Renderer, Weather};
 use glam::Vec3;
 use gpu::Gpu;
 use pocket3d_gxm::target::{Fence, Msaa};
@@ -119,6 +120,13 @@ struct Control {
 
 fn apply_control(v: &Value, rig: &mut Rig, r: &mut Renderer, ctl: &mut Control, hud: &mut bool) {
     *hud = v["settings"]["hud"].as_bool().unwrap_or(*hud);
+    // A profile switch resets the switches to the profile's, then the
+    // settings below override them.
+    if let Some(p) = v["renderProfile"].as_str().and_then(profile::by_name) {
+        if !core::ptr::eq(p, r.profile) {
+            r.set_profile(p);
+        }
+    }
     let s = &mut r.settings;
     let flag = |k: &str, cur: bool| v["settings"][k].as_bool().unwrap_or(cur);
     s.reflection = flag("reflection", s.reflection);
@@ -132,7 +140,7 @@ fn apply_control(v: &Value, rig: &mut Rig, r: &mut Renderer, ctl: &mut Control, 
     s.msaa = if flag("msaa", s.msaa == Msaa::X4) { Msaa::X4 } else { Msaa::None };
     s.flat = flag("flat", s.flat);
     if let Some(n) = v["settings"]["scale"].as_u64() {
-        s.scale = n.min(3) as u32;
+        s.scale = n.min(frame::SCALES.len() as u64) as u32;
     }
     s.amortize = flag("amortize", s.amortize);
     if let Some(n) = v["settings"]["skip"].as_u64() {
@@ -211,7 +219,7 @@ fn main() {
                 frame = frame.wrapping_add(1);
             }
         };
-        let mut renderer = match Renderer::new(Settings::default(), &scene) {
+        let mut renderer = match Renderer::new(&profile::VITA60, &scene) {
             Ok(r) => r,
             Err(e) => {
                 let mut frame = 0u32;
@@ -324,7 +332,9 @@ fn main() {
             // Profiling serializes the GPU; its frame times would force the
             // lowest resolution.
             if !renderer.timeline.on {
-                renderer.feedback(frame_ms);
+                // Work-limited frame time: the display-flip wait is not GPU load.
+                let p = renderer.profile;
+                renderer.governor.feedback(p, (frame_ms - swap_ms).max(0.0));
             }
             let fade = if ctl.view.is_some() { 0.0 } else { rig.fade };
             let bars = if ctl.view.is_some() { 0.0 } else { rig.bars };
@@ -365,7 +375,7 @@ fn main() {
             swap_ms = swap_ms * 0.9 + t_swap.elapsed().as_secs_f32() * 1000.0 * 0.1;
 
             let st = &renderer.stats;
-            let pass = |p: &frame::PassStats| json!({"draws": p.draws, "tris": p.tris, "culled": p.culled, "missing": p.missing});
+            let pass = |p: &frame::PassStats| json!({"draws": p.draws, "tris": p.tris, "lod": p.lod, "culled": p.culled, "missing": p.missing});
             let s = &renderer.settings;
             dev.engine = json!({
                 "stage": "running",
@@ -381,7 +391,7 @@ fn main() {
                 "loadMs": scene.load_ms,
                 "clocks": clocks,
                 "view": {"pos": view.pos.to_array(), "target": view.target.to_array(), "fov": view.fov_y, "mode": if rig.mode == Mode::Cinematic { "cinematic" } else { "free" }, "shot": rig.shot_name()},
-                "settings": {"msaa": s.msaa == Msaa::X4, "reflection": s.reflection, "haze": s.haze, "bloom": s.bloom, "rain": s.rain, "cullCw": s.cull_cw, "exposure": s.exposure, "maxLights": s.max_lights, "flat": s.flat, "scale": s.scale, "level": renderer.level(), "fx": s.fx, "amortize": s.amortize},
+                "settings": {"msaa": s.msaa == Msaa::X4, "reflection": s.reflection, "haze": s.haze, "bloom": s.bloom, "rain": s.rain, "cullCw": s.cull_cw, "exposure": s.exposure, "maxLights": s.max_lights, "flat": s.flat, "scale": s.scale, "level": renderer.level(), "profile": renderer.profile.name, "step": renderer.governor.step, "budgetMs": renderer.profile.budget_ms, "fx": s.fx, "amortize": s.amortize},
                 "uptime": started.elapsed().as_secs(),
                 "passes": renderer.timeline.passes.iter().map(|(n, ms)| json!([n, ms])).collect::<Vec<_>>(),
             });

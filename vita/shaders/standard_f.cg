@@ -7,14 +7,15 @@
 // VERTEX_COLOR, ALPHA_TEST, WET, PLANAR, DAMP, CLEARCOAT, INTERIOR, FOG,
 // REFLECTION (mirror pass: cheaper film, no planar lookup), BAKED (static
 // diffuse lighting from the vertices; LIGHTS then counts moving lights only),
-// FAR (draws beyond the detail distance).
+// LITE (no normal, ORM or streak maps), FAR (LITE beyond the detail
+// distance, without environment specular off the wet ground).
 
 #include "common.cgh"
 
 // The mirror pass lands in a half-resolution, blurred buffer: diffuse and
 // emission are all that survive. Far draws keep their wet reflections but
 // drop per-pixel detail smaller than a few pixels at that distance.
-#if defined(REFLECTION) || defined(FAR)
+#if defined(REFLECTION) || defined(FAR) || defined(LITE)
 #undef NORMAL_MAP
 #undef ORM_MAP
 #undef DAMP

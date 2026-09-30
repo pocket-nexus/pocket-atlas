@@ -29,28 +29,24 @@ half3 tone(float3 c)
     return lerp(lo, hi, (half)(l.b - b0));
 }
 
-float4 main(float2 vUv : TEXCOORD0) : COLOR
+half4 main(float2 vUv : TEXCOORD0) : COLOR
 {
-    float4 scene = tex2D(uScene, vUv);
-    float dist = scene.a;
-
-    // Haze is soft: one bilinear tap of the quarter-resolution buffer (a
+    half3 c = tex2D(uScene, vUv).rgb;
+    // Haze is soft: one bilinear tap of the low-resolution buffer (a
     // bilateral 4-tap upsample cost 6.4 ms per frame on the device).
-    float3 haze = tex2D(uHazeTex, vUv).rgb;
-
-    float3 c = scene.rgb + haze;
-    c += tex2D(uBloom, vUv).rgb * uBloomK.x;
-    half3 d = tone(c * uBloomK.y);
+    c += tex2D(uHazeTex, vUv).rgb;
+    c += tex2D(uBloom, vUv).rgb * (half)uBloomK.x;
+    half3 d = tone((float3)(c * (half)uBloomK.y));
 
     // Screen-space finish on the encoded colour: vignette (scaled for the
     // sRGB curve), grain strongest in the shadows, dip to black, letterbox.
-    float2 q = (vUv - 0.5) * float2(uBloomK.w, 1.0);
-    half v = (half)smoothstep(1.05, 0.25, length(q));
+    half2 q = (half2)((vUv - 0.5) * float2(uBloomK.w, 1.0));
+    half v = smoothstep((half)1.05, (half)0.25, length(q));
     d *= lerp((half)(1.0 - uGrade.w * 0.55), (half)1.0, v);
-    float n = ign(vUv * uGrade2.zw + frac(uBloomK.z * 7.13) * 64.0) - 0.5;
-    d += (half)(n * uGrade.z * 2.4) * (1.0 - d.g * 0.7);
+    half n = (half)ign(vUv * uGrade2.zw + frac(uBloomK.z * 7.13) * 64.0) - (half)0.5;
+    d += n * (half)(uGrade.z * 2.4) * ((half)1.0 - d.g * (half)0.7);
     d *= (half)(1.0 - uGrade2.x);
-    float bar = uGrade2.y * max(0.0, 0.5 - (uBloomK.w / 2.39) * 0.5);
-    d *= (half)smoothstep(bar - 0.001, bar + 0.001, min(vUv.y, 1.0 - vUv.y));
-    return float4(d, 1.0);
+    half bar = (half)(uGrade2.y * max(0.0, 0.5 - (uBloomK.w / 2.39) * 0.5));
+    d *= smoothstep(bar - (half)0.001, bar + (half)0.001, (half)min(vUv.y, 1.0 - vUv.y));
+    return half4(d, 1.0);
 }

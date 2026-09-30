@@ -14,22 +14,16 @@ use vita2d_sys as g;
 use crate::camera::{self, View};
 use crate::gpu::{bind, BlendMode, Gpu, Layout, Out, PipeKey, Pipeline, Uniforms, S, U};
 use crate::scene::{rows4x4, Scene};
+use crate::profile::{Governor, Profile, Step};
 use crate::shaders::Key;
 
 pub const W: u32 = 960;
 pub const H: u32 = 544;
 /// Scene resolutions (the display stays 960×544).
-const SCALES: [(u32, u32); 3] = [(960, 544), (720, 408), (640, 362)];
+pub const SCALES: [(u32, u32); 4] = [(960, 544), (720, 408), (640, 362), (544, 308)];
 const LIGHTS_MAX: usize = 4;
 const REFL_LIGHTS: usize = 2;
 const HAZE_LIGHTS: usize = 6;
-/// Lit draws whose bounds start beyond this distance (m) use the FAR program
-/// variant: no normal, ORM or streak maps and, off the wet ground, no
-/// environment specular.
-const DETAIL_DISTANCE: f32 = 12.0;
-/// The mirror pass skips draws whose bounding radius is below this fraction
-/// of their distance (a few pixels in the blurred half-resolution buffer).
-const REFLECTION_MIN_SIZE: f32 = 0.06;
 /// Camera motion per frame (m, radians) above which the reflection and the
 /// haze are both redrawn instead of alternating between frames.
 const STILL_MOVE: f32 = 0.25;
@@ -55,8 +49,9 @@ pub struct Settings {
     /// Particle systems drawn (bit per system: curtain, streak, drip,
     /// splash, steam, beacon).
     pub fx: u32,
-    /// Scene resolution, upscaled by the composite: 0 = 960×544,
-    /// 1 = 720×408, 2 = 640×362, 3 = picked from the frame time.
+    /// Scene resolution, upscaled to the display: an index into `SCALES`
+    /// (960×544, 720×408, 640×362, 544×308), or `SCALES.len()` for the
+    /// profile's governor.
     pub scale: u32,
     /// Profiling: material classes left out of the scene passes (bits of
     /// [`Mat::class`]; bit 7 is the sky).
@@ -66,15 +61,33 @@ pub struct Settings {
     pub amortize: bool,
 }
 
-impl Default for Settings {
-    fn default() -> Self {
-        Self { msaa: Msaa::X4, reflection: true, haze: true, bloom: true, rain: true, cull_cw: true, exposure: 1.0, max_lights: LIGHTS_MAX, flat: false, fx: 0x3f, scale: 3, skip: 0, amortize: true }
+impl Settings {
+    /// Every switch on, as the profile sets them; the scene resolution
+    /// follows the governor.
+    pub fn for_profile(p: &Profile) -> Self {
+        Self {
+            msaa: p.msaa,
+            reflection: true,
+            haze: true,
+            bloom: true,
+            rain: true,
+            cull_cw: true,
+            exposure: 1.0,
+            max_lights: p.dynamic_lights,
+            flat: false,
+            fx: 0x3f,
+            scale: SCALES.len() as u32,
+            skip: 0,
+            amortize: p.alternate,
+        }
     }
 }
 
 #[derive(Clone, Copy, Default)]
 pub struct PassStats {
     pub draws: u32,
+    /// Draws that used their LOD1.
+    pub lod: u32,
     pub tris: u32,
     pub culled: u32,
     pub missing: u32,
@@ -137,6 +150,7 @@ pub struct Stats {
 
 /// Material resolved to shader programs and constants.
 struct Mat {
+    alpha_test: bool,
     /// Profiling class: 0 wet ground, 1 other lit, 2 glass, 3 window,
     /// 4 products, 5 unlit, 6 skyline and tower.
     class: u32,
@@ -243,6 +257,7 @@ fn material(m: &pc::Material, env_scene: f32) -> Mat {
         pc::Kind::Tower | pc::Kind::Skyline => 6,
     };
     Mat {
+        alpha_test: m.alpha_test > 0.0 && matches!(m.kind, pc::Kind::Standard | pc::Kind::Unlit),
         class,
         fs,
         defines,
@@ -329,14 +344,20 @@ pub struct Renderer {
     mats: Vec<Mat>,
     _vram: Arena,
     _mem: Arena,
-    refl: Target,
-    refl_blur: Target,
+    /// Render profile in use and the quality step its governor holds.
+    pub profile: &'static Profile,
+    pub governor: Governor,
+    /// Mirror target and its blurred copy per `Profile::reflection_size`.
+    refls: Vec<(Target, Target)>,
     /// Scene targets per resolution in `SCALES`, 4× MSAA then single-sampled;
     /// `Settings::msaa` and the current scale level pick one.
     mains: Vec<Target>,
     main_points: Vec<g::SceGxmTexture>,
-    haze: Target,
-    prefilter: Target,
+    /// Haze buffer per `Profile::haze_size`.
+    hazes: Vec<Target>,
+    /// Bloom chain: prefilter at W/4 and W/8, downsamples W/8 and W/16,
+    /// upsamples W/8 and W/4 (`Profile::bloom_full` uses all of them).
+    prefilters: Vec<Target>,
     /// Tone-mapped 8-bit frame per scene resolution; the display scene
     /// scales it to 960×544.
     finals: Vec<Target>,
@@ -364,8 +385,6 @@ pub struct Renderer {
     pipe_mode: (Msaa, bool),
     /// Frame counter and previous view for the reflection/haze alternation.
     tick: u32,
-    auto_level: usize,
-    auto_held: u32,
     prev_view: Option<(Vec3, Vec3)>,
     refl_ready: bool,
     haze_ready: bool,
@@ -415,12 +434,17 @@ fn key_v(file: &'static str, defs: &[&str]) -> Key {
 impl Renderer {
     /// # Safety
     /// GXM initialised; render thread.
-    pub unsafe fn new(settings: Settings, scene: &Scene) -> Result<Self, String> {
+    pub unsafe fn new(profile: &'static Profile, scene: &Scene) -> Result<Self, String> {
+        let settings = Settings::for_profile(profile);
         let mut vram = Arena::new(Kind::Cdram, 8 << 20);
         let mut mem = Arena::new(Kind::Main, 4 << 20);
         let hdr = ColorFormat::Rgba16f;
-        let refl = Target::new(&mut vram, &mut mem, W / 2, H / 2, hdr, Msaa::None, Depth::Transient)?;
-        let refl_blur = Target::new(&mut vram, &mut mem, W / 4, H / 4, hdr, Msaa::None, Depth::None)?;
+        let mut refls = Vec::new();
+        for d in [2, 4] {
+            let sharp = Target::new(&mut vram, &mut mem, W / d, H / d, hdr, Msaa::None, Depth::Transient)?;
+            let blur = Target::new(&mut vram, &mut mem, W / (d * 2), H / (d * 2), hdr, Msaa::None, Depth::None)?;
+            refls.push((sharp, blur));
+        }
         let mut mains = Vec::new();
         let mut main_points = Vec::new();
         for (w, h) in SCALES {
@@ -433,10 +457,15 @@ impl Renderer {
             main_points.push(point);
           }
         }
-        // Haze is smooth and costs ~1.3 ms per light per 32k pixels: 160×90.
-        let haze = Target::new(&mut vram, &mut mem, W / 6, H / 6, hdr, Msaa::None, Depth::None)?;
-        // Bloom starts at quarter resolution.
-        let prefilter = Target::new(&mut vram, &mut mem, W / 4, H / 4, hdr, Msaa::None, Depth::None)?;
+        // Haze is smooth and costs ~1.3 ms per light per 32k pixels.
+        let mut hazes = Vec::new();
+        for d in [6, 8] {
+            hazes.push(Target::new(&mut vram, &mut mem, W / d, H / d, hdr, Msaa::None, Depth::None)?);
+        }
+        let mut prefilters = Vec::new();
+        for d in [4, 8] {
+            prefilters.push(Target::new(&mut vram, &mut mem, W / d, H / d, hdr, Msaa::None, Depth::None)?);
+        }
         let mut down = Vec::new();
         for s in [8, 16] {
             down.push(Target::new(&mut vram, &mut mem, W / s, H / s, hdr, Msaa::None, Depth::None)?);
@@ -500,12 +529,13 @@ impl Renderer {
             mats,
             _vram: vram,
             _mem: mem,
-            refl,
-            refl_blur,
+            profile,
+            governor: Governor::new(),
+            refls,
             mains,
             main_points,
-            haze,
-            prefilter,
+            hazes,
+            prefilters,
             finals,
             down,
             up,
@@ -524,12 +554,10 @@ impl Renderer {
             // Words 0..2 belong to the frame fence in main.rs.
             timeline: Timeline::new(8, 32),
             order: Vec::new(),
-            pipe_cache: vec![core::ptr::null(); scene.meta.materials.len() * 36],
+            pipe_cache: vec![core::ptr::null(); scene.meta.materials.len() * 54],
             pipe_epoch: u32::MAX,
             pipe_mode: (Msaa::X4, false),
             tick: 0,
-            auto_level: 1,
-            auto_held: 0,
             prev_view: None,
             refl_ready: false,
             haze_ready: false,
@@ -549,14 +577,13 @@ impl Renderer {
             // Baked surfaces light only moving sources per pixel (at most 2).
             let main: &[usize] = if !m.lit { &[0] } else if baked { &[0, 2] } else { &[0, 2, 4] };
             for n in main {
-                gpu.want(&frag_key(m, *n, false, baked, false));
-                if m.lit {
-                    gpu.want(&frag_key(m, *n, false, baked, true));
+                for tier in if m.lit { &[0usize, 1, 2][..] } else { &[0usize][..] } {
+                    gpu.want(&frag_key(m, *n, false, baked, *tier));
                 }
             }
             if m.reflect {
                 for n in if m.lit { &[0usize, 2][..] } else { &[0usize][..] } {
-                    gpu.want(&frag_key(m, *n, true, baked, false));
+                    gpu.want(&frag_key(m, *n, true, baked, 0));
                 }
             }
         }
@@ -569,25 +596,26 @@ impl Renderer {
         self.level() * 2 + (self.settings.msaa != Msaa::X4) as usize
     }
 
-    /// Resolution level in use: the fixed setting, or the automatic one.
-    pub fn level(&self) -> usize {
-        if self.settings.scale < 3 { self.settings.scale as usize } else { self.auto_level }
+    /// Quality step the governor holds.
+    pub fn step(&self) -> Step {
+        self.profile.steps[self.governor.step.min(self.profile.steps.len() - 1)]
     }
 
-    /// Automatic resolution: step down when frames take longer than 55 ms,
-    /// back up when they take under 38 ms, holding each level at least 1.5 s.
-    pub fn feedback(&mut self, frame_ms: f32) {
-        self.auto_held += 1;
-        if self.auto_held < 30 {
-            return;
-        }
-        if frame_ms > 55.0 && self.auto_level + 1 < SCALES.len() {
-            self.auto_level += 1;
-            self.auto_held = 0;
-        } else if frame_ms < 38.0 && self.auto_level > 0 {
-            self.auto_level -= 1;
-            self.auto_held = 0;
-        }
+    /// Resolution level in use: the fixed setting, or the governor's step.
+    pub fn level(&self) -> usize {
+        if (self.settings.scale as usize) < SCALES.len() { self.settings.scale as usize } else { self.step().level }
+    }
+
+    /// Switches profile: settings back to the profile's, governor to its
+    /// best step, view-dependent buffers redrawn.
+    pub fn set_profile(&mut self, profile: &'static Profile) {
+        let keep = (self.settings.skip, self.settings.flat, self.settings.fx);
+        self.profile = profile;
+        self.settings = Settings::for_profile(profile);
+        (self.settings.skip, self.settings.flat, self.settings.fx) = keep;
+        self.governor = Governor::new();
+        self.refl_ready = false;
+        self.haze_ready = false;
     }
 
     unsafe fn use_pipeline(&mut self, ctx: *mut g::SceGxmContext, p: &Pipeline) {
@@ -655,17 +683,19 @@ impl Renderer {
             eye.y = -eye.y;
             let mview = View { pos: eye, target: Vec3::new(view.target.x, -view.target.y, view.target.z), fov_y: view.fov_y };
             let mconsts = FrameConsts::new(scene, &mview, time, rain, vpm, aspect);
-            self.refl.begin(ctx, 0.0)?;
-            Self::viewport(ctx, self.refl.width, self.refl.height);
+            let ri = self.profile.reflection_size;
+            let refl = &mut self.refls[ri].0 as *mut Target;
+            (*refl).begin(ctx, 0.0)?;
+            Self::viewport(ctx, (*refl).width, (*refl).height);
             let planes = camera::planes(&vpm);
             let mut st = PassStats::default();
             self.draw_meshes(ctx, gpu, scene, &mconsts, &planes, true, false, &mut st);
             self.sky(ctx, gpu, &mconsts, Out::Half4, Msaa::None.gxm());
             self.draw_meshes(ctx, gpu, scene, &mconsts, &planes, true, true, &mut st);
-            self.timeline.end(ctx, &self.refl, "reflection");
+            self.timeline.end(ctx, &*refl, "reflection");
             self.stats.reflection = st;
-            let (src, dst) = (&self.refl.texture as *const _, &mut self.refl_blur as *mut Target);
-            self.post(ctx, gpu, &mut *dst, "down_f.cg", &[(S::Source, src)], &[(U::Texel, [1.0 / self.refl.width as f32, 1.0 / self.refl.height as f32, 0.0, 0.0])], &frame)?;
+            let (src, dst) = (&(*refl).texture as *const _, &mut self.refls[ri].1 as *mut Target);
+            self.post(ctx, gpu, &mut *dst, "down_f.cg", &[(S::Source, src)], &[(U::Texel, [1.0 / (*refl).width as f32, 1.0 / (*refl).height as f32, 0.0, 0.0])], &frame)?;
         }
 
         // ---------------------------------------------------- main
@@ -695,34 +725,38 @@ impl Renderer {
         // Far rain curtain, traced in the haze pass (bit 0 of `fx`).
         let curtain = if self.settings.rain && self.settings.fx & 1 != 0 { 0.08 * rain.intensity } else { 0.0 };
         haze_u.push((U::Curtain, [0.55, 0.6, 0.72, curtain]));
+        let hi = self.profile.haze_size;
+        haze_u[1].1[2] = haze_u[1].1[2].min(self.profile.haze_lights as f32);
         if draw_haze {
             self.haze_ready = true;
-            let (src, dst) = (&self.main_points[mi] as *const _, &mut self.haze as *mut Target);
+            let (src, dst) = (&self.main_points[mi] as *const _, &mut self.hazes[hi] as *mut Target);
             self.post_arrays(ctx, gpu, &mut *dst, "haze_f.cg", &[(S::Scene, src)], &haze_u, &[(U::FogPos, &hz.pos[..]), (U::FogCol, &hz.col[..]), (U::FogDir, &hz.dir[..])], &frame)?;
         }
 
-        let (a, b, dst) = (&self.mains[mi].texture as *const _, &self.haze.texture as *const _, &mut self.prefilter as *mut Target);
-        let texel = [1.0 / self.mains[mi].width as f32, 1.0 / self.mains[mi].height as f32, 0.0, 0.0];
-        self.post(ctx, gpu, &mut *dst, "prefilter_f.cg", &[(S::Scene, a), (S::HazeTex, b)], &[(U::Texel, texel), (U::Threshold, [1.1, 0.4, 0.0, 0.0])], &frame)?;
+        // Bloom: prefilter (bright scene + haze), then a mip blur. The full
+        // chain runs W/4 → W/8 → W/16 → W/8 → W/4, the short one W/8 → W/16 → W/8.
+        let mut bloom_tex: *const g::SceGxmTexture = &self.up[0].texture;
         if self.settings.bloom {
-            let mut src: *const g::SceGxmTexture = &self.prefilter.texture;
-            let mut sw = self.prefilter.width;
-            let mut sh = self.prefilter.height;
-            for i in 0..self.down.len() {
-                let dst = &mut self.down[i] as *mut Target;
-                self.post(ctx, gpu, &mut *dst, "down_f.cg", &[(S::Source, src)], &[(U::Texel, [1.0 / sw as f32, 1.0 / sh as f32, 0.0, 0.0])], &frame)?;
-                src = &self.down[i].texture;
-                sw = self.down[i].width;
-                sh = self.down[i].height;
-            }
-            for i in 0..self.up.len() {
-                // Each upsample blends in the level of its own size.
-                let support: *const g::SceGxmTexture = if i + 1 < self.down.len() { &self.down[self.down.len() - 2 - i].texture } else { &self.prefilter.texture };
-                let dst = &mut self.up[i] as *mut Target;
-                self.post(ctx, gpu, &mut *dst, "up_f.cg", &[(S::Source, src), (S::Support, support)], &[(U::Texel, [1.0 / sw as f32, 1.0 / sh as f32, 0.7, 0.0])], &frame)?;
-                src = &self.up[i].texture;
-                sw = self.up[i].width;
-                sh = self.up[i].height;
+            let full = self.profile.bloom_full;
+            let pre = &mut self.prefilters[if full { 0 } else { 1 }] as *mut Target;
+            let (a, b) = (&self.mains[mi].texture as *const _, &self.hazes[hi].texture as *const _);
+            let texel = [1.0 / self.mains[mi].width as f32, 1.0 / self.mains[mi].height as f32, 0.0, 0.0];
+            self.post(ctx, gpu, &mut *pre, "prefilter_f.cg", &[(S::Scene, a), (S::HazeTex, b)], &[(U::Texel, texel), (U::Threshold, [1.1, 0.4, 0.0, 0.0])], &frame)?;
+            let (d8, d16) = (&mut self.down[0] as *mut Target, &mut self.down[1] as *mut Target);
+            let (u8_, u4) = (&mut self.up[0] as *mut Target, &mut self.up[1] as *mut Target);
+            // (source, destination, support for upsamples)
+            let chain: Vec<(*mut Target, *mut Target, Option<*mut Target>)> = if full {
+                vec![(pre, d8, None), (d8, d16, None), (d16, u8_, Some(d8)), (u8_, u4, Some(pre))]
+            } else {
+                vec![(pre, d16, None), (d16, u8_, Some(pre))]
+            };
+            for (src, dst, support) in chain {
+                let texel = [1.0 / (*src).width as f32, 1.0 / (*src).height as f32, 0.7, 0.0];
+                match support {
+                    None => self.post(ctx, gpu, &mut *dst, "down_f.cg", &[(S::Source, &(*src).texture)], &[(U::Texel, texel)], &frame)?,
+                    Some(sup) => self.post(ctx, gpu, &mut *dst, "up_f.cg", &[(S::Source, &(*src).texture), (S::Support, &(*sup).texture)], &[(U::Texel, texel)], &frame)?,
+                }
+                bloom_tex = &(*dst).texture;
             }
         }
         // ---------------------------------------------------- composite
@@ -730,8 +764,8 @@ impl Renderer {
         let lv = self.level();
         let (fw, fh) = (self.finals[lv].width as f32, self.finals[lv].height as f32);
         let bloom_on = if self.settings.bloom { 0.85 } else { 0.0 };
-        let (scene_tex, bloom_tex) = (&self.mains[mi].texture as *const _, &self.up[self.up.len() - 1].texture as *const _);
-        let (haze_tex, lut) = (&self.haze.texture as *const _, &self.lut as *const _);
+        let scene_tex = &self.mains[mi].texture as *const _;
+        let (haze_tex, lut) = (&self.hazes[hi].texture as *const _, &self.lut as *const _);
         let dst = &mut self.finals[lv] as *mut Target;
         self.post(
             ctx,
@@ -857,11 +891,15 @@ impl Renderer {
             }
             let c = (lo + hi) * 0.5;
             let dist = (c - f.eye3).length_squared();
-            if mirror && (hi - lo).length_squared() * 0.25 < dist * REFLECTION_MIN_SIZE * REFLECTION_MIN_SIZE {
+            let min_size = self.profile.reflection_min_size;
+            if mirror && (hi - lo).length_squared() * 0.25 < dist * min_size * min_size {
                 st.culled += 1;
                 continue;
             }
-            order.push((i as u32, if transparent { -dist } else { d.material as f32 }, lo, hi));
+            // Solid opaque first, alpha-tested after (hidden-surface removal
+            // on the tiler resolves the solid ones before any shading).
+            let key = if transparent { -dist } else { d.material as f32 + if m.alpha_test { 1.0e4 } else { 0.0 } };
+            order.push((i as u32, key, lo, hi));
         }
         let mode = (self.settings.msaa, self.settings.flat);
         if self.pipe_epoch != gpu.epoch || self.pipe_mode != mode {
@@ -871,22 +909,31 @@ impl Renderer {
         }
         order.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(core::cmp::Ordering::Equal));
         let msaa = if mirror { Msaa::None.gxm() } else { self.settings.msaa.gxm() };
+        let step = self.step();
+        // World size of one target pixel at 1 m, for LOD errors.
+        let target_h = if mirror { self.refls[self.profile.reflection_size].0.height } else { self.mains[self.mi()].height };
+        let pixel = f.pixel * H as f32 / target_h as f32;
         let mut last_state: Option<(bool, bool, Option<(i32, i32)>)> = None;
         for &(i, _, lo, hi) in &order {
             let d = &scene.draws[i as usize];
             let mi = d.material as usize;
             let max_n = if mirror { REFL_LIGHTS.min(self.settings.max_lights) } else { self.settings.max_lights.min(LIGHTS_MAX) };
             let v = variant(d);
-            let far = !mirror && self.mats[mi].lit && (f.eye3.clamp(lo, hi) - f.eye3).length_squared() > DETAIL_DISTANCE * DETAIL_DISTANCE;
+            let near_dist = (f.eye3.clamp(lo, hi) - f.eye3).length();
+            let far = !mirror && self.mats[mi].lit && near_dist > step.detail_m;
+            // 0 full detail, 1 LITE (no detail maps), 2 FAR.
+            let tier = if far { 2 } else if !mirror && self.mats[mi].lit && !self.profile.detail_maps { 1 } else { 0 };
+            // The mirror image is blurred and small: LOD1 whenever there is one.
+            let lod = d.lod.filter(|l| mirror || l.2 < near_dist.max(0.1) * pixel * step.lod_pixels);
             let max_n = if d.baked { max_n.min(2) } else { max_n };
             let lights = if self.mats[mi].lit { select_lights(scene, lo, hi, max_n, d.baked) } else { LightSet::default() };
             let n = if lights.n == 0 { 0 } else if lights.n <= 2 { 2 } else { 4 };
-            let slot = (((mi * 3 + v) * 2 + mirror as usize) * 2 + far as usize) * 3 + n / 2;
+            let slot = (((mi * 3 + v) * 2 + mirror as usize) * 3 + tier) * 3 + n / 2;
             let mut pp = self.pipe_cache[slot];
             if pp.is_null() {
                 let key = PipeKey {
                     vs: surface_key(v, self.settings.flat),
-                    fs: if self.settings.flat { Key::new("debug_f.cg", &[]) } else { frag_key(&self.mats[mi], n, mirror, d.baked, far) },
+                    fs: if self.settings.flat { Key::new("debug_f.cg", &[]) } else { frag_key(&self.mats[mi], n, mirror, d.baked, tier) },
                     layout: [Layout::Static, Layout::Skinned, Layout::Baked][v],
                     blend: self.mats[mi].blend,
                     output: Out::Half4,
@@ -972,13 +1019,16 @@ impl Renderer {
             bind(ctx, p, S::Ripples, f.ripples);
             bind(ctx, p, S::Beads, f.beads);
             if !mirror {
-                bind(ctx, p, S::ReflSharp, &self.refl.texture);
-                bind(ctx, p, S::ReflBlur, &self.refl_blur.texture);
+                let (sharp, blur) = &self.refls[self.profile.reflection_size];
+                bind(ctx, p, S::ReflSharp, &sharp.texture);
+                bind(ctx, p, S::ReflBlur, &blur.texture);
             }
             g::sceGxmSetVertexStream(ctx, 0, d.vb.cast());
-            g::sceGxmDraw(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, d.ib.cast(), d.count);
+            let (ib, count) = lod.map_or((d.ib, d.count), |l| (l.0, l.1));
+            g::sceGxmDraw(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, ib.cast(), count);
             st.draws += 1;
-            st.tris += d.count / 3;
+            st.tris += count / 3;
+            st.lod += lod.is_some() as u32;
         }
         g::sceGxmSetFrontDepthBias(ctx, 0, 0);
         self.order = order;
@@ -1000,9 +1050,12 @@ impl Renderer {
         ];
         for (k, (vdef, fdef, blend, buf, opacity)) in passes.into_iter().enumerate() {
             let buf = &*buf;
-            if buf.count == 0 || self.settings.fx & (2 << k) == 0 {
+            if buf.count == 0 || self.settings.fx & (2 << k) == 0 || (k == 3 && !self.profile.steam) {
                 continue;
             }
+            // Streaks are seeded uniformly in their box: a prefix is a
+            // uniformly thinner rain.
+            let count = if k == 0 { buf.count.min(self.profile.streaks * 6) } else { buf.count };
             let key = PipeKey { vs: key_v("fx_v.cg", &[vdef]), fs: Key::new("fx_f.cg", &[fdef]), layout: Layout::Fx, blend, output: Out::Half4, msaa };
             let Some(p) = gpu.pipeline(&key) else { continue };
             let p = &*(p as *const Pipeline);
@@ -1021,8 +1074,8 @@ impl Renderer {
             u.set(p, U::Opacity, &[opacity, 0.0, 0.0, 0.0]);
             bind(ctx, p, S::Puddles, f.puddles);
             g::sceGxmSetVertexStream(ctx, 0, buf.vb.cast());
-            g::sceGxmDraw(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, buf.ib.cast(), buf.count);
-            self.stats.fx_quads += buf.count / 6;
+            g::sceGxmDraw(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, buf.ib.cast(), count);
+            self.stats.fx_quads += count / 6;
         }
         let _ = scene;
     }
@@ -1053,7 +1106,8 @@ fn surface_key(variant: usize, flat: bool) -> Key {
     Key::new("surface_v.cg", &defs)
 }
 
-fn frag_key(m: &Mat, lights: usize, reflection: bool, baked: bool, far: bool) -> Key {
+/// `tier`: 0 full detail, 1 LITE (no normal, ORM or streak maps), 2 FAR.
+fn frag_key(m: &Mat, lights: usize, reflection: bool, baked: bool, tier: usize) -> Key {
     let mut defs: Vec<&str> = m.defines.clone();
     let l = format!("LIGHTS={lights}");
     let l: &'static str = match lights {
@@ -1071,9 +1125,13 @@ fn frag_key(m: &Mat, lights: usize, reflection: bool, baked: bool, far: bool) ->
     if baked {
         defs.push("BAKED");
     }
-    // Only the standard program has a far variant.
-    if far && m.fs == "standard_f.cg" {
-        defs.push("FAR");
+    // Only the standard program has the reduced tiers.
+    if m.fs == "standard_f.cg" {
+        match tier {
+            1 => defs.push("LITE"),
+            2 => defs.push("FAR"),
+            _ => {}
+        }
     }
     Key::new(m.fs, &defs)
 }

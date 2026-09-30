@@ -63,6 +63,8 @@ pub struct Built {
     pub indices: Vec<u8>,
     pub vertex_count: u32,
     pub index_count: u32,
+    /// LOD1 indices over the same vertices, and its error (m).
+    pub lod: Option<(Vec<u8>, u32, f32)>,
     pub pos_offset: [f32; 3],
     pub pos_scale: [f32; 3],
     pub uv_offset: [f32; 2],
@@ -78,9 +80,68 @@ fn s8n(v: f32) -> i8 {
     (v.clamp(-1.0, 1.0) * 127.0).round() as i8
 }
 
+/// Reorders triangles for the post-transform vertex cache.
+pub fn cache_order(tris: &[[u32; 3]], vertex_count: usize) -> Vec<[u32; 3]> {
+    let flat: Vec<u32> = tris.iter().flatten().copied().collect();
+    meshopt::optimize_vertex_cache(&flat, vertex_count).chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect()
+}
+
+fn u16_indices(tris: &[[u32; 3]]) -> Vec<u8> {
+    let mut idx = Vec::with_capacity(tris.len() * 6);
+    for t in tris {
+        for &i in t {
+            idx.extend((i as u16).to_le_bytes());
+        }
+    }
+    idx
+}
+
+/// Simplified index list over `verts` for distant draws: shading attributes
+/// (normal, baked light, vertex colour, UV) weigh into the error, borders
+/// between chunks stay locked. `None` when it removes less than a third.
+pub fn simplify(verts: &[Vertex], tris: &[[u32; 3]], keep: f32, max_error: f32) -> Option<(Vec<[u32; 3]>, f32)> {
+    if tris.len() < 64 {
+        return None;
+    }
+    let pos: Vec<f32> = verts.iter().flat_map(|v| [v.pos.x, v.pos.y, v.pos.z]).collect();
+    let bytes: Vec<u8> = pos.iter().flat_map(|f| f.to_le_bytes()).collect();
+    let adapter = meshopt::VertexDataAdapter::new(&bytes, 12, 0).ok()?;
+    const ATTRS: usize = 9;
+    let attrs: Vec<f32> = verts
+        .iter()
+        .flat_map(|v| {
+            let l = v.light.map(|c| c as f32 / 255.0);
+            let lum = (l[0] * 0.3 + l[1] * 0.6 + l[2] * 0.1) * l[3];
+            let c = v.color.map(|c| c as f32 / 255.0);
+            [v.normal.x, v.normal.y, v.normal.z, lum, c[0], c[1], c[2], v.uv.x, v.uv.y]
+        })
+        .collect();
+    let weights = [0.4, 0.4, 0.4, 2.0, 0.5, 0.5, 0.5, 0.02, 0.02];
+    let flat: Vec<u32> = tris.iter().flatten().copied().collect();
+    let mut err = 0.0f32;
+    let out = meshopt::simplify_with_attributes_and_locks(
+        &flat,
+        &adapter,
+        &attrs,
+        &weights,
+        ATTRS * 4,
+        &vec![false; verts.len()],
+        ((flat.len() as f32 * keep) as usize / 3) * 3,
+        max_error,
+        meshopt::SimplifyOptions::LockBorder | meshopt::SimplifyOptions::ErrorAbsolute,
+        Some(&mut err),
+    );
+    if out.len() * 3 > flat.len() * 2 || out.is_empty() {
+        return None;
+    }
+    let lod: Vec<[u32; 3]> = out.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+    Some((cache_order(&lod, verts.len()), err))
+}
+
 /// Quantizes one draw (≤ 65 536 unique vertices) into the Static (24 B),
-/// Baked (28 B) or Skinned (32 B) layout.
-pub fn build(verts: &[Vertex], tris: &[[u32; 3]], layout: pocket3d_city::VertexLayout) -> Built {
+/// Baked (28 B) or Skinned (32 B) layout. `lod`: reduced triangles over the
+/// same vertices and their error.
+pub fn build(verts: &[Vertex], tris: &[[u32; 3]], layout: pocket3d_city::VertexLayout, lod: Option<(Vec<[u32; 3]>, f32)>) -> Built {
     let skinned = layout == pocket3d_city::VertexLayout::Skinned;
     let mut min = Vec3::splat(f32::MAX);
     let mut max = Vec3::splat(f32::MIN);
@@ -118,17 +179,12 @@ pub fn build(verts: &[Vertex], tris: &[[u32; 3]], layout: pocket3d_city::VertexL
             out.extend(v.weights);
         }
     }
-    let mut idx = Vec::with_capacity(tris.len() * 6);
-    for t in tris {
-        for &i in t {
-            idx.extend((i as u16).to_le_bytes());
-        }
-    }
     Built {
         vertices: out,
-        indices: idx,
+        indices: u16_indices(&cache_order(tris, verts.len())),
         vertex_count: verts.len() as u32,
         index_count: (tris.len() * 3) as u32,
+        lod: lod.map(|(t, e)| (u16_indices(&t), (t.len() * 3) as u32, e)),
         pos_offset: center.to_array(),
         pos_scale: half.to_array(),
         uv_offset: uvc.to_array(),
@@ -279,4 +335,36 @@ pub fn product_proxy(src: &[Vertex]) -> (Vec<Vertex>, Vec<[u32; 3]>) {
         tris.push([base, base + 3, base + 2]);
     }
     (verts, tris)
+}
+
+/// LOD1 of one shelf item: a two-sided vertical card through its centre,
+/// spanning its wider horizontal extent (4 triangles instead of 10–23).
+pub fn product_card(src: &[Vertex]) -> (Vec<Vertex>, Vec<[u32; 3]>) {
+    let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    for v in src {
+        lo = lo.min(v.pos);
+        hi = hi.max(v.pos);
+    }
+    let c = (lo + hi) * 0.5;
+    let along_x = hi.x - lo.x >= hi.z - lo.z;
+    let (a, b, n) = if along_x {
+        (Vec3::new(lo.x, 0.0, c.z), Vec3::new(hi.x, 0.0, c.z), Vec3::Z)
+    } else {
+        (Vec3::new(c.x, 0.0, hi.z), Vec3::new(c.x, 0.0, lo.z), Vec3::X)
+    };
+    let vtx = |p: Vec3, n: Vec3, u: f32, t: f32| Vertex {
+        pos: Vec3::new(p.x, lo.y + t * (hi.y - lo.y), p.z),
+        normal: n,
+        tangent: [1.0, 0.0, 0.0, 1.0],
+        uv: Vec2::new(u, t),
+        color: [255, 255, 255, (t * 255.0).round() as u8],
+        joints: [0; 4],
+        weights: [255, 0, 0, 0],
+        light: [0; 4],
+    };
+    let mut verts = Vec::with_capacity(8);
+    for side in [n, -n] {
+        verts.extend([vtx(a, side, 0.0, 0.0), vtx(b, side, 1.0, 0.0), vtx(b, side, 1.0, 1.0), vtx(a, side, 0.0, 1.0)]);
+    }
+    (verts, vec![[0, 1, 2], [0, 2, 3], [4, 6, 5], [4, 7, 6]])
 }

@@ -199,6 +199,18 @@ pub struct Draw {
     /// Drawn by the main camera only (not into the street reflection).
     pub no_reflect: bool,
     pub cast_shadow: bool,
+    /// Reduced index list over the same vertices, for draws far enough that
+    /// its error projects below the renderer's pixel threshold.
+    #[serde(default)]
+    pub lod: Option<DrawLod>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DrawLod {
+    pub indices: Range,
+    pub index_count: u32,
+    /// Largest geometric deviation from the full mesh (m).
+    pub error: f32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

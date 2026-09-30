@@ -55,6 +55,22 @@ Shader sources in `vita/shaders` hot-reload: `bun tools/city.ts sync` copies the
 
 `bun tools/city.ts ctl '{"view":…,"time":…,"settings":{…}}'` steers the camera and renderer switches (`reflection`, `haze`, `bloom`, `rain`, `msaa`, `scale` 0–3, `amortize`, `maxLights`, `fx`, `skip`, `flat`, `hud`, `profile`).
 
+## Render profiles
+
+`vita/src/profile.rs` fixes a GPU frame budget and what the renderer may spend to meet it. A governor walks the profile's quality steps (scene resolution, LOD and detail distances) from the measured frame time, so the budget holds before image quality is added back.
+
+| | `vita60` (default) | `cinematic` |
+| --- | --- | --- |
+| Budget | 15.5 ms (60 fps with the display flip) | 55 ms |
+| Scene resolution steps | 720×408 → 640×362 → 544×308 | 960×544 → 720×408 → 640×362 |
+| Materials | baked diffuse + environment specular; no normal, ORM or streak maps | full detail maps within 12–18 m |
+| Planar reflection | 240×136, draws ≥ 10 % of their distance, LOD1 geometry | 480×272, draws ≥ 6 %, LOD1 geometry |
+| Haze | 120×68, 4 lights | 160×90, 6 lights |
+| Bloom | one level from W/8 | two levels from W/4 |
+| Rain | 3000 streaks, no steam | 7000 streaks, steam |
+
+Static draws carry an LOD1 index list (meshoptimizer, borders locked, baked light and normals weighted); a draw switches to it when its error projects under the step's pixel threshold. Shelf stock switches to one card per item. Pick a profile at run time with `bun tools/city.ts ctl '{"renderProfile":"cinematic"}'`; `bun tools/city.ts shots --render vita60` reports the frame time per cinematic shot.
+
 ## Status on hardware
 
 Measured on a PS Vita 2000 (CPU 444 MHz, GPU 222 MHz), fixed camera and clock, `scale` = 2 (640×362 scene, 4× MSAA, composited and scaled to 960×544), reflection and haze updates alternating between frames:

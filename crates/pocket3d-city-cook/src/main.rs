@@ -274,6 +274,14 @@ fn uv_transform(m: &gltf::Material) -> Option<([f32; 2], [f32; 2])> {
 
 // -------------------------------------------------------------- scene walk
 
+/// One shelf item: full stand-in and its LOD1 card, world space.
+struct Stock {
+    material: u32,
+    center: Vec3,
+    full: (Vec<Vertex>, Vec<[u32; 3]>),
+    card: (Vec<Vertex>, Vec<[u32; 3]>),
+}
+
 struct Prim {
     mesh_node: usize,
     world: Mat4,
@@ -419,6 +427,33 @@ fn accessor_f32(doc: &gltf::Document, buffers: &[gltf::buffer::Data], index: usi
     out
 }
 
+/// Stores one built draw's buffers and records it.
+#[allow(clippy::too_many_arguments)]
+fn push_draw(b: geometry::Built, material: u32, layout: pc::VertexLayout, node: Option<u32>, skin: Option<u32>, no_reflect: bool, blobs: &mut Blobs, draws: &mut Vec<pc::Draw>) {
+    let vertices = Blobs::push(&mut blobs.geom, &b.vertices, 16);
+    let indices = Blobs::push(&mut blobs.geom, &b.indices, 16);
+    let lod = b.lod.as_ref().map(|(idx, count, error)| pc::DrawLod { indices: Blobs::push(&mut blobs.geom, idx, 16), index_count: *count, error: *error });
+    draws.push(pc::Draw {
+        material,
+        layout,
+        vertices,
+        vertex_count: b.vertex_count,
+        indices,
+        index_count: b.index_count,
+        pos_offset: b.pos_offset,
+        pos_scale: b.pos_scale,
+        uv_offset: b.uv_offset,
+        uv_scale: b.uv_scale,
+        min: b.min,
+        max: b.max,
+        node,
+        skin,
+        no_reflect,
+        cast_shadow: true,
+        lod,
+    });
+}
+
 fn main() {
     let a = args();
     let t0 = Instant::now();
@@ -480,6 +515,7 @@ fn main() {
 
     // ---- walk the scene
     let mut prims: Vec<Prim> = Vec::new();
+    let mut stock: Vec<Stock> = Vec::new();
     let mut lights: Vec<(usize, Mat4, gltf::khr_lights_punctual::Light)> = Vec::new();
     let mut stack: Vec<(gltf::Node, Mat4)> = scene.nodes().map(|n| (n, Mat4::IDENTITY)).collect();
     let mut world_of: HashMap<usize, Mat4> = HashMap::new();
@@ -509,7 +545,7 @@ fn main() {
                     let proxy = read_primitive(&mut cook, &prim, Mat4::IDENTITY, true, None).and_then(|(v, _, m)| {
                         (cook.materials[m as usize].kind == pc::Kind::Products).then(|| {
                             cook.materials[m as usize].vertex_color = true;
-                            (geometry::product_proxy(&v), m)
+                            (geometry::product_proxy(&v), geometry::product_card(&v), m)
                         })
                     });
                     for k in 0..count {
@@ -521,19 +557,20 @@ fn main() {
                             [v[b], v[b + 1], v[b + 2], if cstride == 4 { v[b + 3] } else { 1.0 }]
                         });
                         let xf = w * Mat4::from_scale_rotation_translation(sc, ro, tr);
-                        if let Some(((pv, pt), material)) = &proxy {
+                        if let Some(((pv, pt), (cv, ct), material)) = &proxy {
                             let nmat = Mat3::from_mat4(xf).inverse().transpose();
                             let c = ic.unwrap_or([1.0; 4]);
-                            let verts = pv
-                                .iter()
-                                .map(|v| Vertex {
-                                    pos: xf.transform_point3(v.pos),
-                                    normal: (nmat * v.normal).normalize_or_zero(),
-                                    color: [srgb8(c[0]), srgb8(c[1]), srgb8(c[2]), v.color[3]],
-                                    ..*v
-                                })
-                                .collect();
-                            prims.push(Prim { mesh_node: node.index(), world: xf, verts, tris: pt.clone(), material: *material, moving: false, skin: None, no_reflect: true, baked: false });
+                            let place = |src: &Vec<Vertex>| -> Vec<Vertex> {
+                                src.iter()
+                                    .map(|v| Vertex {
+                                        pos: xf.transform_point3(v.pos),
+                                        normal: (nmat * v.normal).normalize_or_zero(),
+                                        color: [srgb8(c[0]), srgb8(c[1]), srgb8(c[2]), v.color[3]],
+                                        ..*v
+                                    })
+                                    .collect()
+                            };
+                            stock.push(Stock { material: *material, center: xf.transform_point3(Vec3::ZERO), full: (place(pv), pt.clone()), card: (place(cv), ct.clone()) });
                             continue;
                         }
                         if let Some((verts, tris, material)) = read_primitive(&mut cook, &prim, xf, true, ic) {
@@ -883,27 +920,46 @@ fn main() {
     }
     let emit = |verts: &[Vertex], tris: &[[u32; 3]], material: u32, layout: pc::VertexLayout, node: Option<u32>, skin: Option<u32>, no_reflect: bool, blobs: &mut Blobs, draws: &mut Vec<pc::Draw>| {
         for (v, t) in geometry::split(verts, tris) {
-            let b = geometry::build(&v, &t, layout);
-            let vertices = Blobs::push(&mut blobs.geom, &b.vertices, 16);
-            let indices = Blobs::push(&mut blobs.geom, &b.indices, 16);
-            draws.push(pc::Draw {
-                material,
-                layout,
-                vertices,
-                vertex_count: b.vertex_count,
-                indices,
-                index_count: b.index_count,
-                pos_offset: b.pos_offset,
-                pos_scale: b.pos_scale,
-                uv_offset: b.uv_offset,
-                uv_scale: b.uv_scale,
-                min: b.min,
-                max: b.max,
-                node,
-                skin,
-                no_reflect,
-                cast_shadow: true,
-            });
+            // LOD1 for draws seen from afar: 40 % of the triangles, ≤ 6 cm off.
+            let lod = if node.is_none() { geometry::simplify(&v, &t, 0.4, 0.06) } else { None };
+            let b = geometry::build(&v, &t, layout, lod);
+            push_draw(b, material, layout, node, skin, no_reflect, blobs, draws);
+        }
+    };
+    // Shelf stock: groups of items near each other, full stand-ins plus the
+    // LOD1 cards in one vertex buffer.
+    let mut stock_groups: BTreeMap<(u32, i32, i32), Vec<&Stock>> = BTreeMap::new();
+    for s in &stock {
+        stock_groups.entry((s.material, (s.center.x / 4.0).floor() as i32, (s.center.z / 4.0).floor() as i32)).or_default().push(s);
+    }
+    let emit_stock = |blobs: &mut Blobs, draws: &mut Vec<pc::Draw>| {
+        for ((material, _, _), items) in &stock_groups {
+            let mut start = 0;
+            while start < items.len() {
+                let (mut verts, mut tris, mut cards) = (Vec::new(), Vec::new(), Vec::new());
+                let (mut end, mut count) = (start, 0);
+                while end < items.len() && count + items[end].full.0.len() + items[end].card.0.len() <= 65535 {
+                    count += items[end].full.0.len() + items[end].card.0.len();
+                    end += 1;
+                }
+                // Full stand-ins first, then the cards, all in one buffer.
+                for s in &items[start..end] {
+                    let base = verts.len() as u32;
+                    verts.extend_from_slice(&s.full.0);
+                    tris.extend(s.full.1.iter().map(|t| t.map(|i| i + base)));
+                }
+                for s in &items[start..end] {
+                    let base = verts.len() as u32;
+                    verts.extend_from_slice(&s.card.0);
+                    cards.extend(s.card.1.iter().map(|t| t.map(|i| i + base)));
+                }
+                let cards = geometry::cache_order(&cards, verts.len());
+                // Cards replace items beyond a few metres (a small nominal
+                // error puts the switch at ~4 m at 640×362).
+                let b = geometry::build(&verts, &tris, pc::VertexLayout::Static, Some((cards, 0.012)));
+                push_draw(b, *material, pc::VertexLayout::Static, None, None, true, blobs, draws);
+                start = end;
+            }
         }
     };
     for ((material, _, _, no_reflect, baked), (verts, tris)) in &static_buckets {
@@ -938,6 +994,7 @@ fn main() {
         let layout = if *baked { pc::VertexLayout::Baked } else { pc::VertexLayout::Static };
         emit(&uv, &ut, *material, layout, None, None, *no_reflect, &mut cook.blobs, &mut draws);
     }
+    emit_stock(&mut cook.blobs, &mut draws);
     let static_draws = draws.len();
     for p in &prims {
         if !(p.moving || p.skin.is_some()) {
