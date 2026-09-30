@@ -6,9 +6,28 @@
 // Defines: LIGHTS (0..4), ALBEDO_MAP, NORMAL_MAP, ORM_MAP, EMISSION_MAP,
 // VERTEX_COLOR, ALPHA_TEST, WET, PLANAR, DAMP, CLEARCOAT, INTERIOR, FOG,
 // REFLECTION (mirror pass: cheaper film, no planar lookup), BAKED (static
-// diffuse lighting from the vertices; LIGHTS then counts moving lights only).
+// diffuse lighting from the vertices; LIGHTS then counts moving lights only),
+// FAR (draws beyond the detail distance).
 
 #include "common.cgh"
+
+// The mirror pass lands in a half-resolution, blurred buffer: diffuse and
+// emission are all that survive. Far draws keep their wet reflections but
+// drop per-pixel detail smaller than a few pixels at that distance.
+#if defined(REFLECTION) || defined(FAR)
+#undef NORMAL_MAP
+#undef ORM_MAP
+#undef DAMP
+#undef CLEARCOAT
+#endif
+#ifdef REFLECTION
+#undef WET
+#undef PLANAR
+#define NO_SPECULAR
+#endif
+#if defined(FAR) && !defined(WET)
+#define NO_SPECULAR
+#endif
 
 uniform sampler2D uAlbedo;
 uniform sampler2D uNormalMap;
@@ -19,7 +38,6 @@ uniform sampler2D uPuddles;
 uniform sampler2D uRipples;
 uniform sampler2D uReflSharp;
 uniform sampler2D uReflBlur;
-uniform sampler2D uReflSoft;
 
 uniform float4 uBase;       // linear albedo, opacity
 uniform float4 uEmissive;   // linear HDR emission, alpha-test threshold
@@ -114,10 +132,10 @@ half4 main(
         albedo.rgb *= lerp((half)1.0, (half)uWet.y, rain) * lerp((half)1.0, (half)0.82, damp * rain);
         albedo.rgb = lerp(albedo.rgb, albedo.rgb * (half)0.45 + half3(0.002, 0.0025, 0.003), puddle);
         half2 rip = 0.0;
-#ifndef REFLECTION
+#if !defined(REFLECTION) && !defined(FAR)
         if (puddle > 0.01) {
             float2 ua = vWorld.xz * uRipple.w;
-            rip = lerp(rippleFrame(ua, uRipple.x), rippleFrame(ua, uRipple.y), (half)uRipple.z) * (half)1.4 * rain;
+            rip = rippleFrame(ua, uRipple.x) * (half)1.4 * rain;
         }
 #endif
         half2 micro = (pf - 0.5) * 0.06;
@@ -181,6 +199,9 @@ half4 main(
     half3 irradiance = lerp((half3)uHemiGround.rgb, (half3)uHemiSky.rgb, N.y * 0.5 + 0.5) * (half)INV_PI;
     irradiance += tex2Dlod(uEnv, float4(octUv((float3)N), 0.0, 5.0)).rgb * envK;
 #endif
+#ifdef NO_SPECULAR
+    half3 color = diffuse + irradiance * diffuseColor * ao;
+#else
     half3 R = reflect(-V, N);
     half3 radiance = tex2Dlod(uEnv, float4(octUv((float3)R), 0.0, roughness * 5.0)).rgb * envK;
 #if defined(PLANAR) && !defined(REFLECTION)
@@ -188,9 +209,9 @@ half4 main(
         float2 ruv = vScreen.xy / vScreen.w * float2(0.5, -0.5) + 0.5;
         half3 nW = normalize(lerp(half3(0.0, 1.0, 0.0), wetN, max(puddle, (half)0.35)));
         ruv += (float2)nW.xz * float2(0.05, 0.09);
-        half3 rs = tex2D(uReflSharp, ruv).rgb;
-        half3 rb = tex2D(uReflBlur, ruv).rgb;
-        half3 refl = lerp(rs, rb, smoothstep((half)0.05, (half)0.3, roughness));
+        // One tap: the sharp mirror for puddles and polished surfaces, its
+        // blurred copy for rough wet asphalt.
+        half3 refl = roughness < (half)0.15 ? (half3)tex2D(uReflSharp, ruv).rgb : (half3)tex2D(uReflBlur, ruv).rgb;
         half2 e2 = (half2)saturate(min(ruv, 1.0 - ruv) * 33.3);
         half w = (half)uReflOn.x * (1.0 - smoothstep((half)0.5, (half)0.8, roughness)) * lerp((half)0.35, (half)1.0, e2.x * e2.y);
         radiance = lerp(radiance, refl, w);
@@ -199,6 +220,7 @@ half4 main(
     half2 dfg = DFGApprox(roughness, dotNV);
     half3 specEnv = specularColor * dfg.x + dfg.y;
     half3 color = diffuse + specular + irradiance * diffuseColor * ao + radiance * specEnv * ao;
+#endif
 
 #ifdef CLEARCOAT
     {

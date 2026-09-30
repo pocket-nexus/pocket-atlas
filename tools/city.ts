@@ -6,6 +6,7 @@
 //   bun tools/city.ts serve                         # USB host (keep running)
 //   bun tools/city.ts build  [--title P6424D941] [--debug]
 //   bun tools/city.ts vpk                           # standalone PKCT00001 VPK
+//   bun tools/city.ts push-vpk                      # → ux0:data/pocket-city/ via the dev build
 //   bun tools/city.ts native [--title P6424D941]   # build + USB SELF replacement
 //   bun tools/city.ts status|capture [--title ...]
 //   bun tools/city.ts sync                          # pack + shader sources → host0:city/
@@ -144,13 +145,14 @@ async function lint(): Promise<void> {
   const cases: [string, string[]][] = [
     ["surface_v.cg", []], ["surface_v.cg", ["SKINNED", "MAX_BONES=24"]], ["surface_v.cg", ["BAKED"]],
     ["standard_f.cg", ["LIGHTS=2", "BAKED", "WET", "PLANAR", "ALBEDO_MAP", "NORMAL_MAP", "ORM_MAP", "FOG"]], ["debug_f.cg", []],
+    ["standard_f.cg", ["LIGHTS=0", "BAKED", "FAR", "DAMP", "ALBEDO_MAP", "NORMAL_MAP", "FOG"]], ["glass_f.cg", ["LIGHTS=0", "BAKED", "FOG"]],
     ["standard_f.cg", ["LIGHTS=4", ...lit]], ["standard_f.cg", ["LIGHTS=2", "DAMP", "CLEARCOAT", "ALPHA_TEST", "REFLECTION"]],
     ["standard_f.cg", ["LIGHTS=0", "INTERIOR", "ALBEDO_MAP"]], ["unlit_f.cg", ["ALBEDO_MAP", "VERTEX_COLOR", "FOG", "ALPHA_TEST"]],
     ["glass_f.cg", ["LIGHTS=4", "FOG"]], ["glass_f.cg", ["LIGHTS=0", "REFLECTION"]], ["window_f.cg", ["FOG"]], ["window_f.cg", ["REFLECTION"]],
-    ["products_f.cg", []], ["skyline_f.cg", []], ["tower_f.cg", []], ["sky_v.cg", []], ["sky_f.cg", []], ["world_v.cg", []], ["sheet_f.cg", []],
+    ["products_f.cg", []], ["skyline_f.cg", []], ["tower_f.cg", []], ["sky_v.cg", []], ["sky_f.cg", []],
     ...["STREAK", "SPLASH", "DRIP", "STEAM", "BEACON"].map((d): [string, string[]] => ["fx_v.cg", [d]]),
     ...["STREAK", "SPLASH", "STEAM", "BEACON"].map((d): [string, string[]] => ["fx_f.cg", [d]]),
-    ["post_v.cg", []], ["haze_f.cg", []], ["prefilter_f.cg", []], ["down_f.cg", []], ["up_f.cg", []], ["composite_f.cg", []],
+    ["post_v.cg", []], ["haze_f.cg", []], ["prefilter_f.cg", []], ["down_f.cg", []], ["up_f.cg", []], ["composite_f.cg", []], ["blit_f.cg", []],
   ];
   const tmp = resolve(ROOT, ".pocket-build/city/lint");
   mkdirSync(tmp, { recursive: true });
@@ -169,6 +171,10 @@ async function lint(): Promise<void> {
   if (failed) throw new Error(`${failed} shader variants failed`);
 }
 
+// Renderer switches as the device starts; every measurement sends the full
+// set so no switch carries over from an earlier run.
+const DEFAULTS = { reflection: true, haze: true, bloom: true, rain: true, msaa: true, flat: false, maxLights: 4, fx: 63, skip: 0, hud: true, amortize: true, scale: 1 };
+
 // Frame cost per renderer feature at a fixed view and time: each row turns
 // one feature off (or all of them) through control.json and averages the
 // frame times the device reports once the change has settled.
@@ -184,11 +190,11 @@ async function bench(): Promise<void> {
   const view = engine().view;
   if (engine().stage !== "running" || !view) throw new Error("the device is not running Pocket City");
   const shot = { view: { pos: view.pos, target: view.target, fov: view.fov }, time: engine().time };
-  const all = { reflection: true, haze: true, bloom: true, rain: true, msaa: true, flat: false, maxLights: 4, reduced: false, fx: 63 };
+  const all = DEFAULTS;
   const bare = { reflection: false, haze: false, bloom: false, rain: false };
   const rows: [string, Record<string, boolean | number>][] = [
     ["full", {}], ["no reflection", { reflection: false }], ["no haze", { haze: false }],
-    ["no bloom", { bloom: false }], ["no rain", { rain: false }], ["no msaa", { msaa: false }], ["720x408", { reduced: true }],
+    ["no bloom", { bloom: false }], ["no rain", { rain: false }], ["no msaa", { msaa: false }], ["960x544", { scale: 0 }], ["640x362", { scale: 2 }],
     ["lights 2", { maxLights: 2 }], ["lights 0", { maxLights: 0 }],
     ["meshes only", bare], ["meshes flat", { ...bare, flat: true }],
     ["flat no msaa", { ...bare, flat: true, msaa: false }], ["full (again)", {}],
@@ -224,7 +230,7 @@ async function profile(): Promise<void> {
   if (engine().stage !== "running" || !view) throw new Error("the device is not running Pocket City");
   const extra = argv[1] ? JSON.parse(argv[1]) : {};
   const shot = { view: { pos: view.pos, target: view.target, fov: view.fov }, time: engine().time };
-  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ ...shot, settings: { profile: true, ...extra } }) + "\n");
+  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ ...shot, settings: { ...DEFAULTS, profile: true, ...extra } }) + "\n");
   await Bun.sleep(3000);
   const sum = new Map<string, number>();
   const n = 8;
@@ -240,7 +246,7 @@ async function profile(): Promise<void> {
     console.log(`${name.padEnd(16)} ${ms.toFixed(2).padStart(7)} ms`);
   }
   console.log(`${"total".padEnd(16)} ${total.toFixed(2).padStart(7)} ms`);
-  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ ...shot, settings: { profile: false, ...extra } }) + "\n");
+  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ ...shot, settings: { ...DEFAULTS, profile: false } }) + "\n");
 }
 
 // Standalone VPK (title PKCT00001 unless --title is given): the cooked pack
@@ -266,7 +272,24 @@ async function vpk(): Promise<void> {
   await build({ standalone: true, assets: stage });
 }
 
+// Copies the standalone VPK to ux0:data/pocket-city/ through the running
+// development build, ready to install from VitaShell.
+async function pushVpk(): Promise<void> {
+  const name = "pocket-city-PKCT00001.vpk";
+  const vpkPath = `${OUT_DIR}/${name}`;
+  if (!existsSync(vpkPath)) throw new Error(`${vpkPath} missing: run \`bun tools/city.ts vpk\` first`);
+  mkdirSync(`${SHARE}/outbox`, { recursive: true });
+  rmSync(`${SHARE}/outbox/${name}.done`, { force: true });
+  cpSync(vpkPath, `${SHARE}/outbox/${name}`);
+  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ fetch: name, nonce: Date.now() }) + "\n");
+  const done = `${SHARE}/outbox/${name}.done`;
+  for (let i = 0; i < 600 && !existsSync(done); i++) await Bun.sleep(500);
+  if (!existsSync(done)) throw new Error("the device did not pick up the package (is the development build running?)");
+  console.log(`city: ${readFileSync(done, "utf8").trim()}`);
+}
+
 if (command === "build") await build();
+else if (command === "push-vpk") await pushVpk();
 else if (command === "vpk") await vpk();
 else if (command === "lint") await lint();
 else if (command === "bench") await bench();

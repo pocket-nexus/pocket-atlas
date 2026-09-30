@@ -206,7 +206,7 @@ pub fn product_proxy(src: &[Vertex]) -> (Vec<Vertex>, Vec<[u32; 3]>) {
     };
     let top_y = hi.y;
     if round {
-        let sides = 6;
+        let sides = 5;
         // Profile radius at a few heights (bottles narrow at the shoulder and neck).
         let sample = [0.0f32, 0.55, 0.8, 1.0];
         let profile: Vec<f32> = sample

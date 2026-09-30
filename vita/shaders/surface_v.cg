@@ -3,7 +3,8 @@
 // rigid moving parts. Skinned vertices blend up to four bone rows. Baked
 // vertices carry the static diffuse lighting as square-root RGBM.
 //
-// Defines: SKINNED, MAX_BONES, BAKED.
+// Defines: SKINNED, MAX_BONES, BAKED, FLAT (profiling: position and world
+// only).
 
 void main(
     float4 aPosition,
@@ -16,7 +17,7 @@ void main(
     float4 aWeights,
     uniform float4 uBones[3 * MAX_BONES],
 #endif
-#ifdef BAKED
+#if defined(BAKED) && !defined(FLAT)
     float4 aLight,
     out half3 oLight : TEXCOORD5,
 #endif
@@ -25,12 +26,14 @@ void main(
     uniform float4x4 uViewProj,
     uniform float4 uUv,
     out float4 oPosition : POSITION,
-    out float3 oWorld : TEXCOORD0,
+#ifndef FLAT
     out half3 oNormal : TEXCOORD1,
     out half4 oTangent : TEXCOORD2,
     out float2 oUv : TEXCOORD3,
     out float4 oScreen : TEXCOORD4,
-    out half4 oColor : COLOR0)
+    out half4 oColor : COLOR0,
+#endif
+    out float3 oWorld : TEXCOORD0)
 {
     float4 local = float4(aPosition.xyz * uDequant[0].xyz + uDequant[1].xyz, 1.0);
     float3 n = aNormal.xyz;
@@ -59,12 +62,14 @@ void main(
     float4 clipPos = mul(uViewProj, float4(world, 1.0));
     oPosition = clipPos;
     oWorld = world;
+#ifndef FLAT
     oNormal = (half3)normalize(n);
     oTangent = half4((half3)normalize(t), (half)aTangent.w);
     oUv = aUv * uUv.xy + uUv.zw;
     oScreen = clipPos;
     oColor = (half4)aColor;
-#ifdef BAKED
+#endif
+#if defined(BAKED) && !defined(FLAT)
     float3 s = aLight.rgb * aLight.a;
     oLight = (half3)(s * s * 64.0);
 #endif

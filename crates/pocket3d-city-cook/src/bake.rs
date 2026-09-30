@@ -21,13 +21,13 @@ use crate::geometry::Vertex;
 pub const RANGE: f32 = 64.0;
 
 /// Refinement: edges shorter than this are never split.
-const MIN_EDGE: f32 = 0.3;
+const MIN_EDGE: f32 = 0.4;
 /// Refinement rounds; each halves the longest edges that fail the test.
 const ROUNDS: u32 = 6;
 /// Split when the midpoint differs from linear interpolation by more than
 /// ABS + REL × the local level (luminance, irradiance units).
 const ABS: f32 = 0.0015;
-const REL: f32 = 0.1;
+const REL: f32 = 0.15;
 
 struct Light {
     pos: Vec3,
