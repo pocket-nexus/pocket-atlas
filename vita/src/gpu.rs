@@ -82,6 +82,7 @@ pub enum U {
     SkyDisc,
     CloudSun,
     CloudAmb,
+    SunCurve,
     Count,
 }
 
@@ -91,7 +92,7 @@ const UNIFORM_NAMES: [&str; U::Count as usize] = [
     "uZenith", "uHorizon", "uGlow", "uCam", "uTime", "uBox", "uWind", "uCenter", "uAmbient", "uDry", "uFogPos", "uFogCol", "uFogDir",
     "uOpacity", "uBoxMin", "uBoxMax", "uTexel", "uThreshold", "uBloomK", "uGrade",
     "uCurtain", "uGrainK", "uEarthRot", "uSun", "uGlobeK", "uGlobeK2", "uCloudOff", "uMarker", "uMarkerCol", "uMarkerK",
-    "uSunDir", "uSunRad", "uSunMat", "uShadowK", "uSkyDay", "uSkySun", "uSkyGlow", "uSkyDisc", "uCloudSun", "uCloudAmb",
+    "uSunDir", "uSunRad", "uSunMat", "uShadowK", "uSkyDay", "uSkySun", "uSkyGlow", "uSkyDisc", "uCloudSun", "uCloudAmb", "uSunCurve",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

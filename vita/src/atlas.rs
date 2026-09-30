@@ -24,6 +24,8 @@ use crate::shaders::Key;
 
 const W: u32 = 960;
 const H: u32 = 544;
+/// Resolution of the globe frame; the display scales it to 960×544.
+const ATLAS_SIZE: (u32, u32) = (720, 408);
 /// Sphere tessellation (longitude × latitude segments).
 const SEG_U: usize = 128;
 const SEG_V: usize = 64;
@@ -72,6 +74,51 @@ pub struct Atlas {
     pub load_ms: u32,
     /// Profiling switches (`{"atlas": true, "probe": {...}}`).
     pub probe: Probe,
+    /// Sunlight transmittance at the ground and at the cloud shell, sampled
+    /// from the baked table at cos sun zenith −0.3 … 0.5 (globe_v.cg).
+    sun_curve: Vec<f32>,
+}
+
+const CURVE: usize = 16;
+
+fn half_to_f32(h: u16) -> f32 {
+    let (s, e, m) = ((h >> 15) as u32, ((h >> 10) & 31) as u32, (h & 1023) as u32);
+    let bits = if e == 0 {
+        if m == 0 { s << 31 } else {
+            let mut e2 = 127 - 15 + 1;
+            let mut m2 = m;
+            while m2 & 1024 == 0 {
+                m2 <<= 1;
+                e2 -= 1;
+            }
+            (s << 31) | ((e2 as u32) << 23) | ((m2 & 1023) << 13)
+        }
+    } else if e == 31 {
+        (s << 31) | (255 << 23) | (m << 13)
+    } else {
+        (s << 31) | ((e + 127 - 15) << 23) | (m << 13)
+    };
+    f32::from_bits(bits)
+}
+
+/// Two rows (ground, cloud shell) of the half-float RGBA sunlight table as
+/// `CURVE` samples each over cos sun zenith −0.3 … 0.5.
+fn sun_curve(px: &[u8], w: usize, h: usize) -> Vec<f32> {
+    let at = |x: f32, y: f32| -> [f32; 3] {
+        let (xi, yi) = (((x * (w - 1) as f32).round() as usize).min(w - 1), ((y * (h - 1) as f32).round() as usize).min(h - 1));
+        let o = (yi * w + xi) * 8;
+        let c = |k: usize| half_to_f32(u16::from_le_bytes([px[o + k * 2], px[o + k * 2 + 1]]));
+        [c(0), c(1), c(2)]
+    };
+    let mut out = Vec::with_capacity(2 * CURVE * 4);
+    for row in [0.0, 0.3873] {
+        for i in 0..CURVE {
+            let mu = -0.3 + 0.8 * i as f32 / (CURVE - 1) as f32;
+            let c = at(mu * 0.5 + 0.5, row);
+            out.extend_from_slice(&[c[0], c[1], c[2], 0.0]);
+        }
+    }
+    out
 }
 
 struct Targets {
@@ -262,10 +309,14 @@ impl Atlas {
         order.sort_by_key(|&i| meta.textures[i].data.offset);
         let mut slots: Vec<Option<Texture>> = (0..meta.textures.len()).map(|_| None).collect();
         let mut buf = Vec::new();
+        let mut curve = Vec::new();
         for &i in &order {
             let t = &meta.textures[i];
             buf.resize(t.data.size as usize, 0);
             f.read_at((s_tex.offset + t.data.offset) as u64, &mut buf)?;
+            if t.name == "sun_transmittance" {
+                curve = sun_curve(&buf, t.width as usize, t.height as usize);
+            }
             let mut tex = up.texture(vram, fmt(t.format), t.width, t.height, t.mips, &buf).map_err(|e| format!("atlas texture {}: {e}", t.name))?;
             tex.set_wrap(wrap(t.wrap_s), wrap(t.wrap_t));
             tex.set_filter(true, t.mips > 1);
@@ -277,7 +328,9 @@ impl Atlas {
             tex_index(&meta, n)?;
         }
 
-        let rt = Targets::new(W, H, Msaa::X4)?;
+        // 720×408 with 4× MSAA holds 30 fps with margin; 960×544 fits only
+        // without MSAA and with under a millisecond to spare.
+        let rt = Targets::new(ATLAS_SIZE.0, ATLAS_SIZE.1, Msaa::X4)?;
 
         let (sv, si) = sphere();
         let sphere_vb = mem.alloc(sv.len() * 4, 16)?;
@@ -328,7 +381,7 @@ impl Atlas {
             vram: Arena::new(Kind::Cdram, 16 << 20),
             mem: Arena::new(Kind::Main, 2 << 20),
             rt,
-            size: (W, H),
+            size: ATLAS_SIZE,
             msaa: Msaa::X4,
             sphere_vb,
             sphere_ib,
@@ -351,6 +404,7 @@ impl Atlas {
             toast: None,
             load_ms: 0,
             probe: Probe::default(),
+            sun_curve: curve,
             meta,
         };
         atlas.focus_selected();
@@ -563,11 +617,11 @@ impl Atlas {
             u.set(p, U::GlobeK, &[gl.sun_i * gl.surface, gl.lights_max, gl.lights_gain, gl.night]);
             u.set(p, U::GlobeK2, &[gl.cloud_shadow, gl.specular, gl.cloud_opacity, gl.cloud_glow]);
             u.set(p, U::CloudOff, &[(self.time * gl.cloud_drift_per_s).fract(), gl.sun_i, 0.0, 0.0]);
+            u.set(p, U::SunCurve, &self.sun_curve);
             bind(ctx, p, S::Albedo, self.tex("albedo"));
             bind(ctx, p, S::NormalMap, self.tex("normals"));
             bind(ctx, p, S::Lights, self.tex("lights"));
             bind(ctx, p, S::Clouds, self.tex("clouds"));
-            bind(ctx, p, S::SunTrans, self.tex("sun_transmittance"));
             bind(ctx, p, S::Inscatter, self.tex("inscatter"));
             bind(ctx, p, S::Transmit, self.tex("transmittance"));
             g::sceGxmSetVertexStream(ctx, 0, self.sphere_vb.cast());

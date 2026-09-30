@@ -475,7 +475,7 @@ pub struct Renderer {
     refls: Vec<(Target, Target)>,
     /// Scene targets per resolution in `SCALES`, 4× MSAA then single-sampled;
     /// `Settings::msaa` and the current scale level pick one.
-    mains: Vec<Target>,
+    mains: Vec<Option<Target>>,
     main_points: Vec<g::SceGxmTexture>,
     /// Haze buffer per `Step::haze_size`.
     hazes: Vec<Target>,
@@ -484,7 +484,7 @@ pub struct Renderer {
     prefilters: Vec<Target>,
     /// Tone-mapped 8-bit frame per scene resolution; the display scene
     /// scales it to 960×544.
-    finals: Vec<Target>,
+    finals: Vec<Option<Target>>,
     down: Vec<Target>,
     up: Vec<Target>,
     /// Screen mask (vignette × letterbox × fade), rewritten into the next
@@ -572,7 +572,7 @@ impl SunPass {
             rad: [sun.radiance[0], sun.radiance[1], sun.radiance[2], sh.normal_bias.max(0.01)],
             mat: [urow.x, urow.y, urow.z, urow.w, vrow.x, vrow.y, vrow.z, vrow.w],
             // Bias: the authored depth bias over the range, at least ~2 cm.
-            k: [near, 1.0 / range, sh.bias.abs().max(0.02 / range), sh.radius.max(0.5) * 0.5 / size as f32],
+            k: [near, 1.0 / range, sh.bias.abs().max(0.02 / range), size as f32],
             ready: false,
         })
     }
@@ -627,28 +627,27 @@ impl Renderer {
         let mut vram = Arena::new(Kind::Cdram, 8 << 20);
         let mut mem = Arena::new(Kind::Main, 4 << 20);
         let hdr = ColorFormat::Rgba16f;
+        // What this place has: the rain, its haze and the street mirror.
+        let has_planar = scene.meta.materials.iter().any(|m| m.wet.as_ref().is_some_and(|w| w.planar));
+        let has_haze = !scene.meta.fog_lights.is_empty();
         let mut refls = Vec::new();
-        for d in [2, 4] {
-            let sharp = Target::new(&mut vram, &mut mem, W / d, H / d, hdr, Msaa::None, Depth::Transient)?;
-            let blur = Target::new(&mut vram, &mut mem, W / (d * 2), H / (d * 2), hdr, Msaa::None, Depth::None)?;
-            refls.push((sharp, blur));
+        if has_planar {
+            for d in [2, 4] {
+                let sharp = Target::new(&mut vram, &mut mem, W / d, H / d, hdr, Msaa::None, Depth::Transient)?;
+                let blur = Target::new(&mut vram, &mut mem, W / (d * 2), H / (d * 2), hdr, Msaa::None, Depth::None)?;
+                refls.push((sharp, blur));
+            }
         }
-        let mut mains = Vec::new();
-        let mut main_points = Vec::new();
-        for (w, h) in SCALES {
-          for msaa in [Msaa::X4, Msaa::None] {
-            let t = Target::new(&mut vram, &mut mem, w, h, hdr, msaa, Depth::Transient)?;
-            let mut point = t.texture;
-            g::sceGxmTextureSetMinFilter(&mut point, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_POINT);
-            g::sceGxmTextureSetMagFilter(&mut point, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_POINT);
-            mains.push(t);
-            main_points.push(point);
-          }
-        }
+        // Scene targets per resolution level are made when a level is first
+        // used (`ensure_level`): most places only ever use one.
+        let mains = (0..SCALES.len() * 2).map(|_| None).collect();
+        let main_points = (0..SCALES.len() * 2).map(|_| core::mem::zeroed()).collect();
         // Haze is smooth and costs ~1.3 ms per light per 32k pixels.
         let mut hazes = Vec::new();
-        for d in [6, 8] {
-            hazes.push(Target::new(&mut vram, &mut mem, W / d, H / d, hdr, Msaa::None, Depth::None)?);
+        if has_haze {
+            for d in [6, 8] {
+                hazes.push(Target::new(&mut vram, &mut mem, W / d, H / d, hdr, Msaa::None, Depth::None)?);
+            }
         }
         let mut prefilters = Vec::new();
         for d in [4, 8] {
@@ -663,10 +662,7 @@ impl Renderer {
             up.push(Target::new(&mut vram, &mut mem, W / s, H / s, hdr, Msaa::None, Depth::None)?);
         }
 
-        let mut finals = Vec::new();
-        for (w, h) in SCALES {
-            finals.push(Target::new(&mut vram, &mut mem, w, h, ColorFormat::Rgba8, Msaa::None, Depth::None)?);
-        }
+        let finals = (0..SCALES.len()).map(|_| None).collect();
 
         let lut_px = tone_lut(&scene.meta.post);
         let lut_mem = vram.alloc(lut_px.len(), 512)?;
@@ -729,10 +725,8 @@ impl Renderer {
             Some(s) => Some(SunPass::new(&mut vram, &mut mem, s)?),
             None => None,
         };
-        // What this place has: the rain, its haze and the street mirror.
         let has_rain = scene.meta.rain.active;
-        let has_haze = !scene.meta.fog_lights.is_empty();
-        let has_reflection = mats.iter().any(|m| m.defines.contains(&"PLANAR"));
+        let has_reflection = has_planar;
         Ok(Self {
             settings,
             mats,
@@ -796,7 +790,7 @@ impl Renderer {
             a.destroy();
             b.destroy();
         }
-        for t in mains.into_iter().chain(hazes).chain(prefilters).chain(finals).chain(down).chain(up) {
+        for t in mains.into_iter().flatten().chain(hazes).chain(prefilters).chain(finals.into_iter().flatten()).chain(down).chain(up) {
             t.destroy();
         }
         _vram.free();
@@ -928,6 +922,35 @@ impl Renderer {
         Ok(())
     }
 
+    /// Makes the scene targets of resolution `level` (both MSAA modes) and
+    /// its 8-bit frame on first use.
+    unsafe fn ensure_level(&mut self, level: usize) -> Result<(), String> {
+        let (w, h) = SCALES[level];
+        for (k, msaa) in [Msaa::X4, Msaa::None].into_iter().enumerate() {
+            let i = level * 2 + k;
+            if self.mains[i].is_none() {
+                let t = Target::new(&mut self._vram, &mut self._mem, w, h, ColorFormat::Rgba16f, msaa, Depth::Transient)?;
+                let mut point = t.texture;
+                g::sceGxmTextureSetMinFilter(&mut point, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_POINT);
+                g::sceGxmTextureSetMagFilter(&mut point, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_POINT);
+                self.main_points[i] = point;
+                self.mains[i] = Some(t);
+            }
+        }
+        if self.finals[level].is_none() {
+            self.finals[level] = Some(Target::new(&mut self._vram, &mut self._mem, w, h, ColorFormat::Rgba8, Msaa::None, Depth::None)?);
+        }
+        Ok(())
+    }
+
+    fn main_t(&self, mi: usize) -> &Target {
+        self.mains[mi].as_ref().expect("scene target made by ensure_level")
+    }
+
+    fn final_t(&self, level: usize) -> &Target {
+        self.finals[level].as_ref().expect("frame target made by ensure_level")
+    }
+
     fn mi(&self) -> usize {
         self.level() * 2 + (self.settings.msaa != Msaa::X4) as usize
     }
@@ -1049,9 +1072,10 @@ impl Renderer {
         }
 
         // ---------------------------------------------------- main
+        self.ensure_level(self.level())?;
         let mi = self.mi();
-        self.mains[mi].begin(ctx, 0.0)?;
-        Self::viewport(ctx, self.mains[mi].width, self.mains[mi].height);
+        self.mains[mi].as_mut().expect("scene target").begin(ctx, 0.0)?;
+        Self::viewport(ctx, self.main_t(mi).width, self.main_t(mi).height);
         let planes = camera::planes(&vp);
         let mut st = PassStats::default();
         let msaa = self.settings.msaa.gxm();
@@ -1063,7 +1087,8 @@ impl Renderer {
         if self.settings.rain && self.has_rain {
             self.particles(ctx, gpu, scene, &frame, rain);
         }
-        self.timeline.end(ctx, &self.mains[mi], "main");
+        let main_target = self.main_t(mi) as *const Target;
+        self.timeline.end(ctx, &*main_target, "main");
         self.stats.main = st;
 
         // ---------------------------------------------------- haze, bloom
@@ -1110,8 +1135,10 @@ impl Renderer {
         if bloom {
             let full = step.bloom_full;
             let pre = &mut self.prefilters[if full { 0 } else { 1 }] as *mut Target;
-            let (a, b) = (&self.mains[mi].texture as *const _, &self.hazes[hi].texture as *const _);
-            let texel = [1.0 / self.mains[mi].width as f32, 1.0 / self.mains[mi].height as f32, 0.0, 0.0];
+            let a = &self.main_t(mi).texture as *const _;
+            // Without haze buffers the prefilter's haze input is weighted out.
+            let b = self.hazes.get(hi).map_or(a, |t| &t.texture as *const _);
+            let texel = [1.0 / self.main_t(mi).width as f32, 1.0 / self.main_t(mi).height as f32, 0.0, 0.0];
             self.post(ctx, gpu, &mut *pre, "prefilter_f.cg", &[(S::Scene, a), (S::HazeTex, b)], &[(U::Texel, texel), (U::Threshold, [self.post.bloom_threshold, self.post.bloom_smoothing, haze_w, 0.0])], &frame)?;
             let (d8, d16) = (&mut self.down[0] as *mut Target, &mut self.down[1] as *mut Target);
             let (u8_, u4) = (&mut self.up[0] as *mut Target, &mut self.up[1] as *mut Target);
@@ -1133,11 +1160,12 @@ impl Renderer {
         // ---------------------------------------------------- composite
         // Tone map and grade at scene resolution; the display scene scales.
         let lv = self.level();
-        let (fw, fh) = (self.finals[lv].width as f32, self.finals[lv].height as f32);
+        let (fw, fh) = (self.final_t(lv).width as f32, self.final_t(lv).height as f32);
         let mask = self.mask(fade, bars);
-        let scene_tex = &self.mains[mi].texture as *const _;
-        let (haze_tex, lut, grain) = (&self.hazes[hi].texture as *const _, &self.lut as *const _, &self.grain as *const _);
-        let dst = &mut self.finals[lv] as *mut Target;
+        let scene_tex = &self.main_t(mi).texture as *const _;
+        let haze_tex = self.hazes.get(hi).map_or(scene_tex, |t| &t.texture as *const _);
+        let (lut, grain) = (&self.lut as *const _, &self.grain as *const _);
+        let dst = self.finals[lv].as_mut().expect("frame target") as *mut Target;
         let mut defs: Vec<&'static str> = Vec::new();
         if haze_on {
             defs.push("HAZE");
@@ -1180,7 +1208,8 @@ impl Renderer {
         g::sceGxmSetFragmentProgram(ctx, p.fp);
         let u = Uniforms::reserve(ctx, p);
         u.set(p, U::RayZ, &[0.0; 4]);
-        bind(ctx, p, S::Source, &self.finals[self.level()].texture);
+        let Some(fin) = self.finals[self.level()].as_ref() else { return };
+        bind(ctx, p, S::Source, &fin.texture);
         g::sceGxmSetVertexStream(ctx, 0, self.tri_vb.cast());
         g::sceGxmDraw(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, self.tri_ib.cast(), 3);
     }
@@ -1335,7 +1364,7 @@ impl Renderer {
         let msaa = if mirror { Msaa::None.gxm() } else { self.settings.msaa.gxm() };
         let step = self.step();
         // World size of one target pixel at 1 m, for LOD errors.
-        let target_h = if mirror { self.refls[self.settings.reflection_size].0.height } else { self.mains[self.mi()].height };
+        let target_h = if mirror { self.refls[self.settings.reflection_size].0.height } else { self.main_t(self.mi()).height };
         let pixel = f.pixel * H as f32 / target_h as f32;
         let mut last_state: Option<(bool, bool, Option<(i32, i32)>)> = None;
         for &(i, _, lo, hi) in &order {
@@ -1478,9 +1507,10 @@ impl Renderer {
             bind(ctx, p, S::Ripples, f.ripples);
             bind(ctx, p, S::Beads, f.beads);
             if !mirror {
-                let (sharp, blur) = &self.refls[self.settings.reflection_size];
-                bind(ctx, p, S::ReflSharp, &sharp.texture);
-                bind(ctx, p, S::ReflBlur, &blur.texture);
+                if let Some((sharp, blur)) = self.refls.get(self.settings.reflection_size) {
+                    bind(ctx, p, S::ReflSharp, &sharp.texture);
+                    bind(ctx, p, S::ReflBlur, &blur.texture);
+                }
             }
             g::sceGxmSetVertexStream(ctx, 0, d.vb.cast());
             let (ib, count) = lod.map_or((d.ib, d.count), |l| (l.0, l.1));

@@ -61,7 +61,7 @@ uniform sampler2D uShadow;
 uniform float4 uSunDir;    // direction towards the sun, -
 uniform float4 uSunRad;    // radiance (colour × intensity), normal offset (m)
 uniform float4 uSunMat[2]; // world → shadow-map uv
-uniform float4 uShadowK;   // near-plane distance along the light, 1 / range, bias, tap offset (uv)
+uniform float4 uShadowK;   // near-plane distance along the light, 1 / range, bias, map size (texels)
 
 // Packed distance along the light (shadow_f.cg).
 float shadowDepth(float2 uv)
@@ -69,16 +69,22 @@ float shadowDepth(float2 uv)
     return dot(tex2D(uShadow, uv).rgb, float3(1.0, 1.0 / 255.0, 1.0 / 65025.0));
 }
 
-// Share of four taps around `sp` that the sun reaches.
+// Share of the sun that reaches `sp`: the four map texels around it
+// compared and blended by the position between their centres (what a
+// hardware PCF lookup does), so shadow edges do not step with the texels.
 float sunLit(float3 sp)
 {
     float4 wp = float4(sp, 1.0);
-    float2 uv = float2(dot(uSunMat[0], wp), dot(uSunMat[1], wp));
+    float2 t = float2(dot(uSunMat[0], wp), dot(uSunMat[1], wp)) * uShadowK.w - 0.5;
+    float2 f = frac(t);
+    float2 uv = (t - f + 0.5) / uShadowK.w;
+    float o = 1.0 / uShadowK.w;
     float d = (-dot(uSunDir.xyz, sp) - uShadowK.x) * uShadowK.y - uShadowK.z;
-    float o = uShadowK.w;
-    float lit = step(d, shadowDepth(uv + float2(-o, -o))) + step(d, shadowDepth(uv + float2(o, -o)))
-              + step(d, shadowDepth(uv + float2(-o, o))) + step(d, shadowDepth(uv + float2(o, o)));
-    return lit * 0.25;
+    float s00 = step(d, shadowDepth(uv));
+    float s10 = step(d, shadowDepth(uv + float2(o, 0.0)));
+    float s01 = step(d, shadowDepth(uv + float2(0.0, o)));
+    float s11 = step(d, shadowDepth(uv + float2(o, o)));
+    return lerp(lerp(s00, s10, f.x), lerp(s01, s11, f.x), f.y);
 }
 #endif
 #if LIGHTS > 0

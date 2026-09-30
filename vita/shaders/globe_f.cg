@@ -4,27 +4,24 @@
 // city lights on the night side, moonlight; then the clouds lit by the sun
 // and, at night, by the cities under them. The atmosphere comes from maps
 // baked for the fixed camera: colour × transmittance + in-scattering.
+//
+// Sunlight through the atmosphere, the surface frame and every map
+// coordinate arrive from the vertex stage (globe_v.cg), so no fetch depends
+// on arithmetic in this program.
 
 #include "common.cgh"
-
-#define TAU 6.28318531
-// Height of the cloud shell over the atmosphere depth (sunlight table rows).
-#define CLOUD_ROW 0.3873
 
 uniform sampler2D uAlbedo;    // sRGB albedo, water in alpha
 uniform sampler2D uNormalMap; // relief normal (tangent space), elevation in alpha
 uniform sampler2D uLights;    // city lights: dense cores (r), scattered towns (g)
 uniform sampler2D uClouds;    // cover (r), thickness (g), shading (b)
-uniform sampler2D uSunTrans;  // sunlight transmittance (x: cos zenith, y: sqrt height)
 uniform sampler2D uInscatter; // atmosphere in front of the disc (screen)
 uniform sampler2D uTransmit;  // … and its transmittance
 
-uniform float4 uEarthRot[3]; // rows of the object → world rotation
-uniform float4 uSun;         // direction towards the sun (world)
-uniform float4 uEye;         // camera position
-uniform float4 uGlobeK;      // sun irradiance (sunI × surface), lights max, lights gain, moonlight
-uniform float4 uGlobeK2;     // cloud shadow, specular, cloud opacity, cloud glow
-uniform float4 uCloudOff;    // cloud map offset (u), sunI
+uniform float4 uSun;      // direction towards the sun (world)
+uniform float4 uGlobeK;   // sun irradiance (sunI × surface), lights max, lights gain, moonlight
+uniform float4 uGlobeK2;  // cloud shadow, specular, cloud opacity, cloud glow
+uniform float4 uCloudOff; // -, sunI
 
 float ggx(float NdH, float a2)
 {
@@ -32,110 +29,93 @@ float ggx(float NdH, float a2)
     return a2 / (PI * d * d);
 }
 
-float3 toWorld(float3 v)
-{
-    return float3(dot(uEarthRot[0].xyz, v), dot(uEarthRot[1].xyz, v), dot(uEarthRot[2].xyz, v));
-}
-
-float3 toObject(float3 v)
-{
-    return uEarthRot[0].xyz * v.x + uEarthRot[1].xyz * v.y + uEarthRot[2].xyz * v.z;
-}
-
-float2 sphereUv(float3 p)
-{
-    return float2(atan2(p.x, p.z) * (1.0 / TAU) + 0.5, 0.5 - asin(clamp(p.y, -1.0, 1.0)) * INV_PI);
-}
-
-float3 lightsColor(float lum)
-{
-    return lerp(float3(1.0, 0.46, 0.15), float3(1.0, 0.76, 0.42), saturate(lum * 0.55));
-}
-
 float4 main(
-    float3 vObj : TEXCOORD0,
-    float3 vWorld : TEXCOORD1,
-    float2 vUv : TEXCOORD2,
-    float4 vScreen : TEXCOORD3) : COLOR
+    float4 vUv : TEXCOORD0,
+    float2 vShadowUv : TEXCOORD1,
+    float2 vScreen : TEXCOORD2,
+    half3 vN : TEXCOORD3,
+    half3 vEast : TEXCOORD4,
+    half3 vNorth : TEXCOORD5,
+    half3 vV : TEXCOORD6,
+    half4 vSunE : TEXCOORD7,
+    half3 vCloudE : TEXCOORD8) : COLOR
 {
-    float3 p = normalize(vObj);
-    float4 A = tex2D(uAlbedo, vUv);
-    float3 albedo = (float3)srgbToLinear((half3)A.rgb);
-    float water = A.a;
+    half4 A = tex2D(uAlbedo, vUv.xy);
+    half4 NM = tex2D(uNormalMap, vUv.xy);
+    half2 li = tex2D(uLights, vUv.xy).rg;
+    half3 c = tex2D(uClouds, vUv.zw).rgb;
+    half cs = tex2D(uClouds, vShadowUv).r;
+    half3 ins = tex2D(uInscatter, vScreen).rgb;
+    half3 tr = tex2D(uTransmit, vScreen).rgb;
 
-    float4 NM = tex2D(uNormalMap, vUv);
-    float3 tn = NM.xyz * 2.0 - 1.0;
-    float elev = NM.w;
-    float3 east = float3(p.z, 0.0, -p.x);
-    float el = length(east);
-    east = el > 1e-5 ? east / el : float3(1.0, 0.0, 0.0);
-    float3 north = cross(p, east);
-    float3 Ng = normalize(vWorld);
-    float3 N = normalize(toWorld(east * tn.x + north * tn.y + p * tn.z));
+    half3 albedo = srgbToLinear(A.rgb);
+    half water = A.a;
+    half3 Ng = normalize(vN);
+    half3 tn = NM.xyz * (half)2.0 - (half)1.0;
+    half3 N = normalize(vEast * tn.x + vNorth * tn.y + Ng * tn.z);
     N = normalize(lerp(N, Ng, water));
-    float3 L = uSun.xyz;
-    float3 V = normalize(uEye.xyz - vWorld);
-    float mu = dot(Ng, L);
-    float sunI = uCloudOff.y;
-    float3 E = uGlobeK.x * tex2D(uSunTrans, float2(mu * 0.5 + 0.5, 0.008)).rgb;
+    half3 L = (half3)uSun.xyz;
+    half3 V = normalize(vV);
+    half mu = vSunE.w;
+    half3 E = vSunE.rgb;
+    half sunI = (half)uCloudOff.y;
 
-    // Cloud shadows: the cover a little towards the sun.
-    float3 Lo = toObject(L);
-    float3 ps = normalize(p + (Lo - p * dot(Lo, p)) * 0.009);
-    float2 suv = sphereUv(ps);
-    float cs = tex2Dlod(uClouds, float4(suv.x + uCloudOff.x, suv.y, 0.0, 2.0)).r;
-    float shadow = 1.0 - uGlobeK2.x * cs;
-
-    float NdL = max(dot(N, L), 0.0);
-    float3 col = albedo * INV_PI * E * NdL * shadow;
+    half shadow = (half)1.0 - (half)uGlobeK2.x * cs;
+    half NdL = max(dot(N, L), (half)0.0);
+    half3 col = albedo * (half)INV_PI * E * NdL * shadow;
 
     // Skylight: blue by day, amber in the twilight band.
-    float dayAmt = smoothstep(-0.16, 0.3, mu);
-    float3 skyCol = lerp(float3(0.9, 0.42, 0.22), float3(0.32, 0.52, 1.0), smoothstep(-0.06, 0.12, mu));
-    col += albedo * skyCol * uGlobeK.x * 0.012 * dayAmt * (1.0 - 0.3 * cs);
+    half dayAmt = smoothstep((half)-0.16, (half)0.3, mu);
+    half3 skyCol = lerp(half3(0.9, 0.42, 0.22), half3(0.32, 0.52, 1.0), smoothstep((half)-0.06, (half)0.12, mu));
+    col += albedo * skyCol * ((half)uGlobeK.x * (half)0.012 * dayAmt * ((half)1.0 - (half)0.3 * cs));
 
-    // Ocean: GGX sun glint plus Fresnel sky reflection.
-    float NdV = max(dot(Ng, V), 1e-3);
-    float3 H = normalize(L + V);
-    float NdH = max(dot(Ng, H), 0.0);
-    float VdH = max(dot(V, H), 0.0);
-    float NgL = max(mu, 0.0);
-    float G = (NgL / (NgL * 0.97 + 0.03)) * (NdV / (NdV * 0.97 + 0.03));
-    float F = 0.02 + 0.98 * pow(1.0 - VdH, 5.0);
-    float spec = (ggx(NdH, 0.0035) + ggx(NdH, 0.05) * 0.35) * F * G / (4.0 * NdV + 1e-4);
-    col += water * E * spec * shadow * (1.0 - 0.7 * cs) * uGlobeK2.y;
-    float Fv = 0.02 + 0.98 * pow(1.0 - NdV, 5.0);
-    col += water * Fv * skyCol * sunI * 0.02 * dayAmt;
+    // Ocean: GGX sun glint plus Fresnel sky reflection (float: the glint is sharp).
+    if (water > 0.01) {
+        float3 Vf = (float3)V;
+        float3 Lf = (float3)L;
+        float3 Nf = (float3)Ng;
+        float NdV = max(dot(Nf, Vf), 1e-3);
+        float3 H = normalize(Lf + Vf);
+        float NdH = max(dot(Nf, H), 0.0);
+        float VdH = max(dot(Vf, H), 0.0);
+        float NgL = max((float)mu, 0.0);
+        float G = (NgL / (NgL * 0.97 + 0.03)) * (NdV / (NdV * 0.97 + 0.03));
+        float F = 0.02 + 0.98 * exp2((-5.55473 * VdH - 6.98316) * VdH);
+        float spec = (ggx(NdH, 0.0035) + ggx(NdH, 0.05) * 0.35) * F * G / (4.0 * NdV + 1e-4);
+        float Fv = 0.02 + 0.98 * exp2((-5.55473 * NdV - 6.98316) * NdV);
+        col += (half3)((float3)E * spec * (float)(shadow * ((half)1.0 - (half)0.7 * cs)) * uGlobeK2.y) * water;
+        col += water * (half)Fv * skyCol * (sunI * (half)0.02 * dayAmt);
+    }
 
     // City lights, fading in through twilight; mountain country stays dark.
-    float night = 1.0 - smoothstep(-0.14, 0.05, mu);
-    float2 li = tex2D(uLights, vUv).rg;
-    float lum = (li.r * li.r * saturate((1.0 - water) * 1.6) + li.g * li.g) * uGlobeK.y;
-    float mtn = smoothstep(0.12, 0.4, elev);
-    lum *= 1.0 - 0.75 * mtn * (1.0 - smoothstep(0.4, 1.5, lum));
-    col += lightsColor(lum) * lum * uGlobeK.z * night;
+    half night = (half)1.0 - smoothstep((half)-0.14, (half)0.05, mu);
+    half lum = (li.r * li.r * saturate(((half)1.0 - water) * (half)1.6) + li.g * li.g) * (half)uGlobeK.y;
+    half mtn = smoothstep((half)0.12, (half)0.4, NM.w);
+    lum *= (half)1.0 - (half)0.75 * mtn * ((half)1.0 - smoothstep((half)0.4, (half)1.5, lum));
+    half3 lightsCol = lerp(half3(1.0, 0.46, 0.15), half3(1.0, 0.76, 0.42), saturate(lum * (half)0.55));
+    col += lightsCol * lum * ((half)uGlobeK.z * night);
     // Moonlight keeps the night hemisphere legible.
-    col += (albedo * float3(0.26, 0.40, 0.85) + float3(0.002, 0.004, 0.012) * water) * uGlobeK.w * (1.0 - dayAmt);
+    col += (albedo * half3(0.26, 0.40, 0.85) + half3(0.002, 0.004, 0.012) * water) * ((half)uGlobeK.w * ((half)1.0 - dayAmt));
 
     // Cloud shell (0.45 % above the ground: the same view ray, same maps).
-    float3 c = tex2D(uClouds, float2(vUv.x + uCloudOff.x, vUv.y)).rgb;
-    float dens = c.r;
+    half dens = c.r;
     if (dens > 0.004) {
-        float thick = c.g;
-        float3 Ec = uGlobeK.x * tex2D(uSunTrans, float2(mu * 0.5 + 0.5, CLOUD_ROW)).rgb;
-        float wrapL = saturate(mu * 0.85 + 0.15);
-        float shade = (0.5 + 0.55 * thick) * (0.82 + 0.3 * c.b);
-        float3 cc = 0.8 * INV_PI * Ec * (0.15 + 0.85 * wrapL) * shade;
-        cc += Ec * pow(saturate(dot(-V, L)), 6.0) * (1.0 - thick) * 0.05;
-        cc += float3(0.30, 0.45, 0.9) * uGlobeK.x * 0.012 * dayAmt;
-        float2 lc = tex2Dlod(uLights, float4(vUv, 0.0, 3.0)).rg;
-        float lumc = (lc.r * lc.r + lc.g * lc.g) * uGlobeK.y;
-        cc += float3(1.0, 0.52, 0.24) * lumc * uGlobeK2.w * uGlobeK.z * night * (0.45 + 0.55 * thick);
-        cc += float3(0.26, 0.38, 0.75) * uGlobeK.w * (0.6 + 0.5 * thick) * (1.0 - dayAmt);
-        float alpha = saturate(dens * uGlobeK2.z * (0.75 + 0.25 * thick) * (1.0 + 0.9 * (1.0 - NdV)));
+        half thick = c.g;
+        half3 Ec = vCloudE;
+        half wrapL = saturate(mu * (half)0.85 + (half)0.15);
+        half shade = ((half)0.5 + (half)0.55 * thick) * ((half)0.82 + (half)0.3 * c.b);
+        half3 cc = (half)(0.8 * INV_PI) * Ec * ((half)0.15 + (half)0.85 * wrapL) * shade;
+        half back = saturate(dot(-V, L));
+        back *= back;
+        cc += Ec * (back * back * back * ((half)1.0 - thick) * (half)0.05);
+        cc += half3(0.30, 0.45, 0.9) * ((half)uGlobeK.x * (half)0.012 * dayAmt);
+        half lumc = (li.r * li.r + li.g * li.g) * (half)uGlobeK.y;
+        cc += half3(1.0, 0.52, 0.24) * (lumc * (half)uGlobeK2.w * (half)uGlobeK.z * night * ((half)0.45 + (half)0.55 * thick));
+        cc += half3(0.26, 0.38, 0.75) * ((half)uGlobeK.w * ((half)0.6 + (half)0.5 * thick) * ((half)1.0 - dayAmt));
+        half NdVc = saturate(dot(Ng, V));
+        half alpha = saturate(dens * (half)uGlobeK2.z * ((half)0.75 + (half)0.25 * thick) * ((half)1.0 + (half)0.9 * ((half)1.0 - NdVc)));
         col = lerp(col, cc, alpha);
     }
 
-    float2 sv = vScreen.xy / vScreen.w * float2(0.5, -0.5) + 0.5;
-    return float4(col * tex2D(uTransmit, sv).rgb + tex2D(uInscatter, sv).rgb, 1.0);
+    return float4((float3)(col * tr + ins), 1.0);
 }
