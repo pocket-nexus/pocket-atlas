@@ -8,7 +8,7 @@ import {
   type Texture,
 } from "three";
 import type { Quality } from "../../../core/quality";
-import type { Baker, SurfaceMaps } from "./bake";
+import type { Baker, SurfaceMaps } from "../../shared/bake";
 import { makeRainGlass } from "./glass";
 import { makeInteriorWindows } from "./interior";
 import * as SURF from "./surfaces";

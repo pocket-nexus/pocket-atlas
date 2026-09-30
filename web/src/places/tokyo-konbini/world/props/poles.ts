@@ -1,8 +1,8 @@
 import { CylinderGeometry, LatheGeometry, SpotLight, TorusGeometry, Vector2, Vector3, type BufferGeometry, type Material } from "three";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
-import { mapUV, type AtlasRect } from "../../gfx/atlas";
+import { mapUV, type AtlasRect } from "../../../shared/atlas";
 import { JP_SANS, LATIN, verticalText, type Ctx } from "../../gfx/canvas";
-import { box, cable } from "../../gfx/geo";
+import { box, cable } from "../../../shared/geo";
 import type { World } from "../context";
 import { atlasPlane, cablePoint, palette, rod, tube, v3, type Kit } from "./util";
 

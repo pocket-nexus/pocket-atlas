@@ -1,11 +1,14 @@
 /**
  * Exports a place for the Pocket Atlas cooker: glTF 2.0 (binary) with
- * `extras.pocketAtlas`, the HDR environment cube, and a report. Needs a running
- * dev server (`bun run dev`) and a local Google Chrome.
+ * `extras.pocketAtlas`, the HDR environment cube, any extra files the place
+ * names (baked sky layers), and a report. Needs a running dev server
+ * (`bun run dev`) and a local Google Chrome.
  *
- *   bun scripts/export-place.ts [--place tokyo-konbini] [--out ../.pocket-build/places/<place>] [--seconds 20]
+ *   bun scripts/export-place.ts [--place tokyo-konbini] [--out ../.pocket-build/places/<place>] [--seconds 20] [--base http://127.0.0.1:5173]
  *
  * The device loops the recorded tracks; the Tokyo konbini pack uses 20 s.
+ * Every place stage exposes `window.pocketAtlasExport` under `?export`
+ * (`src/places/shared/export.ts`).
  */
 import { mkdirSync, openSync, writeSync, closeSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -25,7 +28,7 @@ mkdirSync(out, { recursive: true });
 const browser = await chromium.launch({ channel: "chrome", headless: true, args: ["--use-angle=metal", "--enable-gpu", "--ignore-gpu-blocklist"] });
 const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
 page.on("console", (m) => {
-  if (m.type() === "error" || m.text().startsWith("[export]") || m.text().startsWith("[tokyo]")) console.log(`[page] ${m.text()}`);
+  if (m.type() === "error" || /^\[[a-z-]+\]/.test(m.text())) console.log(`[page] ${m.text()}`);
 });
 page.on("pageerror", (e) => console.log(`[pageerror] ${e.message}`));
 
@@ -44,7 +47,7 @@ await page.waitForFunction(() => typeof (window as unknown as { pocketAtlasExpor
 console.log("scene built; exporting");
 const t0 = Date.now();
 const report = await page.evaluate(async (secs: number) => {
-  type Out = { glb: ArrayBuffer; env: Uint16Array | null; report: Record<string, unknown> };
+  type Out = { glb: ArrayBuffer; env: Uint16Array | null; files: { name: string; bytes: Uint8Array }[]; report: Record<string, unknown> };
   const w = window as unknown as { pocketAtlasExport: (s: number) => Promise<Out>; __pcChunk: (n: string, b: string) => Promise<void> };
   const r = await w.pocketAtlasExport(secs);
   const send = async (name: string, bytes: Uint8Array) => {
@@ -58,6 +61,7 @@ const report = await page.evaluate(async (secs: number) => {
   };
   await send("scene.glb", new Uint8Array(r.glb));
   if (r.env) await send("env.rgba16f", new Uint8Array(r.env.buffer, r.env.byteOffset, r.env.byteLength));
+  for (const f of r.files) await send(f.name, f.bytes);
   return r.report;
 }, seconds);
 for (const fd of files.values()) closeSync(fd);

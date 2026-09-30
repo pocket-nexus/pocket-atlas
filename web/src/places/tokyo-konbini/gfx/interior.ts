@@ -1,5 +1,5 @@
 import { MeshStandardMaterial, type PlaneGeometry, type BufferAttribute } from "three";
-import { GLSL_NOISE } from "./glsl";
+import { GLSL_NOISE } from "../../shared/glsl";
 import type { WetShared } from "./wet";
 
 /**

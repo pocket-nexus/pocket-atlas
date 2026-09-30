@@ -1,7 +1,7 @@
 import { BufferGeometry, CylinderGeometry, Float32BufferAttribute, PlaneGeometry, Quaternion, SphereGeometry, TorusGeometry, Vector3 } from "three";
-import { mapUV } from "../../gfx/atlas";
+import { mapUV } from "../../../shared/atlas";
 import { parkingSign, stopSign } from "../../gfx/canvas";
-import { box } from "../../gfx/geo";
+import { box } from "../../../shared/geo";
 import type { World } from "../context";
 import { L } from "../layout";
 import { hazardStripes } from "./poles";

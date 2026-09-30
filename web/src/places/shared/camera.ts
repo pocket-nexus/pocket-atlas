@@ -14,7 +14,7 @@ export interface Shot {
 }
 
 /** Walkable camera volumes: [minX, minY, minZ, maxX, maxY, maxZ]. */
-type Box6 = [number, number, number, number, number, number];
+export type Box6 = [number, number, number, number, number, number];
 
 const ease = (t: number) => t * t * (3 - 2 * t);
 const easeInOutCubic = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
@@ -31,6 +31,8 @@ export class CameraRig {
   private dom: HTMLElement;
   private shots: Shot[];
   private boxes: Box6[];
+  /** Where the free-orbit focus may travel. */
+  private focus: Box6;
   // Free-orbit state (smoothed toward goal).
   private yaw = 0;
   private pitch = 0.1;
@@ -61,11 +63,12 @@ export class CameraRig {
   onModeChange: (mode: CameraRig["mode"]) => void = () => {};
   private cleanup: (() => void)[] = [];
 
-  constructor(camera: PerspectiveCamera, dom: HTMLElement, shots: Shot[], boxes: Box6[]) {
+  constructor(camera: PerspectiveCamera, dom: HTMLElement, shots: Shot[], boxes: Box6[], focus: Box6 = [-40, 0.4, -40, 40, 8, 30]) {
     this.camera = camera;
     this.dom = dom;
     this.shots = shots;
     this.boxes = boxes;
+    this.focus = focus;
     this.bind();
   }
 
@@ -276,9 +279,10 @@ export class CameraRig {
     if (this.keys.has("e")) move.y += 1;
     if (this.keys.has("q")) move.y -= 1;
     if (move.lengthSq() > 0) this.goalTarget.addScaledVector(move.normalize(), dt * 4.5);
-    this.goalTarget.x = MathUtils.clamp(this.goalTarget.x, -40, 40);
-    this.goalTarget.y = MathUtils.clamp(this.goalTarget.y, 0.4, 8);
-    this.goalTarget.z = MathUtils.clamp(this.goalTarget.z, -40, 30);
+    const f = this.focus;
+    this.goalTarget.x = MathUtils.clamp(this.goalTarget.x, f[0], f[3]);
+    this.goalTarget.y = MathUtils.clamp(this.goalTarget.y, f[1], f[4]);
+    this.goalTarget.z = MathUtils.clamp(this.goalTarget.z, f[2], f[5]);
 
     const k = 1 - Math.exp(-dt * 6);
     this.yaw += (this.goalYaw - this.yaw) * k;

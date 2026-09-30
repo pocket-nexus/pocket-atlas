@@ -1,5 +1,5 @@
 import { BoxGeometry, Group, Mesh, PlaneGeometry, SphereGeometry, Vector3, type BufferGeometry, type Material, type Object3D } from "three";
-import { mapUV } from "../../gfx/atlas";
+import { mapUV } from "../../../shared/atlas";
 import { canvas, JP_SANS, LATIN, toTexture } from "../../gfx/canvas";
 import { flip, merge, rod, tube, v3 } from "../props/util";
 import { grid } from "./shape";

@@ -1,8 +1,8 @@
 import { CylinderGeometry, LatheGeometry, Vector2, type Object3D } from "three";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
-import { mapUV } from "../../gfx/atlas";
+import { mapUV } from "../../../shared/atlas";
 import { JP_SANS, LATIN } from "../../gfx/canvas";
-import { box } from "../../gfx/geo";
+import { box } from "../../../shared/geo";
 import type { World } from "../context";
 import { acUnit } from "../konbini";
 import { L } from "../layout";

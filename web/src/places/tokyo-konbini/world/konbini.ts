@@ -11,7 +11,7 @@ import {
   type Object3D,
 } from "three";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
-import { mapUV, type AtlasRect } from "../gfx/atlas";
+import { mapUV, type AtlasRect } from "../../shared/atlas";
 import {
   chillerAtlas,
   coolerAtlas,
@@ -26,7 +26,7 @@ import {
   tobaccoWall,
   toTexture,
 } from "../gfx/canvas";
-import { box } from "../gfx/geo";
+import { box } from "../../shared/geo";
 import { seedWindowUV } from "../gfx/interior";
 import { ProductBatch, type Shape } from "./products";
 import type { World } from "./context";

@@ -1,5 +1,5 @@
 import { Matrix4, type IUniform, type MeshStandardMaterial, type Texture } from "three";
-import { GLSL_NOISE, GLSL_RIPPLES } from "./glsl";
+import { GLSL_NOISE, GLSL_RIPPLES } from "../../shared/glsl";
 
 /**
  * Scene-wide uniforms shared by every wet material. The stage updates the
