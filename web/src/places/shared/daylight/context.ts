@@ -14,6 +14,8 @@ export class DayWorld {
   /** Effects may soften their geometry near the eye without changing the camera rig. */
   readonly viewPosition = new Vector3();
   readonly updaters: Updater[] = [];
+  /** Moving casters invalidate the otherwise cached daylight shadow map. */
+  shadowsDirty = false;
   /** Daylight places need no fog lamps; kept for the exporter's shape. */
   readonly fogLights: ExportFogLight[] = [];
   readonly lib: DayLib;

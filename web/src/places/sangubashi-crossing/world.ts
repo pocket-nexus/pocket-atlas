@@ -9,6 +9,7 @@ import { house, houseKit, type HouseSpec } from "../shared/daylight/houses";
 import { foliage } from "../shared/daylight/foliage";
 import { crossingSignal, railway, safetyRail, sign } from "../shared/daylight/railway";
 import { petalDrift, tree } from "../shared/daylight/trees";
+import { PASS } from "./rail";
 
 /** The railway crest is y=0; the short western lane falls away beyond it. Metres, approximate from photographs. */
 export function roadY(z: number): number {
@@ -47,9 +48,9 @@ export function buildGround(w: DayWorld): void {
     w.mesh(new TorusGeometry(0.3, 0.014, 6, 40).rotateX(Math.PI / 2), w.lib.plain(0x92918a, 0.75), -0.52, roadY(z) + 0.026, z);
     for (let j = -3; j <= 3; j++) w.mesh(box(0.37, 0.008, 0.012), w.lib.plain(0x777c7a), -0.52, roadY(z) + 0.032, z + j * 0.064);
   }
-  railway(w, 0.105);
-  crossingSignal(w, 2.78, -4.55, -0.05);
-  crossingSignal(w, -2.83, 4.6, 0.09);
+  railway(w, 0.105, 210);
+  crossingSignal(w, 2.78, -4.55, -0.05, { pass: PASS, armDirection: -1 });
+  crossingSignal(w, -2.83, 4.6, 0.09, { pass: PASS, armDirection: 1 });
   for (const side of [-1, 1]) for (const [za, zb] of [[5.4, 9.3], [-5.6, -8.0]]) {
     safetyRail(w, [za, (za + zb) / 2, zb].map((z) => v3(side * 2.9, roadY(z) + 0.1, z)));
   }
@@ -79,6 +80,13 @@ export function buildNeighbourhood(w: DayWorld): void {
   add({ x0: -12.8, x1: -4.3, z0: 7.1, z1: 17, base: -0.3, floors: 2, wall: l.stucco(0xc6b9a4), roof: { kind: "gable", mat: tile, ridge: "z" }, faces: { "+x": { door: true, balcony: 1 }, "-z": { dense: 2 }, "+z": {} }, seed: 611 });
   add({ x0: 4.8, x1: 12.1, z0: 6.3, z1: 16, base: -0.4, floors: 2, wall: l.stucco(0xd9d5c9), roof: { kind: "hip", mat: roof }, faces: { "-x": { door: true }, "-z": { balcony: 1 }, "+z": {} }, seed: 422 });
   const r = new Rng(533);
+  const far = new Rng(9137);
+  // Close the longer railway corridor behind a full-length formation, away from the focal street.
+  for (const side of [-1, 1]) for (let x = -200; x <= 200; x += 15) {
+    if (Math.abs(x) < 60) continue;
+    const z = x * 0.105 + side * far.range(12, 16);
+    add({ x0: x - 5.8, x1: x + 5.8, z0: z - 4.8, z1: z + 4.8, base: -0.4, floors: far.pick([2, 2, 3]), wall: far.pick([cream, white, grey]), roof: { kind: far.pick(["hip", "gable"]), mat: roof }, faces: { [side < 0 ? "+z" : "-z"]: {} }, seed: far.int(1, 99999), detail: "mid" });
+  }
   for (const side of [-1, 1]) for (const z of [-69, -58, -46, -29, 24, 35, 47]) {
     if (z === -29 && side === 1) continue;
     const x = side * r.range(8, 10), width = r.range(6, 8);

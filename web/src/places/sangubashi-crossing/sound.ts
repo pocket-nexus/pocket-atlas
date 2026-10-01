@@ -1,5 +1,7 @@
-import type { PerspectiveCamera } from "three";
+import { Vector3, type PerspectiveCamera } from "three";
 import type { AudioEngine } from "../../core/audio";
+import { RailwayAudio } from "../shared/railway-audio";
+import { PASS, RAIL_YAW } from "./rail";
 
 /** Quiet spring air and distant neighbourhood birds, with no borrowed soundtrack. */
 export class SpringAudio {
@@ -7,9 +9,13 @@ export class SpringAudio {
   private sources = new Set<AudioScheduledSourceNode>();
   private cancel: (() => void) | null = null;
   private nextBird = 3;
-  constructor(private engine: AudioEngine) {}
+  private railway: RailwayAudio;
+  constructor(private engine: AudioEngine) {
+    this.railway = new RailwayAudio(engine, PASS, new Vector3(Math.sin(RAIL_YAW) * 1.82, 0.102, Math.cos(RAIL_YAW) * 1.82), RAIL_YAW);
+  }
 
   start(): void {
+    this.railway.start();
     this.cancel = this.engine.whenReady(() => {
       this.cancel = null;
       const ctx = this.engine.ctx, bus = this.engine.bus();
@@ -25,7 +31,8 @@ export class SpringAudio {
     });
   }
 
-  update(dt: number, _camera: PerspectiveCamera): void {
+  update(dt: number, camera: PerspectiveCamera, time: number): void {
+    this.railway.update(camera, time);
     if (!this.out || !this.engine.ctx) return;
     this.nextBird -= dt;
     if (this.nextBird > 0) return;
@@ -42,6 +49,7 @@ export class SpringAudio {
   }
 
   stop(): void {
+    this.railway.stop();
     this.cancel?.(); this.cancel = null;
     for (const source of this.sources) { try { source.stop(); } catch { /* already ended */ } source.disconnect(); }
     this.sources.clear(); this.out?.disconnect(); this.out = null;

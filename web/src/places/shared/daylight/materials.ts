@@ -198,6 +198,22 @@ export class DayLib {
     );
   }
 
+  /** Brushed stainless sheets with restrained relief at close viewing distances. */
+  stainless(): MeshStandardMaterial {
+    return this.memo("stainless", () => withMaps(this.surf("stainless", SURF.STAINLESS, 1024, 1, 0.05), {
+      normalScale: new Vector2(0.07, 0.07), envMapIntensity: 0.85,
+    }));
+  }
+
+  /** Thin railway glazing: real openings and interior geometry behind the reflection. */
+  clearGlass(): MeshStandardMaterial {
+    return this.memo("clear-glass", () => new MeshStandardMaterial({
+      color: 0x708f91, roughness: 0.13, metalness: 0.18,
+      transparent: true, opacity: 0.24, depthWrite: false, side: DoubleSide,
+      envMapIntensity: 0.85,
+    }));
+  }
+
   /** Plain PBR without maps (small props, far field). */
   plain(hex: number, rough = 0.6, metal = 0): MeshStandardMaterial {
     return this.memo(`plain-${hex.toString(16)}-${rough}-${metal}`, () => new MeshStandardMaterial({ color: hex, roughness: rough, metalness: metal }));

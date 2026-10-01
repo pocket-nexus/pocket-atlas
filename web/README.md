@@ -42,7 +42,7 @@ Requires WebGL 2. Tested in Chrome on Apple silicon (ANGLE / Metal).
 | `?shot` | capture mode: no UI, no intro, muted |
 | `?cam=Konbini\|Puddles\|Vending\|Crossing\|Inside\|Wires` | start at a named shot (konbini) |
 | `?cam=Stairs\|Rails\|Below\|Lane\|Canopy` | start at a named shot (Suga Shrine Stairs) |
-| `?cam=Crossing\|Blossom\|Tracks\|Lane\|Spring` | start at a named shot (Sangubashi in Bloom) |
+| `?cam=Crossing\|Blossom\|Tracks\|Train\|Lane\|Spring` | start at a named shot (Sangubashi in Bloom) |
 | `?view=px,py,pz,tx,ty,tz[,fov]` | explicit camera (with `?shot`) |
 | `?t=12.5` | simulation clock when the stage appears (with `?shot`, captures are reproducible) |
 | `?stats` | frame time and draw-call readout |
@@ -154,13 +154,13 @@ bun scripts/shot.ts "/?shot&stats&q=high&cam=Puddles#/place/tokyo-konbini" out.p
 
 ## How Sangubashi in Bloom is put together
 
-Open `/?q=high&cam=Crossing#/place/sangubashi-crossing`. The five camera buttons,
+Open `/?q=high&cam=Crossing#/place/sangubashi-crossing`. The six camera buttons,
 free orbit, keyboard movement, cinematic mode and globe entry use the normal
 place shell. `?cam` also skips the intro when the HUD is visible.
 
 The photo-based site has two 1,067 mm tracks, sleepers and rail fasteners,
 crossing infill and check rails, two diagonal signal assemblies with hooded
-lamps and raised gates, overhead contact wires and gantries, and a short lane
+lamps and animated gates, overhead contact wires and gantries, and a short lane
 descending to the shuttered house and its outside stair. Housing, garden
 walls, utility poles, service drops, a convex mirror, gutters and vegetation
 surround the crossing, including the reverse view.
@@ -171,7 +171,16 @@ used by both daytime places. Its reusable tree builder grows tapered limbs
 and alpha-tested branch sprays; a seeded canvas atlas draws each cherry
 flower with five notched petals and stamens. Instanced curved petals settle
 in gutters or drift in the breeze. Spring audio is synthesised wind, city
-hum and occasional birds. The gates remain open; there is no train cycle.
+hum and occasional birds, with a timed crossing bell and wheel rumble.
+
+An eight-car, photo-based Odakyu 1000-series local passes every 64 seconds.
+The reusable commuter builder supplies open window apertures and glazed
+interiors, sliding-door leaves, brushed panels, cabs and wipers, 32 rotating
+wheelsets, sprung bogies, underfloor services, gangways, roof coolers and
+pantographs. The same clock drives the train, warning lamps, barrier arms and
+sound; gates stay closed until the last car clears. Moving casters invalidate
+the shared daylight shadow map near the crossing. Start at
+`/?q=high&cam=Train&t=16#/place/sangubashi-crossing` to review the arrival.
 
 See [the place notes](src/places/sangubashi-crossing/README.md) for real-location
 references and reconstruction limits. This is the Three.js reference for

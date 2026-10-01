@@ -217,6 +217,16 @@ Surface surface(vec2 uv) {
   return S(col, plates * 0.8 - lent * 0.3, 0.88, 0.85 + 0.15 * plates, 0.0);
 }`;
 
+/** Fine horizontal brushing, subtle sheet variation and accumulated surface dirt. */
+export const STAINLESS = /* glsl */ `
+Surface surface(vec2 uv) {
+  float brush = vnoise(uv * vec2(3.0, 480.0), vec2(3.0, 480.0));
+  float broad = fbm(uv * vec2(2.0, 18.0), vec2(2.0, 18.0), 3);
+  float dirt = smoothstep(0.58, 0.85, fbm(uv * vec2(12.0, 2.0), vec2(12.0, 2.0), 3));
+  vec3 col = vec3(0.64, 0.67, 0.68) * (0.94 + brush * 0.08 + broad * 0.04 - dirt * 0.1);
+  return S(col, brush * 0.12, 0.31 + brush * 0.13 + dirt * 0.16, 1.0, 0.84 - dirt * 0.15);
+}`;
+
 /** 1 m of painted steel with chalking, chips and a little rust (tinted per use). */
 export const PAINT = /* glsl */ `
 Surface surface(vec2 uv) {

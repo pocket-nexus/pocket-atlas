@@ -1,8 +1,9 @@
-import { CircleGeometry, CylinderGeometry, TorusGeometry, Vector3, type Material, type Object3D } from "three";
+import { CircleGeometry, CylinderGeometry, TorusGeometry, Vector3, type Material, type Mesh, type Object3D } from "three";
 import { box, cable } from "../geo";
 import { atlasPlane, rod, v3 } from "../shapes";
 import { JP_SANS } from "../canvas";
 import type { DayWorld } from "./context";
+import { railState, type RailPass } from "../railway-motion";
 
 function striped(w: DayWorld, a: Vector3, b: Vector3, radius: number, parent: Object3D, interval = 0.38) {
   const n = Math.ceil(a.distanceTo(b) / interval);
@@ -11,7 +12,7 @@ function striped(w: DayWorld, a: Vector3, b: Vector3, radius: number, parent: Ob
 }
 
 /** Open Japanese level-crossing equipment, authored in road-facing local coordinates. */
-export function crossingSignal(w: DayWorld, x: number, z: number, yaw = 0): void {
+export function crossingSignal(w: DayWorld, x: number, z: number, yaw = 0, motion?: { pass: RailPass; armDirection: number }): void {
   const g = w.group(x, 0, z, yaw);
   const yellow = w.lib.paint(0xdcb438), dark = w.lib.paint(0x252a2a), steel = w.lib.plain(0x777f79, 0.38, 0.7);
   w.mesh(box(0.48, 0.22, 0.48), w.lib.concrete(), 0, 0.11, 0, g);
@@ -21,19 +22,24 @@ export function crossingSignal(w: DayWorld, x: number, z: number, yaw = 0): void
     const m = w.mesh(box(1.35, 0.22, 0.075), yellow, 0, 4.25, 0.025, g); m.rotation.z = angle;
   }
   // Two hooded lamps offset vertically, with ribbed lenses, backing and fasteners.
+  const lamps: Mesh[] = [];
   for (const y of [2.93, 3.55]) {
     w.mesh(rod(v3(0, y, 0), v3(-0.38, y, 0.08), 0.025), steel, 0, 0, 0, g);
     const disk = w.mesh(new CylinderGeometry(0.215, 0.215, 0.09, 32), dark, -0.38, y, 0.04, g); disk.rotation.x = Math.PI / 2;
     w.mesh(new CircleGeometry(0.148, 32), w.lib.plain(0x241e21, 0.18), -0.38, y, 0.1, g);
+    if (motion) {
+      const lamp = w.mesh(new CircleGeometry(0.143, 32), w.lib.glow(0xff1707, 2), -0.38, y, -0.025, g, { cast: false });
+      lamp.name = `crossing-lamp-${x}-${y}`; lamp.userData.dynamic = true; lamps.push(lamp);
+    }
     const rim = w.mesh(new TorusGeometry(0.159, 0.014, 6, 32), steel, -0.38, y, 0.106, g); rim.rotation.z = 0.1;
     const hood = w.mesh(new CylinderGeometry(0.18, 0.185, 0.28, 24, 1, true, 0, Math.PI * 1.16), dark, -0.38, y + 0.03, 0.2, g); hood.rotation.x = Math.PI / 2; hood.rotation.y = -Math.PI * 0.08;
     for (const dx of [-0.065, 0, 0.065]) w.mesh(box(0.007, 0.21, 0.005), w.lib.plain(0x483333, 0.3), -0.38 + dx, y, 0.109, g);
   }
   w.mesh(box(0.5, 0.48, 0.31), dark, 0, 2.15, 0.08, g);
-  const arrow = w.draw("crossing-direction", 320, 272, (c, width, height) => {
+  const arrow = w.draw(`crossing-direction-${motion ? "right" : "left"}`, 320, 272, (c, width, height) => {
     c.fillStyle = "#292f2c"; c.fillRect(0, 0, width, height);
     c.strokeStyle = "#b7bfae"; c.lineWidth = width * 0.01; c.strokeRect(width * 0.04, height * 0.04, width * 0.92, height * 0.92);
-    c.fillStyle = "#b7bfae"; c.font = `${height * 0.8}px ${JP_SANS}`; c.textAlign = "center"; c.textBaseline = "middle"; c.fillText("←", width / 2, height * 0.49);
+    c.fillStyle = "#b7bfae"; c.font = `${height * 0.8}px ${JP_SANS}`; c.textAlign = "center"; c.textBaseline = "middle"; c.fillText(motion ? "→" : "←", width / 2, height * 0.49);
   });
   w.mesh(atlasPlane(0.43, 0.37, arrow), w.printed, 0, 2.15, 0.24, g);
   w.mesh(box(0.34, 0.38, 0.3), steel, 0.05, 1.55, -0.08, g);
@@ -44,7 +50,22 @@ export function crossingSignal(w: DayWorld, x: number, z: number, yaw = 0): void
   // Separate barrier machine, with the pole tilted very slightly away from the opening.
   w.mesh(box(0.4, 0.73, 0.58), yellow, 0.72, 0.48, 0.06, g);
   const stripe = w.mesh(box(0.43, 0.15, 0.6), dark, 0.72, 0.46, 0.06, g); stripe.rotation.z = 0.36;
-  striped(w, v3(0.66, 0.78, 0.09), v3(0.82, 6.6, 0.09), 0.048, g, 0.44);
+  const arm = w.group(0.66, 0.78, 0.09, 0, g);
+  arm.name = `barrier-arm-${x}`;
+  // Only the barrier moves; the pole, ladder and machine remain in static batches.
+  striped(w, v3(0, 0, 0), v3(0.16, 4.96, 0), 0.048, arm, 0.44);
+  if (motion) {
+    arm.userData.dynamic = true;
+    let lastGate = -1;
+    w.update((_dt, t) => {
+      const state = railState(motion.pass, t);
+      arm.rotation.z = -motion.armDirection * state.gate * Math.PI / 2;
+      // Retract the lit lens behind its opaque housing. Translation is supported by the shared exporter.
+      lamps.forEach((lamp, i) => lamp.position.z = state.warning && state.lamp === i ? 0.114 : -0.025);
+      if (Math.abs(lastGate - state.gate) > 0.00001) w.shadowsDirty = true;
+      lastGate = state.gate;
+    });
+  }
   w.mesh(new CylinderGeometry(0.105, 0.105, 0.16, 16), steel, 0.67, 0.8, 0.08, g).rotation.x = Math.PI / 2;
   for (const yy of [0.26, 0.6]) for (const xx of [0.59, 0.85]) w.mesh(new CircleGeometry(0.02, 8), steel, xx, yy, 0.356, g);
   const notice = w.draw("crossing-warning", 560, 160, (c, width, height) => {
@@ -64,6 +85,7 @@ export function safetyRail(w: DayWorld, points: Vector3[]): void {
 /** A narrow-gauge double line: ballast, concrete sleepers, steel rails and rubber crossing panels. */
 export function railway(w: DayWorld, skew: number, halfLength = 66): void {
   const g = w.group(0, 0, 0, -Math.atan(skew));
+  if (halfLength > 66) for (const s of [-1, 1]) w.mesh(box(halfLength - 60, 0.24, 36), w.lib.ground(), s * (halfLength + 60) / 2, -0.58, 0, g);
   const ballast = w.lib.granite([0.39, 0.37, 0.4]);
   w.mesh(box(halfLength * 2, 0.25, 8.25), ballast, 0, -0.245, 0, g);
   const sleeper = w.lib.concrete([0.53, 0.5, 0.47]), rust = w.lib.plain(0x71554a, 0.83), top = w.lib.plain(0xb4b7b2, 0.29, 0.82);
@@ -95,7 +117,10 @@ export function railway(w: DayWorld, skew: number, halfLength = 66): void {
       for (let xx = 0; xx < 2; xx += 0.23) w.mesh(rod(v3((x + xx) * side, 0.2, z), v3((x + xx) * side, 1.28, z), 0.006), fence, 0, 0, 0, g);
     }
   }
-  for (const x of [-48, -21, 20, 48]) {
+  const gantries = [-48, -21, 20, 48];
+  for (let x = 80; x < halfLength; x += 32) gantries.push(-x, x);
+  gantries.sort((a, b) => a - b);
+  for (const x of gantries) {
     for (const z of [-4.6, 4.6]) w.mesh(rod(v3(x, -0.2, z), v3(x, 8.5, z), 0.115, 12, 0.085), w.lib.concrete(), 0, 0, 0, g);
     for (const y of [7.75, 8.35]) w.mesh(rod(v3(x, y, -4.6), v3(x, y, 4.6), 0.043), fence, 0, 0, 0, g);
     for (let z = -4.6; z < 4.5; z += 0.65) w.mesh(rod(v3(x, 7.75, z), v3(x, 8.35, z + 0.65), 0.022), fence, 0, 0, 0, g);
@@ -106,7 +131,9 @@ export function railway(w: DayWorld, skew: number, halfLength = 66): void {
   }
   for (const z of [-1.82, 1.82]) {
     w.mesh(rod(v3(-halfLength, 5.65, z), v3(halfLength, 5.65, z), 0.012), wire, 0, 0, 0, g);
-    for (const [a, b] of [[-66, -48], [-48, -21], [-21, 20], [20, 48], [48, 66]]) {
+    const spans = [-halfLength, ...gantries, halfLength];
+    for (let i = 1; i < spans.length; i++) {
+      const a = spans[i - 1], b = spans[i];
       w.mesh(cable(v3(a, 7.3, z), v3(b, 7.3, z), 0.9, 0.016), wire, 0, 0, 0, g);
       for (let x = a + 3; x < b; x += 4.5) {
         const t = (x - a) / (b - a), y = 7.3 - 3.6 * t * (1 - t);

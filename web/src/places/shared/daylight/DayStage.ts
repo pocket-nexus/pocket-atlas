@@ -16,7 +16,7 @@ import { bakeClouds, buildSky, SKY } from "./sky";
 interface DayAudio {
   start(): void;
   stop(): void;
-  update(dt: number, camera: PerspectiveCamera): void;
+  update(dt: number, camera: PerspectiveCamera, time: number): void;
 }
 
 /** A daytime place supplies its layout and atmosphere, never a second renderer. */
@@ -228,12 +228,12 @@ export class DayStage implements Stage {
     this.world.viewPosition.copy(this.camera.position);
     for (const u of this.world.updaters) u(dt, time);
     this.sky.update(time, this.camera.position);
-    this.spec.audio?.update(dt, this.camera);
+    this.spec.audio?.update(dt, this.camera, time);
     this.post.grade.uniforms.get("uFade")!.value = this.rig.fade;
     const bars = this.post.grade.uniforms.get("uBars")!;
     bars.value += ((this.rig.mode === "cinematic" ? 1 : 0) - bars.value) * (1 - Math.exp(-dt * 2.5));
-    // Static architecture and canopies cast; the small drifting petals do not.
-    if (this.shadowFrames++ < 2) this.ctx.renderer.shadowMap.needsUpdate = true;
+    if (this.shadowFrames++ < 2 || this.world.shadowsDirty) this.ctx.renderer.shadowMap.needsUpdate = true;
+    this.world.shadowsDirty = false;
     this.post.render(dt);
   }
 
