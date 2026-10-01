@@ -123,6 +123,30 @@ const PLACE_DIR = `${PLACES_DIR}/${PLACE}`;
 const PACK = `${PLACE_DIR}/${PLACE}.place`;
 /** The globe and place list (`cook-atlas`, from web/scripts/export-atlas.ts). */
 const ATLAS_PACK = resolve(ROOT, ".pocket-build/atlas/atlas.pack");
+const UI_FONT = resolve(ROOT, ".pocket-build/atlas/ui.font");
+const FONTS = resolve(ROOT, ".pocket-build/fonts");
+const NOTO_REVISION = "f8d157532fbfaeda587e826d4cd5b21a49186f7c";
+
+/** Noto Sans CJK JP Medium and Bold (OFL), fetched once into `.pocket-build/fonts`. */
+async function cjkFonts(): Promise<[string, string]> {
+  mkdirSync(FONTS, { recursive: true });
+  const paths = ["Medium", "Bold"].map((w) => `${FONTS}/NotoSansCJKjp-${w}.otf`) as [string, string];
+  for (const path of paths) {
+    if (existsSync(path)) continue;
+    const name = path.split("/").pop()!;
+    const r = await fetch(`https://raw.githubusercontent.com/notofonts/noto-cjk/${NOTO_REVISION}/Sans/OTF/Japanese/${name}`);
+    if (!r.ok) throw new Error(`${name}: ${r.status}`);
+    writeFileSync(path, new Uint8Array(await r.arrayBuffer()));
+  }
+  return paths;
+}
+
+/** The interface font (`ui.font`): Inter from PocketJS, Noto Sans CJK, the places' characters. */
+async function bakeUiFont(): Promise<void> {
+  const [cjk, cjkBold] = await cjkFonts();
+  const inter = `${POCKETJS}/assets/fonts`;
+  await $`cargo run --release -p pocket3d-place-cook -- ui-font --places ${resolve(ROOT, ".pocket-build/atlas/globe/places.json")} --latin ${inter}/Inter-Regular.ttf --latin-bold ${inter}/Inter-Bold.ttf --cjk ${cjk} --cjk-bold ${cjkBold} --out ${UI_FONT}`.cwd(ROOT);
+}
 
 /** Every cooked place pack: [id, path]. */
 function cookedPlaces(): [string, string][] {
@@ -155,6 +179,7 @@ function sync(): void {
   if (!places.length) throw new Error(`no cooked place under ${PLACES_DIR}: run \`bun tools/atlas.ts cook\` first`);
   const copied = places.filter(([id, path]) => copyIfChanged(path, `${SHARE}/places/${id}.place`)).map(([id]) => id);
   if (existsSync(ATLAS_PACK) && copyIfChanged(ATLAS_PACK, `${SHARE}/atlas.pack`)) copied.push("atlas");
+  if (existsSync(UI_FONT) && copyIfChanged(UI_FONT, `${SHARE}/ui.font`)) copied.push("ui.font");
   console.log(`atlas: synced shaders${copied.length ? ` and ${copied.join(", ")}` : ""} to ${SHARE}`);
 }
 
@@ -185,7 +210,7 @@ async function lint(): Promise<void> {
     ...["STREAK", "SPLASH", "STEAM", "BEACON"].map((d): [string, string[]] => ["fx_f.cg", [d]]),
     ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "SUN_SPEC", "ALBEDO_MAP", "NORMAL_MAP", "ORM_MAP", "FOG"]], ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "ALPHA_TEST", "ALBEDO_MAP", "EMISSION_MAP", "FOG"]],
     ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "FAR", "ALBEDO_MAP", "FOG"]], ["shadow_f.cg", []], ["shadow_f.cg", ["ALPHA_TEST"]], ["fill_f.cg", []], ["sky_day_f.cg", []], ["sky_day_f.cg", ["TWILIGHT"]],
-    ["globe_v.cg", []], ["globe_f.cg", []], ["marker_v.cg", []], ["marker_f.cg", []], ["ui_v.cg", []], ["ui_f.cg", []], ["ui_f.cg", ["TEX"]], ["surface_v.cg", ["FLAT"]], ["surface_v.cg", ["BAKED", "FLAT"]],
+    ["globe_v.cg", []], ["globe_f.cg", []], ["marker_v.cg", []], ["marker_f.cg", []], ["ui_v.cg", []], ["ui_f.cg", []], ["ui_f.cg", ["TEX"]], ["text_v.cg", []], ["text_f.cg", []], ["surface_v.cg", ["FLAT"]], ["surface_v.cg", ["BAKED", "FLAT"]],
     ["post_v.cg", []], ["post_v.cg", ["GRAIN"]], ["haze_f.cg", ["HAZE_LIGHTS=2"]], ["haze_f.cg", ["HAZE_LIGHTS=6"]], ["prefilter_f.cg", []], ["down_f.cg", []], ["up_f.cg", []], ["composite_f.cg", []], ["composite_f.cg", ["HAZE", "BLOOM"]], ["blit_f.cg", []],
   ];
   const tmp = resolve(ROOT, ".pocket-build/atlas/lint");
@@ -382,6 +407,8 @@ async function vpk(): Promise<void> {
   for (const [id, path] of places) cpSync(path, `${stage}/places/${id}.place`);
   if (!existsSync(ATLAS_PACK)) throw new Error(`${ATLAS_PACK} missing: run \`bun tools/atlas.ts cook-atlas\` first`);
   cpSync(ATLAS_PACK, `${stage}/atlas.pack`);
+  if (!existsSync(UI_FONT)) throw new Error(`${UI_FONT} missing: run \`bun tools/atlas.ts cook-atlas\` first`);
+  cpSync(UI_FONT, `${stage}/ui.font`);
   console.log(`atlas: staged ${hashes.length} programs, the atlas and ${places.map(([id]) => id).join(", ")} in ${stage}`);
   await build({ standalone: true, assets: stage });
 }
@@ -454,6 +481,7 @@ else if (command === "ctl") {
   await $`cargo run --release -p pocket3d-place-cook -- --in ${PLACE_DIR}`.cwd(ROOT);
 } else if (command === "cook-atlas") {
   await $`cargo run --release -p pocket3d-place-cook -- atlas --in ${resolve(ROOT, ".pocket-build/atlas/globe")} --out ${ATLAS_PACK}`.cwd(ROOT);
+  await bakeUiFont();
 } else if (command === "capture") {
   const out = value("--out", resolve(ROOT, `.pocket-build/validation/captures/${new Date().toISOString().replace(/[:.]/g, "-")}.png`));
   await dev("capture", "--out", out);

@@ -1,0 +1,12 @@
+// Interface text: glyph quads in display pixels (960×544, top-left origin)
+// from the baked atlas (`ui.font`), one draw per string.
+
+void main(
+    float2 aPosition,
+    float2 aUv,
+    out float4 oPosition : POSITION,
+    out float2 oUv : TEXCOORD0)
+{
+    oPosition = float4(aPosition.x / 480.0 - 1.0, 1.0 - aPosition.y / 272.0, 0.5, 1.0);
+    oUv = aUv;
+}

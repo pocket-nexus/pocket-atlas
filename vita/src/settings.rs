@@ -11,7 +11,7 @@ use crate::camera::{Mode, Rig};
 use crate::frame::{Renderer, SCALES};
 use crate::gpu::Gpu;
 use crate::profile::{self, Profile};
-use crate::ui::{accent, rgb, Button, Style, Ui};
+use crate::ui::{accent, rgb, Button, Style, Ui, T};
 
 const PATH: &str = "ux0:data/pocket-atlas/settings.json";
 
@@ -100,7 +100,6 @@ enum Row {
     Exposure,
     Shot,
     Hud,
-    Reset,
     Leave,
 }
 
@@ -118,8 +117,8 @@ pub struct Sheet {
     note: Option<(String, f32)>,
 }
 
-const ROW_H: f32 = 30.0;
-const SW: f32 = 352.0;
+const ROW_H: f32 = 33.0;
+const SW: f32 = 380.0;
 
 fn on_off(v: bool) -> String {
     if v { "On".into() } else { "Off".into() }
@@ -161,7 +160,7 @@ impl Sheet {
         if r.has_rain() {
             v.push(Row::Rain);
         }
-        v.extend([Row::Exposure, Row::Shot, Row::Hud, Row::Reset, Row::Leave]);
+        v.extend([Row::Exposure, Row::Shot, Row::Hud, Row::Leave]);
         v
     }
 
@@ -178,7 +177,6 @@ impl Sheet {
             Row::Exposure => "Exposure",
             Row::Shot => "Camera",
             Row::Hud => "Performance overlay",
-            Row::Reset => "Reset to the profile",
             Row::Leave => "Back to the atlas",
         }
     }
@@ -206,7 +204,7 @@ impl Sheet {
                 Mode::Cinematic => format!("{} · {} of {}", rig.shot_name(), rig.shot_index() + 1, rig.shot_count()),
             },
             Row::Hud => on_off(p.hud),
-            Row::Reset | Row::Leave => String::new(),
+            Row::Leave => String::new(),
         }
     }
 
@@ -235,6 +233,14 @@ impl Sheet {
         self.bar += (self.row as f32 - self.bar) * (1.0 - (-dt * 18.0).exp());
         if pressed & SCE_CTRL_CIRCLE != 0 {
             self.open = false;
+            return Outcome::None;
+        }
+        if pressed & SCE_CTRL_TRIANGLE != 0 {
+            let hud = p.hud;
+            *p = Prefs { profile: p.profile, step: None, scale: None, msaa: None, bloom: None, haze: None, reflection: None, rain: None, exposure_ev: 0.0, hud };
+            p.apply(r);
+            p.save();
+            self.note = Some((format!("Settings follow {}", profile_label(p.profile)), 2.0));
             return Outcome::None;
         }
         if pressed & SCE_CTRL_DOWN != 0 {
@@ -318,14 +324,6 @@ impl Sheet {
                 rig.set_shot(k);
             }
             Row::Hud => p.hud = !p.hud,
-            Row::Reset => {
-                if cross {
-                    let hud = p.hud;
-                    *p = Prefs { profile: p.profile, step: None, scale: None, msaa: None, bloom: None, haze: None, reflection: None, rain: None, exposure_ev: 0.0, hud };
-                    p.apply(r);
-                    self.note = Some((format!("Settings follow {}", profile_label(p.profile)), 2.0));
-                }
-            }
             Row::Leave => {
                 if cross {
                     self.open = false;
@@ -348,54 +346,52 @@ impl Sheet {
         let e = 1.0 - (1.0 - self.anim).powi(3);
         let o = self.anim;
         let rows = Self::rows(r);
-        let h = 74.0 + rows.len() as f32 * ROW_H + 64.0;
-        let x = 960.0 - 16.0 - SW + (1.0 - e) * (SW + 24.0);
-        let y = ((544.0 - h) * 0.5).max(8.0);
+        let h = 78.0 + rows.len() as f32 * ROW_H + 70.0;
+        let x = 960.0 - 14.0 - SW + (1.0 - e) * (SW + 24.0);
+        let y = ((544.0 - h) * 0.5).max(6.0);
         let white = |a: f32| rgb(0xffffff, a * o);
-        let grey = |a: f32| rgb(0xb4b8c4, a * o);
+        let grey = |a: f32| rgb(0xbcc0cc, a * o);
         let acc = |a: f32| accent(accent_c, a * o);
 
-        ui.rect(gpu, x, y, SW, h, &Style::gradient(16.0, rgb(0x161a24, 0.88 * o), rgb(0x0c0e14, 0.92 * o)).stroke(1.0, white(0.1)));
-        ui.text(x + 20.0, y + 30.0, grey(0.8), 0.52, "S E T T I N G S");
-        ui.text(x + 20.0, y + 56.0, white(1.0), 0.8, &ui.fit(0.8, title, SW - 40.0));
+        ui.rect(gpu, x, y, SW, h, &Style::gradient(16.0, rgb(0x161a24, 0.9 * o), rgb(0x0c0e14, 0.94 * o)).stroke(1.0, white(0.1)));
+        ui.text(gpu, x + 20.0, y + 30.0, grey(0.85), T::Label, "SETTINGS");
+        ui.text(gpu, x + 20.0, y + 58.0, white(1.0), T::Title, &ui.fit(T::Title, title, SW - 40.0));
 
         let ry = y + 74.0;
-        ui.rect(gpu, x + 10.0, ry + self.bar * ROW_H, SW - 20.0, ROW_H - 2.0, &Style::fill(8.0, acc(0.22)).stroke(1.0, acc(0.6)));
+        ui.rect(gpu, x + 10.0, ry + self.bar * ROW_H, SW - 20.0, ROW_H - 3.0, &Style::fill(9.0, acc(0.22)).stroke(1.0, acc(0.6)));
         for (k, row) in rows.iter().enumerate() {
-            let cy = ry + k as f32 * ROW_H + ROW_H * 0.5;
+            let cy = ry + k as f32 * ROW_H + ROW_H * 0.5 - 1.0;
             let focused = k == self.row;
-            let action = matches!(row, Row::Reset | Row::Leave);
-            if action && k > 0 && !matches!(rows[k - 1], Row::Reset | Row::Leave) {
+            if *row == Row::Leave {
                 ui.rect(gpu, x + 20.0, cy - ROW_H * 0.5 - 1.0, SW - 40.0, 1.0, &Style::fill(0.0, white(0.08)));
             }
-            ui.text(x + 22.0, cy + 6.0, if focused { white(1.0) } else { white(0.82) }, 0.66, Self::label(*row));
+            ui.text(gpu, x + 22.0, cy + 6.0, if focused { white(1.0) } else { white(0.86) }, if focused { T::Strong } else { T::Body }, Self::label(*row));
             let v = Self::value(*row, p, r, rig);
             if !v.is_empty() {
                 let vx = x + SW - 22.0;
                 if focused {
-                    ui.text_right(vx, cy + 6.0, acc(1.0), 0.62, "›");
-                    let vw = ui.width(0.62, &v);
-                    ui.text_right(vx - 14.0, cy + 6.0, white(1.0), 0.62, &v);
-                    ui.text_right(vx - 22.0 - vw, cy + 6.0, acc(1.0), 0.62, "‹");
+                    let aw = ui.text_right(gpu, vx, cy + 6.0, acc(1.0), T::Strong, "›");
+                    let vw = ui.text_right(gpu, vx - aw - 8.0, cy + 6.0, white(1.0), T::Strong, &v);
+                    ui.text_right(gpu, vx - aw - 16.0 - vw, cy + 6.0, acc(1.0), T::Strong, "‹");
                 } else {
-                    ui.text_right(vx, cy + 6.0, grey(0.85), 0.62, &v);
+                    ui.text_right(gpu, vx, cy + 6.0, grey(0.92), T::Body, &v);
                 }
             } else if focused {
-                ui.button(gpu, x + SW - 32.0, cy, Button::Cross, o);
+                ui.button(gpu, x + SW - 34.0, cy, Button::Cross, o);
             }
         }
 
-        let fy = ry + rows.len() as f32 * ROW_H + 12.0;
+        let fy = ry + rows.len() as f32 * ROW_H + 10.0;
         ui.rect(gpu, x + 20.0, fy - 4.0, SW - 40.0, 1.0, &Style::fill(0.0, white(0.08)));
         let line = match &self.note {
             Some((n, _)) => n.clone(),
             None => stats.to_string(),
         };
-        ui.text(x + 22.0, fy + 16.0, if self.note.is_some() { acc(1.0) } else { grey(0.8) }, 0.54, &ui.fit(0.54, &line, SW - 44.0));
-        let hy = fy + 38.0;
+        ui.text(gpu, x + 22.0, fy + 18.0, if self.note.is_some() { acc(1.0) } else { grey(0.9) }, T::Caption, &ui.fit(T::Caption, &line, SW - 44.0));
+        let hy = fy + 44.0;
         let mut hx = x + 20.0;
-        hx += ui.hint(gpu, hx, hy, &[Button::Pad], "Choose", o) + 14.0;
-        hx += ui.hint(gpu, hx, hy, &[Button::Cross], "Change", o) + 14.0;
+        hx += ui.hint(gpu, hx, hy, &[Button::Pad], "Choose", o) + 16.0;
+        hx += ui.hint(gpu, hx, hy, &[Button::Triangle], "Reset", o) + 16.0;
         ui.hint(gpu, hx, hy, &[Button::Circle], "Close", o);
     }
 }

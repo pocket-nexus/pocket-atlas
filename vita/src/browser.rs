@@ -12,7 +12,7 @@ use serde_json::json;
 
 use crate::atlas::Atlas;
 use crate::gpu::Gpu;
-use crate::ui::{accent, drawable, rgb, Button, Style, Ui};
+use crate::ui::{accent, drawable, rgb, Button, Style, Ui, T};
 
 const SAVED_PATH: &str = "ux0:data/pocket-atlas/saved.json";
 
@@ -46,17 +46,17 @@ pub enum Action {
 }
 
 // Panel geometry (display pixels).
-const PX: f32 = 576.0;
-const PW: f32 = 368.0;
-const PY: f32 = 16.0;
-const PH: f32 = 512.0;
-const LIST_Y: f32 = PY + 88.0;
-const LIST_H: f32 = PH - 88.0 - 10.0;
+const PX: f32 = 564.0;
+const PW: f32 = 380.0;
+const PY: f32 = 14.0;
+const PH: f32 = 482.0;
+const LIST_Y: f32 = PY + 92.0;
+const LIST_H: f32 = PH - 92.0 - 8.0;
 /// Card image (2:1) and the compact row's thumbnail.
-const IMG_W: f32 = 344.0;
-const THUMB_W: f32 = 96.0;
-const ROW_H: f32 = 60.0;
-const CARD_H: f32 = IMG_W * 0.5 + 84.0;
+const IMG_W: f32 = PW - 24.0;
+const THUMB_W: f32 = 100.0;
+const ROW_H: f32 = 64.0;
+const CARD_H: f32 = IMG_W * 0.5 + 96.0;
 const GAP: f32 = 6.0;
 /// Previews are 16:9 frames stored in 2:1 textures; a 2:1 card shows the
 /// middle 16:9 ÷ 2:1 of their height.
@@ -150,7 +150,7 @@ fn unit(lat: f32, lon: f32) -> [f32; 3] {
 }
 
 fn kind_label(kind: &str) -> String {
-    kind.replace('-', "  ").to_uppercase()
+    kind.replace('-', " ").to_uppercase()
 }
 
 /// Search score of a place for the query words (`None`: a word matches
@@ -445,6 +445,7 @@ impl Browser {
     }
 
     /// Image of a place: its preview, or a placeholder in its colours.
+    #[allow(clippy::too_many_arguments)]
     unsafe fn picture(&self, ui: &Ui, gpu: &mut Gpu, atlas: &Atlas, p: &AtlasPlace, x: f32, y: f32, w: f32, radius: f32, opacity: f32) {
         let h = w * 0.5;
         match p.preview.and_then(|t| atlas.texture(t)) {
@@ -455,10 +456,10 @@ impl Browser {
                 ui.rect(gpu, x, y, w, h, &Style::gradient(radius, top, bottom).stroke(1.0, rgb(0xffffff, 0.12 * opacity)));
                 // The place's own name for the city, faint, as on a postmark.
                 let label = if p.locality_native.trim().is_empty() || !drawable(&p.locality_native) { &p.locality } else { &p.locality_native };
-                let scale = (w / 150.0).clamp(0.55, 2.0);
-                let tw = ui.width(scale, label);
+                let t = if w > 200.0 { T::Brand } else { T::Strong };
+                let tw = ui.width(t, label);
                 if tw < w - 8.0 {
-                    ui.text(x + (w - tw) * 0.5, y + h * 0.5 + 9.0 * scale, rgb(0xffffff, 0.32 * opacity), scale, label);
+                    ui.text(gpu, (x + (w - tw) * 0.5).round(), (y + h * 0.5 + t.px() * 0.35).round(), rgb(0xffffff, 0.34 * opacity), t, label);
                 }
             }
         }
@@ -471,30 +472,34 @@ impl Browser {
     pub unsafe fn draw(&mut self, ui: &Ui, gpu: &mut Gpu, atlas: &Atlas) {
         let places = &atlas.meta.places;
         let white = |a: f32| rgb(0xffffff, a);
-        let grey = |a: f32| rgb(0xb4b8c4, a);
+        let grey = |a: f32| rgb(0xbcc0cc, a);
 
         // Brand.
-        ui.text_shadow(40.0, 58.0, white(1.0), 1.25, "P O C K E T   A T L A S");
+        ui.text_shadow(gpu, 36.0, 56.0, white(1.0), T::Brand, "Pocket Atlas");
         let open = places.iter().filter(|p| p.enterable).count();
-        ui.text_shadow(40.0, 84.0, rgb(0xd4d8e2, 0.95), 0.66, &format!("Places people remember  ·  {} places, {open} open", places.len()));
+        ui.text_shadow(gpu, 37.0, 84.0, rgb(0xdde1ea, 0.95), T::Body, &format!("Places people remember  ·  {} places, {open} open", places.len()));
 
         // Panel.
         ui.shadow(gpu, PX, PY, PW, PH, 16.0, 24.0, 0.45);
-        ui.rect(gpu, PX, PY, PW, PH, &Style::gradient(16.0, rgb(0x161a24, 0.78), rgb(0x0c0e14, 0.84)).stroke(1.0, white(0.09)));
+        ui.rect(gpu, PX, PY, PW, PH, &Style::gradient(16.0, rgb(0x161a24, 0.82), rgb(0x0c0e14, 0.88)).stroke(1.0, white(0.09)));
 
         // Tabs, L / R at the ends, an underline sliding to the current one.
-        let ty = PY + 30.0;
-        ui.button(gpu, PX + 24.0, ty - 5.0, Button::L, 0.9);
-        ui.button(gpu, PX + PW - 24.0, ty - 5.0, Button::R, 0.9);
-        let span = (PX + 46.0, PX + PW - 46.0);
-        let cell = (span.1 - span.0) / TABS.len() as f32;
+        let ty = PY + 34.0;
+        ui.button(gpu, PX + 26.0, ty - 5.0, Button::L, 0.95);
+        ui.button(gpu, PX + PW - 26.0, ty - 5.0, Button::R, 0.95);
+        // Labels spread with equal gaps between them across the span.
+        let span = (PX + 50.0, PX + PW - 50.0);
+        let widths: Vec<f32> = TABS.iter().map(|t| ui.width(T::Label, t.label())).collect();
+        let gap = ((span.1 - span.0) - widths.iter().sum::<f32>()) / (TABS.len() - 1) as f32;
         let focus_accent = self.focused(atlas).map_or(rgb(0x8fb4ff, 1.0), |p| accent(p.accent, 1.0));
+        let mut lx = span.0;
         for (k, t) in TABS.iter().enumerate() {
             let label = t.label();
-            let tw = ui.width(0.56, label);
-            let cx = span.0 + cell * (k as f32 + 0.5);
+            let tw = widths[k];
+            let cx = lx + tw * 0.5;
+            lx += tw + gap;
             let on = *t == self.tab;
-            ui.text(cx - tw * 0.5, ty, if on { white(1.0) } else { grey(0.6) }, 0.56, label);
+            ui.text(gpu, (cx - tw * 0.5).round(), ty, if on { white(1.0) } else { grey(0.62) }, T::Label, label);
             if on {
                 let goal = (cx - tw * 0.5, tw);
                 if self.underline.1 == 0.0 {
@@ -505,19 +510,19 @@ impl Browser {
                 self.underline.1 += (goal.1 - self.underline.1) * e;
             }
         }
-        ui.rect(gpu, self.underline.0, ty + 8.0, self.underline.1, 2.0, &Style::fill(1.0, focus_accent));
-        ui.rect(gpu, PX + 16.0, ty + 20.0, PW - 32.0, 1.0, &Style::fill(0.0, white(0.07)));
+        ui.rect(gpu, self.underline.0, ty + 8.0, self.underline.1, 3.0, &Style::fill(1.5, focus_accent));
+        ui.rect(gpu, PX + 16.0, ty + 22.0, PW - 32.0, 1.0, &Style::fill(0.0, white(0.07)));
 
         // What the list is.
         let sub = match self.tab {
             Tab::Featured => format!("Picked for you  ·  {}", self.list.len()),
-            Tab::Explore => "Nearest the middle of the globe  ·  spin it to explore".to_string(),
+            Tab::Explore => "Nearest the middle of the globe".to_string(),
             Tab::Saved if self.list.is_empty() => "Nothing saved yet".to_string(),
             Tab::Saved => format!("{} saved", self.list.len()),
             Tab::Search if self.query.is_empty() => "Search by name, city, country or tag".to_string(),
             Tab::Search => format!("“{}”  ·  {} result{}", self.query, self.list.len(), if self.list.len() == 1 { "" } else { "s" }),
         };
-        ui.text(PX + 18.0, PY + 72.0, grey(0.8), 0.58, &ui.fit(0.58, &sub, PW - 36.0));
+        ui.text(gpu, PX + 18.0, PY + 78.0, grey(0.9), T::Caption, &ui.fit(T::Caption, &sub, PW - 36.0));
 
         // The list.
         let a = self.fade;
@@ -537,35 +542,35 @@ impl Browser {
                 Tab::Search => ("No places found", "Press □ to try other words."),
                 _ => ("No places", ""),
             };
-            ui.text(PX + 24.0, LIST_Y + 40.0, white(0.9 * a), 0.9, title);
-            ui.text(PX + 24.0, LIST_Y + 66.0, grey(0.85 * a), 0.62, body);
+            ui.text(gpu, PX + 24.0, LIST_Y + 40.0, white(0.92 * a), T::Title, title);
+            ui.text(gpu, PX + 24.0, LIST_Y + 68.0, grey(0.9 * a), T::Caption, body);
         }
         ui.clip(None);
-        // Edge fades over the scrolled list.
+        // Edge fade over the scrolled list.
         if self.scroll > 1.0 {
             ui.rect(gpu, PX + 1.0, LIST_Y - 6.0, PW - 2.0, 18.0, &Style::gradient(0.0, rgb(0x141822, 0.9), rgb(0x141822, 0.0)));
         }
 
-        // Hints along the bottom, under the globe.
-        let hy = 524.0;
-        let mut x = 40.0;
+        // Hints along the bottom.
+        let hy = 520.0;
+        let mut x = 36.0;
         let focused = self.focused(atlas);
         if focused.is_some_and(|p| p.enterable) {
-            x += ui.hint(gpu, x, hy, &[Button::Cross], "Visit", 1.0) + 18.0;
+            x += ui.hint(gpu, x, hy, &[Button::Cross], "Visit", 1.0) + 20.0;
         }
         if let Some(p) = focused {
-            x += ui.hint(gpu, x, hy, &[Button::Triangle], if self.is_saved(&p.id) { "Unsave" } else { "Save" }, 1.0) + 18.0;
+            x += ui.hint(gpu, x, hy, &[Button::Triangle], if self.is_saved(&p.id) { "Unsave" } else { "Save" }, 1.0) + 20.0;
         }
-        x += ui.hint(gpu, x, hy, &[Button::Square], "Search", 1.0) + 18.0;
-        x += ui.hint(gpu, x, hy, &[Button::L, Button::R], "Lists", 1.0) + 18.0;
-        ui.hint(gpu, x, hy, &[Button::Stick], "Spin", 1.0);
+        x += ui.hint(gpu, x, hy, &[Button::Square], "Search", 1.0) + 20.0;
+        x += ui.hint(gpu, x, hy, &[Button::L, Button::R], "Lists", 1.0) + 20.0;
+        ui.hint(gpu, x, hy, &[Button::Stick], "Spin the globe", 1.0);
 
         if let Some((msg, t)) = &self.toast {
             let o = (t.min(0.4) / 0.4).clamp(0.0, 1.0);
-            let tw = ui.width(0.7, msg);
-            let (cx, cy) = (atlas.meta.globe.center_x, 462.0);
-            ui.rect(gpu, cx - tw * 0.5 - 16.0, cy - 17.0, tw + 32.0, 32.0, &Style::fill(16.0, rgb(0x0c0e14, 0.82 * o)).stroke(1.0, white(0.14 * o)));
-            ui.text(cx - tw * 0.5, cy + 5.0, white(o), 0.7, msg);
+            let tw = ui.width(T::Strong, msg);
+            let (cx, cy) = (atlas.meta.globe.center_x, 458.0);
+            ui.rect(gpu, cx - tw * 0.5 - 18.0, cy - 19.0, tw + 36.0, 36.0, &Style::fill(18.0, rgb(0x0c0e14, 0.85 * o)).stroke(1.0, white(0.14 * o)));
+            ui.text(gpu, (cx - tw * 0.5).round(), cy + 6.0, white(o), T::Strong, msg);
         }
     }
 
@@ -577,7 +582,7 @@ impl Browser {
         let a = self.open.get(i).copied().unwrap_or(0.0);
         let s = a * a * (3.0 - 2.0 * a);
         let white = |o: f32| rgb(0xffffff, o * fade);
-        let grey = |o: f32| rgb(0xb4b8c4, o * fade);
+        let grey = |o: f32| rgb(0xbcc0cc, o * fade);
         let acc = |o: f32| accent(p.accent, o * fade);
         let saved = self.is_saved(&p.id);
         let w = PW - 24.0;
@@ -585,29 +590,29 @@ impl Browser {
         // Card behind the opened postcard.
         if s > 0.02 {
             let ch = ROW_H + (CARD_H - ROW_H) * s;
-            ui.rect(gpu, x - 4.0, y - 4.0, w + 8.0, ch + 2.0, &Style::fill(14.0, rgb(0x1c212c, 0.9 * s * fade)).stroke(1.5, acc(0.75 * s)));
+            ui.rect(gpu, x - 4.0, y - 4.0, w + 8.0, ch + 2.0, &Style::fill(14.0, rgb(0x1c212c, 0.92 * s * fade)).stroke(1.5, acc(0.75 * s)));
         }
         // Picture: thumbnail → card image.
         let iw = THUMB_W + (IMG_W - THUMB_W) * s;
-        let ix = x + 2.0 + (0.0 - 2.0) * s;
-        let iy = y + 6.0 * (1.0 - s);
-        self.picture(ui, gpu, atlas, p, ix, iy, iw, 6.0 + 4.0 * s, fade);
+        let ix = x + 2.0 * (1.0 - s);
+        let iy = y + 7.0 * (1.0 - s);
+        self.picture(ui, gpu, atlas, p, ix, iy, iw, 7.0 + 3.0 * s, fade);
 
         // Row text, fading as the card opens.
         let ro = (1.0 - s * 2.0).max(0.0);
         if ro > 0.0 {
             let tx = x + THUMB_W + 16.0;
-            let tw = w - THUMB_W - 16.0 - 44.0;
-            ui.text(tx, y + 26.0, white(0.94 * ro), 0.74, &ui.fit(0.74, &p.name, tw));
+            let tw = w - THUMB_W - 16.0 - 46.0;
+            ui.text(gpu, tx, y + 28.0, white(0.96 * ro), T::Strong, &ui.fit(T::Strong, &p.name, tw));
             let loc = if p.country.is_empty() { p.locality.clone() } else { format!("{}  ·  {}", p.locality, p.country) };
-            ui.text(tx, y + 46.0, grey(0.85 * ro), 0.58, &ui.fit(0.58, &loc, tw));
+            ui.text(gpu, tx, y + 50.0, grey(0.9 * ro), T::Caption, &ui.fit(T::Caption, &loc, tw + 40.0));
             if p.enterable {
-                ui.text_right(x + w - 6.0, y + 26.0, acc(ro), 0.5, "OPEN");
+                ui.text_right(gpu, x + w - 6.0, y + 27.0, acc(ro), T::Label, "OPEN");
             } else {
-                ui.text_right(x + w - 6.0, y + 26.0, grey(0.55 * ro), 0.5, "SOON");
+                ui.text_right(gpu, x + w - 6.0, y + 27.0, grey(0.6 * ro), T::Label, "SOON");
             }
             if saved {
-                ui.text_right(x + w - 6.0, y + 46.0, acc(ro), 0.62, "★");
+                ui.text_right(gpu, x + w - 6.0, y + 50.0, acc(ro), T::Small, "★");
             }
         }
 
@@ -616,26 +621,26 @@ impl Browser {
         if co > 0.0 {
             let ih = IMG_W * 0.5;
             // Scrim and name over the bottom of the picture (its current size).
-            let sh = 64.0 * iw / IMG_W;
-            ui.rect(gpu, ix, iy + iw * 0.5 - sh, iw, sh, &Style::gradient(10.0, rgb(0x000000, 0.0), rgb(0x000000, 0.72 * co * fade)));
-            let name = ui.fit(1.0, &p.name, IMG_W - 28.0);
-            ui.text(x + 14.0, y + ih - 14.0, white(co), 1.0, &name);
-            let nw = ui.width(1.0, &name);
-            if !p.native.is_empty() && drawable(&p.native) && nw + ui.width(0.66, &p.native) + 40.0 < IMG_W {
-                ui.text(x + 24.0 + nw, y + ih - 14.0, white(0.72 * co), 0.66, &p.native);
+            let sh = 72.0 * iw / IMG_W;
+            ui.rect(gpu, ix, iy + iw * 0.5 - sh, iw, sh, &Style::gradient(10.0, rgb(0x000000, 0.0), rgb(0x000000, 0.75 * co * fade)));
+            let nt = if ui.width(T::Heading, &p.name) <= IMG_W - 28.0 { T::Heading } else { T::Title };
+            let name = ui.fit(nt, &p.name, IMG_W - 28.0);
+            let nw = ui.text(gpu, x + 14.0, y + ih - 14.0, white(co), nt, &name);
+            if !p.native.is_empty() && drawable(&p.native) && nw + ui.width(T::Body, &p.native) + 40.0 < IMG_W {
+                ui.text(gpu, x + 24.0 + nw, y + ih - 15.0, white(0.78 * co), T::Body, &p.native);
             }
             // Kind chip and the saved badge.
             if !p.kind.is_empty() {
                 let k = kind_label(&p.kind);
-                let kw = ui.width(0.48, &k);
-                ui.rect(gpu, x + 10.0, y + 10.0, kw + 16.0, 18.0, &Style::fill(9.0, rgb(0x000000, 0.5 * co * fade)));
-                ui.text(x + 18.0, y + 23.0, white(0.92 * co), 0.48, &k);
+                let kw = ui.width(T::Label, &k);
+                ui.rect(gpu, x + 10.0, y + 10.0, kw + 18.0, 22.0, &Style::fill(11.0, rgb(0x000000, 0.55 * co * fade)));
+                ui.text(gpu, x + 19.0, y + 26.0, white(0.95 * co), T::Label, &k);
             }
             if saved {
                 let b = "★ SAVED";
-                let bw = ui.width(0.48, b);
-                ui.rect(gpu, x + IMG_W - bw - 26.0, y + 10.0, bw + 16.0, 18.0, &Style::fill(9.0, rgb(0x000000, 0.5 * co * fade)));
-                ui.text(x + IMG_W - bw - 18.0, y + 23.0, acc(co), 0.48, b);
+                let bw = ui.width(T::Label, b);
+                ui.rect(gpu, x + IMG_W - bw - 28.0, y + 10.0, bw + 18.0, 22.0, &Style::fill(11.0, rgb(0x000000, 0.55 * co * fade)));
+                ui.text(gpu, x + IMG_W - bw - 19.0, y + 26.0, acc(co), T::Label, b);
             }
             // Caption.
             let cy = y + ih;
@@ -644,32 +649,33 @@ impl Browser {
             } else {
                 format!("{} {}  ·  {}", p.locality, p.locality_native, p.country)
             };
-            ui.text(x + 4.0, cy + 24.0, white(0.9 * co), 0.66, &ui.fit(0.66, &loc, w - 110.0));
-            ui.text_right(x + w - 4.0, cy + 24.0, grey(0.75 * co), 0.5, &p.weather.to_uppercase());
+            let weather = p.weather.to_uppercase();
+            let ww = ui.width(T::Label, &weather);
+            ui.text(gpu, x + 4.0, cy + 26.0, white(0.94 * co), T::Body, &ui.fit(T::Body, &loc, w - ww - 20.0));
+            ui.text_right(gpu, x + w - 4.0, cy + 25.0, grey(0.85 * co), T::Label, &weather);
             // Tags.
             let mut tx = x + 4.0;
             for t in &p.tags {
-                let tw = ui.width(0.5, t);
-                if tx + tw + 16.0 > x + w {
+                let tw = ui.width(T::Caption, t);
+                if tx + tw + 18.0 > x + w {
                     break;
                 }
-                ui.rect(gpu, tx, cy + 34.0, tw + 14.0, 18.0, &Style::fill(9.0, [0.0; 4]).stroke(1.0, white(0.22 * co)));
-                ui.text(tx + 7.0, cy + 47.0, white(0.82 * co), 0.5, t);
-                tx += tw + 20.0;
+                ui.rect(gpu, tx, cy + 37.0, tw + 18.0, 24.0, &Style::fill(12.0, [0.0; 4]).stroke(1.0, white(0.26 * co)));
+                ui.text(gpu, tx + 9.0, cy + 54.0, white(0.9 * co), T::Caption, t);
+                tx += tw + 24.0;
             }
             // Author and what × does.
             if !p.author.is_empty() {
-                ui.text(x + 4.0, cy + 74.0, grey(0.8 * co), 0.56, &format!("by {}", p.author));
+                ui.text(gpu, x + 4.0, cy + 84.0, grey(0.9 * co), T::Caption, &format!("by {}", p.author));
             }
             if p.enterable {
                 let l = "VISIT";
-                let lw = ui.width(0.56, l);
-                ui.text(x + w - 4.0 - lw, cy + 74.0, acc(co), 0.56, l);
+                let lw = ui.text_right(gpu, x + w - 4.0, cy + 83.0, acc(co), T::Label, l);
                 if focused {
-                    ui.button(gpu, x + w - 18.0 - lw, cy + 69.0, Button::Cross, co * fade);
+                    ui.button(gpu, x + w - 20.0 - lw, cy + 78.0, Button::Cross, co * fade);
                 }
             } else {
-                ui.text_right(x + w - 4.0, cy + 74.0, grey(0.7 * co), 0.56, "COMING SOON");
+                ui.text_right(gpu, x + w - 4.0, cy + 83.0, grey(0.8 * co), T::Label, "COMING SOON");
             }
         }
     }
