@@ -83,10 +83,18 @@ pub fn light_point(p: [f32; 3], color: [f32; 3], light: Option<&[f32]>, path: Op
 }
 
 /// The vista haze (scene `haze` with an `inversion`); `None` for the night
-/// streets' lit haze, which shares the key.
+/// streets' lit haze, which shares the key. `band` (the weight of the sky's
+/// sun-side terms in the inscatter) is 1, the dome, when absent.
 pub fn vista_haze(h: &Value) -> Option<pc::VistaHaze> {
     h.get("inversion")?.as_f64()?;
-    Some(pc::VistaHaze { density: f(h, "density", 0.0), inversion: f(h, "inversion", 0.0), scale: f(h, "scale", 100.0).max(1e-3), gain: f(h, "gain", 1.0), glow: v3(&h["glow"]) })
+    Some(pc::VistaHaze {
+        density: f(h, "density", 0.0),
+        inversion: f(h, "inversion", 0.0),
+        scale: f(h, "scale", 100.0).max(1e-3),
+        gain: f(h, "gain", 1.0),
+        glow: v3(&h["glow"]),
+        band: f(h, "band", 1.0),
+    })
 }
 
 /// The twilight terms of a day sky (`sky.twilight`).
@@ -141,8 +149,10 @@ mod tests {
 
     #[test]
     fn vista_haze_needs_an_inversion() {
-        let h = vista_haze(&json!({"density": 1.2e-4, "inversion": -60, "scale": 120, "gain": 1, "glow": [0.01, 0.009, 0.007], "note": "…"})).unwrap();
-        assert_eq!((h.density, h.inversion, h.scale, h.gain, h.glow), (1.2e-4, -60.0, 120.0, 1.0, [0.01, 0.009, 0.007]));
+        let h = vista_haze(&json!({"density": 1.6e-4, "inversion": -60, "scale": 60, "gain": 1.25, "band": 0.25, "glow": [0.0045, 0.003, 0.0035], "note": "…"})).unwrap();
+        assert_eq!((h.density, h.inversion, h.scale, h.gain, h.band, h.glow), (1.6e-4, -60.0, 60.0, 1.25, 0.25, [0.0045, 0.003, 0.0035]));
+        // Without `band`, the sky's sun-side terms keep their full weight.
+        assert_eq!(vista_haze(&json!({"density": 1e-4, "inversion": 0})).unwrap().band, 1.0);
         // The night streets' lit haze shares the key.
         assert!(vista_haze(&json!({"density": 0.015, "ambient": [0.1, 0.1, 0.1]})).is_none());
         assert!(vista_haze(&Value::Null).is_none());

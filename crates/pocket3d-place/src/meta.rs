@@ -624,20 +624,26 @@ impl DaySky {
     /// whose azimuth cosine to the sun is `a` (`sky_day_f.cg` and the web's
     /// `places/shared/sky.ts` at h = 0; no clouds, no disc).
     pub fn horizon_at(&self, a: f32) -> Vec3 {
+        self.horizon_weighted(a, 1.0)
+    }
+
+    /// [`DaySky::horizon_at`] with the sun-side terms (the glow lobes and
+    /// the afterglow band) weighted by `band` (the vista haze's `band`).
+    pub fn horizon_weighted(&self, a: f32, band: f32) -> Vec3 {
         let a = a.clamp(-1.0, 1.0);
         let t = 1e-5f32.powf(self.gradient_power);
         let mut c: Vec3 = core::array::from_fn(|k| self.horizon[k] + (self.zenith[k] - self.horizon[k]) * t);
         let s = self.sun_direction;
         let mu = (a * (s[0] * s[0] + s[2] * s[2]).sqrt()).max(0.0);
         let lobe = |w: [f32; 2]| if mu > 0.0 { w[0] * mu.powf(w[1]) } else { 0.0 };
-        let glow = self.glow * (lobe(self.glow_wide) + lobe(self.glow_tight));
+        let glow = band * self.glow * (lobe(self.glow_wide) + lobe(self.glow_tight));
         for k in 0..3 {
             c[k] += self.sun_color[k] * glow;
         }
         if let Some(tw) = &self.twilight {
             let toward = (a + 1.0) * 0.5;
             let away = ((1.0 - a) * 0.5).max(0.0);
-            let band = 1.0 + (toward.powf(tw.band.sun_power) - 1.0) * tw.band.sun_bias;
+            let band = band * (1.0 + (toward.powf(tw.band.sun_power) - 1.0) * tw.band.sun_bias);
             let bz = tw.belt.elevation / tw.belt.width.max(1e-6);
             let belt = (-bz * bz).exp() * away.powf(tw.belt.power);
             let shadow = 1.0 - tw.shadow.strength * away.powf(tw.shadow.power);
@@ -657,7 +663,8 @@ impl DaySky {
 /// scale)` above. Between the eye and a point d metres away the optical
 /// depth is `d · (G(y_p) − G(y_e)) / (y_p − y_e)` with G the antiderivative
 /// of ρ; a surface keeps `T = e^(−τ)` of its colour and gains
-/// `(gain · sky(horizon toward the point) + glow · ρ(y_p) / density) · (1 − T)`.
+/// `(gain · sky(horizon toward the point) + glow · ρ(y_p) / density) · (1 − T)`,
+/// the sky's sun-side terms (glow lobes, afterglow band) weighted by `band`.
 /// Additive surfaces and the light field take `T` only. Replaces the uniform
 /// fog on every material that has fog.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -667,6 +674,13 @@ pub struct VistaHaze {
     pub scale: f32,
     pub gain: f32,
     pub glow: Vec3,
+    /// Weight of the sky's sun-side terms in the inscatter (1: the dome).
+    #[serde(default = "one")]
+    pub band: f32,
+}
+
+fn one() -> f32 {
+    1.0
 }
 
 impl VistaHaze {
@@ -696,13 +710,13 @@ impl VistaHaze {
         (-tau.max(0.0)).exp()
     }
 
-    /// `gain` × the sky on the horizon at the knots (see `SKY_KNOTS`); the
-    /// renderer interpolates linearly between them. Without a day sky, the
-    /// night sky's horizon colour everywhere.
+    /// `gain` × the sky on the horizon at the knots (see `SKY_KNOTS`), its
+    /// sun-side terms × `band`; the renderer interpolates linearly between
+    /// them. Without a day sky, the night sky's horizon colour everywhere.
     pub fn sky_table(&self, sky: Option<&DaySky>, night_horizon: Vec3) -> [Vec3; Self::SKY_KNOTS] {
         core::array::from_fn(|k| {
             let u = k as f32 / (Self::SKY_KNOTS - 1) as f32;
-            let c = sky.map_or(night_horizon, |s| s.horizon_at(1.0 - 2.0 * u * u));
+            let c = sky.map_or(night_horizon, |s| s.horizon_weighted(1.0 - 2.0 * u * u, self.band));
             c.map(|x| x * self.gain)
         })
     }
@@ -742,7 +756,7 @@ mod haze_tests {
         }
     }
 
-    const HAZE: VistaHaze = VistaHaze { density: 1.2e-4, inversion: -60.0, scale: 120.0, gain: 1.0, glow: [0.01, 0.009, 0.007] };
+    const HAZE: VistaHaze = VistaHaze { density: 1.2e-4, inversion: -60.0, scale: 120.0, gain: 1.0, glow: [0.01, 0.009, 0.007], band: 1.0 };
 
     #[test]
     fn transmittance_in_and_above_the_layer() {
@@ -775,6 +789,32 @@ mod haze_tests {
         assert!((c[0] - want).abs() < 1e-5, "{} {want}", c[0]);
         // Toward the sun the afterglow band and the glow lobes add up.
         assert!(sky.horizon_at(1.0)[0] > 0.5);
+    }
+
+    #[test]
+    fn band_weights_the_sun_side_terms() {
+        let sky = blue_hour();
+        // Toward the sun (a = 1): mu = |sun.xz|, toward = 1, away = 0.
+        let s = sky.sun_direction;
+        let mu = (s[0] * s[0] + s[2] * s[2]).sqrt();
+        let base = 0.09 + (0.01 - 0.09) * 1e-5f32.powf(0.45);
+        let lobes = 0.5 * 0.4 * (0.4 * mu.powf(3.0) + 0.6 * mu.powf(24.0));
+        let band = 0.45 * (1.0 + (1.0 - 1.0) * 0.9);
+        let want = base + 0.25 * (lobes + band);
+        assert!((sky.horizon_weighted(1.0, 0.25)[0] - want).abs() < 1e-5);
+        // Opposite the sun only the band term's floor scales.
+        let belt = (-(0.12f32 / 0.09).powi(2)).exp() * 0.08;
+        let want = (base + 0.25 * 0.45 * 0.1 + belt) * 0.65;
+        assert!((sky.horizon_weighted(-1.0, 0.25)[0] - want).abs() < 1e-5);
+        // band = 1 is the dome, and absent from older packs it reads as 1.
+        assert_eq!(sky.horizon_weighted(0.3, 1.0), sky.horizon_at(0.3));
+        let h: VistaHaze = serde_json::from_str(r#"{"density":1e-4,"inversion":0,"scale":50,"gain":1,"glow":[0,0,0]}"#).unwrap();
+        assert_eq!(h.band, 1.0);
+        // The table carries gain × the weighted horizon.
+        let griffith = VistaHaze { density: 1.6e-4, inversion: -60.0, scale: 60.0, gain: 1.25, glow: [0.0045, 0.003, 0.0035], band: 0.25 };
+        let t = griffith.sky_table(Some(&sky), [0.0; 3]);
+        let w = sky.horizon_weighted(1.0, 0.25);
+        assert!((t[0][1] - 1.25 * w[1]).abs() < 1e-6);
     }
 
     #[test]

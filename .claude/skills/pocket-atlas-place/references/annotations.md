@@ -32,4 +32,4 @@ Any material may carry `frames`/`scroll` (e.g. surf strips): `UvAnim` applies to
 - `post` — `tone` (`agx` or `aces`), `exposure`, `contrast`, `saturation`, `lift`, `gain`, `vignette`, `grain`, `bloom {threshold, smoothing, intensity}`.
 - `camera.shots` — named `from`/`to` keyframes (`pos`, `target`, `fov`) and durations; the device's cinematic rig plays them, `tools/atlas.ts` measures them by name.
 - Haze: night streets with `fogLights`; other kinds leave it out (no haze pass).
-- `haze` with an `inversion` — the vista haze [Dusk vistas]: `density` (ρ0, 1/m), `inversion` (H, place y), `scale` (s, m), `gain`, `glow: [r, g, b]`; replaces the uniform fog on every material that has fog. Without `inversion`, `haze` is the night streets' lit haze.
+- `haze` with an `inversion` — the vista haze [Dusk vistas]: `density` (ρ0, 1/m), `inversion` (H, place y), `scale` (s, m), `gain`, `glow: [r, g, b]`, `band` (weight of the sky's sun-side terms, the glow lobes and the afterglow band, in the inscatter; default 1, the dome); replaces the uniform fog on every material that has fog. Without `inversion`, `haze` is the night streets' lit haze.
