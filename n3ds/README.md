@@ -110,7 +110,8 @@ bun tools/atlas-3ds.ts ctl '{"shot":"Crossing","time":25,"step":0,"hold":true}'
 bun tools/atlas-3ds.ts ctl '{"sheet":true,"settings":{"exposure":0.25}}'
 bun tools/atlas-3ds.ts capture
 bun tools/atlas-3ds.ts capture --surface reflection
-bun tools/atlas-3ds.ts profile --place suga-shrine-stairs --step 4 --samples 60 --live
+bun tools/atlas-3ds.ts profile --place suga-shrine-stairs --step 0 --samples 60 --live
+bun tools/atlas-3ds.ts profile --place tokyo-konbini --step 3 --samples 60 --live
 bun tools/atlas-3ds.ts sweep --place akihabara-radio-kaikan --samples 60 --live
 bun tools/atlas-3ds.ts tour --place kamakura-koko-mae-crossing --seconds 135
 bun tools/atlas-3ds.ts ctl '{"hold":false,"play":true}'
@@ -132,10 +133,16 @@ quality. Benchmarks temporarily lock physical input and restore it afterward;
 the lock expires after three seconds without control traffic. `hold` pins
 quality, while `time` freezes animation/camera until `play: true`.
 
+`tour` checkpoints incomplete results and may reconnect after a Wi-Fi drop.
+It accepts only the same build and place with advancing frame and measurement
+counters, so all frames remain included in the device's statistics. A finished
+record has `complete: true`; interruptions and reconnects remain in the receipt.
+
 ## Native rendering
 
 The PLCE5 container's PICA3 section holds native materials, draws, tiled
-RGB565/RGBA4 mip chains, RGBA8 clouds, 24-byte vertices and interpolated animation palettes.
+RGB565/RGBA4 mip chains, RGBA8 clouds, 24-byte vertices and interpolated
+animation palettes.
 The cooker applies the authored AgX/ACES grade, baked irradiance and static
 sun occlusion. It keeps only referenced animation matrices; long loops retain
 their duration even if matrix sampling must be reduced to fit memory.
@@ -157,8 +164,10 @@ and index buffers. Frustum/size/back-face culling, material caches and a coarse
 reflection proxy reduce cost. `lodFloor: 3` selects an automatic minimum mesh
 LOD from material features: open water uses 0, day/twilight skies use 1, and
 other scenes use 2. Values 0–2 override this for comparisons; status reports
-the actual `lodFloor` and configured `lodSetting`. Automatic quality adapts detail tolerance, rain and
-reflection range to the selected frame budget.
+the actual `lodFloor` and configured `lodSetting`. Automatic quality adapts
+detail tolerance, rain and reflection range to the selected frame budget.
+It starts conservatively on each scene entry, so a costly scene does not
+inherit a lighter scene's highest quality before its first measurements.
 
 ## Lifecycle and validation
 

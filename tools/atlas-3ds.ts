@@ -177,10 +177,13 @@ async function connect() {
     port: device.port,
     token,
     timeoutMs: 20000,
+    heartbeatTimeoutMs: 30000,
   });
   client.on("ctrl", (m) => {
     if (m.t === "log" || m.t === "runtime.native") console.log(m);
   });
+  for (const event of ["heartbeatTimeout", "protocolError", "socketError"])
+    client.on(event, (error) => console.error(`${event}: ${String(error)}`));
   try {
     await client.connect();
     return client;
@@ -316,7 +319,7 @@ else if (command === "install") {
   await $`zip -q -r ${archive} 3ds pocket-atlas`.cwd(stage);
   console.log(archive);
 } else {
-  const c = await connect();
+  let c = await connect();
   try {
     if (
       ["profile", "sweep", "tour"].includes(command) &&
@@ -454,29 +457,53 @@ else if (command === "install") {
         measure: true,
       });
       const samples = [];
+      const reconnects = [];
+      const out = option("--out", join(receipts, "tour.json"));
+      const saveTour = (complete: boolean) =>
+        writeFileSync(
+          out,
+          JSON.stringify(
+            { complete, reconnects, samples, measured: samples.at(-1) },
+            null,
+            2,
+          ) + "\n",
+        );
       const end = Date.now() + Number(option("--seconds", "60")) * 1000;
       while (Date.now() < end) {
         await Bun.sleep(500);
-        const sample = await status(c);
+        let sample;
+        try {
+          sample = await status(c);
+        } catch (error) {
+          // The device counts every frame even if Wi-Fi drops. Reconnect only
+          // to the same uninterrupted run; never restart its measurement.
+          c.close();
+          if (reconnects.length >= 3) throw error;
+          c = await connect();
+          sample = await status(c, { inputLock: true });
+          reconnects.push({
+            afterFrame: previous.frame,
+            resumedFrame: sample.frame,
+            error: String(error),
+          });
+        }
         if (
           sample.phase !== "running" ||
           sample.place !== previous.place ||
           sample.build !== previous.build ||
           sample.error ||
-          Number(sample.frame) <= Number(previous.frame)
+          Number(sample.frame) <= Number(previous.frame) ||
+          Number(sample.measuredFrames) <= Number(previous.measuredFrames)
         )
           throw new Error(
             `Tour runtime stopped or changed: ${JSON.stringify(sample)}`,
           );
         samples.push(sample);
         previous = sample;
+        if (samples.length % 20 === 0) saveTour(false);
       }
-      const result = { samples, measured: samples.at(-1) };
-      writeFileSync(
-        option("--out", join(receipts, "tour.json")),
-        JSON.stringify(result, null, 2) + "\n",
-      );
-      console.log(result.measured);
+      saveTour(true);
+      console.log(samples.at(-1));
     } else
       throw new Error(
         "usage: cook [--place ID] | build | install [--thin] | sync | package | status | ctl JSON | capture | profile | sweep | tour",

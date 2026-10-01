@@ -497,6 +497,10 @@ bool scene_load(const char *path, char *error, size_t capacity) {
   atlas.geom_bytes = gs;
   atlas.texture_bytes = ts;
   atlas.animation_bytes = as;
+  // A new view may cost much more than the previous one. Start automatic
+  // quality within the budget, then probe upward using this scene's timings.
+  if (!atlas.hold)
+    atlas.step = 4;
   memcpy(atlas.position, shots[0].from, 12);
   memcpy(atlas.target, shots[0].from + 3, 12);
   atlas.fov = shots[0].from[6];
