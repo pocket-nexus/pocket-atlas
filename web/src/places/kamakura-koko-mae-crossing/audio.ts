@@ -1,11 +1,9 @@
 import { Vector3, type PerspectiveCamera } from "three";
 import type { AudioEngine } from "../../core/audio";
-import type { CrossingState } from "./world/crossing";
+import { BELL_AT as BELL, type CrossingState } from "./world/crossing";
 import { TRACK } from "./world/layout";
-import { trainFront } from "./world/timeline";
+import { TRAIN_LENGTH, trainFront } from "./world/timeline";
 
-/** The crossing's electronic bell (on the south-west mast). */
-const BELL = new Vector3(-7.2, 4.4, 3.4);
 /** The shore break, broadly south of the crossing. */
 const SURF = new Vector3(0, -9, 64);
 
@@ -193,7 +191,7 @@ export class KamakuraAudio {
       this.train.gain.setTargetAtTime(0, now, 0.3);
       return;
     }
-    const mid = TRACK.point(f.u + 25, new Vector3());
+    const mid = TRACK.point(f.u + TRAIN_LENGTH / 2, new Vector3());
     const dtn = camera.position.distanceTo(mid);
     const ahead = trainFront(time + 0.5).u;
     const speed = Math.abs(ahead - f.u) * 2;

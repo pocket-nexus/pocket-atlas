@@ -2,7 +2,8 @@ import { BufferGeometry, ClampToEdgeWrapping, CylinderGeometry, Float32BufferAtt
 import { canvas, toTexture } from "../../shared/canvas";
 import { merge } from "../../shared/shapes";
 import type { KamakuraWorld } from "./context";
-import { bearing, SEA_Y, VIEW } from "./layout";
+import { bearing } from "../../shared/geo";
+import { SEA_Y, VIEW } from "./layout";
 
 /**
  * The coast in the haze: Inamuragasaki (105.8°, 2.5 km) at the end of the
@@ -462,7 +463,7 @@ export function buildFar(w: KamakuraWorld): void {
     lantern.translate(t.x, base + 55.5, t.z);
     const cap = new SphereGeometry(2.8, 8, 4, 0, Math.PI * 2, 0, Math.PI / 2);
     cap.translate(t.x, base + 59, t.z);
-    w.mesh(w.tint(merge([shaft, deck, lantern, cap]), "white"), w.printed, 0, 0, 0, w.root, { cast: false, receive: false });
+    w.mesh(w.equip.solid(merge([shaft, deck, lantern, cap]), "white"), w.equip.material, 0, 0, 0, w.root, { cast: false, receive: false });
   }
   w.mesh(merge(land), forest, 0, 0, 0, w.root, { cast: false, receive: false });
   w.mesh(merge(towns), town, 0, 0, 0, w.root, { cast: false, receive: false });

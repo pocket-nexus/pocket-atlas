@@ -1,7 +1,7 @@
 import { CylinderGeometry, PlaneGeometry, Vector3, type Group, type Material } from "three";
 import { Rng } from "../../../core/random";
 import { box } from "../../shared/geo";
-import { seedWindowUV } from "../../tokyo-konbini/gfx/interior";
+import { seedWindowUV } from "../../shared/interior";
 import { paintInterior, paintLightbox, type Lightbox } from "../gfx/art";
 import type { AkibaWorld } from "./context";
 import { cellPlane, rect } from "./util";
@@ -54,16 +54,11 @@ export class Facade {
     this.box(mat, 0, this.width, 0, Math.min(opts.ground, height), -depth, -opts.shopDepth - 0.06);
   }
 
-  /** A plane facing the street. */
-  plane(geo: PlaneGeometry, mat: Material, x: number, y: number, z: number): void {
-    this.w.mesh(geo, mat, x, y, z, this.g);
-  }
-
   /** Rows of interior-mapped windows (rooms with lamps) with frames and sills. */
-  windows(opts: { x0: number; x1: number; y0: number; floorH: number; floors: number; winH: number; bays: number; winW?: number; sill?: Material; frame?: Material; ribbon?: boolean; intensity?: number; z?: number }): void {
+  windows(opts: { x0: number; x1: number; y0: number; floorH: number; floors: number; winH: number; bays: number; winW?: number; sill?: Material; frame?: Material; ribbon?: boolean; z?: number }): void {
     const z = opts.z ?? 0;
     const { w, r } = this;
-    const mat = w.lib.interiorWindows(opts.intensity ?? 1.2);
+    const mat = w.lib.interiorWindows();
     const span = opts.x1 - opts.x0;
     const bw = span / opts.bays;
     const ww = opts.ribbon ? bw : Math.min(bw - 0.3, opts.winW ?? bw * 0.62);
@@ -94,9 +89,8 @@ export class Facade {
     const depth = opts.depth ?? 3;
     const yb = opts.y ?? 0;
     const variant = seed % 3;
-    const inner = w.draw(`int-${kind}-${variant}`, 640, 240, (g, cw, ch) => paintInterior(g, cw, ch, kind, variant + 1));
-    const lit = w.lib.lit(w.atlas.texture, 1.2, "atlas-interior", { fog: false });
-    w.mesh(cellPlane(bw - 0.1, h - 0.1, inner), lit, (x0 + x1) / 2, yb + h / 2, -depth, this.g);
+    const inner = w.drawArt(`int-${kind}-${variant}`, 640, 240, (g, cw, ch) => paintInterior(g, cw, ch, kind, variant + 1));
+    w.mesh(cellPlane(bw - 0.1, h - 0.1, inner), w.interior, (x0 + x1) / 2, yb + h / 2, -depth, this.g);
     const glowCol = opts.color ?? 0xf0f2ff;
     for (const sx of [x0 + 0.03, x1 - 0.03]) {
       const side = new PlaneGeometry(depth, h);

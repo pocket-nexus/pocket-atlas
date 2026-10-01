@@ -83,13 +83,27 @@ export function quad(p0: Vector3, p1: Vector3, p2: Vector3, p3: Vector3, normal:
   return g;
 }
 
-/** Merges arbitrary generated geometries into one (position/normal/uv only). */
-export function merge(geos: BufferGeometry[]): BufferGeometry {
+/**
+ * Merges arbitrary generated geometries into one: position, normal and uv
+ * (zeros where missing); with `color` also the vertex colours (RGB, or RGBA
+ * when any input has alpha; white where missing). Non-indexed, unless
+ * `index` is set and every input is indexed.
+ */
+export function merge(geos: BufferGeometry[], opts: { color?: boolean; index?: boolean } = {}): BufferGeometry {
+  const indexed = !!opts.index && geos.every((g) => g.index);
+  const rgba = opts.color ? (geos.some((g) => g.getAttribute("color")?.itemSize === 4) ? 4 : 3) : 0;
   const list = geos.map((g) => {
-    const n = g.index ? g.toNonIndexed() : g;
+    const n = g.index && !indexed ? g.toNonIndexed() : g;
+    const count = n.getAttribute("position").count;
+    const color = rgba ? n.getAttribute("color") : undefined;
     for (const k of Object.keys(n.attributes)) if (k !== "position" && k !== "normal" && k !== "uv") n.deleteAttribute(k);
     if (!n.getAttribute("normal")) n.computeVertexNormals();
-    if (!n.getAttribute("uv")) n.setAttribute("uv", new Float32BufferAttribute(new Float32Array(n.getAttribute("position").count * 2), 2));
+    if (!n.getAttribute("uv")) n.setAttribute("uv", new Float32BufferAttribute(new Float32Array(count * 2), 2));
+    if (rgba) {
+      const c = new Float32Array(count * rgba).fill(1);
+      if (color) for (let i = 0; i < count; i++) for (let k = 0; k < Math.min(rgba, color.itemSize); k++) c[i * rgba + k] = color.getComponent(i, k);
+      n.setAttribute("color", new Float32BufferAttribute(c, rgba));
+    }
     n.morphAttributes = {};
     n.clearGroups();
     return n;

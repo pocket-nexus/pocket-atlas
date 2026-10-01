@@ -307,7 +307,6 @@ export function buildRoad(w: KamakuraWorld, bag: Bag): void {
     [0.24, 0.23, 0.22],
   );
   const road = w.mesh(s.geometry(), asphalt, 0, 0, 0, w.root, { cast: false });
-  road.userData.noBatch = true;
   road.name = "slope-road";
 
   // ---- kerbs and sidewalks.

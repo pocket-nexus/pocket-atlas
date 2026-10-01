@@ -1,14 +1,13 @@
 import { BufferAttribute, BufferGeometry, Sphere, Vector3, type SkinnedMesh } from "three";
-import type { MaterialLib } from "../../tokyo-konbini/gfx/materials";
-import { stand, walk, wander, type Gait } from "../../tokyo-konbini/world/people/motion";
-import { Figure, type Build, type Look } from "../../tokyo-konbini/world/people/rig";
-import { Wear } from "../../tokyo-konbini/world/people/wear";
+import { stand, walk, wander, type Gait } from "../../shared/people/motion";
+import { mapPath, patrol } from "../../shared/people/paths";
+import { Figure, type Build, type Look } from "../../shared/people/rig";
+import { Wear } from "../../shared/people/wear";
 import type { KamakuraWorld } from "./context";
 import { COAST, LOOP, SECTION } from "./layout";
 
 /*
- * Two ordinary summer visitors on the procedural, skinned rig of Rainy
- * Night Konbini: a man in a cap standing at the sea-wall fence west of the
+ * Two ordinary summer visitors on the shared procedural, skinned rig: a man in a cap standing at the sea-wall fence west of the
  * junction, looking out over the bay, and a woman strolling the Route 134 sidewalk
  * east of the junction and back. No crowd, no costumes. Paints use two
  * roughness classes, so a figure costs two draws on the handheld. All
@@ -22,41 +21,6 @@ const CELL = 0.05;
 
 /** Sidewalk height above the rail (road 0.06 + kerb 0.15). */
 const WALK_Y = 0.21;
-
-/** Out along one line of the sidewalk, a tight U-turn, back along another (u, s on the coast line). */
-function stroll(u0: number, u1: number, s0: number, s1: number) {
-  const r = Math.abs(s1 - s0) / 2;
-  const sc = (s0 + s1) / 2;
-  const run = u1 - u0;
-  const turn = Math.PI * r;
-  const length = 2 * run + 2 * turn;
-  const p = new Vector3();
-  const q = new Vector3();
-  /** Point at distance d along the circuit and the yaw that faces the way ahead. */
-  const at = (d: number, out: Vector3): number => {
-    const uv = (dd: number): [number, number] => {
-      dd = ((dd % length) + length) % length;
-      if (dd < run) return [u0 + dd, s0];
-      dd -= run;
-      if (dd < turn) {
-        const a = dd / r;
-        return [u1 + r * Math.sin(a), sc - (sc - s0) * Math.cos(a)];
-      }
-      dd -= turn;
-      if (dd < run) return [u1 - dd, s1];
-      dd -= run;
-      const a = dd / r;
-      return [u0 - r * Math.sin(a), sc - (sc - s1) * Math.cos(a)];
-    };
-    const [u, s] = uv(d);
-    const [ua, sa] = uv(d + 0.05);
-    COAST.offset(u, s, out);
-    COAST.offset(u, s, p);
-    COAST.offset(ua, sa, q);
-    return Math.atan2(q.x - p.x, q.z - p.z);
-  };
-  return { length, at };
-}
 
 /**
  * Thins a figure to handheld size by vertex clustering in the bind pose:
@@ -136,20 +100,10 @@ function thin(f: Figure, cell: number): void {
 }
 
 export function buildPeople(w: KamakuraWorld): void {
-  if (new URLSearchParams(location.search).has("nopeople")) return;
   const root = w.group();
   root.name = "people";
   root.userData.dynamic = true;
-  const wear = new Wear(w.lib as unknown as MaterialLib, false);
-  let tris = 0;
-  let draws = 0;
-  const count = (f: Figure) => {
-    draws += f.meshes.length;
-    for (const m of f.meshes) {
-      const g = m.geometry;
-      tris += (g.index ? g.index.count : g.getAttribute("position").count) / 3;
-    }
-  };
+  const wear = new Wear(w.lib, false);
 
   // ---- standing at the sea-wall fence west of the junction, looking out over the bay
   {
@@ -169,7 +123,6 @@ export function buildPeople(w: KamakuraWorld): void {
     f.root.rotation.y = Math.atan2(-t.z, t.x) - 0.45;
     root.add(f.root);
     thin(f, CELL);
-    count(f);
     const s = f.d.s;
     const feet: [Vector3, Vector3] = [new Vector3(0.11, 0.075 * s, 0.02), new Vector3(-0.1, 0.075 * s, -0.03)];
     const k = (2 * Math.PI) / LOOP;
@@ -182,7 +135,7 @@ export function buildPeople(w: KamakuraWorld): void {
         lean: 0.03,
         twist: 0.04 * Math.sin(tl * k * 7 + 1),
         breath: tl * k * 40,
-        // Turns toward the train as it passes (t ≈ 20–30), then back to the sea.
+        // A slow look left and right along the bay, three times a loop.
         yaw: 0.25 * Math.sin(tl * k * 3 + 2) + 0.1 * wander(0, 1),
         pitch: 0.05 * Math.sin(tl * k * 6 + 1),
       });
@@ -205,8 +158,8 @@ export function buildPeople(w: KamakuraWorld): void {
     const f = new Figure(build, look, wear);
     root.add(f.root);
     thin(f, CELL);
-    count(f);
-    const path = stroll(-14, 40, 4.3, 5.1);
+    // Out along s = 4.3 m of the coast line, back along 5.1 m.
+    const path = mapPath(patrol("x", -14, 40, 4.3, 5.1), (u, s, out) => COAST.offset(u, s, out));
     // One circuit per loop, a whole number of gait cycles in it.
     const speed = path.length / LOOP;
     const cycles = Math.round(path.length / 1.12);
@@ -220,6 +173,4 @@ export function buildPeople(w: KamakuraWorld): void {
       walk(f, (d / path.length) * cycles, gait, [true, true]);
     });
   }
-  root.userData.triangles = tris;
-  console.info(`[kamakura:people] ${Math.round(tris)} triangles in ${root.children.length} figures, ${draws} meshes`);
 }

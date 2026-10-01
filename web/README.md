@@ -74,7 +74,7 @@ bun scripts/shot.ts "/?shot&stats&q=high&cam=Puddles#/place/tokyo-konbini" out.p
   and optional depth of field and N8AO finish the frame.
 - **Windows.** Apartment and office windows are interior-mapped: each pane
   traces a room behind the glass with its own lamp, curtains or a flickering
-  TV (`gfx/interior.ts`).
+  TV (`places/shared/interior.ts`).
 - **Materials.** Asphalt, pavers, facade tile, concrete, metals, shutters and
   wood are baked on the GPU into albedo / normal / ORM maps
   (`gfx/bake.ts`, `gfx/surfaces.ts`). Signs, posters and packaging are drawn
@@ -86,8 +86,8 @@ bun scripts/shot.ts "/?shot&stats&q=high&cam=Puddles#/place/tokyo-konbini" out.p
   lamps, vending machines, mamachari bicycles, a coin-parking lot, a taxi that
   passes every half minute with working head and tail lights, and six people
   (clerk, magazine reader, shopper, a customer on their phone, two walkers
-  under umbrellas) on skinned procedural rigs (`world/props`, `world/traffic.ts`,
-  `world/people`).
+  under umbrellas) on the shared skinned procedural rig (`world/props`,
+  `world/traffic.ts`, `world/people.ts`, `places/shared/people/`).
 - **Sound.** Rain layers, drops on hard surfaces, gutter drips, traffic rumble,
   the shop's 100 Hz hum near the entrance and the door chime are all
   synthesised (`audio.ts`). Rain intensity and wind gusts vary over
@@ -116,7 +116,8 @@ bun scripts/shot.ts "/?shot&stats&q=high&cam=Puddles#/place/tokyo-konbini" out.p
   caster moves, so the shadow map renders on the first frames only.
 - **Sky.** The dome is the one custom shader on a scene surface: a
   zenith-to-horizon gradient, a sun glow and disc, and a panorama of fair-weather
-  cumulus (`world/sky.ts`). The panorama is baked once on the GPU by
+  cumulus (`places/shared/sky.ts`, with Suga's colours and cloud numbers in
+  `world/sky.ts`). The panorama is baked once on the GPU by
   ray-marching domed cloud cells through a 1.4–4.6 km layer over a curved
   Earth, with six light steps toward the sun per sample. It stores opacity,
   sun-lit and sky-lit radiance in a 1024² texture (two halves of 180° azimuth,
@@ -152,7 +153,7 @@ bun scripts/shot.ts "/?shot&stats&q=high&cam=Puddles#/place/tokyo-konbini" out.p
   leaves in the breeze and the city hum are synthesised and pan with the
   camera (`audio.ts`).
 - **Finish.** N8AO, a bloom above luminance 1.6, ACES tone mapping and the
-  shared grade (`fx/post.ts`, `places/shared/grade.ts`).
+  shared grade (`places/shared/post.ts`, `places/shared/grade.ts`).
 
 ## How Radio Kaikan at Blue Hour is put together
 
@@ -174,9 +175,10 @@ bun scripts/shot.ts "/?shot&stats&q=high&cam=Puddles#/place/tokyo-konbini" out.p
   the LED screen, eight ribbon floors with backlit window artwork over
   white spandrels, the floodlit billboard over 3F–4F, and the west strip of
   horizontal louvres lit from behind (`world/kaikan.ts`).
-- **Signs.** Lightboxes, posters and shop interiors are drawn into two
-  skyline-packed canvas atlases (`SkylineAtlas`) and channel letters into an
-  alpha-tested one. The LED band (32 frames of bar patterns), the screen
+- **Signs.** Lightboxes and posters are drawn into one skyline-packed canvas
+  atlas, the window artwork, billboards and shop interiors into a second, and
+  channel letters into an alpha-tested third (`places/shared/atlas.ts`; every
+  cell has a 16 px border of its own edge pixels). The LED band (32 frames of bar patterns), the screen
   (16 frames of a generic advert loop), the pachinko hall's red ticker and
   the green message board are animated signs (`places/shared/signs.ts`).
   Lettering uses the real shop names in their colours; no logo artwork is
@@ -186,12 +188,12 @@ bun scripts/shot.ts "/?shot&stats&q=high&cam=Puddles#/place/tokyo-konbini" out.p
   hemisphere light takes its averaged colour, and a cube capture of the
   street lights the reflections. Lantern lamp posts, panel lights in front of
   every lit sign and shopfront, and the soffit's spot lights do the rest.
-- **Life.** Eleven pedestrians on the rig of Rainy Night Konbini walk the
-  street (closed to vehicles 16:00–19:00) and wait by the entrance and the
-  pole clock; a ten-car Sobu Line local crosses the bridge north of the
-  street in the first 20 s of every 40 s.
+- **Life.** Eleven pedestrians on the shared people rig walk the street
+  (closed to vehicles 16:00–19:00) and wait by the entrance and the pole
+  clock; a ten-car Sobu Line local crosses the bridge north of the street in
+  the first 20 s of every 40 s, and its rumble plays on the same clock.
 - **Finish.** N8AO, a bloom above luminance 1.0, AgX tone mapping and the
-  shared grade with cool shadows and warm highlights (`fx/post.ts`).
+  shared grade with cool shadows and warm highlights (`places/shared/post.ts`).
 
 ## How Kamakura-Kōkōmae Crossing is put together
 
@@ -214,13 +216,13 @@ bun scripts/shot.ts "/?shot&stats&q=high&cam=Puddles#/place/tokyo-konbini" out.p
   the direction indicator), four striped gate arms, the ochre deck with the
   green pedestrian strip, spike mats, the rules board, cabinets
   (`world/crossing.ts`); `world/timeline.ts` drives the sequence.
-- **Sea.** `places/shared/water.ts` on a few large triangles to 25 km, two
-  surf strips, sailboats, and the coast in the haze (Inamuragasaki, Miura,
+- **Sea.** `places/shared/water.ts` on a few large triangles to 25 km, three
+  surf strips (outer bar, inner bar, shore break; one moving mesh each), sailboats, and the coast in the haze (Inamuragasaki, Miura,
   Enoshima) as low-poly curtains placed by their angles above the horizon
   (`world/sea.ts`, `world/far.ts`).
 - **Life.** One Enoden 500 type (two articulated units, 50.8 m) per 120 s
-  loop, eight vehicles on Route 134, two visitors on the Rainy Night Konbini
-  rig (`world/train.ts`, `world/traffic.ts`, `world/people.ts`).
+  loop, eight vehicles on Route 134, two visitors on the shared people rig
+  (`world/train.ts`, `world/traffic.ts`, `world/people.ts`).
 - **Sound.** Surf in sets, the road, cicadas, the electronic bell while the
   crossing rings, the train's motor (`audio.ts`).
 
@@ -232,26 +234,32 @@ src/
   ui/          DOM overlay: place list, tooltip, loading screen, HUD
   globe/       the globe stage
   places/
-    registry.ts          every place on the globe (which ones are enterable)
-    shared/              GPU baker, geometry and canvas helpers, atlases, camera rig,
-                         grade, animated signs, twilight sky, and export.ts (glTF + extras.pocketAtlas for the
-                         cooker, driven by scripts/export-place.ts)
+    registry.ts          every place on the globe, its kind (`PlaceKind`) and which ones are enterable
+    shared/              what places of a kind share:
+                         stage.ts (camera rig, sun shadow fit, light probe, export hook),
+                         bake.ts, geo.ts (bearing, batching), shapes.ts, canvas.ts,
+                         atlas.ts (canvas atlas, shelf or skyline packing, edge borders),
+                         pbr-atlas.ts (albedo / height / ORM painting, normal maps),
+                         sky.ts (day and twilight dome, cloud panorama bake),
+                         post.ts + grade.ts (post chain from a place's look),
+                         glass.ts, interior.ts, water.ts, signs.ts, camera.ts,
+                         people/ (skinned rig, motion, wardrobe, carried objects, paths),
+                         export.ts (glTF + extras.pocketAtlas for the cooker,
+                         driven by scripts/export-place.ts)
     tokyo-konbini/       Rainy Night Konbini
       gfx/       materials, wet/glass/interior shaders, reflection, canvas art
       fx/        rain, post-processing
       world/     street plan, ground, konbini, neighbours, props, traffic, people, sky
     suga-shrine-stairs/  Suga Shrine Stairs
       gfx/       daylight surfaces and materials, quad builder
-      fx/        daylight post-processing
       world/     site plan, terrain, stairs, houses, props, tree, far field, sky
     akihabara-radio-kaikan/  Radio Kaikan at Blue Hour
       gfx/       street surfaces, palette-snapped materials, sign and poster art
-      fx/        dusk post-processing
       world/     site plan, ground, Radio Kaikan, facade toolkit, neighbours,
                  props, people, viaduct and towers
     kamakura-koko-mae-crossing/  Kamakura-Kōkōmae Crossing
-      gfx/       seaside surfaces, material set, canvas art (signs, livery, facades)
-      fx/        daylight post-processing
+      gfx/       seaside surfaces, material set, equipment atlas, road signs,
+                 train livery, facades, leaf atlas
       world/     site plan and survey data, coast strip, terrain, slope road,
                  buildings, crossing, props, train, traffic, people, sea, far coast
 ```

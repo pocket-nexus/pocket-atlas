@@ -1,9 +1,9 @@
 import { BoxGeometry, BufferGeometry, CylinderGeometry, Float32BufferAttribute, Group, MeshStandardMaterial, Vector2, Vector3 } from "three";
+import { glassMaterial } from "../../shared/glass";
 import { merge, rod } from "../../shared/shapes";
-import { ENO, enoden500Maps, faceUV, halfWidth, PROFILE, PROFILE_S, rectUV, SIDE, solidUV, sOfY, stripUV, WINDSCREEN, type CabKind, type RectName, type SolidName } from "../gfx/livery";
+import { ENO, enoden500Maps, faceUV, halfWidth, PROFILE, PROFILE_S, rectUV, SIDE, solidUV, stripUV, WINDSCREEN, type CabKind, type RectName, type SolidName } from "../gfx/livery";
 import type { KamakuraWorld } from "./context";
-import type { CrossingState } from "./crossing";
-import { LOOP, TRACK } from "./layout";
+import { CATENARY, LOOP, TRACK } from "./layout";
 import { APPROACH, ARRIVE, RUN, T0, trainFront } from "./timeline";
 
 /**
@@ -37,8 +37,8 @@ export const TRAIN = {
 const { L, W, RC, BOW, BOT, TOP, RAKE, JOINT, NOSES } = ENO;
 /** Where the flat side meets the cab corner (local x). */
 const XS = L / 2 - RC - BOW;
-/** Contact wire height above the rail (props.ts strings it at 5.05 m). */
-const WIRE = 5.03;
+/** Top of the pantograph's contact strips: the contact wire (world/wires.ts strings it at this height). */
+const WIRE = CATENARY.contact;
 const WHEEL_R = 0.33;
 
 type V3 = [number, number, number];
@@ -501,7 +501,7 @@ function carBody(spec: CarSpec): { body: BufferGeometry; glass: BufferGeometry }
   return { body, glass };
 }
 
-export function buildTrain(w: KamakuraWorld, _crossing: CrossingState): void {
+export function buildTrain(w: KamakuraWorld): void {
   const maps = enoden500Maps();
   const paint = new MeshStandardMaterial({
     map: maps.map,
@@ -517,28 +517,23 @@ export function buildTrain(w: KamakuraWorld, _crossing: CrossingState): void {
     envMapIntensity: 1.0,
   });
   paint.name = "enoden-500";
-  const glass = new MeshStandardMaterial({ color: 0x0b1115, roughness: 0.04, metalness: 0, transparent: true, opacity: 0.36, depthWrite: false, envMapIntensity: 1.3 });
+  const glass = glassMaterial({ color: 0x0b1115, roughness: 0.04, metalness: 0, opacity: 0.36, envMapIntensity: 1.3 });
   glass.name = "enoden-glass";
-  glass.userData.pocketAtlas = { kind: "glass" };
 
   const holder = w.group();
   holder.name = "enoden";
   holder.userData.dynamic = true;
   const bodies: Group[] = [];
-  let tris = 0;
   CARS.forEach((spec, k) => {
     const g = new Group();
     g.name = `enoden-car-${k}`;
     holder.add(g);
     bodies.push(g);
     const { body, glass: pane } = carBody(spec);
-    tris += (body.getAttribute("position").count + pane.getAttribute("position").count) / 3;
     w.mesh(body, paint, 0, 0, 0, g, { cast: false });
     const gm = w.mesh(pane, glass, 0, 0, 0, g, { cast: false, receive: false });
     gm.renderOrder = 2;
   });
-  holder.userData.triangles = tris;
-  console.info(`[kamakura:train] ${Math.round(tris)} triangles in ${CARS.length * 2} meshes`);
 
   const a = new Vector3();
   const b = new Vector3();
@@ -556,6 +551,3 @@ export function buildTrain(w: KamakuraWorld, _crossing: CrossingState): void {
     }
   });
 }
-
-/** Profile arc length at the windows (exported for checks). */
-export const WINDOW_S = [sOfY(SIDE.winY[0]), sOfY(SIDE.winY[1])];

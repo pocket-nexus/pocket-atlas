@@ -1,5 +1,5 @@
 import { Rng } from "../../../core/random";
-import { canvas, JP_SANS, LATIN, roundRect, type Ctx } from "../../shared/canvas";
+import { canvas, fitText, HEAVY, JP_SANS, LATIN, roundRect, squeezeText, type Ctx } from "../../shared/canvas";
 
 /**
  * Canvas painters for the Akihabara street: lettering in the colours of the
@@ -8,36 +8,7 @@ import { canvas, JP_SANS, LATIN, roundRect, type Ctx } from "../../shared/canvas
  * (shapes, type and cityscapes; no characters).
  */
 
-export const HEAVY = `900 `;
 const BOLD = `700 `;
-
-/** Fills text scaled to fit width `w` (keeps the size if it already fits). */
-export function fitText(g: Ctx, text: string, x: number, y: number, w: number, size: number, font = JP_SANS, weight = HEAVY): number {
-  g.font = `${weight}${size}px ${font}`;
-  const m = g.measureText(text).width;
-  if (m > w) {
-    size *= w / m;
-    g.font = `${weight}${size}px ${font}`;
-  }
-  g.fillText(text, x, y);
-  return size;
-}
-
-/** Text squeezed horizontally to exactly `w` (condensed signage lettering). */
-export function squeezeText(g: Ctx, text: string, x: number, y: number, w: number, size: number, font = JP_SANS, weight = HEAVY, stroke = 0): void {
-  g.font = `${weight}${size}px ${font}`;
-  const m = g.measureText(text).width;
-  g.save();
-  g.translate(x, y);
-  g.scale(w / m, 1);
-  if (stroke > 0) {
-    g.lineWidth = stroke / (w / m);
-    g.lineJoin = "round";
-    g.strokeText(text, 0, 0);
-  }
-  g.fillText(text, 0, 0);
-  g.restore();
-}
 
 // ------------------------------------------------------------ the 2F band
 
@@ -148,7 +119,7 @@ export function bandBars(frames = 32, bars = 56): { c: HTMLCanvasElement; rows: 
   const pitch = W / bars;
   for (let f = 0; f < frames; f++) {
     const y0 = f * cell;
-    // Panel between the bars: dark gold, the frame lines darker.
+    // Panel between the bars: dark gold.
     g.fillStyle = "#3b3008";
     g.fillRect(0, y0, W, cell);
     for (let b = 0; b < bars; b++) {
@@ -179,8 +150,9 @@ export function bandBars(frames = 32, bars = 56): { c: HTMLCanvasElement; rows: 
 
 /**
  * The LED screen's loop: 16 frames in a 4 × 4 grid of 256² cells (each a
- * 1.58:1 frame squeezed into the square). Three generic spots: a type
- * animation, a trading-card release, an event board with a clock.
+ * 256 × 162 frame squeezed into the square; the 5.2 × 3.5 m screen shows it
+ * at 1.49:1). Three generic spots: a type animation, a trading-card release,
+ * an event board with a clock.
  */
 export function screenFrames(): HTMLCanvasElement {
   const S = 256;
@@ -193,12 +165,12 @@ export function screenFrames(): HTMLCanvasElement {
     g.beginPath();
     g.rect(0, 0, S, S);
     g.clip();
-    // Draw at the screen's aspect in a 256 × 162 frame, stretched to the cell.
+    // Draw in a 256 × 162 frame, stretched to the cell.
     g.scale(1, S / 162);
     screenFrame(g, f, S, 162);
     g.restore();
   }
-  // LED pixel grid: faint dark lines every 2 px.
+  // LED pixel rows: faint dark lines every 2 px.
   g.fillStyle = "rgba(0,0,0,0.18)";
   for (let y = 0; y < S * 4; y += 2) g.fillRect(0, y, S * 4, 0.6);
   return c;
@@ -294,8 +266,8 @@ function wash(g: Ctx, w: number, h: number, stops: string[], angle = 0): void {
 }
 
 /**
- * The big window artwork over 6F–10F: an abstract pastel city at dusk seen
- * from above (blocks, a radio mast, rails, satellites and stars), in the
+ * The big window artwork over 5F–10F: an abstract pastel city at dusk seen
+ * from above (blocks, a radio mast, rails, sparkles and colour sweeps), in the
  * violet, pink and cyan the night photographs show. No figures.
  */
 export function paintPanorama(g: Ctx, w: number, h: number, seed = 31): void {
@@ -330,7 +302,7 @@ export function paintPanorama(g: Ctx, w: number, h: number, seed = 31): void {
     for (let k = 0; k < 4; k++) g.fillRect(-s * 0.38, -s * 0.85 + k * s * 0.38, s * 0.76, s * 0.12);
     g.restore();
   }
-  // Elevated rails curving through, in ink with lit edges.
+  // Elevated rails curving through, in ink with a lit centre line.
   for (let k = 0; k < 3; k++) {
     const y = h * (0.3 + k * 0.2);
     g.strokeStyle = ink;
@@ -561,7 +533,7 @@ export function paintInterior(g: Ctx, w: number, h: number, kind: "gift" | "lobb
   fl.addColorStop(1, floorBot);
   g.fillStyle = fl;
   g.fillRect(0, vy, w, h - vy);
-  // Back wall (a band around the vanishing point) with shelving or posters.
+  // Back wall (a band around the vanishing point) with shelving.
   const bw = w * 0.42;
   const bh = h * 0.34;
   g.fillStyle = wall;

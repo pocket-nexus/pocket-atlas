@@ -1,8 +1,8 @@
 import { Color, DoubleSide, MeshBasicMaterial, MeshStandardMaterial, Vector2, type Texture } from "three";
 import type { Quality } from "../../../core/quality";
 import type { Baker, SurfaceMaps } from "../../shared/bake";
-import { makeInteriorWindows } from "../../tokyo-konbini/gfx/interior";
-import type { WetShared } from "../../tokyo-konbini/gfx/wet";
+import { glassMaterial } from "../../shared/glass";
+import { makeInteriorWindows } from "../../shared/interior";
 import * as SURF from "./surfaces";
 
 export type Tint = [number, number, number];
@@ -20,6 +20,9 @@ const PANELS: Tint[] = [[1.0, 1.0, 0.98], [0.85, 0.85, 0.83], [0.62, 0.66, 0.72]
 const TILES: Tint[] = [[0.82, 0.8, 0.76], [0.64, 0.62, 0.6], [0.35, 0.34, 0.36]];
 /** Light metal reads as brushed steel; every other paint is a matte finish. */
 const METALLIC = new Set([0xbfc3c6, 0x8a8e92]);
+
+/** Unlit levels that come in one material each: shop interiors seen through glass and floodlit prints. */
+export const LEVEL = { interior: 1.25, flood: 0.85 };
 
 function nearestHex(hex: number, palette: number[]): number {
   const c = new Color(hex);
@@ -87,11 +90,12 @@ export class DuskLib {
     return m;
   }
 
-  private memo<T extends MeshStandardMaterial | MeshBasicMaterial>(key: string, make: () => T): T {
+  /** One material per cache key (the name by default); `name` is what the export and the cook see. */
+  private memo<T extends MeshStandardMaterial | MeshBasicMaterial>(name: string, make: () => T, key = name): T {
     let m = this.cache.get(key) as T | undefined;
     if (!m) {
       m = make();
-      m.name = key;
+      m.name = name;
       this.cache.set(key, m);
     }
     return m;
@@ -126,7 +130,8 @@ export class DuskLib {
     });
   }
 
-  granite(_want: Tint = [1, 1, 1]): MeshStandardMaterial {
+  /** Light grey granite (kerbs, plinths): one tint. */
+  granite(): MeshStandardMaterial {
     const tint: Tint = [0.85, 0.85, 0.83];
     return this.memo(`granite-${tint.join(",")}`, () => {
       const m = withMaps(this.surf("granite", SURF.GRANITE, 512, 1.2, 1.2), { color: new Color(...tint) });
@@ -174,7 +179,8 @@ export class DuskLib {
     });
   }
 
-  concrete(_want: Tint = [1, 1, 1]): MeshStandardMaterial {
+  /** Exposed concrete (viaducts, far blocks): one tint. */
+  concrete(): MeshStandardMaterial {
     const tint: Tint = [0.72, 0.72, 0.7];
     return this.memo(`concrete-${tint.join(",")}`, () => {
       const m = withMaps(this.surf("concrete", SURF.CONCRETE, 512, 3, 1.5), { color: new Color(...tint) });
@@ -212,27 +218,19 @@ export class DuskLib {
     });
   }
 
-  /** Transparent glazing in front of lit shop interiors (shopfronts, canopies). */
+  /** Transparent glazing in front of lit shop interiors (shopfronts, canopies; shared/glass.ts). */
   shopGlass(): MeshStandardMaterial {
-    return this.memo("shop-glass", () => {
-      const m = new MeshStandardMaterial({ color: 0x1c242a, roughness: 0.04, metalness: 0, transparent: true, opacity: 0.12, depthWrite: false, side: DoubleSide, envMapIntensity: 1.2 });
-      m.userData.pocketAtlas = { kind: "glass" };
-      return m;
-    });
+    return this.memo("shop-glass", () => glassMaterial({ color: 0x1c242a, roughness: 0.04, metalness: 0, opacity: 0.12, side: DoubleSide, envMapIntensity: 1.2 }));
   }
 
   /** Curved bay glazing: thin, tinted, low reflection so the lit floor shows through at an angle. */
   bayGlass(): MeshStandardMaterial {
-    return this.memo("bay-glass", () => {
-      const m = new MeshStandardMaterial({ color: 0x10161c, roughness: 0.08, metalness: 0, transparent: true, opacity: 0.18, depthWrite: false, side: DoubleSide, envMapIntensity: 0.45 });
-      m.userData.pocketAtlas = { kind: "glass" };
-      return m;
-    });
+    return this.memo("bay-glass", () => glassMaterial({ color: 0x10161c, roughness: 0.08, metalness: 0, opacity: 0.18, side: DoubleSide, envMapIntensity: 0.45 }));
   }
 
-  /** Office and shop floors with parallax rooms behind the glass (the `interiorWindow` kind). */
-  interiorWindows(_intensity = 1.2): MeshStandardMaterial {
-    return this.memo("interior-windows", () => makeInteriorWindows(this.clock as unknown as WetShared, 1.2));
+  /** Office and shop floors with parallax rooms behind the glass (the `interiorWindow` kind), one brightness for the street. */
+  interiorWindows(): MeshStandardMaterial {
+    return this.memo("interior-windows", () => makeInteriorWindows(this.clock.uTime, 1.2));
   }
 
   // ------------------------------------------------------------ light
@@ -250,20 +248,24 @@ export class DuskLib {
   }
 
   /** Unlit texture at an HDR level: backlit posters, lightbox signs, LED letters. */
-  lit(tex: Texture, wantLevel: number, key: string, opts: { alphaTest?: number; fog?: boolean; side?: typeof DoubleSide } = {}): MeshBasicMaterial {
-    // Interiors and floodlit prints each come at one level.
-    const intensity = key === "atlas-interior" ? 1.25 : key === "art-flood" ? 0.85 : wantLevel;
-    return this.memo(`lit-${key}-${intensity}`, () => {
-      const m = new MeshBasicMaterial({ map: tex, fog: opts.fog ?? true, alphaTest: opts.alphaTest ?? 0 });
-      if (opts.side !== undefined) m.side = opts.side;
-      m.color.setScalar(intensity);
-      m.userData.pocketAtlas = { kind: "unlit", color: [intensity, intensity, intensity], fog: opts.fog ?? true };
-      return m;
-    });
+  lit(tex: Texture, intensity: number, key: string, opts: { alphaTest?: number; fog?: boolean; side?: typeof DoubleSide } = {}): MeshBasicMaterial {
+    const fog = opts.fog ?? true;
+    const alphaTest = opts.alphaTest ?? 0;
+    return this.memo(
+      `lit-${key}-${intensity}`,
+      () => {
+        const m = new MeshBasicMaterial({ map: tex, fog, alphaTest });
+        if (opts.side !== undefined) m.side = opts.side;
+        m.color.setScalar(intensity);
+        m.userData.pocketAtlas = { kind: "unlit", color: [intensity, intensity, intensity], fog };
+        return m;
+      },
+      `lit-${tex.uuid}-${key}-${intensity}-${fog}-${alphaTest}-${opts.side ?? ""}`,
+    );
   }
 
   /** A printed surface lit by the street (unlit banners, plates, wrapped panels). */
   printed(tex: Texture, key: string, rough = 0.6): MeshStandardMaterial {
-    return this.memo(`printed-${key}`, () => new MeshStandardMaterial({ map: tex, roughness: rough, metalness: 0 }));
+    return this.memo(`printed-${key}`, () => new MeshStandardMaterial({ map: tex, roughness: rough, metalness: 0 }), `printed-${tex.uuid}-${key}-${rough}`);
   }
 }

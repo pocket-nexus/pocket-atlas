@@ -1,4 +1,5 @@
-import { CustomBlending, OneFactor, OneMinusSrcAlphaFactor, type MeshPhysicalMaterial, type MeshStandardMaterial } from "three";
+import type { MeshPhysicalMaterial, MeshStandardMaterial } from "three";
+import { asGlass } from "../../shared/glass";
 import { GLSL_NOISE } from "../../shared/glsl";
 import type { WetShared } from "./wet";
 
@@ -95,41 +96,26 @@ float glassDrop = 0.0;
 }
 `;
 
-const FRAG_OUT = /* glsl */ `
-{
-  // Premultiplied: reflections are added at full strength while the tint
-  // (diffuse) scales with coverage, like real glass over a bright interior.
-  float cover = clamp(diffuseColor.a + glassDrop * 0.12, 0.0, 1.0);
-  gl_FragColor = vec4(totalDiffuse * cover + totalSpecular * (1.0 + glassDrop * 0.6) + totalEmissiveRadiance, cover);
-}
-`;
-
 /**
- * Storefront glass: premultiplied blend (specular is not faded by opacity),
- * plus procedural rain beads and running drops on the outer face.
+ * Storefront glass (shared/glass.ts: premultiplied, so the specular is not
+ * faded by opacity) with procedural rain beads and running drops on the
+ * outer face.
  */
 export function makeRainGlass<T extends MeshStandardMaterial | MeshPhysicalMaterial>(material: T, shared: WetShared, drops = 1): T {
-  material.userData.pocketAtlas = { ...(material.userData.pocketAtlas ?? {}), kind: "glass", glass: { drops } };
-  material.transparent = true;
-  material.depthWrite = false;
-  material.blending = CustomBlending;
-  material.blendSrc = OneFactor;
-  material.blendDst = OneMinusSrcAlphaFactor;
-  material.blendSrcAlpha = OneFactor;
-  material.blendDstAlpha = OneMinusSrcAlphaFactor;
   const local = { uDrops: { value: drops } };
-  material.onBeforeCompile = (shader) => {
-    shader.uniforms.uTime = shared.uTime;
-    shader.uniforms.uRain = shared.uRain;
-    Object.assign(shader.uniforms, local);
-    shader.vertexShader = shader.vertexShader
-      .replace("#include <common>", `#include <common>\n${VERT_PARS}`)
-      .replace("#include <project_vertex>", `#include <project_vertex>\n${VERT_MAIN}`);
-    shader.fragmentShader = shader.fragmentShader
-      .replace("#include <common>", `#include <common>\n${FRAG_PARS}`)
-      .replace("#include <normal_fragment_maps>", `#include <normal_fragment_maps>\n${FRAG_NORMAL}`)
-      .replace("#include <opaque_fragment>", FRAG_OUT);
-  };
-  material.customProgramCacheKey = () => "rain-glass";
-  return material;
+  return asGlass<T>(material, {
+    annotation: { glass: { drops } },
+    cacheKey: "rain-glass",
+    patch: (shader) => {
+      shader.uniforms.uTime = shared.uTime;
+      shader.uniforms.uRain = shared.uRain;
+      Object.assign(shader.uniforms, local);
+      shader.vertexShader = shader.vertexShader
+        .replace("#include <common>", `#include <common>\n${VERT_PARS}`)
+        .replace("#include <project_vertex>", `#include <project_vertex>\n${VERT_MAIN}`);
+      shader.fragmentShader = shader.fragmentShader
+        .replace("#include <common>", `#include <common>\n${FRAG_PARS}`)
+        .replace("#include <normal_fragment_maps>", `#include <normal_fragment_maps>\n${FRAG_NORMAL}`);
+    },
+  });
 }

@@ -1,8 +1,8 @@
 import { BoxGeometry, BufferGeometry, CylinderGeometry, Float32BufferAttribute, LatheGeometry, PlaneGeometry, SphereGeometry, Vector2, Vector3 } from "three";
-import { rod, tube } from "../../shared/shapes";
-import { equipment, type CellKey, type EquipAtlas } from "../gfx/equip";
+import { cablePoint, merge, rod, tube } from "../../shared/shapes";
+import type { CellKey, EquipAtlas } from "../gfx/equip";
 import { Bag, type KamakuraWorld } from "./context";
-import { COAST, PLATFORM, slopeY, TRACK, VIEW } from "./layout";
+import { CATENARY, COAST, PLATFORM, slopeY, TRACK, VIEW } from "./layout";
 import { hillY } from "./terrain";
 
 /**
@@ -50,7 +50,6 @@ function shotEyes(): { p: Vector3; fov: number }[] {
 class Wires {
   private eyes = shotEyes();
   readonly geos: BufferGeometry[] = [];
-  tris = 0;
   constructor(private E: EquipAtlas) {}
 
   /** Smallest handheld pixel (m) over the shots at p. */
@@ -98,7 +97,6 @@ class Wires {
     g.setAttribute("uv", new Float32BufferAttribute(uv, 2));
     g.setIndex(idx);
     this.geos.push(g);
-    this.tris += idx.length / 3;
   }
 
   /** A sagging span from a to b (parabola, sag at mid-span). */
@@ -108,7 +106,7 @@ class Wires {
     const pts: Vector3[] = [];
     for (let i = 0; i <= n; i++) {
       const t = i / n;
-      pts.push(new Vector3().lerpVectors(a, b, t).setY(a.y + (b.y - a.y) * t - sag * 4 * t * (1 - t)));
+      pts.push(cablePoint(a, b, sag, t));
     }
     this.cable(pts, real, radial, cell);
   }
@@ -246,11 +244,10 @@ function buildPole(put: Put, p: Pole): void {
 // ------------------------------------------------------------- build
 
 export function buildWires(w: KamakuraWorld): void {
-  const E = equipment(w);
+  const E = w.equip;
   const bag = new Bag();
   const put: Put = (g, cell, cast = true) => bag.add(E.material, E.map(g, cell), cast);
   const W = new Wires(E);
-  let partTris = 0;
 
   // ------------------------------------------------------------ distribution poles
   const hill = (x: number, z: number) => Math.max(0.05, hillY(x, z));
@@ -314,7 +311,7 @@ export function buildWires(w: KamakuraWorld): void {
       const pts: Vector3[] = [];
       for (let i = 0; i <= n; i++) {
         const t = i / n;
-        pts.push(new Vector3().lerpVectors(p, q, t).setY(p.y + (q.y - p.y) * t - sag * 4 * t * (1 - t)));
+        pts.push(cablePoint(p, q, sag, t));
       }
       return pts;
     };
@@ -334,8 +331,8 @@ export function buildWires(w: KamakuraWorld): void {
     const t = TRACK.tangent(u, new Vector3());
     return new Vector3(-t.z, 0, t.x);
   };
-  const MESS = 5.6;
-  const CONT = 5.0;
+  const MESS = CATENARY.messenger;
+  const CONT = CATENARY.contact;
   const SOUTH_POLES = [-219, -184, -149, -114, -79, -44, -9, 5.5, 42, 77, 112, 147, 182, 217, 252, 287];
   const supports: { u: number; mess: Vector3; cont: Vector3 }[] = [];
   const feeders: Vector3[][] = [[], []];
@@ -406,47 +403,14 @@ export function buildWires(w: KamakuraWorld): void {
     const k = Math.max(1, Math.round(len / 5));
     for (let j = 1; j < k; j++) {
       const f = j / k;
-      const top = new Vector3().lerpVectors(A.mess, B.mess, f);
-      top.y -= sag * 4 * f * (1 - f);
+      const top = cablePoint(A.mess, B.mess, sag, f);
       const bot = new Vector3().lerpVectors(A.cont, B.cont, f);
       W.cable([top, bot], 0.003, 3, "galv", false, 0.012);
     }
   }
   for (const f of feeders) for (let i = 0; i < f.length - 1; i++) W.span(f[i], f[i + 1], 0.32 + f[i].distanceTo(f[i + 1]) * 0.006, 0.018, "twisted", 4, 3.5);
 
-  for (const m of bag.emit(w)) partTris += (m.geometry.index ? m.geometry.index.count : m.geometry.getAttribute("position").count) / 3;
-  const mesh = w.mesh(mergeAll(W.geos), E.material, 0, 0, 0, w.root, { cast: false, receive: false });
+  bag.emit(w);
+  const mesh = w.mesh(merge(W.geos, { index: true }), E.material, 0, 0, 0, w.root, { cast: false, receive: false });
   mesh.name = "overhead-wires";
-  console.info(`[kamakura:wires] ${Math.round(W.tris)} wire tris, ${Math.round(partTris)} pole tris`);
-}
-
-function mergeAll(geos: BufferGeometry[]): BufferGeometry {
-  let nv = 0;
-  let ni = 0;
-  for (const g of geos) {
-    nv += g.getAttribute("position").count;
-    ni += g.index!.count;
-  }
-  const pos = new Float32Array(nv * 3);
-  const nor = new Float32Array(nv * 3);
-  const uv = new Float32Array(nv * 2);
-  const idx = new Uint32Array(ni);
-  let ov = 0;
-  let oi = 0;
-  for (const g of geos) {
-    pos.set(g.getAttribute("position").array as Float32Array, ov * 3);
-    nor.set(g.getAttribute("normal").array as Float32Array, ov * 3);
-    uv.set(g.getAttribute("uv").array as Float32Array, ov * 2);
-    const ix = g.index!.array;
-    for (let i = 0; i < ix.length; i++) idx[oi + i] = ix[i] + ov;
-    ov += g.getAttribute("position").count;
-    oi += ix.length;
-  }
-  const out = new BufferGeometry();
-  out.setAttribute("position", new Float32BufferAttribute(pos, 3));
-  out.setAttribute("normal", new Float32BufferAttribute(nor, 3));
-  out.setAttribute("uv", new Float32BufferAttribute(uv, 2));
-  out.setIndex(Array.from(idx));
-  out.computeBoundingSphere();
-  return out;
 }

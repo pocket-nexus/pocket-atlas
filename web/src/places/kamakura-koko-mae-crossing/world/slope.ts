@@ -154,15 +154,14 @@ function park(w: KamakuraWorld, bag: Bag, green: Greenery): void {
     [-21, 12.0],
   ]) {
     const y = hillY(x, -n);
-    bag.add(w.printed, w.tint(place(new BoxGeometry(1.6, 0.05, 0.42), new Vector3(x, y + 0.44, -n)), "wood"));
-    bag.add(w.printed, w.tint(place(new BoxGeometry(1.6, 0.35, 0.05), new Vector3(x, y + 0.72, -n - 0.22)), "wood"));
-    for (const dx of [-0.65, 0.65]) bag.add(w.printed, w.tint(place(new BoxGeometry(0.06, 0.44, 0.4), new Vector3(x + dx, y + 0.22, -n)), "black"), false);
+    bag.add(w.equip.material, w.equip.solid(place(new BoxGeometry(1.6, 0.05, 0.42), new Vector3(x, y + 0.44, -n)), "wood"));
+    bag.add(w.equip.material, w.equip.solid(place(new BoxGeometry(1.6, 0.35, 0.05), new Vector3(x, y + 0.72, -n - 0.22)), "wood"));
+    for (const dx of [-0.65, 0.65]) bag.add(w.equip.material, w.equip.solid(place(new BoxGeometry(0.06, 0.44, 0.4), new Vector3(x + dx, y + 0.22, -n)), "black"), false);
   }
 }
 
 function footway(w: KamakuraWorld, bag: Bag, green: Greenery): void {
   const lib = w.lib;
-  const galv = lib.paint("galv");
   const us = stations(-104, -7.2, 3, 3, 3);
   bag.add(lib.paving(), ribbon(TRACK, us, [-6.9, -3.75], () => 0.34));
   // Pipe railing along the track side (0.9 m), posts every 2 m.
@@ -185,7 +184,7 @@ function footway(w: KamakuraWorld, bag: Bag, green: Greenery): void {
     g.translate(p.x, 0.3 + 0.5, p.z);
     rails.push(g);
   }
-  bag.add(galv, merge(rails), false);
+  bag.add(w.equip.material, w.equip.solid(merge(rails), "galv"), false);
   // Clipped hedge on the footway's north side, against the hospital and apartment lots.
   const line: Vector3[] = [];
   for (const u of stations(-100, -14, 3, 3, 3)) {
@@ -234,10 +233,10 @@ function station(w: KamakuraWorld, bag: Bag): void {
     TRACK.offset(u, PLATFORM.back + 0.5, p);
     posts.push(place(new BoxGeometry(0.16, 2.5, 0.16), p.clone().setY(PLATFORM.height + 1.25)));
   }
-  bag.add(w.printed, w.tint(merge(posts), "wood"));
-  bag.add(w.printed, w.tint(ribbon(TRACK, stations(uW + 5, uE - 3, 4, 4, 4), [PLATFORM.back - 0.2, PLATFORM.edge - 0.35], (_u, s) => PLATFORM.height + 2.55 - (s - (PLATFORM.back - 0.2)) * 0.08), "dark"));
+  bag.add(w.equip.material, w.equip.solid(merge(posts), "wood"));
+  bag.add(w.equip.material, w.equip.solid(ribbon(TRACK, stations(uW + 5, uE - 3, 4, 4, 4), [PLATFORM.back - 0.2, PLATFORM.edge - 0.35], (_u, s) => PLATFORM.height + 2.55 - (s - (PLATFORM.back - 0.2)) * 0.08), "dark"));
   // Back wall of the shelter (boards) and benches.
-  bag.add(w.printed, w.tint(wallAlong(TRACK, stations(uW + 5, uE - 3, 4, 4, 4), PLATFORM.back + 0.33, () => PLATFORM.height, () => PLATFORM.height + 2.4, 1), "wood"));
+  bag.add(w.equip.material, w.equip.solid(wallAlong(TRACK, stations(uW + 5, uE - 3, 4, 4, 4), PLATFORM.back + 0.33, () => PLATFORM.height, () => PLATFORM.height + 2.4, 1), "wood"));
   // Name board at the east end, facing the track.
   const board = w.draw("station-name", 1024, 384, stationBoard);
   TRACK.offset(uE - 2.5, PLATFORM.back + 0.4, p);
@@ -252,9 +251,9 @@ function station(w: KamakuraWorld, bag: Bag): void {
   TRACK.offset(uE + 1.5, -9.8, p);
   const yaw = Math.atan2(t.x, t.z);
   bag.add(lib.stucco("white"), place(new BoxGeometry(2.4, 2.5, 2.0), p.clone().setY(0.34 + 1.25), yaw));
-  bag.add(w.printed, w.tint(place(new BoxGeometry(2.8, 0.12, 2.4), p.clone().setY(0.34 + 2.56), yaw), "dark"));
+  bag.add(w.equip.material, w.equip.solid(place(new BoxGeometry(2.8, 0.12, 2.4), p.clone().setY(0.34 + 2.56), yaw), "dark"));
   const canopy = TRACK.offset(uE - 2.5, -8, new Vector3());
-  bag.add(w.printed, w.tint(place(new BoxGeometry(4.5, 0.12, 6.0), canopy.clone().setY(3.4), yaw), "dark"));
+  bag.add(w.equip.material, w.equip.solid(place(new BoxGeometry(4.5, 0.12, 6.0), canopy.clone().setY(3.4), yaw), "dark"));
   for (const [du, ds] of [
     [-2, -2.6],
     [2, -2.6],
@@ -262,6 +261,6 @@ function station(w: KamakuraWorld, bag: Bag): void {
     [2, 2.6],
   ]) {
     const q = TRACK.offset(uE - 2.5 + du, -8 + ds, new Vector3());
-    bag.add(w.printed, w.tint(place(new BoxGeometry(0.14, 3.1, 0.14), q.setY(0.34 + 1.55)), "wood"));
+    bag.add(w.equip.material, w.equip.solid(place(new BoxGeometry(0.14, 3.1, 0.14), q.setY(0.34 + 1.55)), "wood"));
   }
 }

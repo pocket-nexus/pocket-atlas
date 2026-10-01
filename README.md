@@ -20,7 +20,7 @@ A pack connects the two: the web app exports a place as glTF 2.0 with `extras.po
 | Radio Kaikan at Blue Hour | `akihabara-radio-kaikan` | Akihabara, Tokyo (秋葉原ラジオ会館, the 2014 building) | twilight sky (sun below the horizon), animated LED signage (flipbooks and scrolling strips), backlit window artwork, panel lights and lamps baked with sky occlusion, pedestrians and a passing train |
 | Kamakura-Kōkōmae Crossing | `kamakura-koko-mae-crossing` | Shichirigahama, Kamakura (鎌倉高校前1号踏切 on the Enoden) | open water (wave layers, Fresnel sky reflection, glitter path) to a 16 km horizon in FogExp2 haze, scrolling surf strips, flashing crossing lamps and gates driven by material and node tracks, a train, Route 134 traffic |
 
-Real places fall into a finite set of kinds; the registry names them (`PlaceKind` in `web/src/core/types.ts`): `night-street`, `daytime-slope`, `dusk-street`, `daytime-coast`, and the kinds of the places still to come. Each first-party place brings its kind's rendering to the best quality the handheld holds, and the work goes into the shared renderer and cooker so later places of the same kind reuse it. The workflow and quality bar for making a place are in the `pocket-atlas-place` skill (`.claude/skills/pocket-atlas-place/`).
+Real places fall into a finite set of kinds; the registry names them (`PlaceKind` in `web/src/core/types.ts`): `night-street`, `daytime-slope`, `dusk-street`, `daytime-coast` for the places built so far, and `daytime-street`, `night-slope`, `dusk-coast`, `night-coast`, `interior` and `rooftop` for the places still to come. Each first-party place brings its kind's rendering to the best quality the handheld holds, and the work goes into the shared renderer and cooker so later places of the same kind reuse it. Glass (`places/shared/glass.ts`) blends premultiplied on the web as on the device. The workflow and quality bar for making a place are in the `pocket-atlas-place` skill (`.claude/skills/pocket-atlas-place/`).
 
 ## Layout
 
@@ -125,13 +125,13 @@ A place exported with a directional light gets the sun per pixel: the static sce
 
 `extras.bake.skyOcclusion` in a place's export makes the cooker cast cosine-weighted rays (48 within 1.5 m for Suga Shrine Stairs, the web's N8AO radius) from every baked vertex against a BVH of the static triangles; the unblocked share scales the hemisphere and environment terms. Edges split for it only down to 1 m near where the camera goes, coarser with distance.
 
-A `gradient-sun-cloudpanorama` sky annotation draws the web's daytime sky (`sky_day_f.cg`), and `extras.post` carries the tone curve (ACES or AgX), grade, vignette, grain and bloom the device bakes into its colour table.
+A `gradient-sun-cloudpanorama` sky annotation draws the web's daytime sky (`sky_day_f.cg`; `places/shared/sky.ts` holds the day dome, the twilight dome and the cloud-panorama bake), and `extras.post` carries the tone curve (ACES or AgX), grade, vignette, grain and bloom the device bakes into its colour table.
 
 ## Signage
 
 A material annotated `kind: "sign"` cooks as an unlit HDR surface (`color` multiplies its texture). `frames`, `cols`, `rows` and `fps` play the texture as a flipbook: frame f = ⌊(t + `phase`) · fps⌋ mod frames sits in column f mod cols, row ⌊f / cols⌋ from the top left, and the mesh's coordinates span frame 0's cell (glTF UV space, v down). `scroll: [u, v]` then moves the coordinates in texture widths per second, wrapped to 0..1. Both store as `UvAnim` in the pack; the device offsets the draw's coordinate transform each frame, so an animated sign costs what a still one does. The cooker stops a flipbook texture's mip chain while a cell is still 4 texels across, so filtering does not mix frames (the Radio Kaikan band's 32 px cells keep 4 levels), and cooks the same image separately per flipbook grid.
 
-Sign artwork packed into one atlas texture (`places/shared/atlas.ts`) gets a 16 px border filled with each cell's own edge pixels: a distant sign samples low mip levels, where a black border would bleed in and BC1 blocks would turn it into dark squares.
+Every cell of a shared atlas texture (`places/shared/atlas.ts`) gets a border filled with its own edge pixels (16 px on a 4096² atlas; 8 px on Radio Kaikan's 2048² ones; 2 px on the konbini's and Suga's full 4096² atlases): a distant sign samples low mip levels, where a black border would bleed in and BC1 blocks would turn it into dark squares.
 
 ## Dusk places
 

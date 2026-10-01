@@ -1,5 +1,6 @@
-import { BufferGeometry, CanvasTexture, CylinderGeometry, Float32BufferAttribute, LinearMipmapLinearFilter, MeshStandardMaterial, NoColorSpace, SphereGeometry, SRGBColorSpace, TorusGeometry, Vector3, type Texture } from "three";
-import { canvas, JP_SANS, LATIN, type Ctx } from "../../shared/canvas";
+import { BufferGeometry, CylinderGeometry, Float32BufferAttribute, MeshStandardMaterial, SphereGeometry, TorusGeometry, Vector3 } from "three";
+import { JP_SANS, LATIN } from "../../shared/canvas";
+import { LayerPen, paintLayer, pbrTexture, type Finish } from "../../shared/pbr-atlas";
 import { merge, rod } from "../../shared/shapes";
 
 /*
@@ -193,12 +194,6 @@ function sharedUV(n: Shared, fu = 0.5, fv = 0.5): [number, number] {
 
 // --------------------------------------------------------------- painting
 
-type Mode = "albedo" | "orm";
-interface Finish {
-  c: string;
-  r: number;
-  m: number;
-}
 const F = {
   glass: { c: "#0d1215", r: 0.05, m: 0 },
   black: { c: "#141516", r: 0.6, m: 0 },
@@ -220,39 +215,6 @@ const F = {
   frame: { c: "#1b2a44", r: 0.3, m: 0.4 },
   silver: { c: "#b5b9bb", r: 0.3, m: 0.8 },
 } satisfies Record<string, Finish>;
-
-class Pen {
-  constructor(
-    readonly g: Ctx,
-    readonly mode: Mode,
-  ) {}
-  get albedo(): boolean {
-    return this.mode === "albedo";
-  }
-  style(f: Finish): string {
-    return this.mode === "albedo" ? f.c : `rgb(255,${Math.round(f.r * 255)},${Math.round(f.m * 255)})`;
-  }
-  fill(f: Finish): void {
-    this.g.fillStyle = this.style(f);
-    this.g.fill();
-  }
-  rect(x: number, y: number, w: number, h: number, f: Finish): void {
-    this.g.fillStyle = this.style(f);
-    this.g.fillRect(x, y, w, h);
-  }
-  poly(pts: [number, number][], f: Finish): void {
-    const g = this.g;
-    g.beginPath();
-    pts.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y)));
-    g.closePath();
-    this.fill(f);
-  }
-  wash(fill: string | CanvasGradient, x: number, y: number, w: number, h: number): void {
-    if (!this.albedo) return;
-    this.g.fillStyle = fill;
-    this.g.fillRect(x, y, w, h);
-  }
-}
 
 /** Linear interpolation of a station column at x (from the rear). */
 function at(spec: CarSpec, x: number, k: 1 | 2 | 3 | 4 | 5): number {
@@ -278,7 +240,7 @@ function keys(spec: CarSpec) {
   return { a, rf, rr, rb, top };
 }
 
-function plateText(p: Pen, x: number, y: number, w: number, h: number, kei: boolean, van: boolean): void {
+function plateText(p: LayerPen, x: number, y: number, w: number, h: number, kei: boolean, van: boolean): void {
   const g = p.g;
   p.rect(x, y, w, h, kei ? F.keiPlate : F.plate);
   if (!p.albedo) return;
@@ -294,7 +256,7 @@ function plateText(p: Pen, x: number, y: number, w: number, h: number, kei: bool
   g.fillText(kei ? "12-07" : van ? "46-31" : "3-58", x + w * 0.56, y + h * 0.68);
 }
 
-function paintCar(p: Pen, kind: CarKind): void {
+function paintCar(p: LayerPen, kind: CarKind): void {
   const spec = CARS[kind];
   const g = p.g;
   const paint: Finish = { c: spec.paint.hex, r: spec.paint.rough, m: spec.paint.metal };
@@ -521,7 +483,7 @@ function paintCar(p: Pen, kind: CarKind): void {
   }
 }
 
-function paintShared(p: Pen): void {
+function paintShared(p: LayerPen): void {
   const g = p.g;
   const finishes: Record<Shared, Finish> = {
     tyre: F.tyre,
@@ -573,29 +535,17 @@ function paintShared(p: Pen): void {
   p.fill(F.chrome);
 }
 
-function paintAtlas(mode: Mode, scale: number): HTMLCanvasElement {
-  const { c, g } = canvas(A * scale, A * scale);
-  g.setTransform(scale, 0, 0, scale, 0, 0);
-  const p = new Pen(g, mode);
+/** The atlas layout: one block of views per car kind, then the shared cells. */
+function paintAll(p: LayerPen): void {
   p.rect(0, 0, A, A, F.black);
   for (const k of SLOTS) paintCar(p, k);
   paintShared(p);
-  return c;
-}
-
-function tex(c: HTMLCanvasElement, srgb: boolean, name: string): Texture {
-  const t = new CanvasTexture(c);
-  t.colorSpace = srgb ? SRGBColorSpace : NoColorSpace;
-  t.minFilter = LinearMipmapLinearFilter;
-  t.anisotropy = 8;
-  t.name = name;
-  return t;
 }
 
 /** The one material every Route 134 vehicle shares. */
 export function vehicleMaterial(): MeshStandardMaterial {
-  const map = tex(paintAtlas("albedo", 1), true, "route134-vehicles");
-  const orm = tex(paintAtlas("orm", 0.5), false, "route134-vehicles-orm");
+  const map = pbrTexture(paintLayer(A, A, 1, "albedo", paintAll), true, "route134-vehicles");
+  const orm = pbrTexture(paintLayer(A, A, 0.5, "orm", paintAll), false, "route134-vehicles-orm");
   const m = new MeshStandardMaterial({ map, roughnessMap: orm, metalnessMap: orm, roughness: 1, metalness: 1, envMapIntensity: 1.15 });
   m.name = "route134-vehicles";
   return m;

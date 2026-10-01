@@ -27,7 +27,7 @@ import {
   toTexture,
 } from "../gfx/canvas";
 import { box } from "../../shared/geo";
-import { seedWindowUV } from "../gfx/interior";
+import { seedWindowUV } from "../../shared/interior";
 import { ProductBatch, type Shape } from "./products";
 import type { World } from "./context";
 import { L } from "./layout";

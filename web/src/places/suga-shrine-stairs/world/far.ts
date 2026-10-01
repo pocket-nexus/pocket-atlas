@@ -4,7 +4,8 @@ import { canvas, JP_SANS, toTexture } from "../../shared/canvas";
 import { box } from "../../shared/geo";
 import { merge, rod, v3 } from "../../shared/shapes";
 import type { SugaWorld } from "./context";
-import { bearing, groundY } from "./layout";
+import { bearing } from "../../shared/geo";
+import { BEARING, groundY } from "./layout";
 
 /** Apartment frontage, 4 bays × 2 floors (24 m × 5.8 m): balcony parapets, dark recesses, sliding doors, laundry. */
 function apartmentTexture(seed: number, parapet: string, recess: string) {
@@ -227,7 +228,7 @@ export function buildFar(w: SugaWorld): void {
  * orange-and-white day marking bands.
  */
 function buildTower(add: (m: Material, g: BufferGeometry) => void, orange: Material, white: Material): void {
-  const dir = bearing(27);
+  const dir = bearing(27, 0, BEARING);
   const c = dir.clone().multiplyScalar(1020).setY(groundY(-1000) - 2);
   const H = 196;
   const mast = 26;

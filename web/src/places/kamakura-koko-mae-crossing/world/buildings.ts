@@ -2,7 +2,7 @@ import { BoxGeometry, BufferGeometry, CylinderGeometry, Float32BufferAttribute, 
 import { Rng } from "../../../core/random";
 import { mapUV } from "../../shared/atlas";
 import { merge } from "../../shared/shapes";
-import { bandUV, FACADE, facadeAtlas, LAYOUT, propUV, ROWS, wallUV, type Band, type Win } from "../gfx/facade";
+import { bandUV, FACADE, LAYOUT, propUV, ROWS, wallUV, type Band, type Win } from "../gfx/facade";
 import * as SURF from "../gfx/surfaces";
 import { Bag, type KamakuraWorld } from "./context";
 import { BUILDINGS } from "./data";
@@ -95,10 +95,6 @@ class Faces {
   quad(a: P3, b: P3, c: P3, d: P3, ua: UV, ub: UV, uc: UV, ud: UV, out: P3): void {
     this.triOut(a, b, c, ua, ub, uc, out);
     this.triOut(a, c, d, ua, uc, ud, out);
-  }
-
-  get triangles(): number {
-    return this.pos.length / 9;
   }
 
   geometry(colours = true): BufferGeometry {
@@ -251,7 +247,7 @@ function acUnit(f: Faces, w: WallFrame, s: number, y: number, d0 = 0.06): void {
 }
 
 export function buildBuildings(w: KamakuraWorld): void {
-  const tex = facadeAtlas(w.lib);
+  const tex = w.facades;
   const facade = w.lib.facade(tex);
   // The same atlas on the glass panes, smooth: they reflect the sky probe over the painted rooms.
   const paneMat = w.lib.printed("facade-glass", tex, 0.06);
@@ -271,7 +267,6 @@ export function buildBuildings(w: KamakuraWorld): void {
       const dz = vz - mz;
       return dx * fr.nx + dz * fr.nz > 1 && Math.hypot(dx, dz) < RELIEF_M;
     });
-  let reliefBays = 0;
 
   /** A wall from y0 up to y1, storeys `fh` tall; `rowOf(f)` picks the atlas row per storey. */
   const wallStoreys = (fr: WallFrame, len: number, y0: number, y1: number, rowOf: (f: number) => number, fh: number, off: number, relief: boolean) => {
@@ -302,7 +297,6 @@ export function buildBuildings(w: KamakuraWorld): void {
         const [a, b] = windowBay(walls, glass, fr, row, off + k, k * bw, ya, bw, fh, win);
         strip(run, a);
         run = b;
-        reliefBays++;
       }
       strip(run, len);
     }
@@ -588,13 +582,10 @@ export function buildBuildings(w: KamakuraWorld): void {
   }
 
   const houses = w.mesh(walls.geometry(), facade, 0, 0, 0, w.root, { cast: true });
-  // Kept out of batching, which drops vertex colours; nothing animates it, so it cooks as static.
-  houses.userData.noBatch = true;
   houses.name = "hillside-houses";
   const panes = w.mesh(glass.geometry(false), paneMat, 0, 0, 0, w.root, { cast: false });
   panes.name = "hillside-windows";
   if (railPanes.length) w.mesh(merge(railPanes), w.lib.glassRail(), 0, 0, 0, w.root, { cast: false }).name = "villa-balustrades";
-  console.info(`[kamakura:buildings] ${walls.triangles} wall triangles, ${glass.triangles} pane triangles, ${reliefBays} window bays in relief`);
 
   villas(w);
 }
@@ -658,7 +649,7 @@ function villas(w: KamakuraWorld): void {
     sh.translate(gx0 + 1.55, 3.45 + 1.05, -gn1 - 0.025);
     bag.add(w.printed, sh, false);
     // Hood over the shutter.
-    bag.add(w.printed, w.tint(place(new BoxGeometry(2.6, 0.22, 0.2), new Vector3(gx0 + 1.55, 3.45 + 2.2, -gn1 - 0.1)), "beige"));
+    bag.add(w.equip.material, w.equip.solid(place(new BoxGeometry(2.6, 0.22, 0.2), new Vector3(gx0 + 1.55, 3.45 + 2.2, -gn1 - 0.1)), "beige"));
   }
 
   // ---- parapet and fence on the villa wall's coping (p19: split-face block, black steel fence).
@@ -679,7 +670,7 @@ function villas(w: KamakuraWorld): void {
     posts.push(place(new BoxGeometry(0.02, 0.02, len), mid.clone().setY(mid.y + ph + 0.12), yaw));
     for (let k = 0.12; k < len; k += 0.12) posts.push(place(new BoxGeometry(0.012, 0.7, 0.012), a.clone().lerp(b, k / len).setY(mid.y + ph + 0.47)));
   }
-  bag.add(w.printed, w.tint(merge(posts), "black"), false);
+  bag.add(w.equip.material, w.equip.solid(merge(posts), "black"), false);
 
   // ---- round-tower villa NE of the crossing (PLATEAU 19.6, 8.3 N; ground 14.2 m T.P.; p09).
   const base = 4.0;
@@ -707,7 +698,7 @@ function villas(w: KamakuraWorld): void {
       frames.push(f);
     }
   }
-  bag.add(lib.paint("aluminium"), merge(frames), false);
+  bag.add(w.equip.material, w.equip.solid(merge(frames), "aluminium"), false);
   bag.add(lib.glass(), merge(panes), false);
   // Ledgestone columns either side of the tower (p09).
   for (const [x, z] of [
@@ -742,7 +733,7 @@ function villas(w: KamakuraWorld): void {
     pane(a, b, 1.6);
   }
   bag.add(glass, merge(rails), false);
-  bag.add(lib.paint("aluminium"), merge(steel), false);
+  bag.add(w.equip.material, w.equip.solid(merge(steel), "aluminium"), false);
 
   // ---- gardens.
   const at = (x: number, n: number) => new Vector3(x, hillY(x, -n), -n);

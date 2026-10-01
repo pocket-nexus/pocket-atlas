@@ -1,7 +1,6 @@
-import type { MeshStandardMaterial, Texture } from "three";
+import type { Texture } from "three";
 import { Rng } from "../../../core/random";
 import { canvas, toTexture, type Ctx } from "../../shared/canvas";
-import type { CoastLib } from "./materials";
 
 /**
  * Leaf atlas for the gardens, the park and the grass banks: one 1024² canvas
@@ -324,12 +323,8 @@ function cycadBark(g: Ctx, r: Rng): void {
     }
 }
 
-const atlases = new WeakMap<CoastLib, Texture>();
-
-/** The leaf atlas texture (drawn once per stage). */
-export function leafAtlas(lib: CoastLib): Texture {
-  const done = atlases.get(lib);
-  if (done) return done;
+/** Paints the leaf atlas (the stage's `CoastLib.foliage()` draws it once). */
+export function leafAtlas(): Texture {
   const { c, g } = canvas(SIZE, SIZE);
   g.clearRect(0, 0, SIZE, SIZE);
   const r = new Rng(1883);
@@ -356,25 +351,5 @@ export function leafAtlas(lib: CoastLib): Texture {
   clip(LEAF.box, () => hedgeMat(g, r, 768, 768, 256, 100, 24, [8, 13], 1700, true));
   const atlas = toTexture(c);
   atlas.name = "kamakura-leaves";
-  atlases.set(lib, atlas);
   return atlas;
-}
-
-/**
- * The foliage material: alpha-tested, double-sided, vertex-coloured per plant
- * (meshes using it stay out of batching), with a faint emission of the leaf
- * colour so cards in shade or backlit by the sea read as translucent green.
- */
-export function foliageMaterial(lib: CoastLib): MeshStandardMaterial {
-  const tex = leafAtlas(lib);
-  const m = lib.cutout("kamakura-foliage", tex, { rough: 0.55 });
-  if (!m.userData.foliage) {
-    m.userData.foliage = true;
-    m.vertexColors = true;
-    m.emissive.setRGB(0.5, 0.7, 0.28);
-    m.emissiveMap = tex;
-    m.emissiveIntensity = 0.08;
-    m.needsUpdate = true;
-  }
-  return m;
 }

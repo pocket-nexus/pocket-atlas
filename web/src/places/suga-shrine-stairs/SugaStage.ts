@@ -1,33 +1,20 @@
-import {
-  CubeCamera,
-  DirectionalLight,
-  FogExp2,
-  HalfFloatType,
-  HemisphereLight,
-  Mesh,
-  Object3D,
-  PCFShadowMap,
-  PerspectiveCamera,
-  PMREMGenerator,
-  Scene,
-  Vector3,
-  WebGLCubeRenderTarget,
-  type Texture,
-} from "three";
-import type { PlaceDef, Progress, Stage, StageContext } from "../../core/types";
+import { DirectionalLight, FogExp2, HemisphereLight, Object3D, PCFShadowMap, PerspectiveCamera, Vector3, type Texture } from "three";
+import type { PlaceDef, Progress, StageContext } from "../../core/types";
 import { Atlas } from "../shared/atlas";
 import { Baker } from "../shared/bake";
-import { CameraRig, type Box6, type Shot, type ShotKey } from "../shared/camera";
-import { batchStatic } from "../shared/geo";
+import type { Box6, Shot, ShotKey } from "../shared/camera";
+import { batchStatic, bearing } from "../shared/geo";
+import { createPlacePost, type PostLook } from "../shared/post";
+import type { Sky } from "../shared/sky";
+import { PlaceStage } from "../shared/stage";
 import { SugaAudio } from "./audio";
-import { createDayPost, type DayPost } from "./fx/post";
 import { DayLib } from "./gfx/materials";
 import { SugaWorld } from "./world/context";
 import { buildFar } from "./world/far";
 import { buildHouses } from "./world/houses";
-import { bearing, BEARING, GEO, stepY, SUN } from "./world/layout";
+import { BEARING, GEO, stepY, SUN } from "./world/layout";
 import { buildProps } from "./world/props";
-import { bakeClouds, buildSky, SKY } from "./world/sky";
+import { bakeClouds, buildDaySky, SKY } from "./world/sky";
 import { buildStairs } from "./world/stairs";
 import { buildTerrain } from "./world/terrain";
 import { buildTree } from "./world/tree";
@@ -80,31 +67,26 @@ const WALKABLE: Box6[] = [
 const FOCUS: Box6 = [-60, -24, -150, 60, 30, 20];
 const INTRO_FROM: ShotKey = { pos: [3.5, 36, 14], target: [0, -6, -34], fov: 40 };
 
-export class SugaStage implements Stage {
-  readonly scene = new Scene();
-  readonly camera = new PerspectiveCamera(38, 1, 0.1, 4000);
-  private ctx: StageContext;
-  private place: PlaceDef;
-  private baker!: Baker;
-  private world!: SugaWorld;
-  private post!: DayPost;
-  private rig!: CameraRig;
-  private sky!: ReturnType<typeof buildSky>;
+/**
+ * Daylight finish: ambient occlusion for the contact shadows the sky probe
+ * cannot give, a restrained bloom for sun glints and the sun disc, ACES tone
+ * mapping and a clean, saturated summer grade. No chromatic aberration: it
+ * tints the fine wire mesh and cables magenta.
+ */
+const LOOK: PostLook = {
+  tone: "aces",
+  ao: { radius: 0.9, intensity: 3.0, color: [0.02, 0.03, 0.06] },
+  bloom: { threshold: 1.6, smoothing: 0.5, intensity: 0.35, radius: 0.65, levels: 7 },
+  grade: { grain: 0.012, vignette: 0.3, lift: [0.02, 0.14, 0.3], gain: [1.05, 1.0, 0.93], saturation: 1.1, contrast: 1.06 },
+};
+
+export class SugaStage extends PlaceStage<SugaWorld, SugaAudio> {
+  private sky!: Sky;
   private clouds!: Texture;
-  private sun!: DirectionalLight;
-  private sunDir = bearing(SUN.azimuth, SUN.elevation);
-  private env: Texture | null = null;
-  private envCube: WebGLCubeRenderTarget | null = null;
-  private audio: SugaAudio;
-  private shadowFrames = 0;
-  private keyHandler = (e: KeyboardEvent) => {
-    if (e.key === "c" || e.key === "C") this.rig.toggleCinematic();
-  };
+  private sunDir = bearing(SUN.azimuth, SUN.elevation, BEARING);
 
   private constructor(ctx: StageContext, place: PlaceDef) {
-    this.ctx = ctx;
-    this.place = place;
-    this.audio = new SugaAudio(ctx.audio);
+    super(ctx, place, new PerspectiveCamera(38, 1, 0.1, 4000), { shots: SHOTS, walkable: WALKABLE, focus: FOCUS, intro: INTRO_FROM, introSeconds: 7.5 }, new SugaAudio(ctx.audio));
   }
 
   static async create(ctx: StageContext, place: PlaceDef, progress: Progress): Promise<SugaStage> {
@@ -126,7 +108,7 @@ export class SugaStage implements Stage {
     this.baker = new Baker(renderer);
     const lib = new DayLib(this.baker, quality);
     lib.bakeAll();
-    const atlas = new Atlas(1024);
+    const atlas = new Atlas(1024, { pad: 2 });
     const world = (this.world = new SugaWorld(lib, atlas, quality, 20160826));
 
     await progress(0.16, "Growing summer cumulus");
@@ -147,7 +129,7 @@ export class SugaStage implements Stage {
 
     await progress(0.66, "Raising the ridge");
     buildFar(world);
-    this.sky = buildSky(world, this.sunDir, this.clouds);
+    this.sky = buildDaySky(world, this.sunDir, this.clouds);
     this.addLights();
 
     await progress(0.74, "Batching geometry");
@@ -156,20 +138,13 @@ export class SugaStage implements Stage {
     this.scene.add(world.root);
 
     await progress(0.84, "Capturing the sky");
-    this.captureEnvironment();
+    this.captureProbe(new Vector3(0, -2.5, -9), { near: 0.1, far: 3000, intensity: 0.86 });
 
     await progress(0.92, "Grading the afternoon");
-    this.post = createDayPost(renderer, this.scene, this.camera, quality);
-    this.rig = new CameraRig(this.camera, this.ctx.canvas, SHOTS, WALKABLE, FOCUS);
-    this.rig.onModeChange = (m) => this.ctx.overlay.setCinematic(m === "cinematic");
-    const start = SHOTS.find((s) => s.name.toLowerCase() === (this.ctx.params.cam ?? "stairs").toLowerCase()) ?? SHOTS[0];
-    this.camera.position.set(...start.to.pos);
-    this.camera.lookAt(...start.to.target);
-    this.camera.fov = start.to.fov;
-    this.camera.updateProjectionMatrix();
-    this.camera.updateMatrixWorld();
+    this.post = createPlacePost(renderer, this.scene, this.camera, quality, LOOK);
+    this.startRig();
     await progress(1, "Listening to the cicadas");
-    if (this.ctx.params.exporting) this.exposeExport();
+    if (this.ctx.params.exporting) this.exposeSugaExport();
   }
 
   /**
@@ -198,182 +173,40 @@ export class SugaStage implements Stage {
     sun.shadow.normalBias = 0.02;
     sun.shadow.radius = 1.6;
     // Fit the orthographic frustum to the detailed area (stairs to junction).
-    sun.updateMatrixWorld(true);
-    const inv = sun.matrixWorld.clone().invert();
-    const lo = new Vector3(Infinity, Infinity, Infinity);
-    const hi = new Vector3(-Infinity, -Infinity, -Infinity);
-    for (const x of [-14, 14]) for (const y of [-8, 13]) for (const z of [-70, 8]) {
-      const p = new Vector3(x, y, z).applyMatrix4(inv);
-      lo.min(p);
-      hi.max(p);
-    }
-    const cam = sun.shadow.camera;
-    cam.left = lo.x;
-    cam.right = hi.x;
-    cam.bottom = lo.y;
-    cam.top = hi.y;
-    cam.near = Math.max(1, -hi.z - 5);
-    cam.far = -lo.z + 5;
-    cam.updateProjectionMatrix();
+    this.fitSunShadow(sun, [-14, 14], [-8, 13], [-70, 8]);
     this.world.root.add(sun);
     this.world.root.add(new HemisphereLight(0xa9c8f0, 0x6a6258, 0.5));
   }
 
-  /** Renders the finished place into a cube map once; PMREM makes it the IBL. */
-  private captureEnvironment(): void {
-    const { renderer } = this.ctx;
-    const rt = new WebGLCubeRenderTarget(256, { type: HalfFloatType });
-    const cube = new CubeCamera(0.1, 3000, rt);
-    cube.position.set(0, -2.5, -9);
-    this.scene.add(cube);
-    renderer.shadowMap.needsUpdate = true;
-    cube.update(renderer, this.scene);
-    this.scene.remove(cube);
-    const pmrem = new PMREMGenerator(renderer);
-    this.env = pmrem.fromCubemap(rt.texture).texture;
-    pmrem.dispose();
-    if (this.ctx.params.exporting) this.envCube = rt;
-    else rt.dispose();
-    this.scene.environment = this.env;
-    this.scene.environmentIntensity = 0.86;
-  }
-
   /** `window.pocketAtlasExport()` → glTF, sky probe and cloud panorama for the cooker. */
-  private exposeExport(): void {
-    const w = window as unknown as { pocketAtlasExport?: (seconds?: number) => Promise<unknown> };
-    w.pocketAtlasExport = async (seconds = 1) => {
-      const { exportPlace } = await import("../shared/export");
-      const fog = this.scene.fog as FogExp2;
-      return exportPlace({
-        renderer: this.ctx.renderer,
-        world: this.world,
-        baker: this.baker,
-        env: this.envCube,
-        envPosition: [0, -2.5, -9],
-        shots: SHOTS,
-        walkable: WALKABLE,
-        intro: INTRO_FROM,
-        fog: { color: fog.color.toArray(), density: fog.density },
-        environmentIntensity: this.scene.environmentIntensity,
-        record: seconds,
-        fps: 15,
-        files: [{ name: "sky-clouds.png", texture: this.clouds }],
-        meta: (c) => ({
-          version: c.version,
-          units: c.units,
-          up: c.up,
-          kind: "daytime-slope",
-          geo: { ...GEO, bearing: BEARING, note: "−Z faces the bearing; the world is not rotated to north" },
-          sun: { azimuth: SUN.azimuth, elevation: SUN.elevation, direction: [this.sunDir.x, this.sunDir.y, this.sunDir.z] },
-          fog: c.fog,
-          hemisphere: c.hemisphere,
-          directionalLights: c.directionalLights,
-          environment: c.environment,
-          camera: c.camera,
-          ...c.special,
-          tracks: c.tracks,
-          post: this.postMeta(),
-          // The cooker's vertex bake stands in for N8AO (radius 0.9 m): sky occlusion by ray casts within 1.5 m.
-          bake: { skyOcclusion: { rays: 48, reach: 1.5, foliage: 0.55 } },
-        }),
-        onProgress: (label) => console.info(`[export] ${label}`),
-      });
-    };
+  private exposeSugaExport(): void {
+    this.exposeExport({
+      seconds: 1,
+      files: [{ name: "sky-clouds.png", texture: this.clouds }],
+      meta: (c) => ({
+        version: c.version,
+        units: c.units,
+        up: c.up,
+        kind: this.place.kind,
+        geo: { ...GEO, bearing: BEARING, note: "−Z faces the bearing; the world is not rotated to north" },
+        sun: { azimuth: SUN.azimuth, elevation: SUN.elevation, direction: [this.sunDir.x, this.sunDir.y, this.sunDir.z] },
+        fog: c.fog,
+        hemisphere: c.hemisphere,
+        directionalLights: c.directionalLights,
+        environment: c.environment,
+        camera: c.camera,
+        ...c.special,
+        tracks: c.tracks,
+        post: this.postMeta(),
+        // The cooker's vertex bake stands in for N8AO (radius 0.9 m): sky occlusion by ray casts within 1.5 m.
+        bake: { skyOcclusion: { rays: 48, reach: 1.5, foliage: 0.55 } },
+      }),
+    });
   }
 
-  /** The grade and bloom as uniforms hold them, for handheld ports. */
-  private postMeta(): Record<string, unknown> {
-    const u = this.post.grade.uniforms;
-    const v3 = (k: string) => (u.get(k)!.value as Vector3).toArray();
-    const b = this.post.bloom;
-    return {
-      tone: "aces",
-      exposure: this.ctx.renderer.toneMappingExposure,
-      contrast: u.get("uContrast")!.value,
-      saturation: u.get("uSaturation")!.value,
-      lift: v3("uLift"),
-      gain: v3("uGain"),
-      vignette: u.get("uVignette")!.value,
-      grain: u.get("uGrain")!.value,
-      bloomThreshold: b.luminanceMaterial.threshold,
-      bloomSmoothing: b.luminanceMaterial.smoothing,
-      bloomIntensity: b.intensity,
-    };
-  }
-
-  enter(): void {
-    this.ctx.overlay.showPlace(
-      this.place,
-      {
-        onBack: () => this.ctx.nav.closePlace(),
-        onCinematic: () => this.rig.toggleCinematic(),
-        onShot: (name) => this.rig.goTo(name),
-      },
-      SHOTS.map((s) => s.name),
-    );
-    addEventListener("keydown", this.keyHandler);
-    this.audio.start();
-    const p = this.ctx.params;
-    if (p.shot) {
-      this.rig.goTo(p.cam ?? "Stairs");
-      if (p.view && p.view.length >= 6) {
-        const v = p.view;
-        this.rig.goToKey({ pos: [v[0], v[1], v[2]], target: [v[3], v[4], v[5]], fov: v[6] ?? 40 });
-      }
-      this.rig.autoCinematicAfter = Infinity;
-    } else {
-      this.rig.startIntro(INTRO_FROM, SHOTS[0].to, 7.5);
-    }
-  }
-
-  leave(): void {
-    this.audio.stop();
-    removeEventListener("keydown", this.keyHandler);
-    this.ctx.overlay.hidePlace();
-  }
-
-  resize(width: number, height: number): void {
-    this.camera.aspect = width / height;
-    this.camera.updateProjectionMatrix();
-    this.post.setSize(width, height);
-  }
-
-  frame(dt: number, time: number): void {
-    this.rig.update(dt, time);
-    this.camera.updateMatrixWorld();
+  protected advance(dt: number, time: number): void {
     for (const u of this.world.updaters) u(dt, time);
     this.sky.update(time, this.camera.position);
     this.audio.update(dt, this.camera);
-    this.post.grade.uniforms.get("uFade")!.value = this.rig.fade;
-    const bars = this.post.grade.uniforms.get("uBars")!;
-    bars.value += ((this.rig.mode === "cinematic" ? 1 : 0) - bars.value) * (1 - Math.exp(-dt * 2.5));
-    // Everything that casts is static: the sun's shadow map renders once.
-    if (this.shadowFrames < 2) {
-      this.ctx.renderer.shadowMap.needsUpdate = true;
-      this.shadowFrames++;
-    }
-    this.post.render(dt);
-  }
-
-  dispose(): void {
-    const { renderer } = this.ctx;
-    this.rig.dispose();
-    this.post.dispose();
-    this.baker.dispose();
-    this.env?.dispose();
-    this.scene.traverse((o) => {
-      const m = o as Mesh;
-      if (m.isMesh) {
-        m.geometry.dispose();
-        const mats = Array.isArray(m.material) ? m.material : [m.material];
-        for (const mat of mats) {
-          for (const v of Object.values(mat)) if (v && typeof v === "object" && "isTexture" in v) (v as Texture).dispose();
-          mat.dispose();
-        }
-      }
-    });
-    this.sun?.shadow.map?.dispose();
-    renderer.shadowMap.enabled = false;
-    renderer.shadowMap.autoUpdate = true;
   }
 }

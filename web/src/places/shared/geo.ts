@@ -13,6 +13,16 @@ import {
 } from "three";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 
+
+/**
+ * Unit vector for a compass bearing and an elevation (degrees) in world
+ * axes: y up, −Z facing the bearing `forward` (0 when −Z is north).
+ */
+export function bearing(azimuth: number, elevation = 0, forward = 0): Vector3 {
+  const a = ((azimuth - forward) * Math.PI) / 180;
+  const e = (elevation * Math.PI) / 180;
+  return new Vector3(Math.sin(a) * Math.cos(e), Math.sin(e), -Math.cos(a) * Math.cos(e));
+}
 /** Box whose UVs are in meters on every face (textures tile by physical size). */
 export function box(w: number, h: number, d: number): BoxGeometry {
   const g = new BoxGeometry(w, h, d);
@@ -85,20 +95,28 @@ export function worldUV(g: BufferGeometry): void {
   g.setAttribute("uv", new BufferAttribute(uv, 2));
 }
 
-function normalizeForMerge(g: BufferGeometry): BufferGeometry {
-  let out = g;
+/**
+ * Indexed, with position, normal and uv only; with `color` too when `color`
+ * is 3 or 4 (its components): Float32, white where the mesh has none.
+ */
+function normalizeForMerge(g: BufferGeometry, color: 0 | 3 | 4): BufferGeometry {
+  const out = g;
+  const n = out.getAttribute("position").count;
   if (!out.index) {
-    const n = out.getAttribute("position").count;
     const idx = new Uint32Array(n);
     for (let i = 0; i < n; i++) idx[i] = i;
     out.setIndex(new BufferAttribute(idx, 1));
   }
+  const src = color ? out.getAttribute("color") : undefined;
   for (const name of Object.keys(out.attributes)) {
     if (name !== "position" && name !== "normal" && name !== "uv") out.deleteAttribute(name);
   }
   if (!out.getAttribute("normal")) out.computeVertexNormals();
-  if (!out.getAttribute("uv")) {
-    out.setAttribute("uv", new Float32BufferAttribute(new Float32Array(out.getAttribute("position").count * 2), 2));
+  if (!out.getAttribute("uv")) out.setAttribute("uv", new Float32BufferAttribute(new Float32Array(n * 2), 2));
+  if (color) {
+    const rgba = new Float32Array(n * color).fill(1);
+    if (src) for (let i = 0; i < n; i++) for (let c = 0; c < Math.min(color, src.itemSize); c++) rgba[i * color + c] = src.getComponent(i, c);
+    out.setAttribute("color", new Float32BufferAttribute(rgba, color));
   }
   out.morphAttributes = {};
   out.clearGroups();
@@ -107,41 +125,47 @@ function normalizeForMerge(g: BufferGeometry): BufferGeometry {
 
 /**
  * Collapses every static, single-material mesh under `root` into one mesh per
- * (material, shadow flags, layer mask). Authoring stays object-by-object while
- * the frame (and the planar reflection pass) pays a few dozen draw calls.
- * Meshes with `userData.dynamic` are left alone.
+ * (material, shadow flags, layer mask, render order, culling). Authoring
+ * stays object-by-object while the frame (and the planar reflection pass)
+ * pays a few dozen draw calls. The merged geometry keeps position, normal
+ * and UV, and vertex colours (RGB or RGBA, white where a mesh has none) when
+ * the material uses them. Meshes under `userData.dynamic` are left alone.
  */
 export function batchStatic(root: Object3D): { before: number; after: number } {
   root.updateMatrixWorld(true);
-  const groups = new Map<string, { material: Material; cast: boolean; receive: boolean; layers: number; renderOrder: number; geos: BufferGeometry[]; worldUv: boolean }>();
+  type Batch = { material: Material; cast: boolean; receive: boolean; layers: number; renderOrder: number; culled: boolean; color: 0 | 3 | 4; geos: BufferGeometry[]; worldUv: boolean };
+  const groups = new Map<string, Batch>();
   const remove: Mesh[] = [];
   let before = 0;
   root.traverse((o) => {
     const m = o as Mesh;
     if (!m.isMesh || (m as unknown as { isInstancedMesh?: boolean }).isInstancedMesh) return;
-    // `noBatch`: static, but its vertex colours must survive (batching keeps
-    // position, normal and UV only); `dynamic`: it moves.
-    if (m.userData.dynamic || m.userData.noBatch || Array.isArray(m.material)) return;
+    if (m.userData.dynamic || Array.isArray(m.material)) return;
     let skip = false;
-    for (let p: Object3D | null = m.parent; p; p = p.parent) if (p.userData.dynamic || p.userData.noBatch) skip = true;
+    for (let p: Object3D | null = m.parent; p; p = p.parent) if (p.userData.dynamic) skip = true;
     if (skip) return;
     before++;
-    const mat = m.material as Material;
-    const key = `${mat.uuid}|${m.castShadow}|${m.receiveShadow}|${m.layers.mask}|${m.renderOrder}`;
+    const mat = m.material as Material & { vertexColors?: boolean };
+    const vc = !!mat.vertexColors;
+    const key = `${mat.uuid}|${m.castShadow}|${m.receiveShadow}|${m.layers.mask}|${m.renderOrder}|${m.frustumCulled}|${vc}`;
     let grp = groups.get(key);
     if (!grp) {
-      grp = { material: mat, cast: m.castShadow, receive: m.receiveShadow, layers: m.layers.mask, renderOrder: m.renderOrder, geos: [], worldUv: !!mat.userData.worldUV };
+      grp = { material: mat, cast: m.castShadow, receive: m.receiveShadow, layers: m.layers.mask, renderOrder: m.renderOrder, culled: m.frustumCulled, color: vc ? 3 : 0, geos: [], worldUv: !!mat.userData.worldUV };
       groups.set(key, grp);
     }
+    if (vc && m.geometry.getAttribute("color")?.itemSize === 4) grp.color = 4;
     const g = m.geometry.clone();
     g.applyMatrix4(m.matrixWorld);
-    grp.geos.push(normalizeForMerge(g));
+    grp.geos.push(g);
     remove.push(m);
   });
   for (const m of remove) m.removeFromParent();
   let after = 0;
   for (const grp of groups.values()) {
-    const merged = mergeGeometries(grp.geos, false);
+    const merged = mergeGeometries(
+      grp.geos.map((g) => normalizeForMerge(g, grp.color)),
+      false,
+    );
     for (const g of grp.geos) g.dispose();
     if (!merged) continue;
     if (grp.worldUv) worldUV(merged);
@@ -152,6 +176,7 @@ export function batchStatic(root: Object3D): { before: number; after: number } {
     mesh.receiveShadow = grp.receive;
     mesh.layers.mask = grp.layers;
     mesh.renderOrder = grp.renderOrder;
+    mesh.frustumCulled = grp.culled;
     mesh.matrixAutoUpdate = false;
     mesh.name = `batch:${grp.material.name || grp.material.type}`;
     root.add(mesh);

@@ -1,7 +1,8 @@
 import { BoxGeometry, BufferGeometry, CircleGeometry, CylinderGeometry, Float32BufferAttribute, Group, PlaneGeometry, SphereGeometry, Vector3, type BufferAttribute, type Material } from "three";
 import { flip, rod } from "../../shared/shapes";
-import { equipment, type CellKey } from "../gfx/equip";
+import type { CellKey } from "../gfx/equip";
 import { Bag, type KamakuraWorld } from "./context";
+import { CROSSING } from "./layout";
 import { crossingAt } from "./timeline";
 
 /**
@@ -20,6 +21,15 @@ import { crossingAt } from "./timeline";
  * merges into one mesh per shadow flag; the lenses, the LED panel and the
  * lit arrow are tracked emissive materials; the four arms are moving nodes.
  */
+
+/** Warning masts (x, z on the ground) and their height; the south-west one carries the bell. */
+const MAST_NE = { x: 5.75, z: -3.3 };
+const MAST_SW = { x: -4.6, z: 3.4 };
+const MAST_BASE = 0.06;
+const MAST_TOP = 4.42;
+
+/** Centre of the electronic bell's speaker grille, on top of the south-west mast. */
+export const BELL_AT = new Vector3(MAST_SW.x, MAST_BASE + MAST_TOP + 0.24, MAST_SW.z);
 
 export interface CrossingState {
   alarm: boolean;
@@ -80,7 +90,7 @@ function lamp(put: Put, add: (m: Material, g: BufferGeometry, cast?: boolean) =>
 }
 
 export function buildCrossing(w: KamakuraWorld): CrossingState {
-  const E = equipment(w);
+  const E = w.equip;
   const bag = new Bag();
   const put: Put = (g, cell, cast = true, sub) => bag.add(E.material, E.map(g, cell, sub), cast);
   const add = (m: Material, g: BufferGeometry, cast = true) => bag.add(m, g, cast);
@@ -93,13 +103,13 @@ export function buildCrossing(w: KamakuraWorld): CrossingState {
   // Lamp faces as yaw (0 = +z, south); `side` is the bracket's direction from the pole.
   const masts: { x: number; z: number; striped: boolean; faces: { yaw: number; side: number }[] }[] = [
     // North-east: back-to-back pairs on a bracket east of the pole, facing up the slope and over the track.
-    { x: 5.75, z: -3.3, striped: true, faces: [{ yaw: Math.PI, side: Math.PI / 2 }, { yaw: 0, side: Math.PI / 2 }] },
+    { ...MAST_NE, striped: true, faces: [{ yaw: Math.PI, side: Math.PI / 2 }, { yaw: 0, side: Math.PI / 2 }] },
     // South-west: north and south pairs on a bracket west of the pole; the west pair on the south side.
-    { x: -4.6, z: 3.4, striped: false, faces: [{ yaw: Math.PI, side: -Math.PI / 2 }, { yaw: 0, side: -Math.PI / 2 }, { yaw: -Math.PI / 2, side: 0 }] },
+    { ...MAST_SW, striped: false, faces: [{ yaw: Math.PI, side: -Math.PI / 2 }, { yaw: 0, side: -Math.PI / 2 }, { yaw: -Math.PI / 2, side: 0 }] },
   ];
   for (const m of masts) {
-    const base = new Vector3(m.x, 0.06, m.z);
-    const top = 4.42;
+    const base = new Vector3(m.x, MAST_BASE, m.z);
+    const top = MAST_TOP;
     const pole = new CylinderGeometry(0.07, 0.076, top, 14, 1, true);
     pole.translate(base.x, base.y + top / 2, base.z);
     put(pole, "mast");
@@ -180,12 +190,15 @@ export function buildCrossing(w: KamakuraWorld): CrossingState {
 
   // ------------------------------------------------------------ gates
   // Gate machines (しゃ断機): the two entrance gates sit at the masts; the exit gates on their own posts.
-  // Each arm reaches past the road's centre line; the west arms sit a hand's width outboard of the east ones.
+  // East machines just off the carriageway, west ones beyond the pedestrian strip. Each arm
+  // reaches past the road's centre line; the west arms sit a hand's width outboard of the east ones.
+  const east = CROSSING.road[1];
+  const west = CROSSING.strip[0];
   const gates: { x: number; z: number; to: number; face: number; lift: number; post: boolean }[] = [
-    { x: 5.42, z: -3.62, to: 0.5, face: Math.PI, lift: 86, post: false },
-    { x: -4.32, z: -3.86, to: 1.0, face: Math.PI, lift: 84, post: true },
-    { x: 5.45, z: 3.42, to: 0.5, face: 0, lift: 85, post: true },
-    { x: -4.3, z: 3.68, to: 1.0, face: 0, lift: 87, post: false },
+    { x: east + 0.42, z: CROSSING.gateNorth, to: 0.5, face: Math.PI, lift: 86, post: false },
+    { x: west - 0.62, z: CROSSING.gateNorth - 0.24, to: 1.0, face: Math.PI, lift: 84, post: true },
+    { x: east + 0.45, z: CROSSING.gateSouth, to: 0.5, face: 0, lift: 85, post: true },
+    { x: west - 0.6, z: CROSSING.gateSouth + 0.26, to: 1.0, face: 0, lift: 87, post: false },
   ];
   const arms: { node: Group; raised: number }[] = [];
   const holder = w.group();

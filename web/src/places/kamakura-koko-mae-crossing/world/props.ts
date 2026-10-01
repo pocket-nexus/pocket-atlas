@@ -1,6 +1,6 @@
 import { BoxGeometry, BufferGeometry, CircleGeometry, CylinderGeometry, PlaneGeometry, SphereGeometry, Vector3, type BufferAttribute, type Material } from "three";
 import { rod } from "../../shared/shapes";
-import { equipment, type CellKey } from "../gfx/equip";
+import type { CellKey } from "../gfx/equip";
 import { Bag, type KamakuraWorld } from "./context";
 import { COAST, SECTION, slopeEdges, slopeY } from "./layout";
 import { hillY } from "./terrain";
@@ -35,7 +35,7 @@ function discUV(g: BufferGeometry, r: number): BufferGeometry {
 const kerb = (_x: number, n: number) => slopeY(n) + 0.15;
 
 export function buildProps(w: KamakuraWorld): void {
-  const E = equipment(w);
+  const E = w.equip;
   const lib = w.lib;
   const bag = new Bag();
   const put: Put = (g, cell, cast = true) => bag.add(E.material, E.map(g, cell), cast);

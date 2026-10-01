@@ -12,7 +12,7 @@ import { Rng } from "../../../core/random";
 import { mapUV, type AtlasRect } from "../../shared/atlas";
 import { JP_SANS, JP_SERIF, LATIN, lanternWrap, lightboxSign, neonSign, norenCloth, productAtlas, toTexture, type SignStyle } from "../gfx/canvas";
 import { box } from "../../shared/geo";
-import { seedWindowUV } from "../gfx/interior";
+import { seedWindowUV } from "../../shared/interior";
 import type { World } from "./context";
 import { acUnit } from "./konbini";
 import { L } from "./layout";

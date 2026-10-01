@@ -3,9 +3,11 @@ import { Rng } from "../../../core/random";
 import { canvas, toTexture, type Ctx } from "../../shared/canvas";
 
 /**
- * Facade atlas for the hillside villas, houses and apartments: a 4096²
- * canvas (the cooker keeps 2048² from a source this size, about 95 texels
- * a metre across and 88 up), tinted per building by vertex colour.
+ * Facade atlas for the hillside villas, houses and apartments, laid out on
+ * a 4096² pixel grid and painted at 4096² on high and ultra (the cooker
+ * keeps 2048² from a source this size, about 95 texels a metre across and
+ * 88 up) and at twice the preset's texture size below; tinted per building
+ * by vertex colour.
  *
  * Seven storey rows of eight 2.6 m bays (one 20.8 m repeat across the
  * width, so a flat wall is one quad per storey with u wrapping), each row
@@ -444,14 +446,10 @@ function boards(g: Ctx, r: Rng, x0: number, y0: number, w: number, h: number): v
   }
 }
 
-let cache: WeakMap<object, Texture> | null = null;
-
-/** The facade atlas (drawn once per stage key). */
-export function facadeAtlas(key: object): Texture {
-  cache ??= new WeakMap();
-  const done = cache.get(key);
-  if (done) return done;
-  const { c, g } = canvas(W, H);
+/** Paints the facade atlas on a size × size canvas (the layout stays in 4096² pixels). */
+export function facadeAtlas(size: number): Texture {
+  const { c, g } = canvas(size, size);
+  g.scale(size / W, size / H);
   const r = new Rng(2905);
   // Opaque everywhere (the cooker keeps BC1 for a texture without alpha).
   g.fillStyle = "#e6e4de";
@@ -605,6 +603,5 @@ export function facadeAtlas(key: object): Texture {
   t.wrapS = RepeatWrapping;
   t.wrapT = ClampToEdgeWrapping;
   t.name = "kamakura-facades";
-  cache.set(key, t);
   return t;
 }

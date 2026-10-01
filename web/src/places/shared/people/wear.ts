@@ -1,22 +1,29 @@
-import { RepeatWrapping, type MeshStandardMaterial, type Texture } from "three";
-import { canvas, toTexture } from "../../gfx/canvas";
-import type { MaterialLib } from "../../gfx/materials";
+import type { MeshStandardMaterial, Texture } from "three";
+
+/** What a wardrobe asks of a place's material library. */
+export interface WearLib {
+  /** Plain PBR paint. */
+  plain(hex: number, rough?: number): MeshStandardMaterial;
+  /** Interior-lit surface whose emission carries the room light; indoor wardrobes only. */
+  interior?(hex: number, lit?: number, rough?: number, map?: Texture, key?: string): MeshStandardMaterial;
+}
 
 const shaded = new WeakMap<MeshStandardMaterial, MeshStandardMaterial>();
 const toned = new WeakMap<MeshStandardMaterial, MeshStandardMaterial>();
 
 /**
- * Clothing and skin materials. Outdoors: plain PBR lit by the street (low
- * roughness reads as rain-soaked). Indoors: `lib.interior` surfaces (the shop
- * has no real lights inside) with the emission shaded by the world normal and
- * height, so a figure under the LED ceiling keeps its form instead of reading
+ * Clothing and skin materials. Outdoors: the place's plain PBR, lit by its
+ * lights. Indoors (an interior without real lights, such as the konbini):
+ * `lib.interior` surfaces with the emission shaded by the world normal and
+ * height, so a figure under an LED ceiling keeps its form instead of reading
  * as a flat cut-out: tops of shoulders and heads brightest, legs darker.
  */
 export class Wear {
-  private lib: MaterialLib;
+  private lib: WearLib;
   readonly indoor: boolean;
 
-  constructor(lib: MaterialLib, indoor: boolean) {
+  constructor(lib: WearLib, indoor: boolean) {
+    if (indoor && !lib.interior) throw new Error("an indoor wardrobe needs lib.interior");
     this.lib = lib;
     this.indoor = indoor;
   }
@@ -38,7 +45,7 @@ export class Wear {
 
   cloth(hex: number, rough = 0.6, lit = 0.8, map?: Texture): MeshStandardMaterial {
     if (!this.indoor) return this.lib.plain(hex, rough);
-    const base = this.lib.interior(hex, lit, rough, map, "people");
+    const base = this.lib.interior!(hex, lit, rough, map, "people");
     let m = shaded.get(base);
     if (!m) {
       m = base.clone();
@@ -64,19 +71,4 @@ export class Wear {
     }
     return m;
   }
-}
-
-/** Vertical pinstripes in the shop's blue and green on white (u is meters around the body). */
-export function uniformStripes(): Texture {
-  const { c, g } = canvas(64, 4);
-  g.fillStyle = "#eef2f4";
-  g.fillRect(0, 0, 64, 4);
-  g.fillStyle = "#2f6fc0";
-  g.fillRect(6, 0, 9, 4);
-  g.fillStyle = "#1c9a78";
-  g.fillRect(38, 0, 5, 4);
-  const t = toTexture(c, true, 4);
-  t.wrapS = t.wrapT = RepeatWrapping;
-  t.repeat.set(1 / 0.03, 1);
-  return t;
 }

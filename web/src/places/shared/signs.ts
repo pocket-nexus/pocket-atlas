@@ -14,10 +14,10 @@ import {
 /**
  * Animated signage: LED bands, video screens, scrolling message boards.
  *
- * A sign is an unlit material (HDR colour × texture) whose texture is either
- * a flipbook (frames in a grid) or a strip that scrolls. Both animate by
- * offsetting UVs, so the web drives `texture.offset` and the export carries
- * the parameters instead of the motion:
+ * A sign is an unlit material (HDR colour × texture) whose texture is a
+ * flipbook (frames in a grid), a strip that scrolls, or both. Both animate
+ * by offsetting UVs, so the web drives `texture.offset` and the export
+ * carries the parameters instead of the motion:
  *
  *   userData.pocketAtlas = {
  *     kind: "sign",
@@ -35,7 +35,9 @@ import {
  * that ignores the annotation still shows a whole frame; at place time t
  * (the clock that drives the animation tracks) the frame is
  * f = ⌊(t + phase) · fps⌋ mod frames and the UV offset is (c/cols, r/rows).
- * A scrolling sign adds fract(scroll · (t + phase)) to its UVs instead.
+ * The scroll is applied after the flipbook: each component of
+ * scroll · (t + phase) wraps to [0, 1) as x − ⌊x⌋ and adds to the frame's
+ * offset (the device's `UvAnim::apply` runs in the same order).
  */
 export interface Flipbook {
   frames: number;
@@ -97,17 +99,23 @@ export class Sign {
     };
   }
 
-  /** Frame (flipbook) or scroll offset at place time t. */
+  /** UV offset at place time t: the flipbook frame's cell, then the scroll. */
   update(t: number): void {
     const a = this.anim;
     const tt = t + (a.phase ?? 0);
+    let u = 0;
+    let v = 0;
     if (a.flipbook) {
       const fb = a.flipbook;
       const f = ((Math.floor(tt * fb.fps) % fb.frames) + fb.frames) % fb.frames;
-      this.texture.offset.set((f % fb.cols) / fb.cols, Math.floor(f / fb.cols) / fb.rows);
-    } else if (a.scroll) {
-      const fr = (v: number) => v - Math.floor(v);
-      this.texture.offset.set(fr(a.scroll[0] * tt), fr(a.scroll[1] * tt));
+      u = (f % fb.cols) / fb.cols;
+      v = Math.floor(f / fb.cols) / fb.rows;
     }
+    if (a.scroll) {
+      const fr = (x: number) => x - Math.floor(x);
+      u += fr(a.scroll[0] * tt);
+      v += fr(a.scroll[1] * tt);
+    }
+    this.texture.offset.set(u, v);
   }
 }

@@ -26,7 +26,7 @@ const perSky = (r: number, g: number, b: number) => {
 };
 
 /** The bay's water in late July: swell from the south-south-west, an onshore wind chop. */
-export const WATER = {
+const WATER = {
   name: "sea",
   waves: [
     // Swell and wind sea on a 57 m tile; chop on an 8.9 m tile (ratio 0.155,
@@ -125,12 +125,10 @@ export function buildSea(w: KamakuraWorld, baker: Baker): Water {
   g.setAttribute("normal", new Float32BufferAttribute(pos.map((_, i) => (i % 3 === 1 ? 1 : 0)), 3));
   g.setAttribute("color", new Float32BufferAttribute(col, 3));
   g.setAttribute("uv", new Float32BufferAttribute(uv, 2));
-  // Static, out of the web's batch (which keeps position, normal and UV only)
-  // so the shallow-water weight in its vertex colours survives; the cooker
-  // keeps open water in one draw however far it reaches.
+  // The shallow-water weight rides in the vertex colours; the cooker keeps
+  // open water in one draw however far it reaches.
   const sea = w.mesh(g, water.material, 0, 0, 0, w.root, { cast: false, receive: false });
   sea.name = "sea";
-  sea.userData.noBatch = true;
   sea.frustumCulled = false;
 
   surf(w, baker);
@@ -189,14 +187,14 @@ function surf(w: KamakuraWorld, baker: Baker): void {
   // One material for all strips: every wave takes 9 s, so the scroll is shared.
   const foam = foamMaterial(foamTexture(baker), [0, 1 / 9], "surf-foam");
   w.update((_dt, t) => foam.update(t));
-  const strips = [
-    { name: "surf-outer", s: [150, 158, 178, 196], alpha: [0, 0.7, 0.4, 0], tile: 46, along: 233, u0: 0.0, y: 0.05 },
-    { name: "surf-inshore", s: [98, 104, 124, 146], alpha: [0, 0.85, 0.5, 0], tile: 40, along: 191, u0: 0.31, y: 0.04 },
-    { name: "surf-inshore", s: [55.5, 58, 64, 72], alpha: [0, 1, 0.75, 0], tile: 16, along: 97, u0: 0.62, y: 0.03 },
-  ];
   // The outer bar surges less than the inner bar and the shore break.
-  const surge: Record<string, number> = { "surf-outer": 1.2, "surf-inshore": 2.0 };
-  const groups = new Map<string, BufferGeometry[]>();
+  const strips = [
+    { name: "surf-outer", s: [150, 158, 178, 196], alpha: [0, 0.7, 0.4, 0], tile: 46, along: 233, u0: 0.0, y: 0.05, surge: 1.2 },
+    { name: "surf-inner", s: [98, 104, 124, 146], alpha: [0, 0.85, 0.5, 0], tile: 40, along: 191, u0: 0.31, y: 0.04, surge: 2.0 },
+    { name: "surf-shore", s: [55.5, 58, 64, 72], alpha: [0, 1, 0.75, 0], tile: 16, along: 97, u0: 0.62, y: 0.03, surge: 2.0 },
+  ];
+  const dir = COAST.offset(0, 1, new Vector3()).sub(COAST.point(0, new Vector3())).normalize();
+  const sets = Math.round(LOOP / 9);
   for (const st of strips) {
     // v runs offshore: 1 texture repeat (one wave) per `tile` metres, moving `tile` per period.
     const us: number[] = [];
@@ -229,49 +227,19 @@ function surf(w: KamakuraWorld, baker: Baker): void {
     g.setAttribute("uv", new Float32BufferAttribute(uv, 2));
     g.setIndex(idx);
     g.computeVertexNormals();
-    if (!groups.has(st.name)) groups.set(st.name, []);
-    groups.get(st.name)!.push(g);
-  }
-  // One moving mesh per group (one draw each on the handheld).
-  const dir = COAST.offset(0, 1, new Vector3()).sub(COAST.point(0, new Vector3())).normalize();
-  const sets = Math.round(LOOP / 9);
-  for (const [name, geos] of groups) {
+    // One moving mesh per strip (one draw each on the handheld).
     const holder = new Group();
-    holder.name = name;
+    holder.name = st.name;
     holder.userData.dynamic = true;
     w.root.add(holder);
-    const m = w.mesh(geos.length > 1 ? mergeKeepColor(geos) : geos[0], foam.material, 0, 0, 0, holder, { cast: false, receive: false });
+    const m = w.mesh(g, foam.material, 0, 0, 0, holder, { cast: false, receive: false });
     m.renderOrder = 1;
     // The surge: toward the shore and back, a whole number of sets per loop.
     w.update((_dt, t) => {
       const k = Math.sin((2 * Math.PI * sets * (t % LOOP)) / LOOP);
-      holder.position.copy(dir).multiplyScalar(-k * surge[name]);
+      holder.position.copy(dir).multiplyScalar(-k * st.surge);
     });
   }
-}
-
-/** Merges indexed strips keeping their RGBA vertex colours. */
-function mergeKeepColor(geos: BufferGeometry[]): BufferGeometry {
-  const pos: number[] = [];
-  const col: number[] = [];
-  const uv: number[] = [];
-  const nrm: number[] = [];
-  const idx: number[] = [];
-  for (const g of geos) {
-    const base = pos.length / 3;
-    pos.push(...(g.getAttribute("position").array as Float32Array));
-    col.push(...(g.getAttribute("color").array as Float32Array));
-    uv.push(...(g.getAttribute("uv").array as Float32Array));
-    nrm.push(...(g.getAttribute("normal").array as Float32Array));
-    for (const i of Array.from(g.index!.array)) idx.push(base + i);
-  }
-  const out = new BufferGeometry();
-  out.setAttribute("position", new Float32BufferAttribute(pos, 3));
-  out.setAttribute("normal", new Float32BufferAttribute(nrm, 3));
-  out.setAttribute("color", new Float32BufferAttribute(col, 4));
-  out.setAttribute("uv", new Float32BufferAttribute(uv, 2));
-  out.setIndex(idx);
-  return out;
 }
 
 /** A sloop seen side-on: mainsail and jib on a mast, the hull's waterline below. */

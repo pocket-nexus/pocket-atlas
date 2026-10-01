@@ -1,6 +1,6 @@
 import { BufferGeometry, Float32BufferAttribute, Vector3, type Mesh } from "three";
 import { Rng } from "../../../core/random";
-import { foliageMaterial, LEAF, type Cell, type LeafCell } from "../gfx/foliage";
+import { LEAF, type Cell } from "../gfx/foliage";
 import type { KamakuraWorld } from "./context";
 
 const UP = new Vector3(0, 1, 0);
@@ -23,10 +23,6 @@ export class Greenery {
 
   constructor(seed: number) {
     this.r = new Rng(seed);
-  }
-
-  get triangles(): number {
-    return this.idx.length / 3;
   }
 
   private vert(p: Vector3, n: Vector3, u: number, v: number, c: [number, number, number]): number {
@@ -272,7 +268,7 @@ export class Greenery {
     }
   }
 
-  /** Emits everything as one static mesh (kept out of batching, which drops vertex colours). */
+  /** Emits everything as one static mesh (vertex-coloured per plant). */
   emit(w: KamakuraWorld, name: string): Mesh | null {
     if (!this.idx.length) return null;
     const g = new BufferGeometry();
@@ -282,12 +278,9 @@ export class Greenery {
     g.setAttribute("color", new Float32BufferAttribute(this.col, 3));
     g.setIndex(this.idx);
     g.computeBoundingSphere();
-    const m = w.mesh(g, foliageMaterial(w.lib), 0, 0, 0, w.root, { cast: true });
-    m.userData.noBatch = true;
+    const m = w.mesh(g, w.lib.foliage(), 0, 0, 0, w.root, { cast: true });
     m.name = name;
-    console.info(`[kamakura:plants] ${name}: ${this.triangles} triangles`);
     return m;
   }
 }
 
-export type { LeafCell };

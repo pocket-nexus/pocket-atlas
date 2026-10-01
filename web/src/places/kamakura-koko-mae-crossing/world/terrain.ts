@@ -39,8 +39,9 @@ function initControl(): void {
     }
     addCtl(cx, cz, base, 1.0);
   }
-  // The junction east of the slope at 26–48 m north (aerial): a planted triangle at road
-  // level, then the side road curving east to the villas' street at (42.9, 21.9 N).
+  // The junction east of the slope at 26–48 m north (aerial): the ground under the planted
+  // triangle (its lawn stands 1.6–2.1 m above the road, ground.ts), then the side road
+  // curving east to the villas' street at (42.9, 21.9 N).
   for (const [x, n, y] of [
     [7, 27, 2.9],
     [7, 31, 3.3],
@@ -216,17 +217,12 @@ function grid(max: number, fine: number): number[] {
   return out;
 }
 
-export interface HillPatch {
-  /** World position of patch coordinates (a along the coast, b up the slope road). */
-  at(a: number, b: number): Vector3;
-}
-
 /**
  * Builds one side of the hillside as a Coons patch between the track's north
  * edge (b = 0, running along the coast away from the crossing) and the slope
  * road's edge (a = 0, running north). `side` −1 = west, +1 = east.
  */
-function patch(side: 1 | -1, aMax: number, bMax: number): { verts: Vector3[]; rows: number; cols: number; as: number[]; bs: number[] } {
+function patch(side: 1 | -1, aMax: number, bMax: number): { verts: Vector3[]; rows: number; cols: number; as: number[] } {
   const edgeX = (north: number) => {
     const [w, e] = slopeEdges(north);
     const x = side > 0 ? (north < 62 ? eastGroundEdge(north) : e) : w;
@@ -255,7 +251,7 @@ function patch(side: 1 | -1, aMax: number, bMax: number): { verts: Vector3[]; ro
       verts.push(p);
     }
   }
-  return { verts, rows: bs.length, cols: as.length, as, bs };
+  return { verts, rows: bs.length, cols: as.length, as };
 }
 
 /** Hillside ground, walls on the patch edges, and the hillside roads. */
@@ -267,7 +263,7 @@ export function buildTerrain(w: KamakuraWorld): void {
   const lowered = (x: number, z: number) => roads.some((r) => inside(r, x, z));
 
   for (const side of [1, -1] as const) {
-    const { verts, rows, cols, as, bs } = patch(side, side > 0 ? 780 : 600, 320);
+    const { verts, rows, cols, as } = patch(side, side > 0 ? 780 : 600, 320);
     // Heights: hillside IDW, dipped under the draped roads.
     for (const v of verts) v.y = hillY(v.x, v.z) - (lowered(v.x, v.z) ? 0.12 : 0);
     const list: number[] = [];
@@ -280,7 +276,7 @@ export function buildTerrain(w: KamakuraWorld): void {
         // Faces up whichever way the patch is mirrored.
         list.push(...(side > 0 ? [a, b, c, b, d, c] : [a, c, b, b, c, d]));
       }
-    edgeWalls(w, side, verts, cols, rows, as, bs);
+    edgeWalls(w, side, verts, cols, rows, as);
     // One ground material out to the patch edge (the far hills are curtains in far.ts).
     const g = new BufferGeometry();
     g.setAttribute("position", new Float32BufferAttribute(verts.flatMap((v) => [v.x, v.y, v.z]), 3));
@@ -318,7 +314,7 @@ export function buildTerrain(w: KamakuraWorld): void {
  * at the patch edge. East of the slope road near the crossing they are the
  * rock-faced walls under the villas; elsewhere cast-block or plain concrete.
  */
-function edgeWalls(w: KamakuraWorld, side: 1 | -1, verts: Vector3[], cols: number, rows: number, as: number[], bs: number[]): void {
+function edgeWalls(w: KamakuraWorld, side: 1 | -1, verts: Vector3[], cols: number, rows: number, as: number[]): void {
   const lib = w.lib;
   const rubble = lib.rubble();
   const block = lib.block();
@@ -371,7 +367,6 @@ function edgeWalls(w: KamakuraWorld, side: 1 | -1, verts: Vector3[], cols: numbe
     g.computeVertexNormals();
     w.mesh(g, m, 0, 0, 0, w.root, { cast: true });
   }
-  void bs;
 }
 
 /** Splits a 2D triangle (x, z) until its edges are under `max` and drapes it on the hillside. */
@@ -401,8 +396,6 @@ function subdivide(a: Vector2, b: Vector2, c: Vector2, max: number, out: number[
   }
 }
 
-export { slopeY };
-
 /** Pushes a quad (a, b, c, d counter-clockwise seen from `out`) into a position list. */
 function quadOut(list: number[], a: Vector3, b: Vector3, c: Vector3, d: Vector3, out: Vector3): void {
   const n = new Vector3().subVectors(b, a).cross(new Vector3().subVectors(c, a));
@@ -414,7 +407,8 @@ function quadOut(list: number[], a: Vector3, b: Vector3, c: Vector3, d: Vector3,
  * The villa wall east of the slope road (p01–p03, p05): a battered rubble
  * wall from the sidewalk to the terrace 4.1–4.5 m up, its concrete coping,
  * the terrace's north wall toward the junction, and the planted triangle
- * north of the garage: a lawn 1.2 m above the road behind a low rubble wall.
+ * north of the garage: a lawn `triangleLift` (1.6–2.1 m) above the road
+ * behind a low rubble wall.
  */
 function villaWall(w: KamakuraWorld): void {
   const lib = w.lib;
@@ -456,7 +450,7 @@ function villaWall(w: KamakuraWorld): void {
     const t1 = Math.max(y1 + 0.2, terraceY(nN) - Math.max(0, x1 - 14) * 0.05);
     quadOut(rub, new Vector3(x, y0, -nN), new Vector3(x1, y1, -nN), new Vector3(x1, t1, -nN), new Vector3(x, t0, -nN), new Vector3(0, 0, -1));
   }
-  // The planted triangle: a prism on the junction surface, its top 1.2 m over the slope road.
+  // The planted triangle: a prism on the junction surface, its top `triangleLift` (1.6–2.1 m) over the slope road.
   {
     const ring: [number, number][] = [];
     for (let n = TRIANGLE.from + 0.4; n <= TRIANGLE.to; n += 1.5) ring.push([eastKerb(n) + 0.3, n]);

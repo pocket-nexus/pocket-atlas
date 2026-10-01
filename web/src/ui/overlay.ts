@@ -67,7 +67,7 @@ export class Overlay {
     this.buildLoading();
     this.buildSystem();
     this.clockTimer = window.setInterval(() => this.tickClocks(), 1000 * 15);
-    addEventListener("keydown", (e) => {
+    window.addEventListener("keydown", (e) => {
       if (e.target instanceof HTMLInputElement) return;
       if (e.key === "h" || e.key === "H") this.toggleHidden();
     });

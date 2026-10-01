@@ -1,5 +1,5 @@
 import { JP_SANS, LATIN, roundRect, type Ctx } from "../../shared/canvas";
-import type { CellDef, Pen } from "./equip";
+import type { CellDef, CellPen as CellPen } from "../../shared/pbr-atlas";
 
 /**
  * Printed faces in the equipment atlas: crossing lamp lenses and LED
@@ -23,19 +23,19 @@ function text(g: Ctx, s: string, x: number, y: number, font: string, color: stri
 }
 
 /** Retro-reflective sheet: a faint glassy speckle, smooth. */
-function sheet(p: Pen, rough = 0.3): void {
+function sheet(p: CellPen, rough = 0.3): void {
   p.paint(0, 0, p.w, p.ht, undefined, rough, 0, 0.05);
   p.speckle(Math.round(p.w * p.ht * 0.01), ["rgba(255,255,255,0.06)", "rgba(0,0,0,0.05)"], [1, 1.5 * p.k]);
 }
 
 /** Weathering on a sign face: dust streaks from the top edge, a little fade. */
-function weather(p: Pen, amount = 1): void {
+function weather(p: CellPen, amount = 1): void {
   p.streaks(Math.round(6 * amount), "rgba(90,80,65,0.14)", [p.ht * 0.2, p.ht * 0.8], [1, 3 * p.k], () => [p.r.next() * p.w, p.ht * p.r.range(0, 0.2)]);
   p.paint(0, 0, p.w, p.ht, "rgba(255,250,240,0.04)");
 }
 
 /** Red LED lens: dark glass with Fresnel rings and a matrix of LED dots (the bright part when lit). */
-function lens(p: Pen): void {
+function lens(p: CellPen): void {
   const c = p.w / 2;
   const g = p.a.createRadialGradient(c, c, 0, c, c, c);
   g.addColorStop(0, "#4a0b07");
@@ -64,7 +64,7 @@ function lens(p: Pen): void {
 }
 
 /** Amber arrow lens of the train-direction indicator (lit as a separate lamp). */
-function arrowLens(p: Pen): void {
+function arrowLens(p: CellPen): void {
   p.base("#3a2004", 0.2);
   const step = p.w / 8;
   for (let y = step / 2; y < p.ht; y += step)
@@ -77,7 +77,7 @@ function arrowLens(p: Pen): void {
 }
 
 /** Orange LED panel reading ふみきり: dim dots when off; the lens material lights them. */
-function ledFace(p: Pen): void {
+function ledFace(p: CellPen): void {
   p.base("#0d0d0d", 0.25);
   p.a.save();
   text(p.a, "ふみきり", p.w / 2, p.ht * 0.54, `900 ${p.ht * 0.62}px ${JP_SANS}`, "#9a4a08", p.w * 0.9);
@@ -93,7 +93,7 @@ function ledFace(p: Pen): void {
 }
 
 /** Train-direction indicator face: black panel, two dark arrow windows. */
-function arrowFace(p: Pen): void {
+function arrowFace(p: CellPen): void {
   p.base("#121212", 0.45);
   for (const dir of [-1, 1]) {
     const cx = p.w / 2 + dir * p.w * 0.24;
@@ -108,7 +108,7 @@ function arrowFace(p: Pen): void {
 }
 
 /** Emergency button box (踏切支障報知装置), face. */
-function emergency(p: Pen): void {
+function emergency(p: CellPen): void {
   p.base("#eceae3", 0.5);
   p.paint(p.w * 0.06, p.ht * 0.05, p.w * 0.88, p.ht * 0.2, RED, 0.45);
   text(p.a, "非常ボタン", p.w / 2, p.ht * 0.155, `900 ${p.ht * 0.12}px ${JP_SANS}`, "#fff", p.w * 0.84);
@@ -128,7 +128,7 @@ function emergency(p: Pen): void {
 }
 
 /** Round 非常ボタン plate on the north-west post. */
-function emergencySign(p: Pen): void {
+function emergencySign(p: CellPen): void {
   p.base("#b9bcbd", 0.4, 0.6);
   const c = p.w / 2;
   p.shape((g) => g.arc(c, c, c * 0.98, 0, Math.PI * 2), SIGN_WHITE, 0.35);
@@ -139,7 +139,7 @@ function emergencySign(p: Pen): void {
 }
 
 /** Round sign: no parking (blue disc, red ring, one red bar). */
-function noParking(p: Pen): void {
+function noParking(p: CellPen): void {
   const r = p.w / 2;
   p.base("#a9aeb0", 0.45, 0.6);
   p.shape((g) => g.arc(r, r, r * 0.99, 0, Math.PI * 2), SIGN_WHITE, 0.3);
@@ -156,7 +156,7 @@ function noParking(p: Pen): void {
 }
 
 /** Speed limit 50 (Route 134). */
-function speed50(p: Pen): void {
+function speed50(p: CellPen): void {
   const r = p.w / 2;
   p.base("#a9aeb0", 0.45, 0.6);
   p.shape((g) => g.arc(r, r, r * 0.99, 0, Math.PI * 2), SIGN_WHITE, 0.3);
@@ -168,7 +168,7 @@ function speed50(p: Pen): void {
 }
 
 /** Designated direction (straight on only): blue disc, white arrow. */
-function straightOnly(p: Pen): void {
+function straightOnly(p: CellPen): void {
   const r = p.w / 2;
   p.base("#a9aeb0", 0.45, 0.6);
   p.shape((g) => g.arc(r, r, r * 0.99, 0, Math.PI * 2), SIGN_WHITE, 0.3);
@@ -188,7 +188,7 @@ function straightOnly(p: Pen): void {
 }
 
 /** Supplementary plate: a lorry pictogram (the sign applies to large vehicles). */
-function truckPlate(p: Pen): void {
+function truckPlate(p: CellPen): void {
   p.base(SIGN_WHITE, 0.35);
   p.a.strokeStyle = "#222";
   p.a.lineWidth = 2 * p.k;
@@ -207,7 +207,7 @@ function truckPlate(p: Pen): void {
 }
 
 /** Pedestrian crossing (407-A): blue square, white triangle, an adult leading a child. */
-function pedCrossing(p: Pen): void {
+function pedCrossing(p: CellPen): void {
   const w = p.w;
   const h = p.ht;
   p.base(SIGN_WHITE, 0.3);
@@ -244,7 +244,7 @@ function pedCrossing(p: Pen): void {
 }
 
 /** Point-up triangular plate at the west kerb (a pedestrian-crossing warning face). */
-function triangle(p: Pen): void {
+function triangle(p: CellPen): void {
   const w = p.w;
   const h = p.ht;
   p.base("#a9aeb0", 0.45, 0.6);
@@ -272,14 +272,14 @@ function triangle(p: Pen): void {
 }
 
 /** Galvanised sign back with a stiffening rib. */
-function signBack(p: Pen): void {
+function signBack(p: CellPen): void {
   p.base("#a4a9ab", 0.45, 0.75);
   p.speckle(p.w * p.ht * 0.1, ["rgba(255,255,255,0.08)", "rgba(0,0,0,0.08)"], [1, 2 * p.k]);
   p.paint(0, p.ht * 0.45, p.w, p.ht * 0.1, "rgba(0,0,0,0.12)", undefined, undefined, 0.8);
 }
 
 /** Vertical white board: 車両通り抜け出来ません in red. */
-function vehicles(p: Pen): void {
+function vehicles(p: CellPen): void {
   p.base("#f4f3ee", 0.45);
   p.a.strokeStyle = RED;
   p.a.lineWidth = p.w * 0.06;
@@ -291,7 +291,7 @@ function vehicles(p: Pen): void {
 }
 
 /** 踏切内立入禁止 with a crossed-out walker. */
-function noEntry(p: Pen): void {
+function noEntry(p: CellPen): void {
   p.base("#f4f3ee", 0.45);
   const cx = p.w / 2;
   const cy = p.ht * 0.3;
@@ -324,7 +324,7 @@ function noEntry(p: Pen): void {
  * tracks", brown "On the train platform", green "Along the train route",
  * each with a prohibition pictogram and short rules.
  */
-function rules(p: Pen): void {
+function rules(p: CellPen): void {
   const w = p.w;
   const h = p.ht;
   p.base("#f6f5ef", 0.45);
@@ -406,7 +406,7 @@ function camera(g: Ctx, x: number, y: number, s: number): void {
 
 /** City map board: Koshigoe and Shichirigahama, pale map, coast, the Enoden, a you-are-here dot. */
 function mapBoard(seed: number) {
-  return (p: Pen) => {
+  return (p: CellPen) => {
     const w = p.w;
     const h = p.ht;
     p.base("#2a4a3c", 0.45);
@@ -466,7 +466,7 @@ function mapBoard(seed: number) {
 
 /** White plate with black lettering (gate machine numbers, pole tags). */
 function label(s: string, vertical = false) {
-  return (p: Pen) => {
+  return (p: CellPen) => {
     p.base("#efeee8", 0.5);
     p.a.strokeStyle = "#333";
     p.a.lineWidth = 1.2 * p.k;

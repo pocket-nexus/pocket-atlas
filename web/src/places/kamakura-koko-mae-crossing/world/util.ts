@@ -92,8 +92,3 @@ export function place(g: BufferGeometry, p: Vector3, yaw = 0): BufferGeometry {
   g.translate(p.x, p.y, p.z);
   return g;
 }
-
-/** Yaw (about y) that turns +z toward the direction (dx, dz). */
-export function yawTo(dx: number, dz: number): number {
-  return Math.atan2(dx, dz);
-}

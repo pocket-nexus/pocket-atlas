@@ -174,7 +174,7 @@ export const PLACES: PlaceDef[] = [
     weather: "Breeze · 16°C",
     accent: "#6ab8ff",
     author: "Pocket Atlas",
-    kind: "waterfront",
+    kind: "dusk-coast",
     tags: ["Blue hour", "Ferry", "Harbour"],
   },
   {
@@ -225,7 +225,7 @@ export const PLACES: PlaceDef[] = [
     weather: "Clear · −6°C",
     accent: "#7dffb2",
     author: "Pocket Atlas",
-    kind: "waterfront",
+    kind: "night-coast",
     tags: ["Night", "Aurora", "Harbour"],
   },
   {
@@ -310,7 +310,7 @@ export const PLACES: PlaceDef[] = [
     weather: "Storm · 19°C",
     accent: "#63d2ff",
     author: "Pocket Atlas",
-    kind: "waterfront",
+    kind: "daytime-coast",
     tags: ["Storm", "Harbour"],
   },
   {

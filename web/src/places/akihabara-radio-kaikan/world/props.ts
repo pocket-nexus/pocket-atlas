@@ -1,8 +1,8 @@
 import { BoxGeometry, CylinderGeometry, TorusGeometry, Vector3 } from "three";
-import { JP_SANS, LATIN } from "../../shared/canvas";
+import { fitText, HEAVY, JP_SANS, LATIN } from "../../shared/canvas";
 import { box } from "../../shared/geo";
 import { merge } from "../../shared/shapes";
-import { fitText, HEAVY, paintLightbox } from "../gfx/art";
+import { paintLightbox } from "../gfx/art";
 import type { AkibaWorld } from "./context";
 import { CROSSINGS, STREET, VIEW } from "./layout";
 import { cellPlane, point } from "./util";

@@ -1,11 +1,9 @@
-import { Group, Mesh, MeshBasicMaterial, type BufferGeometry, type Light, type Material, type Object3D } from "three";
-import type { Quality } from "../../../core/quality";
-import { Rng } from "../../../core/random";
-import type { Atlas, AtlasRect, SkylineAtlas } from "../../shared/atlas";
+import { Group, Mesh, MeshBasicMaterial, type BufferGeometry, type Material, type Object3D } from "three";
+import type { Atlas, AtlasRect } from "../../shared/atlas";
 import type { Ctx } from "../../shared/canvas";
 import type { ExportFogLight } from "../../shared/export";
 import type { Sign } from "../../shared/signs";
-import type { DuskLib } from "../gfx/materials";
+import { LEVEL, type DuskLib } from "../gfx/materials";
 
 export type Updater = (dt: number, t: number) => void;
 
@@ -16,17 +14,16 @@ export class AkibaWorld {
   /** The street has no lit haze pass; kept for the exporter's shape. */
   readonly fogLights: ExportFogLight[] = [];
   readonly lib: DuskLib;
-  /** Lit signage, shop interiors and small posters (opaque, 4096² on high and ultra). */
-  readonly atlas: SkylineAtlas;
-  /** Large backlit window artwork and billboards (opaque). */
-  readonly art: SkylineAtlas;
+  /** Lit signage and small posters (opaque, 4096² on high and ultra). */
+  readonly atlas: Atlas;
+  /** Large backlit window artwork, billboards and the shop interiors seen through glass (opaque). */
+  readonly art: Atlas;
   /** Channel letters and cut-out signs (alpha-tested). */
   readonly letters: Atlas;
-  readonly quality: Quality;
-  readonly rng: Rng;
-  readonly signs: Sign[] = [];
   /** Backlit window artwork (art atlas). */
   readonly poster: MeshBasicMaterial;
+  /** Shop interiors behind glass (art atlas): one level, no fog. */
+  readonly interior: MeshBasicMaterial;
   /** Lightbox signage by brightness (signage atlas), and the alpha-tested channel letters. */
   readonly sign: MeshBasicMaterial;
   readonly bright: MeshBasicMaterial;
@@ -36,15 +33,14 @@ export class AkibaWorld {
   /** Red LED letters keep their colour below the tone curve's shoulder. */
   readonly cutoutRed: MeshBasicMaterial;
 
-  constructor(lib: DuskLib, atlas: SkylineAtlas, art: SkylineAtlas, letters: Atlas, quality: Quality, seed: number) {
+  constructor(lib: DuskLib, atlas: Atlas, art: Atlas, letters: Atlas) {
     this.lib = lib;
     this.atlas = atlas;
     this.art = art;
     this.letters = letters;
-    this.quality = quality;
-    this.rng = new Rng(seed);
     this.root.name = "world";
     this.poster = lib.lit(art.texture, 1.3, "art");
+    this.interior = lib.lit(art.texture, LEVEL.interior, "art-interior", { fog: false });
     this.sign = lib.lit(atlas.texture, 2.0, "atlas");
     this.bright = lib.lit(atlas.texture, 3.6, "atlas");
     this.dim = lib.lit(atlas.texture, 0.55, "atlas");
@@ -71,11 +67,6 @@ export class AkibaWorld {
     return g;
   }
 
-  light<T extends Light>(l: T, parent: Object3D = this.root): T {
-    parent.add(l);
-    return l;
-  }
-
   /** Paints (once per key) a cell of the signage atlas; sizes are in 4096-atlas pixels. */
   draw(key: string, w: number, h: number, paint: (g: Ctx, w: number, h: number) => void): AtlasRect {
     return this.atlas.shared(key, w, h, paint);
@@ -94,8 +85,9 @@ export class AkibaWorld {
     });
   }
 
+  /** Registers an animated sign: it steps on the place clock with the other updaters. */
   addSign(s: Sign): Sign {
-    this.signs.push(s);
+    this.update((_dt, t) => s.update(t));
     return s;
   }
 

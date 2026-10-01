@@ -1,6 +1,7 @@
-import { CanvasTexture, LinearMipmapLinearFilter, NoColorSpace, SRGBColorSpace, type Texture } from "three";
+import type { Texture } from "three";
 import { Rng } from "../../../core/random";
-import { canvas, JP_SANS, LATIN, roundRect, type Ctx } from "../../shared/canvas";
+import { JP_SANS, LATIN, roundRect, type Ctx } from "../../shared/canvas";
+import { heightToNormal, LayerPen, paintLayer, pbrTexture, type Finish } from "../../shared/pbr-atlas";
 
 /**
  * Enoden 500 type (second generation, 2006): body dimensions, the side and
@@ -183,14 +184,7 @@ export function solidUV(name: SolidName): [number, number] {
 
 // ---------------------------------------------------------------- painting
 
-type Mode = "albedo" | "orm" | "height" | "emit";
-interface Mat {
-  c: string;
-  r: number;
-  m: number;
-  h: number;
-  e?: string;
-}
+type Mat = Finish & { h: number };
 
 /** Surfaces: albedo (sRGB), roughness, metalness, relief height (0.5 = skin), emission. */
 const M = {
@@ -219,65 +213,8 @@ const M = {
   brown: { c: "#4a3a2e", r: 0.7, m: 0, h: 0.5 },
 } satisfies Record<string, Mat>;
 
-const hex2 = (v: number) => Math.round(Math.max(0, Math.min(1, v)) * 255);
-
-class Pen {
-  constructor(
-    readonly g: Ctx,
-    readonly mode: Mode,
-  ) {}
-  get albedo(): boolean {
-    return this.mode === "albedo";
-  }
-  style(m: Mat): string {
-    switch (this.mode) {
-      case "albedo":
-        return m.c;
-      case "orm":
-        return `rgb(255,${hex2(m.r)},${hex2(m.m)})`;
-      case "height":
-        return `rgb(${hex2(m.h)},${hex2(m.h)},${hex2(m.h)})`;
-      case "emit":
-        return m.e ?? "#000";
-    }
-  }
-  rect(x: number, y: number, w: number, h: number, m: Mat): void {
-    this.g.fillStyle = this.style(m);
-    this.g.fillRect(x, y, w, h);
-  }
-  /** Rectangle between two corners (any order). */
-  box(x0: number, y0: number, x1: number, y1: number, m: Mat): void {
-    this.rect(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0), m);
-  }
-  rbox(x0: number, y0: number, x1: number, y1: number, r: number, m: Mat): void {
-    this.g.fillStyle = this.style(m);
-    roundRect(this.g, Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0), r);
-    this.g.fill();
-  }
-  disc(x: number, y: number, r: number, m: Mat): void {
-    this.g.fillStyle = this.style(m);
-    this.g.beginPath();
-    this.g.arc(x, y, r, 0, Math.PI * 2);
-    this.g.fill();
-  }
-  line(x0: number, y0: number, x1: number, y1: number, width: number, m: Mat): void {
-    this.g.strokeStyle = this.style(m);
-    this.g.lineWidth = width;
-    this.g.beginPath();
-    this.g.moveTo(x0, y0);
-    this.g.lineTo(x1, y1);
-    this.g.stroke();
-  }
-  /** Albedo-only translucent wash (grime, shading); other maps keep their values. */
-  wash(fill: string | CanvasGradient, x: number, y: number, w: number, h: number): void {
-    if (!this.albedo) return;
-    this.g.fillStyle = fill;
-    this.g.fillRect(x, y, w, h);
-  }
-}
-
 /** The colour bands of the 500 type at heights y0..y1, drawn across x0..x1 with `yOf` mapping height to canvas y. */
-function bands(p: Pen, x0: number, x1: number, yOf: (y: number) => number, yMax: number): void {
+function bands(p: LayerPen, x0: number, x1: number, yOf: (y: number) => number, yMax: number): void {
   const w = x1 - x0;
   p.rect(x0, yOf(Math.min(BANDS.roofFrom, yMax)), w, yOf(0.78) - yOf(Math.min(BANDS.roofFrom, yMax)), M.green);
   p.rect(x0, yOf(BANDS.creamTo), w, yOf(BANDS.creamFrom) - yOf(BANDS.creamTo), M.cream);
@@ -343,7 +280,7 @@ function drawPassengers(g: Ctx, crowd: Passenger[], h: number, y1: number, dark:
  * side's windows bright with the day outside, seat backs and, now and then,
  * a passenger. Other maps: matte, recessed, the ceiling faintly lit.
  */
-function saloon(p: Pen, x0: number, y0: number, x1: number, y1: number, r: Rng, people: number): void {
+function saloon(p: LayerPen, x0: number, y0: number, x1: number, y1: number, r: Rng, people: number): void {
   const g = p.g;
   const w = x1 - x0;
   const h = y1 - y0;
@@ -428,7 +365,7 @@ function saloon(p: Pen, x0: number, y0: number, x1: number, y1: number, r: Rng, 
 }
 
 /** A window in its black rubber frame. */
-function windowAt(p: Pen, x0: number, y0: number, x1: number, y1: number, r: Rng, people: number): void {
+function windowAt(p: LayerPen, x0: number, y0: number, x1: number, y1: number, r: Rng, people: number): void {
   p.rbox(x0 - 4, y0 - 4, x1 + 4, y1 + 4, 9, M.rubber);
   p.g.save();
   roundRect(p.g, x0, y0, x1 - x0, y1 - y0, 7);
@@ -437,7 +374,7 @@ function windowAt(p: Pen, x0: number, y0: number, x1: number, y1: number, r: Rng
   p.g.restore();
 }
 
-function paintStrip(p: Pen, r: Rng): void {
+function paintStrip(p: LayerPen, r: Rng): void {
   const x0 = sx(D0);
   const x1 = sx(D1);
   bands(p, x0, x1, sy, 3.7);
@@ -506,7 +443,7 @@ function paintStrip(p: Pen, r: Rng): void {
 }
 
 /** Cab face: windscreen with the cab and saloon behind it, display, lamps, number. */
-function paintFace(p: Pen, kind: CabKind, num: string, r: Rng): void {
+function paintFace(p: LayerPen, kind: CabKind, num: string, r: Rng): void {
   const X0 = FACE_X[kind];
   const fx = fxOf(X0);
   const g = p.g;
@@ -643,7 +580,7 @@ function paintFace(p: Pen, kind: CabKind, num: string, r: Rng): void {
   void r;
 }
 
-function paintPanels(p: Pen, r: Rng): void {
+function paintPanels(p: LayerPen, r: Rng): void {
   const g = p.g;
   // Air-conditioner top: louvres either side of two fan grilles.
   {
@@ -727,7 +664,7 @@ function paintPanels(p: Pen, r: Rng): void {
   });
 }
 
-function paintAll(p: Pen): void {
+function paintAll(p: LayerPen): void {
   const r = new Rng(502);
   p.rect(0, 0, AW, AH, M.dark);
   paintStrip(p, r);
@@ -737,45 +674,6 @@ function paintAll(p: Pen): void {
   paintFace(p, "tail", "551", new Rng(4));
   paintFace(p, "end", "", new Rng(5));
   paintPanels(p, new Rng(6));
-}
-
-function layer(mode: Mode, scale: number): HTMLCanvasElement {
-  const { c, g } = canvas(Math.round(AW * scale), Math.round(AH * scale));
-  g.setTransform(scale, 0, 0, scale, 0, 0);
-  paintAll(new Pen(g, mode));
-  return c;
-}
-
-/** Tangent-space normals from a height canvas (v up, three.js convention). */
-function normalsFrom(height: HTMLCanvasElement, strength: number): HTMLCanvasElement {
-  const w = height.width;
-  const h = height.height;
-  const src = height.getContext("2d")!.getImageData(0, 0, w, h).data;
-  const { c, g } = canvas(w, h);
-  const out = g.createImageData(w, h);
-  const H = (x: number, y: number) => src[(Math.min(h - 1, Math.max(0, y)) * w + Math.min(w - 1, Math.max(0, x))) * 4] / 255;
-  for (let y = 0; y < h; y++)
-    for (let x = 0; x < w; x++) {
-      const dx = (H(x + 1, y) - H(x - 1, y)) * strength;
-      const dv = (H(x, y - 1) - H(x, y + 1)) * strength;
-      const l = Math.hypot(dx, dv, 1);
-      const i = (y * w + x) * 4;
-      out.data[i] = ((-dx / l) * 0.5 + 0.5) * 255;
-      out.data[i + 1] = ((-dv / l) * 0.5 + 0.5) * 255;
-      out.data[i + 2] = ((1 / l) * 0.5 + 0.5) * 255;
-      out.data[i + 3] = 255;
-    }
-  g.putImageData(out, 0, 0);
-  return c;
-}
-
-function tex(c: HTMLCanvasElement, srgb: boolean, name: string): Texture {
-  const t = new CanvasTexture(c);
-  t.colorSpace = srgb ? SRGBColorSpace : NoColorSpace;
-  t.minFilter = LinearMipmapLinearFilter;
-  t.anisotropy = 8;
-  t.name = name;
-  return t;
 }
 
 export interface LiveryMaps {
@@ -788,9 +686,9 @@ export interface LiveryMaps {
 /** The 500 type's maps (painted once per build; the stage disposes them with the place). */
 export function enoden500Maps(): LiveryMaps {
   return {
-    map: tex(layer("albedo", 1), true, "enoden500-albedo"),
-    orm: tex(layer("orm", 0.5), false, "enoden500-orm"),
-    normal: tex(normalsFrom(layer("height", 0.5), 3.0), false, "enoden500-normal"),
-    emissive: tex(layer("emit", 0.25), true, "enoden500-emission"),
+    map: pbrTexture(paintLayer(AW, AH, 1, "albedo", paintAll), true, "enoden500-albedo"),
+    orm: pbrTexture(paintLayer(AW, AH, 0.5, "orm", paintAll), false, "enoden500-orm"),
+    normal: pbrTexture(heightToNormal(paintLayer(AW, AH, 0.5, "height", paintAll), undefined, 3.0), false, "enoden500-normal"),
+    emissive: pbrTexture(paintLayer(AW, AH, 0.25, "emit", paintAll), true, "enoden500-emission"),
   };
 }

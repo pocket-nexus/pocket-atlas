@@ -47,13 +47,6 @@ export function local(lat: number, lon: number): { x: number; z: number } {
   return { x: (lon - GEO.lon) * M_LON, z: -(lat - GEO.lat) * M_LAT };
 }
 
-/** Unit vector for a compass bearing and elevation (degrees), in world axes (north = −Z). */
-export function bearing(azimuth: number, elevation = 0): Vector3 {
-  const a = (azimuth * Math.PI) / 180;
-  const e = (elevation * Math.PI) / 180;
-  return new Vector3(Math.sin(a) * Math.cos(e), Math.sin(e), -Math.cos(a) * Math.cos(e));
-}
-
 // ------------------------------------------------------------- lines
 
 /**
@@ -219,40 +212,17 @@ export const SECTION = {
   wallFence: 18.45,
   /** Kerb heights above the rail datum. */
   kerb: 0.15,
-  /** Beach sand at the wall foot (2.3 m T.P.), the waterline and the shelf below. */
+  /** Beach sand at the wall foot (2.3 m T.P.). */
   sandTop: -7.9,
-  waterline: 60,
 };
+
+/** Overhead line above the rail: the messenger wire and the contact wire the pantographs press against (m). */
+export const CATENARY = { messenger: 5.6, contact: 5.0 };
 
 /** Station platform (EN08) on the north side: OSM way 605969832. */
 export const PLATFORM = { west: -171.4, east: -108.0, height: 0.95, edge: -1.45, back: -4.6 };
 
 // --------------------------------------------------------- slope road
-
-/** 日坂: centreline from Route 134 over the crossing to the school (OSM 165632713). */
-export const SLOPE = new Line(
-  [
-    [-0.9, 11.2],
-    [-0.5, 5.0],
-    [0, 0],
-    [0.6, -6.7],
-    [1.6, -16.9],
-    [0.7, -26.7],
-    [-0.2, -36.5],
-    [-1.1, -46.3],
-    [-2.8, -58.3],
-    [-4.5, -70.2],
-    [-5.5, -84.7],
-    [-6.4, -99.1],
-    [-8.3, -114.0],
-    [-10.2, -128.9],
-    [-13.6, -158.0],
-    [-17.0, -187.4],
-    [-29.5, -202.1],
-    [-60, -215],
-  ],
-  [0, 0],
-);
 
 /** GSI 1 m survey along the slope road: [metres north, height above the rail]. */
 const SLOPE_PROFILE: [number, number][] = [
@@ -340,9 +310,9 @@ export const CROSSING = {
   strip: [-3.7, -2.2] as const,
   /** Deck panels along the road (s, metres south of the track centre). */
   deck: [-1.75, 1.75] as const,
-  /** Gate arm lines (s). */
-  gateNorth: -3.3,
-  gateSouth: 3.1,
+  /** Arm lines (s) of the east gate machines; the west gates stand a hand's width farther from the track. */
+  gateNorth: -3.62,
+  gateSouth: 3.42,
 };
 
 // ------------------------------------------------------------ terrain

@@ -1,9 +1,9 @@
 import { Color, DoubleSide, MeshBasicMaterial, MeshStandardMaterial, Vector2, type Texture } from "three";
 import type { Quality } from "../../../core/quality";
 import type { Baker, SurfaceMaps } from "../../shared/bake";
+import { glassMaterial } from "../../shared/glass";
+import { leafAtlas } from "./foliage";
 import * as SURF from "./surfaces";
-
-export type Tint = [number, number, number];
 
 function withMaps(maps: SurfaceMaps, params: ConstructorParameters<typeof MeshStandardMaterial>[0] = {}): MeshStandardMaterial {
   return new MeshStandardMaterial({
@@ -18,30 +18,6 @@ function withMaps(maps: SurfaceMaps, params: ConstructorParameters<typeof MeshSt
     ...params,
   });
 }
-
-/**
- * Plain paints of the place. The handheld pays for every distinct material
- * in every 32 m chunk it appears in, so props share this fixed set instead
- * of asking for colours one by one.
- */
-export const PAINT = {
-  white: [0xe9e8e2, 0.55, 0],
-  black: [0x141516, 0.55, 0],
-  brown: [0x4a3a2e, 0.7, 0],
-  galv: [0x9aa0a3, 0.42, 0.75],
-  steel: [0x6a6f72, 0.5, 0.6],
-  orange: [0xe0601a, 0.45, 0],
-  yellow: [0xe8b812, 0.5, 0],
-  beige: [0xc9bc9f, 0.6, 0],
-  rail: [0x6a4a36, 0.45, 0.5],
-  cable: [0x101112, 0.6, 0],
-  wood: [0x5e4632, 0.8, 0],
-  aluminium: [0xc4c7c8, 0.35, 0.8],
-  roofGrey: [0x3e4246, 0.6, 0.1],
-  roofRed: [0x7a3a28, 0.65, 0],
-  green: [0x2d6a3c, 0.6, 0],
-} as const;
-export type PaintName = keyof typeof PAINT;
 
 /**
  * Materials for the seaside crossing on a summer afternoon. Every lit
@@ -101,24 +77,6 @@ export class CoastLib {
   asphalt(): MeshStandardMaterial {
     return this.memo("asphalt", () => {
       const m = withMaps(this.surf("asphalt", SURF.ASPHALT, 1024, 4, 2), { normalScale: new Vector2(0.5, 0.5) });
-      m.userData.worldUV = true;
-      return m;
-    });
-  }
-
-  /** Road markings (white lines, the zebra, the orange centre line) follow the asphalt relief. */
-  roadPaint(kind: "white" | "orange"): MeshStandardMaterial {
-    return this.memo(`roadpaint-${kind}`, () => {
-      const a = this.surf("asphalt", SURF.ASPHALT, 1024, 4, 2);
-      const m = new MeshStandardMaterial({
-        color: kind === "white" ? 0xd9d8d0 : 0xd2721c,
-        normalMap: a.normalMap,
-        normalScale: new Vector2(0.8, 0.8),
-        roughness: 0.72,
-        polygonOffset: true,
-        polygonOffsetFactor: -2,
-        polygonOffsetUnits: -2,
-      });
       m.userData.worldUV = true;
       return m;
     });
@@ -192,8 +150,8 @@ export class CoastLib {
   /**
    * A baked surface material from a recipe in gfx/surfaces.ts, for builders
    * that need one this class does not name (the slope road, ledgestone).
-   * UVs in metres; `vertexColors` multiplies the albedo (meshes that use it
-   * must stay out of batching, which drops colours).
+   * UVs in metres (batching re-projects them from world space);
+   * `vertexColors` multiplies the albedo.
    */
   baked(key: string, glsl: string, o: { size: number; tile: number; bump: number; normal?: number; ao?: number; vertexColors?: boolean }): MeshStandardMaterial {
     return this.memo(key, () => {
@@ -201,6 +159,30 @@ export class CoastLib {
       const m = withMaps(this.surf(key, glsl, o.size, o.tile, o.bump), { normalScale: new Vector2(n, n), aoMapIntensity: o.ao ?? 0.85, vertexColors: o.vertexColors ?? false });
       m.userData.worldUV = true;
       return m;
+    });
+  }
+
+  /**
+   * Leaf cards (gfx/foliage.ts): alpha-tested, double-sided, vertex-coloured
+   * per plant, with a faint emission of the leaf colour so cards in shade or
+   * backlit by the sea read as translucent green.
+   */
+  foliage(): MeshStandardMaterial {
+    return this.memo("cutout-kamakura-foliage", () => {
+      const tex = leafAtlas();
+      return new MeshStandardMaterial({
+        map: tex,
+        alphaTest: 0.5,
+        // Web only (MSAA): smooths the cut edges; the pack keeps the plain alpha test.
+        alphaToCoverage: true,
+        side: DoubleSide,
+        roughness: 0.55,
+        metalness: 0,
+        vertexColors: true,
+        emissive: new Color(0.5, 0.7, 0.28),
+        emissiveMap: tex,
+        emissiveIntensity: 0.08,
+      });
     });
   }
 
@@ -224,7 +206,7 @@ export class CoastLib {
     });
   }
 
-  /** Painted facades of the hillside houses: one atlas of window bays (see gfx/art.ts). */
+  /** Painted facades of the hillside houses: one atlas of window bays (gfx/facade.ts), tinted by vertex colour. */
   facade(tex: Texture): MeshStandardMaterial {
     return this.memo("facade", () => new MeshStandardMaterial({ map: tex, roughness: 0.8, metalness: 0, vertexColors: true }));
   }
@@ -234,23 +216,14 @@ export class CoastLib {
     return this.memo("glass", () => new MeshStandardMaterial({ color: 0x10161b, roughness: 0.05, metalness: 0, envMapIntensity: 1.4 }));
   }
 
-  /** Clear glass balustrades and wind screens: thin, blended, a little green at the edges. */
+  /** Clear glass balustrades and wind screens: thin, a little green at the edges (shared/glass.ts). */
   glassRail(): MeshStandardMaterial {
-    return this.memo("glass-rail", () => {
-      const m = new MeshStandardMaterial({ color: 0x9fb8b2, roughness: 0.08, metalness: 0, transparent: true, opacity: 0.32, depthWrite: false, envMapIntensity: 1.2, side: DoubleSide });
-      return m;
-    });
+    return this.memo("glass-rail", () => glassMaterial({ color: 0x9fb8b2, roughness: 0.08, metalness: 0, opacity: 0.32, envMapIntensity: 1.2, side: DoubleSide }));
   }
 
   /** Curve-mirror face: polished stainless steel. */
   mirror(): MeshStandardMaterial {
     return this.memo("mirror", () => new MeshStandardMaterial({ color: 0xd8dcdf, roughness: 0.04, metalness: 1, envMapIntensity: 1.3 }));
-  }
-
-  /** A plain paint from the fixed set. */
-  paint(name: PaintName): MeshStandardMaterial {
-    const [hex, rough, metal] = PAINT[name];
-    return this.memo(`paint-${name}`, () => new MeshStandardMaterial({ color: hex, roughness: rough, metalness: metal }));
   }
 
   /** Plain PBR in any colour: only the people's clothing (one white base per roughness class, vertex-coloured). */
@@ -277,18 +250,6 @@ export class CoastLib {
         metalness: 0,
       }),
     );
-  }
-
-  /**
-   * A crossing lamp lens: dark red glass whose emission the crossing
-   * sequence drives (exported as a material track).
-   */
-  lamp(key: string, hex: number, peak: number): MeshStandardMaterial {
-    return this.memo(`lamp-${key}`, () => {
-      const m = new MeshStandardMaterial({ color: 0x2a0806, roughness: 0.2, metalness: 0, emissive: hex, emissiveIntensity: peak });
-      m.userData.peak = peak;
-      return m;
-    });
   }
 
   /** Light-emitting surface (unlit, HDR colour). */

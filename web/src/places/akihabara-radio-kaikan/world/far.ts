@@ -23,11 +23,29 @@ export function buildFar(w: AkibaWorld): void {
   towers(w);
 }
 
+/** The Sobu train: ten 19.5 m cars, 0.5 m apart. */
+const CARS = 10;
+const CAR_L = 19.5;
+const CAR_GAP = 0.5;
+
+/**
+ * Sobu Line timing on the place clock: the nose runs from x = `start` to
+ * `end` (−50 m plus the train's length) during the first `run` seconds of
+ * every `period`.
+ */
+export const SOBU_TRAIN = { period: 40, run: 20, start: -120, end: -50 + CARS * (CAR_L + CAR_GAP) };
+
+/** x of the Sobu train's nose at place time t (≥ 0), or null while it is out of view. */
+export function sobuTrainNose(t: number): number | null {
+  const u = t % SOBU_TRAIN.period;
+  return u < SOBU_TRAIN.run ? SOBU_TRAIN.start + ((SOBU_TRAIN.end - SOBU_TRAIN.start) * u) / SOBU_TRAIN.run : null;
+}
+
 /**
  * A ten-car Sobu Line local (stainless, canary-yellow band, lit saloon
  * windows) crossing the bridge eastbound. It crosses within the first 20 s
- * of every 40 s, so the device's 20 s loop shows one train per loop with
- * the train out of view at the seam.
+ * of every 40 s; the export records the first 20 s, so the device's 20 s
+ * loop shows one train per loop with the train out of view at the seam.
  */
 function sobuTrain(w: AkibaWorld): void {
   const lib = w.lib;
@@ -35,9 +53,9 @@ function sobuTrain(w: AkibaWorld): void {
   train.name = "sobu-train";
   train.userData.dynamic = true;
   w.root.add(train);
-  const cars = 10;
-  const L = 19.5;
-  const gap = 0.5;
+  const cars = CARS;
+  const L = CAR_L;
+  const gap = CAR_GAP;
   const body = lib.plain(0xbfc3c6, 0.3, 0.6);
   const band = lib.plain(0xd2a812, 0.55, 0);
   const lit = lib.glow(0xf2f4ff, 2.6);
@@ -68,12 +86,8 @@ function sobuTrain(w: AkibaWorld): void {
   w.mesh(mergeBoxes(windows), lit, 0, 0, 0, train);
   w.mesh(mergeBoxes(roofs), dark, 0, 0, 0, train);
   const yaw = -Math.atan(0.0963);
-  const length = cars * (L + gap);
-  const start = -120;
-  const end = -50 + length;
   w.update((_dt, t) => {
-    const u = t % 40;
-    const x = u < 20 ? start + ((end - start) * u) / 20 : start - 400;
+    const x = sobuTrainNose(t) ?? SOBU_TRAIN.start - 400;
     train.position.set(x, SOBU.deck, sobuZ(x) + 1.6);
     train.rotation.y = yaw;
   });
@@ -81,12 +95,12 @@ function sobuTrain(w: AkibaWorld): void {
 
 /** Line of the Sobu Line viaduct (OSM 181579925/26): z at x. */
 export const sobuZ = (x: number) => -47.3 + (x + 95) * 0.0963;
-const SOBU = { bottom: 13.4, deck: 14.6, parapet: 15.6, width: 11 };
+const SOBU = { bottom: 13.4, deck: 14.6, width: 11 };
 
 function sobuViaduct(w: AkibaWorld): void {
   const lib = w.lib;
-  const concrete = lib.concrete([0.7, 0.7, 0.68]);
-  // Plate girders painted pale grey-green; the deck slab is concrete.
+  const concrete = lib.concrete();
+  // Plate girders painted pale blue-grey; the deck slab is concrete.
   const girder = lib.panel([0.62, 0.66, 0.72]);
   const g = new Group();
   g.name = "sobu-viaduct";
@@ -145,7 +159,7 @@ function sobuViaduct(w: AkibaWorld): void {
 
 function eastViaduct(w: AkibaWorld): void {
   const lib = w.lib;
-  const concrete = lib.concrete([0.72, 0.72, 0.7]);
+  const concrete = lib.concrete();
   // Yamanote / Keihin-Tohoku tracks on a deck at the second level, x ≈ 64 … 92.
   w.mesh(box(28, 2.2, 260), concrete, 78, 9.1, -10);
   for (let z = -130; z < 120; z += 18) for (const x of [66, 78, 90]) w.mesh(box(1.4, 8, 1.4), concrete, x, 4, z);
@@ -155,7 +169,7 @@ function eastViaduct(w: AkibaWorld): void {
   w.mesh(box(0.1, 3.4, 18), lib.glow(0xf4f6ff, 1.4, false), 63.95, 1.8, 8);
 }
 
-/** Lit office floors: one tileable texture (8 bays × 8 floors per tile) shared by every far block. */
+/** Lit office floors: a tileable texture of 16 bays × 12 floors; the far blocks share three of them (seeds 1–3). */
 function officeTexture(seed: number) {
   const { c, g } = canvas(256, 256);
   paintOfficeGrid(g, 256, 256, 16, 12, seed, 0.72);
@@ -194,7 +208,7 @@ function towers(w: AkibaWorld): void {
     m.name = `office-${i}`;
     return m;
   });
-  // Akiba Crossfield: Akihabara Daibiru (31 F, 150 m) on its podium, and UDX to its west.
+  // Akiba Crossfield: Akihabara Daibiru (31 F, 150 m) with its podium block south of it, and UDX to its west.
   w.mesh(officeBox(36, 32, 22), mats[0], -2, 0, -103);
   w.mesh(officeBox(42, 150, 34), mats[1], 6, 0, -131);
   w.mesh(box(43, 3, 35), lib.plain(0x3a3f44, 0.5, 0.4), 6, 151.5, -131);

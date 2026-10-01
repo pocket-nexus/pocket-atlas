@@ -23,12 +23,6 @@ const DECK_U: [number, number] = [-3.95, 5.25];
 /** Sidewalk gap (the slope road joins Route 134). */
 const JUNCTION_U: [number, number] = [-6.2, 7.4];
 
-export function beachY(s: number): number {
-  if (s < 38) return SECTION.sandTop - (s - 18.8) * 0.012;
-  if (s < 80) return SECTION.sandTop - 0.23 - (s - 38) * 0.085;
-  return SECTION.sandTop - 0.23 - 42 * 0.085 - (s - 80) * 0.03;
-}
-
 export function buildCoast(w: KamakuraWorld): void {
   const lib = w.lib;
   const bag = new Bag();
@@ -74,9 +68,9 @@ export function buildCoast(w: KamakuraWorld): void {
     const s = (side * (SECTION.gauge + 0.065)) / 2;
     const us = stations(NEAR[0], 420, 4, 12, 40);
     const sh = 0.0325;
-    bag.add(P, w.tint(ribbon(TRACK, us, [s - sh, s + sh], () => 0), "rust"), false);
-    bag.add(P, w.tint(wallAlong(TRACK, us, s + sh, () => -0.16, () => 0, 1), "rust"), false);
-    bag.add(P, w.tint(wallAlong(TRACK, us, s - sh, () => -0.16, () => 0, -1), "rust"), false);
+    bag.add(w.equip.material, w.equip.solid(ribbon(TRACK, us, [s - sh, s + sh], () => 0), "rust"), false);
+    bag.add(w.equip.material, w.equip.solid(wallAlong(TRACK, us, s + sh, () => -0.16, () => 0, 1), "rust"), false);
+    bag.add(w.equip.material, w.equip.solid(wallAlong(TRACK, us, s - sh, () => -0.16, () => 0, -1), "rust"), false);
   }
 
   // ------------------------------------------------------------ crossing deck
@@ -102,13 +96,13 @@ export function buildCoast(w: KamakuraWorld): void {
     [JUNCTION_U[1] + 0.3, 200],
   ]) {
     const us = stations(a, b, 2, 4, 8);
-    bag.add(P, w.tint(ribbon(TRACK, us, [fenceS - 0.06, fenceS + 0.06], () => 1.1), "brown"));
+    bag.add(w.equip.material, w.equip.solid(ribbon(TRACK, us, [fenceS - 0.06, fenceS + 0.06], () => 1.1), "brown"));
     for (const [y0, y1] of [
       [0.95, 1.1],
       [0.45, 0.6],
     ]) {
-      bag.add(P, w.tint(wallAlong(TRACK, us, fenceS + 0.06, () => y0 + WALK_Y - 0.15, () => y1 + WALK_Y - 0.15, 1), "brown"));
-      bag.add(P, w.tint(wallAlong(TRACK, us, fenceS - 0.06, () => y0 + WALK_Y - 0.15, () => y1 + WALK_Y - 0.15, -1), "brown"));
+      bag.add(w.equip.material, w.equip.solid(wallAlong(TRACK, us, fenceS + 0.06, () => y0 + WALK_Y - 0.15, () => y1 + WALK_Y - 0.15, 1), "brown"));
+      bag.add(w.equip.material, w.equip.solid(wallAlong(TRACK, us, fenceS - 0.06, () => y0 + WALK_Y - 0.15, () => y1 + WALK_Y - 0.15, -1), "brown"));
     }
     const post = new BoxGeometry(0.13, 1.15, 0.13);
     const posts: BufferGeometry[] = [];
@@ -117,7 +111,7 @@ export function buildCoast(w: KamakuraWorld): void {
       TRACK.tangent(u, t);
       posts.push(place(post.clone(), p.setY(0.4 + WALK_Y - 0.15), Math.atan2(t.x, t.z)));
     }
-    bag.add(P, w.tint(merge(posts), "brown"));
+    bag.add(w.equip.material, w.equip.solid(merge(posts), "brown"));
   }
 
   // ------------------------------------------------------------ sidewalk, road, kerbs
@@ -212,7 +206,7 @@ export function buildCoast(w: KamakuraWorld): void {
   const STAIR: [number, number] = [-6.0, -3.6];
   const flight = beachSteps(STAIR[0], top[1]);
   bag.add(concrete, flight.steps);
-  bag.add(P, w.tint(flight.rail, "galv"));
+  bag.add(w.equip.material, w.equip.solid(flight.rail, "galv"));
   // Wall-top fence: galvanised posts every 2.5 m with three wire ropes, within 260 m.
   // Four-sided posts and caps (12 triangles a post): from the road and the slope they read round.
   const post = new CylinderGeometry(0.05, 0.05, 1.0, 4, 1, true).rotateY(Math.PI / 4);
@@ -226,7 +220,7 @@ export function buildCoast(w: KamakuraWorld): void {
     posts.push(place(post.clone(), new Vector3(p.x, WALK_Y + 0.5, p.z)));
     posts.push(place(cap.clone(), new Vector3(p.x, WALK_Y + 1.025, p.z)));
   }
-  bag.add(P, w.tint(merge(posts), "galv"));
+  bag.add(w.equip.material, w.equip.solid(merge(posts), "galv"));
   for (const h of [0.45, 0.7, 0.92]) {
     for (const [a, b] of [
       [-200, STAIR[0] - 0.2],
@@ -235,8 +229,8 @@ export function buildCoast(w: KamakuraWorld): void {
       const us = stations(a, b, 5, 10, 20);
       const s = SECTION.wallFence - 0.06;
       // A thin vertical ribbon reads as a wire rope from either side.
-      bag.add(P, w.tint(wallAlong(COAST, us, s, () => WALK_Y + h - 0.012, () => WALK_Y + h + 0.012, 1), "dark"), false);
-      bag.add(P, w.tint(wallAlong(COAST, us, s, () => WALK_Y + h - 0.012, () => WALK_Y + h + 0.012, -1), "dark"), false);
+      bag.add(w.equip.material, w.equip.solid(wallAlong(COAST, us, s, () => WALK_Y + h - 0.012, () => WALK_Y + h + 0.012, 1), "dark"), false);
+      bag.add(w.equip.material, w.equip.solid(wallAlong(COAST, us, s, () => WALK_Y + h - 0.012, () => WALK_Y + h + 0.012, -1), "dark"), false);
     }
   }
 

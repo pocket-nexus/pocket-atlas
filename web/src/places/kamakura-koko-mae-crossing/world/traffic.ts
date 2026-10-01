@@ -81,12 +81,10 @@ export function buildTraffic(w: KamakuraWorld): void {
   holder.userData.dynamic = true;
   const p = new Vector3();
   const tan = new Vector3();
-  let tris = 0;
   for (const veh of FLEET) {
     const node = w.group(0, 0, 0, 0, holder);
     node.name = veh.name;
     const geo = veh.geo();
-    tris += geo.getAttribute("position").count / 3;
     w.mesh(geo, mat, 0, 0, 0, node, { cast: false });
     const y = roadY(veh.lane);
     w.update((_dt, t) => {
@@ -98,6 +96,4 @@ export function buildTraffic(w: KamakuraWorld): void {
       node.rotation.y = Math.atan2(-tan.z, tan.x);
     });
   }
-  holder.userData.triangles = tris;
-  console.info(`[kamakura:traffic] ${Math.round(tris)} triangles in ${FLEET.length} meshes`);
 }
