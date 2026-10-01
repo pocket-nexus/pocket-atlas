@@ -270,17 +270,18 @@ fn part_widths(verts: &[Vertex], tris: &[[u32; 3]]) -> Vec<f32> {
         .collect()
 }
 
-/// LOD1 (≤ 6 cm off) and LOD2 (≤ 25 cm off), nested so each level only
-/// removes triangles: with `drop_parts`, parts narrower than the level's
-/// error go (window bars, rails, small boxes, which no edge collapse can
-/// reduce), then the rest simplifies to 40 % of the level above. A level is kept when it has
-/// at most two thirds of the triangles of the level above (a draw may have
-/// only the coarse one).
-pub fn lods(verts: &[Vertex], tris: &[[u32; 3]], locked: &[bool], drop_parts: bool) -> Vec<(Vec<[u32; 3]>, f32)> {
+/// Reduced levels at most `bounds` metres off (LOD1 ≤ 6 cm and LOD2 ≤ 25 cm
+/// near the middle of a place, coarser for far chunks), nested so each
+/// level only removes triangles: with `drop_parts`, parts narrower than the
+/// level's error go (window bars, rails, small boxes, which no edge collapse
+/// can reduce), then the rest simplifies to 40 % of the level above. A level
+/// is kept when it has at most two thirds of the triangles of the level
+/// above (a draw may have only the coarse one).
+pub fn lods(verts: &[Vertex], tris: &[[u32; 3]], locked: &[bool], drop_parts: bool, bounds: &[f32]) -> Vec<(Vec<[u32; 3]>, f32)> {
     let widths = if drop_parts { part_widths(verts, tris) } else { vec![f32::MAX; verts.len()] };
     let mut out: Vec<(Vec<[u32; 3]>, f32)> = Vec::new();
     let (mut prev, mut prev_err) = (tris.to_vec(), 0.0f32);
-    for bound in [0.06f32, 0.25] {
+    for &bound in bounds {
         let kept: Vec<[u32; 3]> = prev.iter().filter(|t| widths[t[0] as usize] > bound).copied().collect();
         let mut err = if kept.len() < prev.len() { bound } else { prev_err };
         let level = match simplify(verts, &kept, 0.4, bound - prev_err, locked) {

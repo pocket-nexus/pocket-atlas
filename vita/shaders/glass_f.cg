@@ -3,7 +3,8 @@
 // the normal. Blend: ONE, ONE_MINUS_SRC_ALPHA on colour; destination alpha
 // (eye distance) is preserved.
 //
-// Defines: LIGHTS, FOG, REFLECTION, BAKED (static diffuse lighting from the
+// Defines: LIGHTS, FOG, VISTA (the vista haze, its inscatter × coverage, in
+// place of the fog), REFLECTION, BAKED (static diffuse lighting from the
 // vertices; LIGHTS then counts moving lights only), LITE and FAR (bead
 // coverage only: no running drops, no bent normal, Schlick Fresnel).
 
@@ -30,6 +31,9 @@ half4 main(
     float3 vWorld : TEXCOORD0,
 #ifdef BAKED
     half3 vLight : TEXCOORD5,
+#endif
+#ifdef VISTA
+    half4 vHaze : TEXCOORD7,
 #endif
     half3 vNormal : TEXCOORD1) : COLOR
 {
@@ -108,7 +112,9 @@ half4 main(
 
     half cover = saturate((half)uBase.a + drop * (half)0.12);
     half3 color = diff * cover + spec * (1.0 + drop * (half)0.6);
-#ifdef FOG
+#if defined(VISTA)
+    color = color * vHaze.a + vHaze.rgb * cover;
+#elif defined(FOG)
     half f = (half)fogFactor(dist, uFog.w);
     color = lerp(color, (half3)uFog.rgb * cover, f);
 #endif

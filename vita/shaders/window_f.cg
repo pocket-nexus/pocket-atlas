@@ -3,7 +3,8 @@
 // plus the pane's own environment reflection. UV: floor = per-window seed,
 // frac = position across the pane; vertex colour RG = pane size / 16 m.
 //
-// Defines: FOG, REFLECTION.
+// Defines: FOG, VISTA (the vista haze from the vertex stage in place of the
+// fog), REFLECTION.
 
 #include "common.cgh"
 
@@ -26,6 +27,9 @@ float4 main(
     half3 vNormal : TEXCOORD1,
     half4 vTangent : TEXCOORD2,
     float2 vUv : TEXCOORD3,
+#ifdef VISTA
+    half4 vHaze : TEXCOORD7,
+#endif
     half4 vColor : COLOR0) : COLOR
 {
     float3 toEye = uEye.xyz - vWorld;
@@ -115,7 +119,9 @@ float4 main(
     float3 radiance = tex2Dlod(uEnv, float4(octUv(reflect(V, N)), 0.0, 0.3)).rgb * uEnvK.x;
     half2 dfg = DFGApprox(0.06, (half)dotNV);
     float3 color = inside + radiance * (0.04 * dfg.x + dfg.y);
-#ifdef FOG
+#if defined(VISTA)
+    color = color * vHaze.a + vHaze.rgb;
+#elif defined(FOG)
     color = lerp(color, uFog.rgb, fogFactor(dist, uFog.w));
 #endif
 #ifdef REFLECTION

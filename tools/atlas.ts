@@ -214,6 +214,12 @@ async function lint(): Promise<void> {
     ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "SUN_SPEC", "ALBEDO_MAP", "NORMAL_MAP", "ORM_MAP", "FOG"]], ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "ALPHA_TEST", "ALBEDO_MAP", "EMISSION_MAP", "FOG"]],
     ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "FAR", "ALBEDO_MAP", "FOG"]], ["shadow_f.cg", []], ["shadow_f.cg", ["ALPHA_TEST"]], ["fill_f.cg", []], ["sky_day_f.cg", []], ["sky_day_f.cg", ["TWILIGHT"]],
     ["globe_v.cg", []], ["globe_f.cg", []], ["marker_v.cg", []], ["marker_f.cg", []], ["ui_v.cg", []], ["ui_f.cg", []], ["ui_f.cg", ["TEX"]], ["text_v.cg", []], ["text_f.cg", []], ["surface_v.cg", ["WAVES"]], ["water_f.cg", ["SUN", "FOG"]], ["water_f.cg", []], ["water_f.cg", ["SUN", "FOG", "SHALLOW"]], ["surface_v.cg", ["WAVES", "COLOR"]], ["surface_v.cg", ["FLAT"]], ["surface_v.cg", ["BAKED", "FLAT"]],
+    // Light fields and the vista haze (dusk-vista places).
+    ["lights_v.cg", []], ["lights_v.cg", ["VISTA"]], ["lights_f.cg", []],
+    ["surface_v.cg", ["BAKED", "VISTA"]], ["surface_v.cg", ["VISTA", "COLOR", "TANGENT"]], ["surface_v.cg", ["SKINNED", "MAX_BONES=24", "VISTA", "VERTEX_LIGHTS=2"]], ["surface_v.cg", ["WAVES", "VISTA"]], ["surface_v.cg", ["VISTA", "FLAT"]],
+    ["standard_f.cg", ["LIGHTS=0", "BAKED", "FAR", "ALBEDO_MAP", "VISTA"]], ["standard_f.cg", ["LIGHTS=1", "BAKED", "ALBEDO_MAP", "NORMAL_MAP", "ORM_MAP", "EMISSION_MAP", "VISTA"]],
+    ["standard_f.cg", ["LIGHTS=2", "BAKED", "LITE", "WET", "PLANAR", "ALBEDO_MAP", "VISTA"]], ["standard_f.cg", ["LIGHTS=0", "VERTEX_LIGHTS", "ALBEDO_MAP", "VISTA", "BLEND"]],
+    ["unlit_f.cg", ["ALBEDO_MAP", "VERTEX_COLOR", "VISTA"]], ["glass_f.cg", ["LIGHTS=0", "BAKED", "VISTA"]], ["window_f.cg", ["VISTA"]], ["water_f.cg", ["VISTA"]],
     ["post_v.cg", []], ["post_v.cg", ["GRAIN"]], ["haze_f.cg", ["HAZE_LIGHTS=2"]], ["haze_f.cg", ["HAZE_LIGHTS=6"]], ["prefilter_f.cg", []], ["down_f.cg", []], ["up_f.cg", []], ["composite_f.cg", []], ["composite_f.cg", ["HAZE", "BLOOM"]], ["blit_f.cg", []],
   ];
   const tmp = resolve(ROOT, ".pocket-build/atlas/lint");

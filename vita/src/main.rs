@@ -198,6 +198,8 @@ fn apply_control(v: &Value, rig: &mut Rig, r: &mut Renderer, ctl: &mut Control, 
     s.detail_m = num("detailM").or(s.detail_m);
     s.lod_pixels = num("lodPixels").or(s.lod_pixels);
     s.cull_size = num("cullSize").or(s.cull_size);
+    s.field_min = num("fieldMin").or(s.field_min);
+    s.field_max = num("fieldMax").or(s.field_max);
     // Pins the governor's quality step; `hold` keeps it there.
     if let Some(n) = v["settings"]["step"].as_u64() {
         r.governor.step = (n as usize).min(r.profile.steps.len() - 1);
@@ -778,7 +780,7 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                 swap_ms = swap_ms * 0.9 + t_swap.elapsed().as_secs_f32() * 1000.0 * 0.1;
 
                 let st = &renderer.stats;
-                let pass = |p: &frame::PassStats| json!({"draws": p.draws, "tris": p.tris, "lod": p.lod, "culled": p.culled, "missing": p.missing, "lights": p.lights, "unbaked": p.unbaked});
+                let pass = |p: &frame::PassStats| json!({"draws": p.draws, "tris": p.tris, "lod": p.lod, "culled": p.culled, "missing": p.missing, "lights": p.lights, "unbaked": p.unbaked, "fields": p.fields, "points": p.points});
                 let s = &renderer.settings;
                 // Main-pass triangles by material, heaviest first (profiling).
                 let mut by: Vec<(usize, u32)> = renderer.stats.by_material.iter().copied().enumerate().filter(|x| x.1 > 0).collect();

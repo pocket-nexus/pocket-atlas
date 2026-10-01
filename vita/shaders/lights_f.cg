@@ -1,0 +1,14 @@
+// Light field sprite: the light's value over a (1 − r²)² profile (r = 0 at
+// the centre, 1 at the sprite's edge), added to the scene; the blend keeps
+// the destination's alpha (the eye distance). POINTCOORD is the position
+// across the sprite (0..1), generated under the POINT_01UV polygon mode
+// (SceShaccCg rejects SPRITECOORD; without that mode it reads 0).
+
+float4 main(
+    half3 vColor : TEXCOORD0,
+    float2 vCoord : POINTCOORD) : COLOR
+{
+    half2 q = (half2)(vCoord * 2.0 - 1.0);
+    half f = saturate((half)1.0 - dot(q, q));
+    return float4(vColor * (f * f), 0.0);
+}

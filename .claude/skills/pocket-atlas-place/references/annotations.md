@@ -14,6 +14,7 @@ The web exporter (`web/src/places/shared/export.ts`) writes glTF 2.0 with these 
 | `products` | shop stock from a packaging atlas | `lit`, `packMix`, `pack` |
 | `tower` | distant lattice, additive | — |
 | `water` | `Water`, one draw, not chunked [Coast places] | normal map = wave texture; `waves: [[repeatsPerMetre, scrollX, scrollZ] ×2]` (required), `body: [r, g, b]` (required), `shallow` (vertex colour red blends toward it), `mask` (wave-face tilt toward the eye), `distanceRoughness`; `roughness` = GGX α near the camera; `normalScale.x` = slope scale |
+| `lights` | `Lights`: a light field, one vertex per light, additive point sprites [Dusk vistas] | on a `THREE.Points` material: `minPixels`, `maxPixels` (pixels of a 272-pixel-high frame), `gain`, `depthPull` (per km of distance, default 0.012), `loop` (s, default: the exported loop). Point attributes: `position`, `color` (COLOR_0, linear, largest channel 1), `light` → `_LIGHT` (intensity, radius m, phase 0–1, twinkle 0–1), optional `path` → `_PATH` (dx, dy, dz m, whole cycles per loop) and `blink` → `_BLINK` (whole cycles per loop, duty) |
 
 Any material may carry `frames`/`scroll` (e.g. surf strips): `UvAnim` applies to every kind.
 
@@ -31,3 +32,4 @@ Any material may carry `frames`/`scroll` (e.g. surf strips): `UvAnim` applies to
 - `post` — `tone` (`agx` or `aces`), `exposure`, `contrast`, `saturation`, `lift`, `gain`, `vignette`, `grain`, `bloom {threshold, smoothing, intensity}`.
 - `camera.shots` — named `from`/`to` keyframes (`pos`, `target`, `fov`) and durations; the device's cinematic rig plays them, `tools/atlas.ts` measures them by name.
 - Haze: night streets with `fogLights`; other kinds leave it out (no haze pass).
+- `haze` with an `inversion` — the vista haze [Dusk vistas]: `density` (ρ0, 1/m), `inversion` (H, place y), `scale` (s, m), `gain`, `glow: [r, g, b]`; replaces the uniform fog on every material that has fog. Without `inversion`, `haze` is the night streets' lit haze.

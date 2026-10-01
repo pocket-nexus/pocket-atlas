@@ -60,14 +60,60 @@ fn pc_of(raw: &gltf::json::Extras) -> Value {
 use extras::{f, v3};
 use pc::color::encode8 as srgb8;
 
-/// Where static geometry is chunked: a grid cell (32 m near the middle,
-/// 256 m beyond), or one chunk for the whole primitive (open water: its cost
-/// is per pixel, and chunks only add draws).
+/// Where static geometry is chunked: a grid cell of the given edge (m),
+/// or one chunk for the whole primitive (open water: its cost is per pixel,
+/// and chunks only add draws).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum Cell {
-    Grid(i32, i32),
+    Grid(u32, i32, i32),
     Whole,
 }
+
+/// Cell edge for a point `r` metres (the larger of |x| and |z|) from the
+/// origin: `near` within 140 m, 256 m to 1 km, then the power of two at or
+/// below r (1 km cells from 1 to 2 km, 2 km cells from 2 to 4 km, … up to
+/// 16 km), so a chunk covers a similar angle from the shots near the origin
+/// and a 45 km vista stays a few draws per material per octave of distance.
+fn cell_size(r: f32, near: f32) -> f32 {
+    if r <= 140.0 {
+        near
+    } else if r <= 1024.0 {
+        256.0
+    } else {
+        r.log2().floor().exp2().min(16384.0)
+    }
+}
+
+/// The cell of a point; edges no smaller than `min`.
+fn cell_at(p: Vec3, near: f32, min: f32) -> Cell {
+    let size = cell_size(p.x.abs().max(p.z.abs()), near).max(min);
+    Cell::Grid(size as u32, (p.x / size).floor() as i32, (p.z / size).floor() as i32)
+}
+
+/// A cell's nearest distance from the origin (the larger of |x| and |z|).
+fn cell_distance(cell: Cell) -> f32 {
+    match cell {
+        Cell::Grid(size, ix, iz) => {
+            let near = |i: i32| {
+                let (lo, hi) = (i as f32 * size as f32, (i + 1) as f32 * size as f32);
+                if lo <= 0.0 && hi >= 0.0 { 0.0 } else { lo.abs().min(hi.abs()) }
+            };
+            near(ix).max(near(iz))
+        }
+        Cell::Whole => 0.0,
+    }
+}
+
+/// LOD errors (m) for a chunk: 6 and 25 cm within 1 km of the origin;
+/// beyond, three levels that grow with the chunk's distance r: 3·10⁻⁴ r
+/// (a pixel of the 5° telephoto shots at 480×272), then ×4 and ×16 (a
+/// pixel of a 40° view at ×16), so far terrain thins out as it recedes
+/// and the renderer's projected-error choice still holds a telephoto.
+fn lod_bounds(cell: Cell) -> Vec<f32> {
+    let r = cell_distance(cell);
+    if r < 1024.0 { vec![0.06, 0.25] } else { vec![3e-4 * r, 1.2e-3 * r, 4.8e-3 * r] }
+}
+
 
 // ------------------------------------------------------------------ builder
 
@@ -105,6 +151,9 @@ struct Cook<'a> {
     mat_keys: HashMap<usize, u32>,
     material_names: HashMap<String, u32>,
     log: Vec<String>,
+    /// The place's loop (s): what light fields repeat over unless their
+    /// material names its own.
+    period: f32,
 }
 
 impl<'a> Cook<'a> {
@@ -180,10 +229,12 @@ impl<'a> Cook<'a> {
             Some("products") => pc::Kind::Products,
             Some("tower") => pc::Kind::Tower,
             Some("water") => pc::Kind::Water,
+            Some("lights") => pc::Kind::Lights,
             _ if m.unlit() => pc::Kind::Unlit,
             _ => pc::Kind::Standard,
         };
         let blend = match m.alpha_mode() {
+            _ if kind == pc::Kind::Lights => pc::Blend::Additive,
             gltf::material::AlphaMode::Blend if kind == pc::Kind::Glass => pc::Blend::Premultiplied,
             gltf::material::AlphaMode::Blend => pc::Blend::Alpha,
             _ => pc::Blend::Opaque,
@@ -231,6 +282,7 @@ impl<'a> Cook<'a> {
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0) as f32;
         let water = (kind == pc::Kind::Water).then(|| extras::water(&x, m.name().unwrap_or("material")));
+        let lights = (kind == pc::Kind::Lights).then(|| extras::light_field(&x, self.period));
         let name = m.name().unwrap_or("material").to_string();
         let out = pc::Material {
             name: name.clone(),
@@ -261,6 +313,7 @@ impl<'a> Cook<'a> {
             emissive_track: None,
             uv_anim,
             water,
+            lights,
         };
         self.materials.push(out);
         let i = (self.materials.len() - 1) as u32;
@@ -413,6 +466,47 @@ fn read_primitive(
     Some((verts, tris, material))
 }
 
+/// A POINTS primitive of a light field (`kind: "lights"`): every point in
+/// the place frame, with its custom attributes (`_LIGHT`, `_PATH`, `_BLINK`).
+/// Other point primitives are skipped.
+fn read_light_field(cook: &mut Cook, prim: &gltf::Primitive, xf: Mat4, moving: bool, out: &mut Vec<(u32, pc::LightPoint)>) {
+    let (material, _) = cook.material(prim.material());
+    let name = cook.materials[material as usize].name.clone();
+    if cook.materials[material as usize].kind != pc::Kind::Lights {
+        cook.log.push(format!("skipped POINTS of {name}: not a light field"));
+        return;
+    }
+    let reader = prim.reader(|b| Some(&cook.buffers[b.index()]));
+    let Some(pos) = reader.read_positions() else { return };
+    let pos: Vec<Vec3> = pos.map(Vec3::from).collect();
+    let colors: Vec<[f32; 3]> = reader.read_colors(0).map(|c| c.into_rgb_f32().collect()).unwrap_or_else(|| vec![[1.0; 3]; pos.len()]);
+    let custom = |key: &str| {
+        prim.get(&gltf::Semantic::Extras(key.into())).map(|a| (accessor_f32(cook.doc, cook.buffers, a.index()), a.dimensions().multiplicity()))
+    };
+    let (light, path, blink) = (custom("LIGHT"), custom("PATH"), custom("BLINK"));
+    if light.is_none() {
+        cook.log.push(format!("light field {name}: no _LIGHT attribute (every light dark)"));
+    }
+    if moving {
+        cook.log.push(format!("light field {name}: under a moving node, cooked at its rest pose"));
+    }
+    // Paths turn with the node; radii stay as authored (the web's sprites
+    // do not scale them either).
+    let lin = Mat3::from_mat4(xf);
+    let n = pos.len();
+    let blinks = blink.as_ref().map(|(v, m)| (0..n).filter(|i| v.get(i * m).copied().unwrap_or(0.0) > 0.0).count()).unwrap_or(0);
+    for (i, p) in pos.iter().enumerate() {
+        fn at(c: &Option<(Vec<f32>, usize)>, i: usize) -> Option<&[f32]> {
+            c.as_ref().and_then(|(v, m)| v.get(i * m..i * m + m))
+        }
+        let mut l = extras::light_point(xf.transform_point3(*p).to_array(), colors[i], at(&light, i), at(&path, i), at(&blink, i));
+        l.path = (lin * Vec3::from(l.path)).to_array();
+        out.push((material, l));
+    }
+    let moving_n = path.as_ref().map(|(v, m)| (0..n).filter(|i| (0..3).any(|k| v.get(i * m + k).copied().unwrap_or(0.0) != 0.0)).count()).unwrap_or(0);
+    cook.log.push(format!("light field {name}: {n} lights ({moving_n} moving, {blinks} blinking)"));
+}
+
 fn node_matrix(n: &gltf::Node) -> Mat4 {
     Mat4::from_cols_array_2d(&n.transform().matrix())
 }
@@ -551,11 +645,18 @@ fn main() {
         mat_keys: HashMap::new(),
         material_names: HashMap::new(),
         log: Vec::new(),
+        period: {
+            let t = &sx["tracks"];
+            let p = f(t, "frames", 0.0) / f(t, "fps", 15.0).max(1e-3);
+            if p > 0.0 { p } else { 120.0 }
+        },
     };
 
     // ---- walk the scene
     let mut prims: Vec<Prim> = Vec::new();
     let mut stock: Vec<Stock> = Vec::new();
+    // Light fields: (material, light) in the place frame.
+    let mut field: Vec<(u32, pc::LightPoint)> = Vec::new();
     let mut lights: Vec<(usize, Mat4, gltf::khr_lights_punctual::Light)> = Vec::new();
     let mut stack: Vec<(gltf::Node, Mat4)> = scene.nodes().map(|n| (n, Mat4::IDENTITY)).collect();
     let mut world_of: HashMap<usize, Mat4> = HashMap::new();
@@ -570,6 +671,10 @@ fn main() {
             let inst = node.extensions().and_then(|e| e.get("EXT_mesh_gpu_instancing")).and_then(|e| e.get("attributes")).cloned();
             let skin = node.skin().map(|s| s.index());
             for prim in mesh.primitives() {
+                if prim.mode() == gltf::mesh::Mode::Points {
+                    read_light_field(&mut cook, &prim, w, is_moving, &mut field);
+                    continue;
+                }
                 if let Some(attrs) = &inst {
                     // Expand GPU instancing into static geometry (shop stock).
                     let get = |k: &str| attrs.get(k).and_then(|v| v.as_u64()).map(|i| accessor_f32(&doc, &buffers, i as usize));
@@ -783,6 +888,7 @@ fn main() {
             emissive_track: None,
             uv_anim: None,
             water: None,
+            lights: None,
         };
         cook.materials.push(mat);
         let mi = (cook.materials.len() - 1) as u32;
@@ -1006,12 +1112,6 @@ fn main() {
     // shares with another chunk of the same primitive (locked in its LODs).
     type Bucket = (Vec<Vertex>, Vec<[u32; 3]>, HashSet<[u32; 3]>);
     let mut static_buckets: BTreeMap<(u32, Cell, bool, bool), Bucket> = BTreeMap::new();
-    let cell_of = |p: Vec3, cell: f32| -> Cell {
-        let far = p.x.abs() > 140.0 || p.z.abs() > 140.0;
-        let size = if far { 256.0 } else { cell };
-        let o = if far { 1000 } else { 0 };
-        Cell::Grid((p.x / size).floor() as i32 + o, (p.z / size).floor() as i32 + o)
-    };
     let mut scene_min = Vec3::splat(f32::MAX);
     let mut scene_max = Vec3::splat(f32::MIN);
     for p in &prims {
@@ -1024,7 +1124,7 @@ fn main() {
         let cells: Vec<Cell> = p
             .tris
             .iter()
-            .map(|t| if water { Cell::Whole } else { cell_of((p.verts[t[0] as usize].pos + p.verts[t[1] as usize].pos + p.verts[t[2] as usize].pos) / 3.0, a.cell) })
+            .map(|t| if water { Cell::Whole } else { cell_at((p.verts[t[0] as usize].pos + p.verts[t[1] as usize].pos + p.verts[t[2] as usize].pos) / 3.0, a.cell, 0.0) })
             .collect();
         // Edges (by position, across attribute seams) whose triangles land in
         // different chunks.
@@ -1058,14 +1158,14 @@ fn main() {
     }
     let mats = cook.materials.clone();
     #[allow(clippy::too_many_arguments)]
-    let emit = |verts: &[Vertex], tris: &[[u32; 3]], locks: Option<&HashSet<[u32; 3]>>, material: u32, layout: pc::VertexLayout, node: Option<u32>, skin: Option<u32>, no_reflect: bool, blobs: &mut Blobs, draws: &mut Vec<pc::Draw>| {
+    let emit = |verts: &[Vertex], tris: &[[u32; 3]], locks: Option<&HashSet<[u32; 3]>>, bounds: &[f32], material: u32, layout: pc::VertexLayout, node: Option<u32>, skin: Option<u32>, no_reflect: bool, blobs: &mut Blobs, draws: &mut Vec<pc::Draw>| {
         // Whole thin parts may vanish at distance only from static lit surfaces
         // without emission: signs and lamps stay, and people keep their limbs.
         let m = &mats[material as usize];
         let drop_parts = locks.is_some() && m.kind == pc::Kind::Standard && m.emissive.iter().all(|&e| e <= 0.0) && m.emission.is_none();
         for (v, t) in geometry::split(verts, tris) {
             let locked: Vec<bool> = v.iter().map(|v| locks.is_some_and(|l| l.contains(&geometry::pos_bits(v.pos)))).collect();
-            let b = geometry::build(&v, &t, layout, geometry::lods(&v, &t, &locked, drop_parts));
+            let b = geometry::build(&v, &t, layout, geometry::lods(&v, &t, &locked, drop_parts, bounds));
             push_draw(b, material, layout, node, skin, no_reflect, blobs, draws);
         }
     };
@@ -1105,7 +1205,7 @@ fn main() {
             }
         }
     };
-    for ((material, _, no_reflect, baked), (verts, tris, locks)) in &static_buckets {
+    for ((material, cell, no_reflect, baked), (verts, tris, locks)) in &static_buckets {
         // Weld identical vertices inside the bucket.
         let mut map: HashMap<[u32; 11], u32> = HashMap::new();
         let mut uv: Vec<Vertex> = Vec::new();
@@ -1135,7 +1235,7 @@ fn main() {
             ut.push(r);
         }
         let layout = if *baked { pc::VertexLayout::Baked } else { pc::VertexLayout::Static };
-        emit(&uv, &ut, Some(locks), *material, layout, None, None, *no_reflect, &mut cook.blobs, &mut draws);
+        emit(&uv, &ut, Some(locks), &lod_bounds(*cell), *material, layout, None, None, *no_reflect, &mut cook.blobs, &mut draws);
     }
     emit_stock(&mut cook.blobs, &mut draws);
     let static_draws = draws.len();
@@ -1146,9 +1246,59 @@ fn main() {
         let skin = p.skin.map(|s| skin_ids[&s]);
         let node = if skin.is_none() { node_ids.get(&p.mesh_node).copied() } else { None };
         let layout = if skin.is_some() { pc::VertexLayout::Skinned } else { pc::VertexLayout::Static };
-        emit(&p.verts, &p.tris, None, p.material, layout, node, skin, false, &mut cook.blobs, &mut draws);
+        emit(&p.verts, &p.tris, None, &lod_bounds(Cell::Whole), p.material, layout, node, skin, false, &mut cook.blobs, &mut draws);
     }
     let _ = &prims.iter().map(|p| p.world).count();
+
+    // ---- light fields: one vertex per light, by cell (no smaller than
+    // 512 m: a light costs one vertex, a draw much more), at most
+    // `LightPoint::PER_DRAW` per draw
+    let mut field_cells: BTreeMap<(u32, Cell), Vec<pc::LightPoint>> = BTreeMap::new();
+    for (material, l) in &field {
+        let (lo, hi) = l.bounds();
+        field_cells.entry((*material, cell_at((Vec3::from(lo) + Vec3::from(hi)) * 0.5, a.cell, 512.0))).or_default().push(*l);
+    }
+    let field_draws = draws.len();
+    for ((material, _), lights) in &field_cells {
+        for chunk in lights.chunks(pc::LightPoint::PER_DRAW) {
+            let (mut plo, mut phi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+            let (mut lo, mut hi) = (plo, phi);
+            for l in chunk {
+                plo = plo.min(Vec3::from(l.position));
+                phi = phi.max(Vec3::from(l.position));
+                let (a, b) = l.bounds();
+                lo = lo.min(Vec3::from(a));
+                hi = hi.max(Vec3::from(b));
+            }
+            let (center, half) = ((plo + phi) * 0.5, ((phi - plo) * 0.5).max(Vec3::splat(1e-3)));
+            let mut bytes = Vec::with_capacity(chunk.len() * pc::LightPoint::STRIDE);
+            for l in chunk {
+                l.encode(center.to_array(), half.to_array(), &mut bytes);
+            }
+            scene_min = scene_min.min(lo);
+            scene_max = scene_max.max(hi);
+            draws.push(pc::Draw {
+                material: *material,
+                layout: pc::VertexLayout::Lights,
+                vertices: Blobs::push(&mut cook.blobs.geom, &bytes, 16),
+                vertex_count: chunk.len() as u32,
+                indices: pc::Range::default(),
+                index_count: chunk.len() as u32,
+                pos_offset: center.to_array(),
+                pos_scale: half.to_array(),
+                uv_offset: [0.0; 2],
+                uv_scale: [1.0; 2],
+                min: lo.to_array(),
+                max: hi.to_array(),
+                node: None,
+                skin: None,
+                no_reflect: true,
+                cast_shadow: false,
+                lods: Vec::new(),
+            });
+        }
+    }
+    let field_draws = draws.len() - field_draws;
 
     // ---- fog lights and scalar tracks
     let tracks = sx.get("tracks").cloned().unwrap_or(Value::Null);
@@ -1290,7 +1440,7 @@ fn main() {
     };
     println!("effect textures in {} ms", t_fx.elapsed().as_millis());
 
-    let tri_count: u32 = draws.iter().map(|d| d.index_count / 3).sum();
+    let tri_count: u32 = draws.iter().filter(|d| d.layout != pc::VertexLayout::Lights).map(|d| d.index_count / 3).sum();
     let stats = json!({
         "draws": draws.len(),
         "staticDraws": static_draws,
@@ -1301,6 +1451,8 @@ fn main() {
         "animatedNodes": nodes.iter().filter(|n| n.track.is_some()).count(),
         "skins": skins.len(),
         "lights": out_lights.len(),
+        "fieldLights": field.len(),
+        "fieldDraws": field_draws,
         "fogLights": fog_lights.len(),
         "textureBytes": cook.blobs.tex.len(),
         "geometryBytes": cook.blobs.geom.len(),
@@ -1428,6 +1580,7 @@ fn main() {
         sun,
         day_sky,
         post,
+        vista_haze: extras::vista_haze(&sx["haze"]),
         stats: stats.clone(),
     };
     let meta_json = serde_json::to_vec(&meta).unwrap();
@@ -1442,4 +1595,33 @@ fn main() {
     println!("{}", serde_json::to_string_pretty(&stats).unwrap());
     println!("wrote {} ({:.1} MiB)", a.output.display(), pack.len() as f64 / 1048576.0);
     let _ = Vec4::ZERO;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cells_grow_with_distance() {
+        // 32 m near the middle, 256 m to 1 km, then octaves up to 16 km.
+        assert_eq!(cell_at(Vec3::new(100.0, 0.0, -20.0), 32.0, 0.0), Cell::Grid(32, 3, -1));
+        assert_eq!(cell_at(Vec3::new(-300.0, 0.0, 900.0), 32.0, 0.0), Cell::Grid(256, -2, 3));
+        assert_eq!(cell_at(Vec3::new(1500.0, 0.0, 0.0), 32.0, 0.0), Cell::Grid(1024, 1, 0));
+        assert_eq!(cell_at(Vec3::new(0.0, 0.0, 30_000.0), 32.0, 0.0), Cell::Grid(16384, 0, 1));
+        assert_eq!(cell_at(Vec3::new(0.0, 0.0, 45_000.0), 32.0, 0.0), Cell::Grid(16384, 0, 2));
+        // Light fields: no cell under 512 m.
+        assert_eq!(cell_at(Vec3::new(100.0, 0.0, 100.0), 32.0, 512.0), Cell::Grid(512, 0, 0));
+    }
+
+    #[test]
+    fn far_chunks_get_coarser_levels() {
+        assert_eq!(lod_bounds(Cell::Grid(256, 3, -4)), vec![0.06, 0.25]);
+        assert_eq!(lod_bounds(Cell::Whole), vec![0.06, 0.25]);
+        // A 2 km cell from 4 to 6 km east: errors from its near edge.
+        assert_eq!(cell_distance(Cell::Grid(2048, 2, -1)), 4096.0);
+        let b = lod_bounds(Cell::Grid(2048, 2, -1));
+        assert!((b[0] - 1.2288).abs() < 1e-4 && (b[2] / b[0] - 16.0).abs() < 1e-4, "{b:?}");
+        // A cell straddling an axis is as near as its other coordinate.
+        assert_eq!(cell_distance(Cell::Grid(1024, -1, 1)), 1024.0);
+    }
 }
