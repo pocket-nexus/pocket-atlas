@@ -210,9 +210,7 @@ fn apply_control(v: &Value, rig: &mut Rig, r: &mut Renderer, ctl: &mut Control, 
         View { pos: Vec3::new(f(p, 0), f(p, 1), f(p, 2)), target: Vec3::new(f(t, 0), f(t, 1), f(t, 2)), fov_y: v["view"]["fov"].as_f64().unwrap_or(45.0) as f32 }
     });
     if let Some(n) = v["shot"].as_u64() {
-        for _ in 0..n {
-            rig.next_shot();
-        }
+        rig.set_shot(n as usize);
     }
 }
 
