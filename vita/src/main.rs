@@ -400,7 +400,7 @@ unsafe fn run_atlas(app: &mut App, select: Option<String>) -> Next {
         }
         let ui_ms = t_ui.elapsed().as_secs_f32() * 1000.0;
         if app.prefs.hud {
-            text(app.font, 12, 540, 0x90ff_ffff, 0.6, &format!("{:.1} fps  {:.1} ms", 1000.0 / frame_ms.max(0.1), frame_ms));
+            text(app.font, 12, 18, 0x90ff_ffff, 0.6, &format!("{:.1} fps  {:.1} ms", 1000.0 / frame_ms.max(0.1), frame_ms));
         }
         if let Some(e) = app.gpu.errors.first().or(render_error.as_ref()) {
             text(app.font, 12, 24, 0xff60_60ff, 0.75, &e.chars().take(110).collect::<String>());
@@ -625,6 +625,12 @@ unsafe fn run_place(app: &mut App, id: &str, name: &str, first: Option<Value>) -
                         continue;
                     }
                     apply_control(&v, &mut rig, &mut renderer, &mut ctl, &mut prefs.hud);
+                    if let Some(open) = v["sheet"].as_bool() {
+                        sheet.open = open;
+                    }
+                    if let Some(row) = v["sheetRow"].as_u64() {
+                        sheet.focus(row as usize);
+                    }
                 }
                 if let Some(n) = switch {
                     break n;
@@ -703,9 +709,9 @@ unsafe fn run_place(app: &mut App, id: &str, name: &str, first: Option<Value>) -
                 }
 
                 // ------------------------------------------------------ render
-                // Profiling serializes the GPU; its frame times would force the
-                // lowest resolution.
-                if !renderer.timeline.on {
+                // Profiling serializes the GPU, and the settings sheet adds its
+                // own cost: neither frame time steers the governor.
+                if !renderer.timeline.on && !sheet.visible() {
                     let p = renderer.profile;
                     renderer.governor.feedback(p, frame_ms);
                 }

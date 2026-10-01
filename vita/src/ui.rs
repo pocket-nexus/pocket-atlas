@@ -1,7 +1,8 @@
 //! Interface drawing over the presented frame, in display pixels (960×544,
 //! top-left origin): rounded rectangles with a vertical gradient, a border
 //! and a soft edge, images in them (`ui_v.cg` / `ui_f.cg`), and text in the
-//! system font (vita2d PGF). Colours are display-encoded and premultiplied.
+//! system's vector fonts (PVF: Latin, Japanese, Chinese and Korean faces).
+//! Colours are display-encoded and premultiplied.
 
 use pocket3d_gxm::mem::{Arena, Kind};
 use pocket3d_gxm::target::Msaa;
@@ -37,14 +38,47 @@ pub fn accent(c: [f32; 3], a: f32) -> [f32; 4] {
     [s(c[0]) * a, s(c[1]) * a, s(c[2]) * a, a]
 }
 
-/// Whether the system font draws every character of `s`: it holds Latin,
-/// Greek, Cyrillic, Japanese (JIS X 0208) and common symbols; other scripts
-/// (Hangul, Devanagari, …) come out as blanks.
+/// Whether the system fonts draw every character of `s`: Latin, Greek,
+/// Cyrillic, Japanese, Chinese, Korean and common symbols; other scripts
+/// (Devanagari, Thai, …) come out as blanks.
 pub fn drawable(s: &str) -> bool {
     s.chars().all(|c| {
         matches!(c as u32,
-            0x0000..=0x024f | 0x0370..=0x04ff | 0x2000..=0x22ff | 0x2460..=0x27bf | 0x3000..=0x30ff | 0x3200..=0x33ff | 0x4e00..=0x9fff | 0xff00..=0xffef)
+            0x0000..=0x024f | 0x0370..=0x04ff | 0x1100..=0x11ff | 0x2000..=0x22ff | 0x2460..=0x27bf | 0x3000..=0x30ff | 0x3130..=0x318f
+            | 0x3200..=0x33ff | 0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xac00..=0xd7af | 0xff00..=0xffef)
     })
+}
+
+unsafe extern "C" fn latin_group(c: u32) -> i32 {
+    (c < 0x0250 || (0x2000..=0x206f).contains(&c)) as i32
+}
+
+unsafe extern "C" fn hangul_group(c: u32) -> i32 {
+    matches!(c, 0x1100..=0x11ff | 0x3130..=0x318f | 0xac00..=0xd7af) as i32
+}
+
+/// Latin and Korean faces in front of a Japanese or Chinese one, which takes
+/// every other character (kanji/hanzi forms differ between the two).
+unsafe fn system_pvf(cjk: g::ScePvfLanguageCode) -> *mut g::vita2d_pvf {
+    let configs = [
+        g::vita2d_system_pvf_config { code: g::ScePvfLanguageCode_SCE_PVF_LANGUAGE_LATIN, in_font_group: Some(latin_group) },
+        g::vita2d_system_pvf_config { code: g::ScePvfLanguageCode_SCE_PVF_LANGUAGE_K, in_font_group: Some(hangul_group) },
+        g::vita2d_system_pvf_config { code: cjk, in_font_group: None },
+    ];
+    g::vita2d_load_system_pvf(configs.len() as i32, configs.as_ptr())
+}
+
+/// Text written in Chinese: Han characters and no kana.
+fn chinese(s: &str) -> bool {
+    let mut han = false;
+    for c in s.chars() {
+        match c as u32 {
+            0x3040..=0x30ff => return false,
+            0x3400..=0x4dbf | 0x4e00..=0x9fff => han = true,
+            _ => {}
+        }
+    }
+    han
 }
 
 #[derive(Clone, Copy)]
@@ -91,6 +125,11 @@ pub enum Button {
 
 pub struct Ui {
     pub font: *mut g::vita2d_pgf,
+    /// Vector fonts (null when the system has none): Japanese-first and
+    /// Chinese-first, and the size that matches the PGF font at a scale.
+    ja: *mut g::vita2d_pvf,
+    zh: *mut g::vita2d_pvf,
+    pvf_scale: f32,
     quad_vb: *const f32,
     quad_ib: *const u16,
     /// Holds the quad for the life of the process.
@@ -113,7 +152,19 @@ impl Ui {
         for (i, v) in [0u16, 1, 2, 2, 1, 3].iter().enumerate() {
             *ib.add(i) = *v;
         }
-        Ok(Self { font, quad_vb: vb, quad_ib: ib, _mem: mem })
+        let ja = system_pvf(g::ScePvfLanguageCode_SCE_PVF_LANGUAGE_J);
+        let zh = system_pvf(g::ScePvfLanguageCode_SCE_PVF_LANGUAGE_C);
+        let zh = if zh.is_null() { ja } else { zh };
+        // The width the layout was drawn with in the PGF font.
+        let pvf_scale = if ja.is_null() {
+            1.0
+        } else {
+            let m = c"Places people remember, Pocket Atlas".as_ptr();
+            let (a, b) = (g::vita2d_pgf_text_width(font, 1.0, m) as f32, g::vita2d_pvf_text_width(ja, 1.0, m) as f32);
+            if a > 0.0 && b > 0.0 { a / b } else { 1.0 }
+        };
+        pocketjs_vita::vita_log(format_args!("atlas: ui fonts pvf ja={} zh={} scale {pvf_scale:.3}", !ja.is_null(), zh != ja));
+        Ok(Self { font, ja, zh, pvf_scale, quad_vb: vb, quad_ib: ib, _mem: mem })
     }
 
     fn key(tex: bool) -> PipeKey {
@@ -200,7 +251,21 @@ impl Ui {
             return;
         }
         let c = std::ffi::CString::new(s.replace('\0', " ")).unwrap();
-        g::vita2d_pgf_draw_text(self.font, x.round() as i32, y.round() as i32, abgr(color), scale, c.as_ptr());
+        match self.pvf(s) {
+            Some(f) => {
+                g::vita2d_pvf_draw_text(f, x.round() as i32, y.round() as i32, abgr(color), scale * self.pvf_scale, c.as_ptr());
+            }
+            None => {
+                g::vita2d_pgf_draw_text(self.font, x.round() as i32, y.round() as i32, abgr(color), scale, c.as_ptr());
+            }
+        }
+    }
+
+    fn pvf(&self, s: &str) -> Option<*mut g::vita2d_pvf> {
+        if self.ja.is_null() {
+            return None;
+        }
+        Some(if chinese(s) { self.zh } else { self.ja })
     }
 
     pub unsafe fn width(&self, scale: f32, s: &str) -> f32 {
@@ -208,7 +273,10 @@ impl Ui {
             return 0.0;
         }
         let c = std::ffi::CString::new(s.replace('\0', " ")).unwrap();
-        g::vita2d_pgf_text_width(self.font, scale, c.as_ptr()) as f32
+        match self.pvf(s) {
+            Some(f) => g::vita2d_pvf_text_width(f, scale * self.pvf_scale, c.as_ptr()) as f32,
+            None => g::vita2d_pgf_text_width(self.font, scale, c.as_ptr()) as f32,
+        }
     }
 
     /// `s`, cut with an ellipsis to fit `max` pixels.
@@ -224,6 +292,16 @@ impl Ui {
             if self.width(scale, &t) <= max { lo = mid } else { hi = mid - 1 }
         }
         chars[..lo].iter().collect::<String>().trim_end().to_string() + "…"
+    }
+
+    /// Text with a soft dark shadow, for lines over the scene.
+    ///
+    /// # Safety
+    /// Inside the display scene.
+    pub unsafe fn text_shadow(&self, x: f32, y: f32, color: [f32; 4], scale: f32, s: &str) {
+        let k = color[3];
+        self.text(x + 1.0, y + 1.5, rgb(0x000000, 0.7 * k), scale, s);
+        self.text(x, y, color, scale, s);
     }
 
     /// Right-aligned text ending at `x`.

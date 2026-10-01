@@ -150,7 +150,7 @@ fn unit(lat: f32, lon: f32) -> [f32; 3] {
 }
 
 fn kind_label(kind: &str) -> String {
-    kind.replace('-', " ").to_uppercase()
+    kind.replace('-', "  ").to_uppercase()
 }
 
 /// Search score of a place for the query words (`None`: a word matches
@@ -474,9 +474,9 @@ impl Browser {
         let grey = |a: f32| rgb(0xb4b8c4, a);
 
         // Brand.
-        ui.text(40.0, 58.0, white(1.0), 1.25, "P O C K E T   A T L A S");
+        ui.text_shadow(40.0, 58.0, white(1.0), 1.25, "P O C K E T   A T L A S");
         let open = places.iter().filter(|p| p.enterable).count();
-        ui.text(40.0, 84.0, grey(0.85), 0.66, &format!("Places people remember  ·  {} places, {open} open", places.len()));
+        ui.text_shadow(40.0, 84.0, rgb(0xd4d8e2, 0.95), 0.66, &format!("Places people remember  ·  {} places, {open} open", places.len()));
 
         // Panel.
         ui.shadow(gpu, PX, PY, PW, PH, 16.0, 24.0, 0.45);

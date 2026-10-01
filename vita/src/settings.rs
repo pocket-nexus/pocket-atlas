@@ -139,6 +139,17 @@ impl Sheet {
         Self { open: false, row: 0, anim: 0.0, bar: 0.0, note: None }
     }
 
+    /// On screen (open, or sliding in or out): its cost is in the frame
+    /// time, so the governor holds its step meanwhile.
+    pub fn visible(&self) -> bool {
+        self.open || self.anim > 0.0
+    }
+
+    /// Moves the focus bar (control messages).
+    pub fn focus(&mut self, row: usize) {
+        self.row = row;
+    }
+
     fn rows(r: &Renderer) -> Vec<Row> {
         let mut v = vec![Row::Profile, Row::Quality, Row::Resolution, Row::Msaa, Row::Bloom];
         if r.has_haze() {
@@ -344,7 +355,6 @@ impl Sheet {
         let grey = |a: f32| rgb(0xb4b8c4, a * o);
         let acc = |a: f32| accent(accent_c, a * o);
 
-        ui.shadow(gpu, x, y, SW, h, 16.0, 24.0, 0.5 * o);
         ui.rect(gpu, x, y, SW, h, &Style::gradient(16.0, rgb(0x161a24, 0.88 * o), rgb(0x0c0e14, 0.92 * o)).stroke(1.0, white(0.1)));
         ui.text(x + 20.0, y + 30.0, grey(0.8), 0.52, "S E T T I N G S");
         ui.text(x + 20.0, y + 56.0, white(1.0), 0.8, &ui.fit(0.8, title, SW - 40.0));
