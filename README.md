@@ -17,7 +17,7 @@ A pack connects the two: the web app exports a place as glTF 2.0 with `extras.po
 | --- | --- | --- | --- |
 | Rainy Night Konbini | `tokyo-konbini` | Tokyo backstreet | wet ground with a planar reflection, rain, lit haze, interior-mapped windows, baked vertex lighting, moving lights |
 | Suga Shrine Stairs | `suga-shrine-stairs` | Yotsuya, Tokyo (the 男坂 stairs) | sun with a shadow map, sky occlusion baked into the vertices, alpha-tested foliage, daytime sky with a cloud panorama, ACES grade |
-| Suga Shrine Stairs | `suga-shrine-stairs` | Yotsuya, Tokyo | directional sun with a shadow map, alpha-tested foliage and its shadows, baked cumulus sky panorama, daylight sky probe |
+| Sangubashi in Bloom | `sangubashi-crossing` | Yoyogi, Tokyo (参宮橋３号踏切) | Three.js spring reference: double railway, blossoming trees, petal drift; shared daytime renderer and materials. Vita validation pending. |
 
 Real places fall into a finite set of kinds: night streets, daytime residential slopes, interiors, waterfronts, parks. Each first-party place brings its kind's rendering to the best quality the handheld holds, and the work goes into the shared renderer and cooker so later places of the same kind reuse it.
 

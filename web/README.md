@@ -2,7 +2,8 @@
 
 A standalone three.js app: a night-side globe where you pick a place, a
 rain-soaked Tokyo backstreet with a 24-hour konbini, and the stairs of Suga
-Shrine in Yotsuya on a summer afternoon. It does not use any PocketJS runtime, build tooling or packages — it is
+Shrine in Yotsuya on a summer afternoon, and Sangubashi No. 3 crossing in spring.
+It does not use any PocketJS runtime, build tooling or packages — it is
 a plain Vite + TypeScript project with its own lockfile.
 
 Every asset is generated at load time: Earth textures are rasterised from
@@ -41,6 +42,7 @@ Requires WebGL 2. Tested in Chrome on Apple silicon (ANGLE / Metal).
 | `?shot` | capture mode: no UI, no intro, muted |
 | `?cam=Konbini\|Puddles\|Vending\|Crossing\|Inside\|Wires` | start at a named shot (konbini) |
 | `?cam=Stairs\|Rails\|Below\|Lane\|Canopy` | start at a named shot (Suga Shrine Stairs) |
+| `?cam=Crossing\|Blossom\|Tracks\|Lane\|Spring` | start at a named shot (Sangubashi in Bloom) |
 | `?view=px,py,pz,tx,ty,tz[,fov]` | explicit camera (with `?shot`) |
 | `?t=12.5` | simulation clock when the stage appears (with `?shot`, captures are reproducible) |
 | `?stats` | frame time and draw-call readout |
@@ -150,6 +152,31 @@ bun scripts/shot.ts "/?shot&stats&q=high&cam=Puddles#/place/tokyo-konbini" out.p
 - **Finish.** N8AO, a bloom above luminance 1.6, ACES tone mapping and the
   shared grade (`fx/post.ts`, `places/shared/grade.ts`).
 
+## How Sangubashi in Bloom is put together
+
+Open `/?q=high&cam=Crossing#/place/sangubashi-crossing`. The five camera buttons,
+free orbit, keyboard movement, cinematic mode and globe entry use the normal
+place shell. `?cam` also skips the intro when the HUD is visible.
+
+The photo-based site has two 1,067 mm tracks, sleepers and rail fasteners,
+crossing infill and check rails, two diagonal signal assemblies with hooded
+lamps and raised gates, overhead contact wires and gantries, and a short lane
+descending to the shuttered house and its outside stair. Housing, garden
+walls, utility poles, service drops, a convex mirror, gutters and vegetation
+surround the crossing, including the reverse view.
+
+`shared/daylight/` now owns the renderer lifecycle, sun/shadow setup, sky
+probe, sky, post-processing, material baker, house kit and foliage helpers
+used by both daytime places. Its reusable tree builder grows tapered limbs
+and alpha-tested branch sprays; a seeded canvas atlas draws each cherry
+flower with five notched petals and stamens. Instanced curved petals settle
+in gutters or drift in the breeze. Spring audio is synthesised wind, city
+hum and occasional birds. The gates remain open; there is no train cycle.
+
+See [the place notes](src/places/sangubashi-crossing/README.md) for real-location
+references and reconstruction limits. This is the Three.js reference for
+visual acceptance; no Vita build, shader compile or device timing is claimed.
+
 ## Layout
 
 ```
@@ -162,12 +189,15 @@ src/
     shared/              GPU baker, geometry and canvas helpers, atlas, camera rig,
                          grade, and export.ts (glTF + extras.pocketAtlas for the
                          cooker, driven by scripts/export-place.ts)
+      daylight/          shared daytime stage, materials, sky, post, housing,
+                         foliage, blossoming trees, petals and railway kit
     tokyo-konbini/       Rainy Night Konbini
       gfx/       materials, wet/glass/interior shaders, reflection, canvas art
       fx/        rain, post-processing
       world/     street plan, ground, konbini, neighbours, props, traffic, people, sky
     suga-shrine-stairs/  Suga Shrine Stairs
-      gfx/       daylight surfaces and materials, quad builder
-      fx/        daylight post-processing
+      gfx/       compatibility exports for shared daylight materials/geometry
+      fx/        compatibility export for shared daylight post-processing
       world/     site plan, terrain, stairs, houses, props, tree, far field, sky
+    sangubashi-crossing/ Sangubashi in Bloom: authored site, cameras and spring sound
 ```
