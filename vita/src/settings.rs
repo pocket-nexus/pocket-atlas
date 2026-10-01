@@ -213,6 +213,15 @@ impl Sheet {
         }
     }
 
+    /// Drops every choice: the settings follow the renderer's profile again.
+    pub fn reset(&mut self, p: &mut Prefs, r: &mut Renderer) {
+        let hud = p.hud;
+        *p = Prefs { profile: r.profile, step: None, scale: None, msaa: None, bloom: None, haze: None, reflection: None, rain: None, exposure_ev: 0.0, hud };
+        p.apply(r);
+        p.save();
+        self.note = Some((format!("Settings follow {}", profile_label(r.profile)), 2.0));
+    }
+
     /// Input while the sheet is open. `pressed`: buttons down this frame.
     ///
     /// # Safety
@@ -241,11 +250,7 @@ impl Sheet {
             return Outcome::None;
         }
         if pressed & SCE_CTRL_TRIANGLE != 0 {
-            let hud = p.hud;
-            *p = Prefs { profile: r.profile, step: None, scale: None, msaa: None, bloom: None, haze: None, reflection: None, rain: None, exposure_ev: 0.0, hud };
-            p.apply(r);
-            p.save();
-            self.note = Some((format!("Settings follow {}", profile_label(r.profile)), 2.0));
+            self.reset(p, r);
             return Outcome::None;
         }
         if pressed & SCE_CTRL_DOWN != 0 {

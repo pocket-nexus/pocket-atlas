@@ -641,6 +641,9 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                     if let Some(row) = v["sheetRow"].as_str() {
                         sheet.focus(row, &renderer);
                     }
+                    if v["sheetReset"].as_bool() == Some(true) {
+                        sheet.reset(prefs, &mut renderer);
+                    }
                 }
                 if let Some(n) = switch {
                     break n;

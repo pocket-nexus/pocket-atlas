@@ -94,7 +94,7 @@ SELECT in a place opens the settings sheet: frame rate profile (`vita30`, `vita6
 
 ### Control messages
 
-`ctl` messages naming a `place` enter it; `{"atlas": true}` returns, and takes `tab` (`featured`, `explore`, `saved`, `search`), `search` (a query), `select` and `save` (place ids) and `keyboard: true` (opens the search keyboard). In a place, `sheet` (true or false) opens or closes the settings sheet and `sheetRow` focuses a row by its label (`"Resolution"`).
+`ctl` messages naming a `place` enter it; `{"atlas": true}` returns, and takes `tab` (`featured`, `explore`, `saved`, `search`), `search` (a query), `select` and `save` (place ids) and `keyboard: true` (opens the search keyboard). In a place, `sheet` (true or false) opens or closes the settings sheet `sheetRow` focuses a row by its label (`"Resolution"`), and `sheetReset: true` drops the saved choices as △ does.
 
 Commands that cook, sync or measure take `--place ID` (default `tokyo-konbini`). Shader sources in `vita/shaders` hot-reload: `bun tools/atlas.ts sync` copies them to the USB share and the device recompiles the programs whose expanded source changed. Compiled programs are cached on the share by content hash; `vpk` packages the ones listed in the device's `gxp/manifest.txt`.
 
