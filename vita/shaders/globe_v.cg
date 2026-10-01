@@ -1,0 +1,73 @@
+// Atlas globe: the unit sphere in object space (a UV sphere whose seam has
+// its own vertices, so the maps' longitude never wraps inside a triangle),
+// turned by the Earth rotation and seen by the fixed atlas camera.
+//
+// Everything that varies only with the sun angle or the surface frame is
+// evaluated here (the sphere is dense enough), and every map the fragment
+// program reads is addressed by a varying, so its fetches do not depend on
+// fragment arithmetic.
+
+#define TAU 6.28318531
+#define PI 3.14159265
+// Sunlight transmittance curves (the baked table sampled by the CPU at
+// cos sun zenith −0.3 … 0.5; darker below, constant above).
+#define CURVE 16
+
+void main(
+    float3 aPosition,
+    float2 aUv,
+    uniform float4x4 uViewProj,
+    uniform float4 uEarthRot[3], // rows of the object → world rotation
+    uniform float4 uSun,         // direction towards the sun (world)
+    uniform float4 uEye,         // camera position
+    uniform float4 uGlobeK,      // sun irradiance (sunI × surface), -, -, -
+    uniform float4 uCloudOff,    // cloud map offset (u), -
+    uniform float4 uSunCurve[2 * CURVE], // ground, then cloud-shell sunlight transmittance
+    out float4 oPosition : POSITION,
+    out float4 oUv : TEXCOORD0,     // surface uv, cloud uv
+    out float2 oShadowUv : TEXCOORD1, // cloud cover a little towards the sun
+    out float2 oScreen : TEXCOORD2, // screen uv of the baked atmosphere
+    out half3 oN : TEXCOORD3,       // world normal
+    out half3 oEast : TEXCOORD4,    // world east (surface frame)
+    out half3 oNorth : TEXCOORD5,   // world north
+    out half3 oV : TEXCOORD6,       // towards the camera
+    out half4 oSunE : TEXCOORD7,    // sunlight at the ground, cos sun zenith
+    out half3 oCloudE : TEXCOORD8)  // sunlight at the cloud shell
+{
+    float3 p = aPosition;
+    float3 w = float3(dot(uEarthRot[0].xyz, p), dot(uEarthRot[1].xyz, p), dot(uEarthRot[2].xyz, p));
+    float4 clip = mul(uViewProj, float4(w, 1.0));
+    oPosition = clip;
+    // Divided per vertex: across these small triangles the interpolation
+    // error is far below a texel, and the fetch stays independent of fragment
+    // arithmetic (tex2Dproj returned wrong texels on the device).
+    oScreen = float2(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5);
+
+    float3 east = float3(p.z, 0.0, -p.x);
+    float el = length(east);
+    east = el > 1e-5 ? east / el : float3(1.0, 0.0, 0.0);
+    float3 north = cross(p, east);
+    float3 toWorld0 = uEarthRot[0].xyz;
+    float3 toWorld1 = uEarthRot[1].xyz;
+    float3 toWorld2 = uEarthRot[2].xyz;
+    oN = (half3)w;
+    oEast = (half3)float3(dot(toWorld0, east), dot(toWorld1, east), dot(toWorld2, east));
+    oNorth = (half3)float3(dot(toWorld0, north), dot(toWorld1, north), dot(toWorld2, north));
+    oV = (half3)normalize(uEye.xyz - w);
+
+    float mu = dot(w, uSun.xyz);
+    float x = saturate((mu + 0.3) / 0.8) * (CURVE - 1);
+    float i0 = min(floor(x), CURVE - 2);
+    float t = x - i0;
+    int i = (int)i0;
+    oSunE = half4((half3)(uGlobeK.x * lerp(uSunCurve[i].rgb, uSunCurve[i + 1].rgb, t)), (half)mu);
+    oCloudE = (half3)(uGlobeK.x * lerp(uSunCurve[CURVE + i].rgb, uSunCurve[CURVE + i + 1].rgb, t));
+
+    oUv = float4(aUv, aUv.x + uCloudOff.x, aUv.y);
+    // Shadow of the cloud cover: the map ~57 km towards the sun (0.009 rad),
+    // as a uv offset along the surface frame.
+    float3 Lo = uEarthRot[0].xyz * uSun.x + uEarthRot[1].xyz * uSun.y + uEarthRot[2].xyz * uSun.z;
+    float cl = max(sqrt(saturate(1.0 - p.y * p.y)), 0.05);
+    float2 duv = float2(dot(Lo, east) * 0.009 / (TAU * cl), -dot(Lo, north) * 0.009 / PI);
+    oShadowUv = aUv + float2(uCloudOff.x, 0.0) + duv;
+}

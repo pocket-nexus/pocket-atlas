@@ -312,9 +312,112 @@ pub struct Atmosphere {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Rain {
+    /// The place has rain: streaks, splashes, the wet film's rain factor.
+    #[serde(default)]
+    pub active: bool,
     pub dry_boxes: Vec<[Vec3; 2]>,
     pub drip_edges: Vec<[Vec3; 2]>,
     pub steam_vents: Vec<[Vec3; 2]>,
+}
+
+// --------------------------------------------------------------------- sun
+
+/// A directional light evaluated per pixel with a shadow map, not baked.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Sun {
+    /// Direction towards the sun.
+    pub direction: Vec3,
+    /// Linear colour × intensity.
+    pub radiance: Vec3,
+    pub shadow: Option<SunShadow>,
+}
+
+/// The sun's orthographic shadow camera, as authored (three.js conventions).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SunShadow {
+    /// Camera position; it looks along −`Sun::direction`.
+    pub position: Vec3,
+    /// left, right, bottom, top, near, far (metres, camera space).
+    pub ortho: [f32; 6],
+    pub map_size: u32,
+    pub bias: f32,
+    pub normal_bias: f32,
+    /// Filter radius in shadow-map texels.
+    pub radius: f32,
+}
+
+/// Daytime sky: a zenith/horizon gradient, the sun's glow and disc, and a
+/// cloud panorama (two 180° halves side by side in v, rows by the square
+/// root of elevation; R opacity, G sunlit / `cloud_sun`, B skylit).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DaySky {
+    pub zenith: Vec3,
+    pub horizon: Vec3,
+    pub ground: Vec3,
+    pub gradient_power: f32,
+    pub ground_blend: f32,
+    pub sun_direction: Vec3,
+    pub sun_color: Vec3,
+    pub glow: f32,
+    /// (weight, exponent) of the wide and tight glow lobes.
+    pub glow_wide: [f32; 2],
+    pub glow_tight: [f32; 2],
+    pub disc: f32,
+    pub disc_cos_inner: f32,
+    pub disc_cos_outer: f32,
+    pub clouds: Option<u32>,
+    /// Sunlit cloud colour (× the panorama's G) and skylit colour (× B).
+    pub cloud_sun: Vec3,
+    pub cloud_ambient: Vec3,
+    pub fade_elevation: f32,
+    /// Panorama turns per second.
+    pub drift: f32,
+}
+
+// -------------------------------------------------------------------- post
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToneCurve {
+    Agx,
+    Aces,
+}
+
+/// Tone mapping and grade after the scene (the web's grade effect), and bloom.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Post {
+    pub tone: ToneCurve,
+    pub exposure: f32,
+    pub contrast: f32,
+    pub saturation: f32,
+    pub lift: Vec3,
+    pub gain: Vec3,
+    /// Darkening at the corners (1 − vignette at full strength).
+    pub vignette: f32,
+    pub grain: f32,
+    pub bloom_threshold: f32,
+    pub bloom_smoothing: f32,
+    pub bloom_intensity: f32,
+}
+
+impl Default for Post {
+    /// The first place's look (Rainy Night Konbini), as the renderer had it
+    /// before places carried their own.
+    fn default() -> Self {
+        Self {
+            tone: ToneCurve::Agx,
+            exposure: 1.0,
+            contrast: 1.16,
+            saturation: 1.18,
+            lift: [0.1, 0.35, 0.45],
+            gain: [1.04, 0.99, 0.94],
+            vignette: 0.2475,
+            grain: 0.03,
+            bloom_threshold: 1.1,
+            bloom_smoothing: 0.4,
+            bloom_intensity: 0.85,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -371,6 +474,10 @@ pub struct Effects {
 pub struct Meta {
     pub version: u32,
     pub name: String,
+    /// Kind of place (`night-street`, `daytime-slope`, …): which rendering
+    /// work it draws on.
+    #[serde(default)]
+    pub kind: String,
     pub min: Vec3,
     pub max: Vec3,
     pub textures: Vec<Texture>,
@@ -392,5 +499,11 @@ pub struct Meta {
     pub beacons: Vec<Vec3>,
     #[serde(default)]
     pub effects: Effects,
+    #[serde(default)]
+    pub sun: Option<Sun>,
+    #[serde(default)]
+    pub day_sky: Option<DaySky>,
+    #[serde(default)]
+    pub post: Post,
     pub stats: serde_json::Value,
 }

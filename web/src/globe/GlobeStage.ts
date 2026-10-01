@@ -57,6 +57,7 @@ import {
   wrapDeg,
   yieldFrame,
 } from "./geo";
+import { type AtlasExport, type AtlasFraming, exportAtlas } from "./export";
 import { Markers } from "./Markers";
 import { GlobePost } from "./post";
 import { atmosphereFrag, cloudFrag, earthFrag, SPHERE_VERT } from "./shaders/earth";
@@ -387,6 +388,75 @@ class GlobeStage implements Stage {
     if (this.ctx.params.stats) console.info("[globe] build ms", JSON.stringify(this.timings));
     this.loadCoastPatch();
     if (import.meta.env.DEV) this.exposeDebug();
+    if (this.ctx.params.exporting) this.exposeAtlasExport({ albedo, normals, clouds, trans, atmosphere, lights: { data: lightsData, width: cfg.texW, height: texH } });
+  }
+
+  /** `pocketAtlasExportGlobe()`: the atlas screen for handheld ports (scripts/export-atlas.ts). */
+  private exposeAtlasExport(maps: {
+    albedo: WebGLRenderTarget;
+    normals: WebGLRenderTarget;
+    clouds: WebGLRenderTarget;
+    trans: WebGLRenderTarget;
+    atmosphere: Mesh;
+    lights: { data: Uint8Array; width: number; height: number };
+  }): void {
+    const w = window as unknown as { pocketAtlasExportGlobe?: (framing?: Partial<AtlasFraming>) => Promise<AtlasExport> };
+    w.pocketAtlasExportGlobe = async (framing) => {
+      const f: AtlasFraming = { width: 960, height: 544, fov: FOV, radiusPx: 0.37 * 544, centerX: 300, ...framing };
+      const r = this.ctx.renderer;
+      const S = this.shared;
+      const E = this.earthMat.uniforms;
+      const C = this.cloudMat.uniforms;
+      const A = this.atmoMat.uniforms;
+      const bloom = this.post.bloom;
+      return exportAtlas(
+        {
+          renderer: r,
+          background: [this.spaceGroup, maps.atmosphere],
+          hide: [this.earthGroup],
+          render: (camera, target) => {
+            this.spaceGroup.position.copy(camera.position);
+            this.starMat.uniforms.uPixelRatio.value = 1;
+            r.setRenderTarget(target);
+            r.setClearColor(0x000000, 1);
+            r.clear();
+            r.render(this.scene, camera);
+            r.setRenderTarget(null);
+            this.applyView();
+          },
+          shared: S,
+          albedo: maps.albedo,
+          normals: maps.normals,
+          clouds: maps.clouds,
+          transmittance: maps.trans,
+          lights: maps.lights,
+          sun: (S.uSunDir.value as Vector3).clone(),
+          params: {
+            sunI: S.uSunI.value,
+            surface: S.uSurface.value,
+            lightsMax: S.uLightsMax.value,
+            lightsGain: S.uLightsGain.value,
+            night: S.uNight.value,
+            cloudShadow: E.uCloudShadow.value,
+            specular: E.uSpecular.value,
+            cloudOpacity: C.uOpacity.value,
+            cloudGlow: C.uGlow.value,
+            cloudDriftPerS: 0.00005,
+            limbBoost: A.uLimbBoost.value,
+            idleDegPerS: IDLE_DEG_PER_S,
+            startLat: START.lat,
+            startLon: START.lon,
+            bloomThreshold: bloom.luminanceMaterial.threshold,
+            bloomSmoothing: bloom.luminanceMaterial.smoothing,
+            bloomIntensity: bloom.intensity,
+            vignetteOffset: 0.3,
+            vignetteDarkness: 0.58,
+            grain: 0.022,
+          },
+        },
+        f,
+      );
+    };
   }
 
   /** High-resolution coastline for the fly-in, built in a worker while the globe is already on screen. */

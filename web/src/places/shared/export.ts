@@ -2,6 +2,7 @@ import {
   AnimationClip,
   CanvasTexture,
   Color,
+  DirectionalLight,
   Group,
   HemisphereLight,
   InstancedMesh,
@@ -26,41 +27,84 @@ import {
 } from "three";
 import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
 import { clone as cloneSkinned } from "three/examples/jsm/utils/SkeletonUtils.js";
-import type { Baker } from "./gfx/bake";
+import type { Baker } from "./bake";
 import type { ShotKey, Shot } from "./camera";
-import type { World } from "./world/context";
 
 /**
- * Exports the built Tokyo scene as glTF 2.0 (binary) plus `extras.pocketAtlas`
+ * Exports a built place as glTF 2.0 (binary) plus `extras.pocketAtlas`
  * metadata, the input of the Pocket Atlas cooker. Everything the web renderer
  * computes in patched shaders is carried as explicit, JSON-safe parameters;
- * procedural motion (people, the taxi) is sampled into glTF animations and
- * scalar tracks.
+ * procedural motion (people, traffic) is sampled into glTF animations and
+ * scalar tracks. Every place's stage calls `exportPlace` from
+ * `window.pocketAtlasExport` (see `scripts/export-place.ts`).
  */
+
+/** A light that scatters in a place's haze (the konbini's `FogLight`). */
+export interface ExportFogLight {
+  position: Vector3;
+  color: Color;
+  intensity: number;
+  radius: number;
+  direction?: Vector3;
+  cosOuter?: number;
+  cosInner?: number;
+  gain?: number;
+}
+
+/** What the exporter reads from a place's world. */
+export interface ExportWorld {
+  root: Object3D;
+  /** Procedural motion, sampled into animation tracks. */
+  updaters: ((dt: number, t: number) => void)[];
+  fogLights: ExportFogLight[];
+}
+
+/** Scene-wide metadata every place exports; `ExportInput.meta` arranges it. */
+export interface CommonMeta {
+  version: number;
+  units: string;
+  up: string;
+  fog: { color: number[]; density: number } | null;
+  hemisphere: unknown;
+  directionalLights: unknown[];
+  rectLights: unknown[];
+  fogLights: unknown[];
+  environment: unknown;
+  camera: { shots: Shot[]; walkable: number[][]; intro: ShotKey };
+  /** Annotated objects exported as data instead of meshes: sky, skyline, beacons. */
+  special: Record<string, unknown>;
+  tracks: unknown;
+}
 
 export interface ExportInput {
   renderer: WebGLRenderer;
-  world: World;
+  world: ExportWorld;
   baker: Baker;
   env: WebGLCubeRenderTarget | null;
   envPosition: [number, number, number];
   shots: Shot[];
   walkable: number[][];
   intro: ShotKey;
-  shopBox: { min: readonly number[]; max: readonly number[] };
-  fog: { color: number[]; density: number };
-  haze: { density: number; ambient: number[]; ambientDensity: number };
+  fog: { color: number[]; density: number } | null;
   environmentIntensity: number;
-  doors: { left: Object3D; right: Object3D; open: number };
   /** Seconds of motion to sample into animations. */
   record: number;
   fps: number;
+  /**
+   * Builds `extras.pocketAtlas` from the common fields, adding the place's own
+   * keys. Called after node names are final. Default: the common fields.
+   */
+  meta?: (common: CommonMeta) => Record<string, unknown>;
+  /** Textures written next to the glb as PNG files (e.g. a baked cloud layer). */
+  files?: { name: string; texture: Texture }[];
   onProgress?: (label: string) => void;
 }
 
 export interface ExportOutput {
   glb: ArrayBuffer;
   env: Uint16Array | null;
+  /** Extra files for the cooker (name → bytes). */
+  files: { name: string; bytes: Uint8Array }[];
   report: Record<string, unknown>;
 }
 
@@ -259,7 +303,7 @@ interface Track {
  * below a dynamic subtree, fog-light positions and gains, and material
  * emissive intensities. Returns only what actually changed.
  */
-function record(world: World, seconds: number, fps: number) {
+function record(world: ExportWorld, seconds: number, fps: number) {
   const dynamic: Object3D[] = [];
   world.root.traverse((o) => {
     let under = false;
@@ -360,6 +404,7 @@ export async function exportPlace(input: ExportInput): Promise<ExportOutput> {
   // Special objects become scene metadata instead of meshes.
   const special: Record<string, unknown> = {};
   const rectLights: unknown[] = [];
+  const directionalLights: unknown[] = [];
   let hemisphere: unknown = null;
   world.root.updateMatrixWorld(true);
   world.root.traverse((o) => {
@@ -391,6 +436,30 @@ export async function exportPlace(input: ExportInput): Promise<ExportOutput> {
       const h = o as HemisphereLight;
       hemisphere = { sky: col(h.color), ground: col(h.groundColor), intensity: h.intensity };
     }
+    if ((o as DirectionalLight).isDirectionalLight) {
+      // glTF carries colour, intensity and the node's −Z; the shadow setup and
+      // the direction toward the light are spelled out for the cooker.
+      const l = o as DirectionalLight;
+      const toLight = l.getWorldPosition(new Vector3()).sub(l.target.getWorldPosition(new Vector3())).normalize();
+      const c = l.shadow.camera;
+      directionalLights.push({
+        node: o.name,
+        direction: arr(toLight),
+        color: col(l.color),
+        intensity: round(l.intensity),
+        castShadow: l.castShadow,
+        shadow: l.castShadow
+          ? {
+              position: arr(l.getWorldPosition(new Vector3())),
+              ortho: [c.left, c.right, c.bottom, c.top, c.near, c.far].map((v) => round(v)),
+              mapSize: l.shadow.mapSize.x,
+              bias: l.shadow.bias,
+              normalBias: l.shadow.normalBias,
+              radius: l.shadow.radius,
+            }
+          : undefined,
+      });
+    }
   });
 
   const clone = cloneSkinned(world.root) as Group;
@@ -412,6 +481,13 @@ export async function exportPlace(input: ExportInput): Promise<ExportOutput> {
       }
     }
     const light = o as Light & { castShadow?: boolean; angle?: number; penumbra?: number; distance?: number; decay?: number };
+    if ((o as DirectionalLight).isDirectionalLight) {
+      // A clone's target is a detached copy; point it back at the cloned child
+      // so GLTFExporter sees the (0, 0, −1) child it expects.
+      const l = o as DirectionalLight;
+      const child = l.children.find((c) => c.name === l.target.name);
+      if (child) l.target = child;
+    }
     if (light.isLight) o.userData = { pocketAtlas: { castShadow: !!light.castShadow } };
     else if (o.userData.pocketAtlas || o.userData.dynamic) o.userData = { pocketAtlas: clean({ ...(o.userData.pocketAtlas ?? {}), dynamic: !!o.userData.dynamic || undefined }) };
     else o.userData = {};
@@ -430,28 +506,35 @@ export async function exportPlace(input: ExportInput): Promise<ExportOutput> {
   const fogTracks = rec.fogs.map((s, i) => ({ s, i })).filter(({ s }) => s.moved).map(({ s, i }) => ({ fog: i, position: s.pos.map((v) => round(v, 1e3)), gain: s.gain.map((v) => round(v, 1e3)) }));
   const materialTracks = [...rec.mats].filter(([, s]) => s.moved).map(([m, s]) => ({ material: materials.convert(m).name, emissiveIntensity: s.values.map((v) => round(v, 1e3)) }));
 
-  root.userData = {
-    pocketAtlas: {
-      version: 1,
-      units: "m",
-      up: "y",
-      fog: input.fog,
-      haze: { ...input.haze, dryBox: { min: [...input.shopBox.min], max: [...input.shopBox.max] } },
-      hemisphere,
-      rectLights,
-      fogLights,
-      environment: input.env ? { file: "env.rgba16f", size: input.env.width, format: "rgba16f-cube", position: input.envPosition, intensity: input.environmentIntensity } : null,
-      rain: {
-        dryBoxes: world.dryBoxes.map(([a, b]) => [arr(a), arr(b)]),
-        dripEdges: world.dripEdges.map(([a, b]) => [arr(a), arr(b)]),
-        steamVents: world.steamVents.map((v) => ({ origin: arr(v.origin), dir: arr(v.dir) })),
-      },
-      camera: { shots: input.shots, walkable: input.walkable, intro: input.intro },
-      doors: { left: input.doors.left.name, right: input.doors.right.name, travel: 0.98, trigger: [2.1, 1.0, -3.0], radius: 3.2 },
-      ...special,
-      tracks: { fps: input.fps, frames: rec.frames, fogs: fogTracks, materials: materialTracks },
-    },
+  const common: CommonMeta = {
+    version: 1,
+    units: "m",
+    up: "y",
+    fog: input.fog,
+    hemisphere,
+    directionalLights,
+    rectLights,
+    fogLights,
+    environment: input.env ? { file: "env.rgba16f", size: input.env.width, format: "rgba16f-cube", position: input.envPosition, intensity: input.environmentIntensity } : null,
+    camera: { shots: input.shots, walkable: input.walkable, intro: input.intro },
+    special,
+    tracks: { fps: input.fps, frames: rec.frames, fogs: fogTracks, materials: materialTracks },
   };
+  const defaultMeta = (c: CommonMeta) => ({
+    version: c.version,
+    units: c.units,
+    up: c.up,
+    fog: c.fog,
+    hemisphere: c.hemisphere,
+    directionalLights: c.directionalLights,
+    rectLights: c.rectLights,
+    fogLights: c.fogLights,
+    environment: c.environment,
+    camera: c.camera,
+    ...c.special,
+    tracks: c.tracks,
+  });
+  root.userData = { pocketAtlas: (input.meta ?? defaultMeta)(common) };
 
   say("encoding glTF");
   const exporter = new GLTFExporter();
@@ -474,8 +557,42 @@ export async function exportPlace(input: ExportInput): Promise<ExportOutput> {
     }
   }
 
+  const files: { name: string; bytes: Uint8Array }[] = [];
+  for (const f of input.files ?? []) {
+    say(`encoding ${f.name}`);
+    const t = textures.convert(f.texture);
+    const img = t?.image as HTMLCanvasElement | undefined;
+    if (!img || !("toBlob" in img)) continue;
+    const blob = await new Promise<Blob | null>((res) => img.toBlob(res, "image/png"));
+    if (blob) files.push({ name: f.name, bytes: new Uint8Array(await blob.arrayBuffer()) });
+  }
+
+  // Scene statistics: draws are meshes (after batching), triangles are indexed faces.
+  let draws = 0;
+  let triangles = 0;
+  const texStats = new Map<string, string>();
+  clone.traverse((o) => {
+    const m = o as Mesh;
+    if (!m.isMesh) return;
+    draws++;
+    const g = m.geometry;
+    triangles += (g.index ? g.index.count : g.getAttribute("position").count) / 3;
+    for (const mat of Array.isArray(m.material) ? m.material : [m.material]) {
+      for (const v of Object.values(mat)) {
+        const t = v as Texture | null;
+        if (t && typeof t === "object" && t.isTexture && t.image) {
+          const img = t.image as { width?: number; height?: number };
+          texStats.set(t.uuid, `${t.name || mat.name}:${img.width}x${img.height}`);
+        }
+      }
+    }
+  });
+
   const report = {
     ms: Math.round(performance.now() - started),
+    draws,
+    triangles: Math.round(triangles),
+    textures: [...texStats.values()].sort(),
     glbBytes: glb.byteLength,
     animatedNodes: rec.tracks.length,
     tracks: clipTracks.length,
@@ -484,8 +601,10 @@ export async function exportPlace(input: ExportInput): Promise<ExportOutput> {
     materialTracks: materialTracks.length,
     bakedTexturesRead: textures.converted.length,
     rectLights: rectLights.length,
+    directionalLights: directionalLights.length,
     fogLights: fogLights.length,
+    files: files.map((f) => f.name),
   };
-  return { glb, env, report };
+  return { glb, env, files, report };
 }
 

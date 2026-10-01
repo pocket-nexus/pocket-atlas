@@ -1,7 +1,7 @@
 import { CylinderGeometry, ExtrudeGeometry, Group, LatheGeometry, MeshPhysicalMaterial, Shape, Vector2, type BufferGeometry, type Material } from "three";
-import { mapUV, type AtlasRect } from "../../gfx/atlas";
+import { mapUV, type AtlasRect } from "../../../shared/atlas";
 import { JP_SANS, LATIN } from "../../gfx/canvas";
-import { box } from "../../gfx/geo";
+import { box } from "../../../shared/geo";
 import type { World } from "../context";
 import { instance, palette, Parts, quad, rod, v3, type Kit } from "./util";
 

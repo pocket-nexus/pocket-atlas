@@ -20,14 +20,33 @@ use crate::geometry::Vertex;
 /// Decoded irradiance = (rgb · m)² · RANGE.
 pub const RANGE: f32 = 64.0;
 
-/// Refinement: edges shorter than this are never split.
-const MIN_EDGE: f32 = 0.4;
-/// Refinement rounds; each halves the longest edges that fail the test.
-const ROUNDS: u32 = 6;
-/// Split when the midpoint differs from linear interpolation by more than
-/// ABS + REL × the local level (luminance, irradiance units).
-const ABS: f32 = 0.0015;
-const REL: f32 = 0.15;
+/// When to split an edge: never below `min_edge` metres; otherwise when the
+/// midpoint differs from linear interpolation by more than abs + rel × the
+/// local level (luminance, irradiance units). Each of `rounds` rounds halves
+/// the edges that fail.
+/// With a focus box (where the camera goes), the shortest split edge grows
+/// by `grow` × the distance from it.
+#[derive(Clone, Copy)]
+pub struct Tolerance {
+    pub min_edge: f32,
+    pub abs: f32,
+    pub rel: f32,
+    pub rounds: u32,
+    pub focus: Option<(Vec3, Vec3)>,
+    pub grow: f32,
+}
+
+/// Lamp pools on a night street keep their shape.
+pub const LIGHTS: Tolerance = Tolerance { min_edge: 0.4, abs: 0.0015, rel: 0.15, rounds: 6, focus: None, grow: 0.0 };
+
+impl Tolerance {
+    fn min_edge_at(&self, p: Vec3) -> f32 {
+        match self.focus {
+            Some((lo, hi)) => self.min_edge + (p - p.clamp(lo, hi)).length() * self.grow,
+            None => self.min_edge,
+        }
+    }
+}
 
 struct Light {
     pos: Vec3,
@@ -144,11 +163,13 @@ impl Baker {
     }
 
     /// Diffuse irradiance / π at `p` with normal `n`. `direct` = false skips
-    /// the lights (materials the runtime shades as shop interiors).
-    pub fn irradiance(&self, p: Vec3, n: Vec3, env_k: f32, direct: bool) -> Vec3 {
+    /// the lights (materials the runtime shades as shop interiors); `sky` is
+    /// the unblocked share of the hemisphere (sky occlusion), which scales
+    /// the hemisphere and environment terms.
+    pub fn irradiance(&self, p: Vec3, n: Vec3, env_k: f32, direct: bool, sky: f32) -> Vec3 {
         let n = n.normalize_or(Vec3::Y);
         let hemi = n.y * 0.5 + 0.5;
-        let mut e = self.hemi_ground.lerp(self.hemi_sky, hemi) * std::f32::consts::FRAC_1_PI + self.env_diffuse(n) * env_k;
+        let mut e = (self.hemi_ground.lerp(self.hemi_sky, hemi) * std::f32::consts::FRAC_1_PI + self.env_diffuse(n) * env_k) * sky;
         if !direct {
             return e;
         }
@@ -208,9 +229,9 @@ pub struct Refined {
 /// Bakes `eval` into every vertex, splitting edges (consistently for both
 /// triangles that share them, so no T-junctions) where the lighting is not
 /// linear across them.
-pub fn refine(mut verts: Vec<Vertex>, mut tris: Vec<[u32; 3]>, eval: &(dyn Fn(Vec3, Vec3) -> Vec3 + Sync)) -> Refined {
+pub fn refine(mut verts: Vec<Vertex>, mut tris: Vec<[u32; 3]>, eval: &(dyn Fn(Vec3, Vec3) -> Vec3 + Sync), tol: Tolerance) -> Refined {
     let mut light: Vec<Vec3> = verts.par_iter().map(|v| eval(v.pos, v.normal)).collect();
-    for _ in 0..ROUNDS {
+    for _ in 0..tol.rounds {
         // Unique geometric edges and one representative index pair each.
         let mut edge_of: HashMap<(PosKey, PosKey), usize> = HashMap::new();
         let mut reps: Vec<(u32, u32)> = Vec::new();
@@ -229,13 +250,13 @@ pub fn refine(mut verts: Vec<Vertex>, mut tris: Vec<[u32; 3]>, eval: &(dyn Fn(Ve
             .par_iter()
             .map(|&(a, b)| {
                 let (va, vb) = (&verts[a as usize], &verts[b as usize]);
-                if va.pos.distance(vb.pos) < MIN_EDGE {
+                if va.pos.distance(vb.pos) < tol.min_edge_at((va.pos + vb.pos) * 0.5) {
                     return false;
                 }
                 let m = midpoint(va, vb);
                 let lm = luminance(eval(m.pos, m.normal));
                 let avg = luminance((light[a as usize] + light[b as usize]) * 0.5);
-                (lm - avg).abs() > ABS + REL * lm.max(avg)
+                (lm - avg).abs() > tol.abs + tol.rel * lm.max(avg)
             })
             .collect();
         if !split.iter().any(|&s| s) {

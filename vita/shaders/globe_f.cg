@@ -1,0 +1,121 @@
+// Atlas globe surface with its cloud shell, as the web globe shades them
+// (web/src/globe/shaders/earth.ts): sunlit albedo with relief normals and
+// cloud shadows, twilight skylight, the ocean's sun glint and Fresnel sky,
+// city lights on the night side, moonlight; then the clouds lit by the sun
+// and, at night, by the cities under them. The atmosphere comes from maps
+// baked for the fixed camera: colour × transmittance + in-scattering.
+//
+// Sunlight through the atmosphere, the surface frame and every map
+// coordinate arrive from the vertex stage (globe_v.cg), so no fetch depends
+// on arithmetic in this program.
+
+#include "common.cgh"
+
+uniform sampler2D uAlbedo;    // sRGB albedo, water in alpha
+uniform sampler2D uNormalMap; // relief normal (tangent space), elevation in alpha
+uniform sampler2D uLights;    // city lights: dense cores (r), scattered towns (g)
+uniform sampler2D uClouds;    // cover (r), thickness (g), shading (b)
+uniform sampler2D uInscatter; // atmosphere in front of the disc (screen)
+uniform sampler2D uTransmit;  // … and its transmittance
+
+uniform float4 uSun;      // direction towards the sun (world)
+uniform float4 uGlobeK;   // sun irradiance (sunI × surface), lights max, lights gain, moonlight
+uniform float4 uGlobeK2;  // cloud shadow, specular, cloud opacity, cloud glow
+uniform float4 uCloudOff; // -, sunI
+
+float ggx(float NdH, float a2)
+{
+    float d = NdH * NdH * (a2 - 1.0) + 1.0;
+    return a2 / (PI * d * d);
+}
+
+float4 main(
+    float4 vUv : TEXCOORD0,
+    float2 vShadowUv : TEXCOORD1,
+    float2 vScreen : TEXCOORD2,
+    half3 vN : TEXCOORD3,
+    half3 vEast : TEXCOORD4,
+    half3 vNorth : TEXCOORD5,
+    half3 vV : TEXCOORD6,
+    half4 vSunE : TEXCOORD7,
+    half3 vCloudE : TEXCOORD8) : COLOR
+{
+    half4 A = tex2D(uAlbedo, vUv.xy);
+    half4 NM = tex2D(uNormalMap, vUv.xy);
+    half2 li = tex2D(uLights, vUv.xy).rg;
+    half3 c = tex2D(uClouds, vUv.zw).rgb;
+    half cs = tex2D(uClouds, vShadowUv).r;
+    half3 ins = tex2D(uInscatter, vScreen).rgb;
+    half3 tr = tex2D(uTransmit, vScreen).rgb;
+
+    half3 albedo = srgbToLinear(A.rgb);
+    half water = A.a;
+    half3 Ng = normalize(vN);
+    half3 tn = NM.xyz * (half)2.0 - (half)1.0;
+    half3 N = normalize(vEast * tn.x + vNorth * tn.y + Ng * tn.z);
+    N = normalize(lerp(N, Ng, water));
+    half3 L = (half3)uSun.xyz;
+    half3 V = normalize(vV);
+    half mu = vSunE.w;
+    half3 E = vSunE.rgb;
+    half sunI = (half)uCloudOff.y;
+
+    half shadow = (half)1.0 - (half)uGlobeK2.x * cs;
+    half NdL = max(dot(N, L), (half)0.0);
+    half3 col = albedo * (half)INV_PI * E * NdL * shadow;
+
+    // Skylight: blue by day, amber in the twilight band.
+    half dayAmt = smoothstep((half)-0.16, (half)0.3, mu);
+    half3 skyCol = lerp(half3(0.9, 0.42, 0.22), half3(0.32, 0.52, 1.0), smoothstep((half)-0.06, (half)0.12, mu));
+    col += albedo * skyCol * ((half)uGlobeK.x * (half)0.012 * dayAmt * ((half)1.0 - (half)0.3 * cs));
+
+    // Ocean: GGX sun glint plus Fresnel sky reflection (float: the glint is sharp).
+    if (water > 0.01) {
+        float3 Vf = (float3)V;
+        float3 Lf = (float3)L;
+        float3 Nf = (float3)Ng;
+        float NdV = max(dot(Nf, Vf), 1e-3);
+        float3 H = normalize(Lf + Vf);
+        float NdH = max(dot(Nf, H), 0.0);
+        float VdH = max(dot(Vf, H), 0.0);
+        float NgL = max((float)mu, 0.0);
+        float G = (NgL / (NgL * 0.97 + 0.03)) * (NdV / (NdV * 0.97 + 0.03));
+        float F = 0.02 + 0.98 * exp2((-5.55473 * VdH - 6.98316) * VdH);
+        float spec = (ggx(NdH, 0.0035) + ggx(NdH, 0.05) * 0.35) * F * G / (4.0 * NdV + 1e-4);
+        float Fv = 0.02 + 0.98 * exp2((-5.55473 * NdV - 6.98316) * NdV);
+        col += (half3)((float3)E * spec * (float)(shadow * ((half)1.0 - (half)0.7 * cs)) * uGlobeK2.y) * water;
+        col += water * (half)Fv * skyCol * (sunI * (half)0.02 * dayAmt);
+    }
+
+    // City lights, fading in through twilight; mountain country stays dark.
+    half night = (half)1.0 - smoothstep((half)-0.14, (half)0.05, mu);
+    half lum = (li.r * li.r * saturate(((half)1.0 - water) * (half)1.6) + li.g * li.g) * (half)uGlobeK.y;
+    half mtn = smoothstep((half)0.12, (half)0.4, NM.w);
+    lum *= (half)1.0 - (half)0.75 * mtn * ((half)1.0 - smoothstep((half)0.4, (half)1.5, lum));
+    half3 lightsCol = lerp(half3(1.0, 0.46, 0.15), half3(1.0, 0.76, 0.42), saturate(lum * (half)0.55));
+    col += lightsCol * lum * ((half)uGlobeK.z * night);
+    // Moonlight keeps the night hemisphere legible.
+    col += (albedo * half3(0.26, 0.40, 0.85) + half3(0.002, 0.004, 0.012) * water) * ((half)uGlobeK.w * ((half)1.0 - dayAmt));
+
+    // Cloud shell (0.45 % above the ground: the same view ray, same maps).
+    half dens = c.r;
+    if (dens > 0.004) {
+        half thick = c.g;
+        half3 Ec = vCloudE;
+        half wrapL = saturate(mu * (half)0.85 + (half)0.15);
+        half shade = ((half)0.5 + (half)0.55 * thick) * ((half)0.82 + (half)0.3 * c.b);
+        half3 cc = (half)(0.8 * INV_PI) * Ec * ((half)0.15 + (half)0.85 * wrapL) * shade;
+        half back = saturate(dot(-V, L));
+        back *= back;
+        cc += Ec * (back * back * back * ((half)1.0 - thick) * (half)0.05);
+        cc += half3(0.30, 0.45, 0.9) * ((half)uGlobeK.x * (half)0.012 * dayAmt);
+        half lumc = (li.r * li.r + li.g * li.g) * (half)uGlobeK.y;
+        cc += half3(1.0, 0.52, 0.24) * (lumc * (half)uGlobeK2.w * (half)uGlobeK.z * night * ((half)0.45 + (half)0.55 * thick));
+        cc += half3(0.26, 0.38, 0.75) * ((half)uGlobeK.w * ((half)0.6 + (half)0.5 * thick) * ((half)1.0 - dayAmt));
+        half NdVc = saturate(dot(Ng, V));
+        half alpha = saturate(dens * (half)uGlobeK2.z * ((half)0.75 + (half)0.25 * thick) * ((half)1.0 + (half)0.9 * ((half)1.0 - NdVc)));
+        col = lerp(col, cc, alpha);
+    }
+
+    return float4((float3)(col * tr + ins), 1.0);
+}

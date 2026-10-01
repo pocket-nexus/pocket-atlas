@@ -1,5 +1,5 @@
 import { CustomBlending, OneFactor, OneMinusSrcAlphaFactor, type MeshPhysicalMaterial, type MeshStandardMaterial } from "three";
-import { GLSL_NOISE } from "./glsl";
+import { GLSL_NOISE } from "../../shared/glsl";
 import type { WetShared } from "./wet";
 
 const VERT_PARS = /* glsl */ `

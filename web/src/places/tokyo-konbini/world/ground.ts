@@ -1,7 +1,7 @@
 import { CircleGeometry, MeshStandardMaterial, PlaneGeometry, Vector2, type Texture } from "three";
-import type { Baker } from "../gfx/bake";
+import type { Baker } from "../../shared/bake";
 import { roadText, toTexture } from "../gfx/canvas";
-import { box } from "../gfx/geo";
+import { box } from "../../shared/geo";
 import { makeWet } from "../gfx/wet";
 import type { World } from "./context";
 import { L } from "./layout";

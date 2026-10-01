@@ -18,7 +18,7 @@ import {
   Float32BufferAttribute,
 } from "three";
 import { Rng } from "../../../core/random";
-import { GLSL_NOISE } from "../gfx/glsl";
+import { GLSL_NOISE } from "../../shared/glsl";
 import type { World } from "./context";
 
 export const SKY = {

@@ -1,0 +1,15 @@
+// Place marker, added to the HDR frame: a glowing dot and a ring (a pulse on
+// open places, a steady wider ring on the selected one). Units are the
+// quad's half size.
+
+uniform float4 uMarkerCol; // linear colour × intensity, -
+uniform float4 uMarkerK;   // dot radius, ring radius, ring width, ring strength
+
+half4 main(float2 vUv : TEXCOORD0) : COLOR
+{
+    float r = length(vUv);
+    float core = exp(-r * r / (uMarkerK.x * uMarkerK.x));
+    float d = (r - uMarkerK.y) / uMarkerK.z;
+    float ring = exp(-d * d) * uMarkerK.w;
+    return half4((half3)(uMarkerCol.rgb * (core * 1.6 + ring)), 0.0);
+}

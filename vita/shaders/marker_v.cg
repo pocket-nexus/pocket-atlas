@@ -1,0 +1,11 @@
+// A place marker: a screen-space quad around the marker's projected position.
+
+void main(
+    float2 aPosition,
+    uniform float4 uMarker, // centre (NDC), half size (NDC)
+    out float4 oPosition : POSITION,
+    out float2 oUv : TEXCOORD0)
+{
+    oPosition = float4(uMarker.xy + aPosition * uMarker.zw, 0.5, 1.0);
+    oUv = aPosition;
+}

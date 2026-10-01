@@ -15,8 +15,10 @@
 //! ```
 //!
 //! `META` is UTF-8 JSON ([`Meta`]); `TEXD`, `GEOM` and `ANIM` are raw blobs
-//! addressed by byte ranges inside `META`.
+//! addressed by byte ranges inside `META`. The atlas pack ([`atlas`]) uses
+//! the same container with magic "ATLS".
 
+pub mod atlas;
 pub mod meta;
 
 pub use meta::*;
@@ -94,7 +96,12 @@ impl<'a> Pack<'a> {
     /// Section table only (`bytes` = the first 16 + 16 × count bytes), for
     /// readers that stream payloads instead of holding the whole pack.
     pub fn parse_header(bytes: &[u8]) -> Result<Vec<Section>, Error> {
-        if bytes.get(0..4) != Some(&MAGIC[..]) {
+        Self::parse_header_as(bytes, MAGIC)
+    }
+
+    /// [`Pack::parse_header`] for a container with another magic.
+    pub fn parse_header_as(bytes: &[u8], magic: [u8; 4]) -> Result<Vec<Section>, Error> {
+        if bytes.get(0..4) != Some(&magic[..]) {
             return Err(Error::Magic);
         }
         let version = u32_at(bytes, 4)?;
@@ -124,6 +131,11 @@ impl<'a> Pack<'a> {
 /// Serializes sections into a pack. Payload alignment is honoured in file
 /// offsets so a runtime can map an aligned file buffer without copying.
 pub fn write(sections: &[([u8; 4], &[u8], u32)]) -> Vec<u8> {
+    write_as(MAGIC, sections)
+}
+
+/// [`write`] with another container magic.
+pub fn write_as(magic: [u8; 4], sections: &[([u8; 4], &[u8], u32)]) -> Vec<u8> {
     let header = 16 + sections.len() * 16;
     let mut offsets = Vec::with_capacity(sections.len());
     let mut at = header;
@@ -134,7 +146,7 @@ pub fn write(sections: &[([u8; 4], &[u8], u32)]) -> Vec<u8> {
         at += data.len();
     }
     let mut out = vec![0u8; at];
-    out[0..4].copy_from_slice(&MAGIC);
+    out[0..4].copy_from_slice(&magic);
     out[4..8].copy_from_slice(&VERSION.to_le_bytes());
     out[8..12].copy_from_slice(&(sections.len() as u32).to_le_bytes());
     for (i, ((tag, data, align), off)) in sections.iter().zip(&offsets).enumerate() {

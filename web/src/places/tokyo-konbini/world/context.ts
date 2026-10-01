@@ -1,7 +1,7 @@
 import { Color, Group, Mesh, Vector3, type BufferGeometry, type Light, type Material, type Object3D } from "three";
 import type { Quality } from "../../../core/quality";
 import { Rng } from "../../../core/random";
-import type { Atlas } from "../gfx/atlas";
+import type { Atlas } from "../../shared/atlas";
 import type { MaterialLib } from "../gfx/materials";
 import type { FogLight } from "../fx/post";
 

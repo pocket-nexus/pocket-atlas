@@ -16,12 +16,12 @@ import {
 import { RectAreaLightUniformsLib } from "three/examples/jsm/lights/RectAreaLightUniformsLib.js";
 import type { PlaceDef, Progress, Stage, StageContext } from "../../core/types";
 import { TokyoAudio } from "./audio";
-import { CameraRig, type Shot, type ShotKey } from "./camera";
+import { CameraRig, type Shot, type ShotKey } from "../shared/camera";
 import { createPost, type PostChain } from "./fx/post";
 import { Rain } from "./fx/rain";
-import { Atlas } from "./gfx/atlas";
-import { Baker } from "./gfx/bake";
-import { batchStatic } from "./gfx/geo";
+import { Atlas } from "../shared/atlas";
+import { Baker } from "../shared/bake";
+import { batchStatic } from "../shared/geo";
 import { LAYER_NO_REFLECT } from "./gfx/layers";
 import { MaterialLib } from "./gfx/materials";
 import { PlanarReflection } from "./gfx/reflection";
@@ -209,27 +209,50 @@ export class TokyoStage implements Stage {
   private exposeExport(): void {
     const w = window as unknown as { pocketAtlasExport?: (seconds?: number) => Promise<unknown> };
     w.pocketAtlasExport = async (seconds = 20) => {
-      const { exportPlace } = await import("./export");
+      const { exportPlace } = await import("../shared/export");
+      const fog = this.scene.fog as FogExp2;
+      const haze = {
+        density: this.post.fog.uniforms.get("uDensity")!.value as number,
+        ambient: (this.post.fog.uniforms.get("uAmbient")!.value as Color).toArray(),
+        ambientDensity: this.post.fog.uniforms.get("uAmbientDensity")!.value as number,
+      };
+      const world = this.world;
+      const door = this.konbini.door;
+      const v = (p: Vector3) => [p.x, p.y, p.z].map((x) => Math.round(x * 1e5) / 1e5);
       return exportPlace({
         renderer: this.ctx.renderer,
-        world: this.world,
+        world,
         baker: this.baker,
         env: this.envCube,
         envPosition: [3.5, 2.2, 3.0],
         shots: SHOTS,
         walkable: WALKABLE,
         intro: INTRO_FROM,
-        shopBox: SHOP_BOX,
-        fog: { color: (this.scene.fog as FogExp2).color.toArray(), density: (this.scene.fog as FogExp2).density },
-        haze: {
-          density: this.post.fog.uniforms.get("uDensity")!.value as number,
-          ambient: (this.post.fog.uniforms.get("uAmbient")!.value as Color).toArray(),
-          ambientDensity: this.post.fog.uniforms.get("uAmbientDensity")!.value as number,
-        },
+        fog: { color: fog.color.toArray(), density: fog.density },
         environmentIntensity: this.scene.environmentIntensity,
-        doors: this.konbini.door,
         record: seconds,
         fps: 15,
+        // Rain, the lit haze and the automatic doors are this place's own keys.
+        meta: (c) => ({
+          version: c.version,
+          units: c.units,
+          up: c.up,
+          fog: c.fog,
+          haze: { ...haze, dryBox: { min: [...SHOP_BOX.min], max: [...SHOP_BOX.max] } },
+          hemisphere: c.hemisphere,
+          rectLights: c.rectLights,
+          fogLights: c.fogLights,
+          environment: c.environment,
+          rain: {
+            dryBoxes: world.dryBoxes.map(([a, b]) => [v(a), v(b)]),
+            dripEdges: world.dripEdges.map(([a, b]) => [v(a), v(b)]),
+            steamVents: world.steamVents.map((s) => ({ origin: v(s.origin), dir: v(s.dir) })),
+          },
+          camera: c.camera,
+          doors: { left: door.left.name, right: door.right.name, travel: 0.98, trigger: [2.1, 1.0, -3.0], radius: 3.2 },
+          ...c.special,
+          tracks: c.tracks,
+        }),
         onProgress: (label) => console.info(`[export] ${label}`),
       });
     };

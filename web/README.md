@@ -1,8 +1,8 @@
 # Pocket Atlas — web reference
 
-A standalone three.js app: a night-side globe where you pick a place, and a
-rain-soaked Tokyo backstreet with a 24-hour konbini as the first enterable
-place. It does not use any PocketJS runtime, build tooling or packages — it is
+A standalone three.js app: a night-side globe where you pick a place, a
+rain-soaked Tokyo backstreet with a 24-hour konbini, and the stairs of Suga
+Shrine in Yotsuya on a summer afternoon. It does not use any PocketJS runtime, build tooling or packages — it is
 a plain Vite + TypeScript project with its own lockfile.
 
 Every asset is generated at load time: Earth textures are rasterised from
@@ -27,8 +27,8 @@ Requires WebGL 2. Tested in Chrome on Apple silicon (ANGLE / Metal).
 | --- | --- | --- |
 | Globe | drag / wheel / pinch | spin, zoom |
 | Globe | click a beacon or a card | fly in (open places) or preview (others) |
-| Tokyo | drag, wheel, WASD / arrows, Q/E | orbit, dolly, move the focus, raise/lower |
-| Tokyo | `C` | cinematic camera on/off (also starts after 40 s idle) |
+| Place | drag, wheel, WASD / arrows, Q/E | orbit, dolly, move the focus, raise/lower |
+| Place | `C` | cinematic camera on/off (also starts after 40 s idle) |
 | Tokyo | walk up to the door | the automatic door opens with its chime |
 | Anywhere | `H` | hide the UI |
 
@@ -36,10 +36,11 @@ Requires WebGL 2. Tested in Chrome on Apple silicon (ANGLE / Metal).
 
 | Switch | Effect |
 | --- | --- |
-| `#/place/<id>` | open a place directly (`#/place/tokyo-konbini`) |
+| `#/place/<id>` | open a place directly (`#/place/tokyo-konbini`, `#/place/suga-shrine-stairs`) |
 | `?q=low\|medium\|high\|ultra` | force a quality preset (otherwise picked from the GPU, persisted when changed in the UI) |
 | `?shot` | capture mode: no UI, no intro, muted |
-| `?cam=Konbini\|Puddles\|Vending\|Crossing\|Inside\|Wires` | start at a named shot |
+| `?cam=Konbini\|Puddles\|Vending\|Crossing\|Inside\|Wires` | start at a named shot (konbini) |
+| `?cam=Stairs\|Rails\|Below\|Lane\|Canopy` | start at a named shot (Suga Shrine Stairs) |
 | `?view=px,py,pz,tx,ty,tz[,fov]` | explicit camera (with `?shot`) |
 | `?t=12.5` | simulation clock when the stage appears (with `?shot`, captures are reproducible) |
 | `?stats` | frame time and draw-call readout |
@@ -88,6 +89,67 @@ bun scripts/shot.ts "/?shot&stats&q=high&cam=Puddles#/place/tokyo-konbini" out.p
   synthesised (`audio.ts`). Rain intensity and wind gusts vary over
   time and drive both the streaks and the audio.
 
+## How Suga Shrine Stairs is put together
+
+- **Site.** The top nosing of the flight is the origin and the stairs descend
+  along −Z. Looking down the flight faces a bearing of 33°; the export records
+  the bearing, the coordinates and the elevations as metadata and the world is
+  not rotated to north (`world/layout.ts`). 48 risers of 156 mm and 47 treads
+  of 330 mm drop 7.5 m over 15.5 m; the lane runs 48 m to a five-way junction,
+  and 東福院坂 climbs to the apartment ridge about 300 m ahead.
+- **Stairs.** Each step is three or four granite slabs with a chamfered
+  nosing, a darker anti-slip band and a mortar joint at the riser; a few slabs
+  are warmer or darker stone (`world/stairs.ts`). Three Ø48.6 mm handrails on
+  Ø42.7 mm posts run 0.85 m above the nosings and turn down into the paving at
+  both ends. A steel frame for festival lanterns spans the stair head.
+- **Light.** The sun is a `DirectionalLight` at azimuth 255° and elevation 35°
+  (15:30 in late July) with one orthographic shadow map (4096² on the high and
+  ultra presets) fitted to the
+  flight, the lane and the junction. It exports as a glTF directional light;
+  `extras.pocketAtlas.directionalLights` adds the direction toward the sun and
+  the shadow frustum, size and bias. A hemisphere light and a cube capture of
+  the finished place (PMREM, `env.rgba16f` in the pack) fill the shade. No
+  caster moves, so the shadow map renders on the first frames only.
+- **Sky.** The dome is the one custom shader on a scene surface: a
+  zenith-to-horizon gradient, a sun glow and disc, and a panorama of fair-weather
+  cumulus (`world/sky.ts`). The panorama is baked once on the GPU by
+  ray-marching domed cloud cells through a 1.4–4.6 km layer over a curved
+  Earth, with six light steps toward the sun per sample. It stores opacity,
+  sun-lit and sky-lit radiance in a 1024² texture (two halves of 180° azimuth,
+  rows by the square root of elevation); the dome's `pocketAtlas` annotation
+  lists the mapping, the colours and the compositing, and the exporter writes
+  the texture as `sky-clouds.png`.
+- **Materials.** Granite, rubble and cut stone, fair-faced concrete with
+  form-tie holes, lap siding, stucco, concrete block, asphalt, sheet-metal and
+  glazed-tile roofs, bark and painted steel are baked on the GPU into albedo /
+  normal / ORM maps of at most 1024² (`gfx/surfaces.ts`, `gfx/materials.ts`).
+  Every surface is a `MeshStandardMaterial`; leaves, the wire-mesh fence,
+  balcony bars and the 止まれ marking are alpha-tested cut-outs.
+- **Cherry tree.** Tapered limbs carry about 1 600 cards from one canvas leaf
+  atlas. Card normals lean toward the crown's outward direction, so the canopy
+  shades as a volume, and its alpha-tested shadow dapples the stairs and the
+  house walls (`world/tree.ts`). The same atlas feeds the hedge, the smaller
+  terrace trees, ground cover and potted plants.
+- **Neighbourhood.** One house builder makes foundations, walls, windows with
+  aluminium frames and shutter boxes, balconies with laundry, gutters and
+  downpipes, and gable, hip, shed or flat roofs. Hand-placed houses line the
+  flight and the lane; a grid of simpler houses fills the valley and the far
+  slope (`world/houses.ts`). The ridge blocks carry printed balcony facades,
+  and the Ministry of Defense tower at Ichigaya stands 1 km away on the view
+  line (`world/far.ts`).
+- **Street.** Concrete poles with crossarms, transformers, low-voltage racks,
+  telecom cables and service drops; the bracket lamp, blue evacuation plate and
+  no-through sign on the pole at the foot; the stair-head street lamp, the red
+  vending machine, the curve mirror, the 須賀神社 pillar and the notice board
+  (`world/props.ts`).
+- **Draw calls.** `batchStatic` merges about 3 600 meshes into 96 draws and
+  about 140 000 triangles (the export report lists both).
+- **Sound.** The abura-zemi chorus in the cherry, bouts of min-min-zemi,
+  leaves in the breeze and the city hum are synthesised and pan with the
+  camera (`audio.ts`).
+- **Finish.** N8AO, a bloom above luminance 1.6, ACES tone mapping and the
+  shared grade (`fx/post.ts`, `places/shared/grade.ts`).
+
 ## Layout
 
 ```
@@ -97,9 +159,15 @@ src/
   globe/       the globe stage
   places/
     registry.ts          every place on the globe (which ones are enterable)
+    shared/              GPU baker, geometry and canvas helpers, atlas, camera rig,
+                         grade, and export.ts (glTF + extras.pocketAtlas for the
+                         cooker, driven by scripts/export-place.ts)
     tokyo-konbini/       Rainy Night Konbini
-      gfx/       baking, materials, wet/glass/interior shaders, reflection
+      gfx/       materials, wet/glass/interior shaders, reflection, canvas art
       fx/        rain, post-processing
       world/     street plan, ground, konbini, neighbours, props, traffic, people, sky
-      export.ts  glTF + extras.pocketAtlas for the cooker (scripts/export-place.ts)
+    suga-shrine-stairs/  Suga Shrine Stairs
+      gfx/       daylight surfaces and materials, quad builder
+      fx/        daylight post-processing
+      world/     site plan, terrain, stairs, houses, props, tree, far field, sky
 ```

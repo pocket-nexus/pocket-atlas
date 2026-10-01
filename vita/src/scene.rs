@@ -80,7 +80,7 @@ pub struct Scene {
     pub bytes_geom: usize,
 }
 
-fn fmt(f: pc::TexFormat) -> Format {
+pub(crate) fn fmt(f: pc::TexFormat) -> Format {
     match f {
         pc::TexFormat::Rgba8 => Format::Rgba8,
         pc::TexFormat::Bc1 => Format::Bc1,
@@ -90,7 +90,7 @@ fn fmt(f: pc::TexFormat) -> Format {
     }
 }
 
-fn wrap(w: pc::Wrap) -> Wrap {
+pub(crate) fn wrap(w: pc::Wrap) -> Wrap {
     match w {
         pc::Wrap::Repeat => Wrap::Repeat,
         pc::Wrap::Clamp => Wrap::Clamp,
@@ -100,7 +100,7 @@ fn wrap(w: pc::Wrap) -> Wrap {
 
 /// Forward-only reads: the USB host file system does not seek, so a pack is
 /// read in file order and a backward jump reopens the file.
-struct Seq {
+pub(crate) struct Seq {
     path: String,
     f: File,
     pos: u64,
@@ -108,11 +108,11 @@ struct Seq {
 }
 
 impl Seq {
-    fn open(path: &str) -> Result<Self, String> {
+    pub(crate) fn open(path: &str) -> Result<Self, String> {
         Ok(Self { path: path.into(), f: File::open(path).map_err(|e| format!("{path}: {e}"))?, pos: 0, scratch: vec![0; 64 * 1024] })
     }
 
-    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+    pub(crate) fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
         if offset < self.pos {
             self.f = File::open(&self.path).map_err(|e| format!("{}: {e}", self.path))?;
             self.pos = 0;
@@ -136,7 +136,26 @@ impl Scene {
     ///
     /// # Safety
     /// GXM initialised; call from the render thread.
-    pub unsafe fn load(path: &str, mut progress: impl FnMut(usize, usize, &str)) -> Result<Self, String> {
+    pub unsafe fn load(path: &str, progress: impl FnMut(usize, usize, &str)) -> Result<Self, String> {
+        let mut vram = Arena::new(Kind::Cdram, 16 << 20);
+        let mut main = Arena::new(Kind::Main, 8 << 20);
+        match Self::load_in(path, progress, &mut vram, &mut main) {
+            Ok(mut s) => {
+                s.vram = vram;
+                s.main = main;
+                Ok(s)
+            }
+            Err(e) => {
+                // Uploads may still be in flight into these blocks.
+                vita2d_sys::sceGxmTransferFinish();
+                vram.free();
+                main.free();
+                Err(e)
+            }
+        }
+    }
+
+    unsafe fn load_in(path: &str, mut progress: impl FnMut(usize, usize, &str), vram: &mut Arena, main: &mut Arena) -> Result<Self, String> {
         let t0 = std::time::Instant::now();
         let mut f = Seq::open(path)?;
         let mut head = [0u8; 16];
@@ -155,8 +174,6 @@ impl Scene {
         drop(meta_bytes);
         let total = meta.textures.len() + 3;
 
-        let mut vram = Arena::new(Kind::Cdram, 16 << 20);
-        let mut main = Arena::new(Kind::Main, 8 << 20);
         let mut up = Uploader::new(4 << 20)?;
         let mut order: Vec<usize> = (0..meta.textures.len()).collect();
         order.sort_by_key(|&i| meta.textures[i].data.offset);
@@ -168,7 +185,7 @@ impl Scene {
             progress(1 + k, total, &t.name);
             buf.resize(t.data.size as usize, 0);
             f.read_at((s_tex.offset + t.data.offset) as u64, &mut buf)?;
-            let mut tex = up.texture(&mut vram, fmt(t.format), t.width, t.height, t.mips, &buf).map_err(|e| format!("texture {}: {e}", t.name))?;
+            let mut tex = up.texture(vram, fmt(t.format), t.width, t.height, t.mips, &buf).map_err(|e| format!("texture {}: {e}", t.name))?;
             tex.set_wrap(wrap(t.wrap_s), wrap(t.wrap_t));
             if matches!(t.role, pc::TexRole::Color | pc::TexRole::Normal | pc::TexRole::Orm) {
                 // No anisotropic filtering on GXM: keep ground textures crisp at grazing angles.
@@ -222,8 +239,8 @@ impl Scene {
             textures,
             draws,
             anim,
-            vram,
-            main,
+            vram: Arena::new(Kind::Cdram, 16 << 20),
+            main: Arena::new(Kind::Main, 8 << 20),
             load_ms: 0,
             bytes_tex,
             bytes_geom: s_geom.size as usize,
@@ -231,6 +248,15 @@ impl Scene {
         scene.update(0.0);
         scene.load_ms = t0.elapsed().as_millis() as u32;
         Ok(scene)
+    }
+
+    /// Frees the pack's textures and geometry.
+    ///
+    /// # Safety
+    /// GPU idle with respect to every draw of this scene.
+    pub unsafe fn release(self) {
+        self.vram.free();
+        self.main.free();
     }
 
     fn track(&self, r: &pc::Range, stride: usize, frame: f32, out: &mut [f32]) {

@@ -64,6 +64,25 @@ pub enum U {
     Grade,
     Curtain,
     GrainK,
+    EarthRot,
+    Sun,
+    GlobeK,
+    GlobeK2,
+    CloudOff,
+    Marker,
+    MarkerCol,
+    MarkerK,
+    SunDir,
+    SunRad,
+    SunMat,
+    ShadowK,
+    SkyDay,
+    SkySun,
+    SkyGlow,
+    SkyDisc,
+    CloudSun,
+    CloudAmb,
+    SunCurve,
     Count,
 }
 
@@ -72,7 +91,8 @@ const UNIFORM_NAMES: [&str; U::Count as usize] = [
     "uHemiGround", "uRipple", "uReflOn", "uLightPos", "uLightCol", "uLightDir", "uLightRight", "uLightUp", "uHaze", "uRayZ", "uRayX", "uRayY",
     "uZenith", "uHorizon", "uGlow", "uCam", "uTime", "uBox", "uWind", "uCenter", "uAmbient", "uDry", "uFogPos", "uFogCol", "uFogDir",
     "uOpacity", "uBoxMin", "uBoxMax", "uTexel", "uThreshold", "uBloomK", "uGrade",
-    "uCurtain", "uGrainK",
+    "uCurtain", "uGrainK", "uEarthRot", "uSun", "uGlobeK", "uGlobeK2", "uCloudOff", "uMarker", "uMarkerCol", "uMarkerK",
+    "uSunDir", "uSunRad", "uSunMat", "uShadowK", "uSkyDay", "uSkySun", "uSkyGlow", "uSkyDisc", "uCloudSun", "uCloudAmb", "uSunCurve",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,12 +117,17 @@ pub enum S {
     Lut,
     Mask,
     Grain,
+    Lights,
+    SunTrans,
+    Inscatter,
+    Transmit,
+    Shadow,
     Count,
 }
 
 const SAMPLER_NAMES: [&str; S::Count as usize] = [
     "uAlbedo", "uNormalMap", "uOrm", "uEmission", "uEnv", "uPuddles", "uRipples", "uReflSharp", "uReflBlur", "uBeads", "uClouds",
-    "uScene", "uHazeTex", "uBloom", "uSource", "uSupport", "uLut", "uMask", "uGrain",
+    "uScene", "uHazeTex", "uBloom", "uSource", "uSupport", "uLut", "uMask", "uGrain", "uLights", "uSunTrans", "uInscatter", "uTransmit", "uShadow",
 ];
 
 pub type Param = *const g::SceGxmProgramParameter;
@@ -150,6 +175,8 @@ pub enum Layout {
     Fx,
     /// f32×2 (full-screen triangles).
     Pos2,
+    /// Atlas globe: position f32×3, uv f32×2 (20 bytes).
+    Globe,
 }
 
 impl Layout {
@@ -175,6 +202,7 @@ impl Layout {
             ),
             Layout::Fx => (&[("aSeed", 0, U16N, 4), ("aCorner", 8, F32, 2), ("aA", 16, F32, 3), ("aB", 28, F32, 3)], 40),
             Layout::Pos2 => (&[("aPosition", 0, F32, 2)], 8),
+            Layout::Globe => (&[("aPosition", 0, F32, 3), ("aUv", 12, F32, 2)], 20),
         }
     }
 }

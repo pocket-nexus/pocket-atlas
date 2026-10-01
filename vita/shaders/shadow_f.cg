@@ -1,0 +1,27 @@
+// Sun shadow map: distance along the sunlight from the shadow camera's near
+// plane, 0..1 over its range, packed into RGB (24 bits) of an 8-bit target.
+//
+// Defines: ALPHA_TEST (cut-outs: leaves, wire mesh, railings).
+
+uniform float4 uSunDir;  // direction towards the sun, -
+uniform float4 uShadowK; // near-plane distance along the light, 1 / range, -, -
+#ifdef ALPHA_TEST
+uniform sampler2D uAlbedo;
+uniform float4 uBase;     // -, -, -, opacity
+uniform float4 uEmissive; // -, -, -, alpha-test threshold
+#endif
+
+float4 main(
+#ifdef ALPHA_TEST
+    float2 vUv : TEXCOORD3,
+#endif
+    float3 vWorld : TEXCOORD0) : COLOR
+{
+#ifdef ALPHA_TEST
+    if (tex2D(uAlbedo, vUv).a * uBase.a < uEmissive.w) discard;
+#endif
+    float d = saturate((-dot(uSunDir.xyz, vWorld) - uShadowK.x) * uShadowK.y);
+    float3 enc = frac(d * float3(1.0, 255.0, 65025.0));
+    enc -= enc.yzz * float3(1.0 / 255.0, 1.0 / 255.0, 0.0);
+    return float4(enc, 1.0);
+}

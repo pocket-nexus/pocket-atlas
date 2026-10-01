@@ -1,6 +1,6 @@
 import { CylinderGeometry, ExtrudeGeometry, Group, Shape, SphereGeometry, TorusGeometry, Vector2, Vector3, type BufferGeometry, type Material, type Object3D } from "three";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
-import { box } from "../../gfx/geo";
+import { box } from "../../../shared/geo";
 import type { World } from "../context";
 import { instance, palette, Parts, rod, tube, v3 } from "./util";
 
