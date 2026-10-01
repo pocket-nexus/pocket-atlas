@@ -137,7 +137,10 @@ These are offline steps. `build` produces a Devkit runtime VPK/SELF; the place
 and atlas packs remain separate. A standalone `PKAT00001` package still needs
 the new shaders compiled by SceShaccCg on a free console. Host shader lint,
 cross-compilation and CPU budget scans do not establish device compilation,
-GPU time, frame rate or physical screen quality. Hardware deployment and
-acceptance are deliberately deferred while another agent uses the Vita.
+GPU time, frame rate or physical screen quality. A subsequent authorized
+native replacement received a successful startup receipt, but another task
+replaced the runtime and shared shaders during scene compilation. Device
+testing is now paused at the user's request; Sangubashi compilation, rendering
+and performance acceptance remain unverified.
 The existing native renderer has no audio path; the procedural railway sound
 remains a web feature. The PocketJS pin and Vita transport are unchanged.

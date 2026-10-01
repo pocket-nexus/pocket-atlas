@@ -20,6 +20,7 @@
 //   (bench, profile, sweep, shots: --render vita30|vita60|cinematic, default vita30;
 //    bench and profile: --shot NAME --time T, else the device's current view;
 //    --place ID picks the place, default tokyo-konbini)
+//   --share DIR reuses an already-running USB host's root directory.
 //
 // The default title is Pocket Devkit (P3B1D7273, PocketJS apps/devkit), the
 // development container installed on the console: its native slots accept
@@ -55,6 +56,8 @@ const release = !argv.includes("--debug");
 const output = `pocket-atlas-${title}`;
 /** The place a command cooks, syncs or measures. */
 const PLACE = value("--place", "tokyo-konbini");
+/** Explicitly reuse an existing host without restarting the device's link. */
+const USB_SHARE = resolve(value("--share", resolve(ROOT, ".pocket-build/vita-usb/share")));
 
 interface BuildOptions {
   /** Packaged build: no USB debug driver, pack and GXPs inside the VPK. */
@@ -112,12 +115,12 @@ async function build(options: BuildOptions = {}): Promise<string> {
 // PocketJS's wired debug tool, pointed at this repository's USB share.
 async function dev(...args: string[]): Promise<void> {
   const runtime = `${OUT_DIR}/${output}.runtime.json`;
-  const share = resolve(ROOT, ".pocket-build/vita-usb/share");
+  const share = USB_SHARE;
   mkdirSync(share, { recursive: true });
   await $`bun ${POCKETJS}/tools/vita-dev.ts ${args} --runtime ${runtime} --title ${title} --dir ${share}`.cwd(POCKETJS);
 }
 
-const SHARE = resolve(ROOT, ".pocket-build/vita-usb/share/atlas");
+const SHARE = resolve(USB_SHARE, "atlas");
 const PLACES_DIR = resolve(ROOT, ".pocket-build/places");
 const PLACE_DIR = `${PLACES_DIR}/${PLACE}`;
 const PACK = `${PLACE_DIR}/${PLACE}.place`;
@@ -240,7 +243,7 @@ async function lint(): Promise<void> {
 // Every measurement names the render profile, which resets the device's
 // switches and governor to the profile's; `settings` then overrides them.
 const RENDER = value("--render", "vita30");
-const STATUS = resolve(ROOT, `.pocket-build/vita-usb/share/pocket-vita/${title}/status.json`);
+const STATUS = resolve(USB_SHARE, `pocket-vita/${title}/status.json`);
 
 /** The device's engine status (the USB host replaces the file while it is read). */
 function engine(): any {

@@ -26,7 +26,7 @@
 - **Flipbooks**: mips stop while a cell is ≥ 4 texels (the cooker does this from `cols`/`rows`).
 - **GXM swizzles are spelled in ABGR order**: `U8_R111` puts the texel in alpha. Use `U8_RRRR` for single-channel masks read as `.r`. When a texture samples wrong, draw it on screen with `ui.image` to see what the GPU reads.
 - **Uniform names are one global table** (`vita/src/gpu.rs`): a new shader must not reuse a name with another meaning. New shader files go into `vita/src/shaders.rs` `SOURCES` and into the lint cases in `tools/atlas.ts`.
-- **`dynamic`** marks moving nodes (no bake, no LOD, no shadow); never use it as a batching opt-out.
+- **`dynamic`** marks moving nodes (no static lighting bake); rigid nodes can use LODs and the moving sunlight shadow map, while skins retain topology and do not cast into that map. Never use it as a batching opt-out.
 - **Pack version** is checked exactly: bump `VERSION` when the format changes and re-cook every pack.
 - **zsh**: `case $s in $pat)` does not glob a pattern held in a variable.
 
