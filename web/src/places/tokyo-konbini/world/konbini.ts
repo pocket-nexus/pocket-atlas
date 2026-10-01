@@ -266,7 +266,12 @@ function buildInterior(w: World, root: Object3D): void {
   for (let x = -3.7; x < 5; x += 2.0)
     for (let z = zf - 1.2; z > K.z0 + 0.8; z -= 1.75) w.mesh(troffer, lightMat, x, K.ceiling - 0.012, z, root, { cast: false, receive: false });
   // Inner wall finish.
-  const innerWall = lib.interior(0xe9ebea, 0.62, 0.8);
+  const innerWall = lib.interior(0xe9ebea, 0.62, 0.8, undefined, "wall-lining");
+  // A surface finish over the wall shell, separated by only 1 cm. Preserve
+  // that layering when handheld depth precision cannot resolve the gap.
+  innerWall.polygonOffset = true;
+  innerWall.polygonOffsetFactor = -2;
+  innerWall.polygonOffsetUnits = -2;
   const iw = new PlaneGeometry(zf - K.z0 - 0.3, K.ceiling);
   iw.rotateY(Math.PI / 2);
   w.mesh(iw, innerWall, K.x0 + 0.26, K.ceiling / 2, (zf + K.z0) / 2, root, { cast: false });
