@@ -8,8 +8,13 @@ import {
   mkdirSync,
   existsSync,
   readdirSync,
+  cpSync,
+  rmSync,
 } from "node:fs";
 import { resolve, join } from "node:path";
+import { crc32 } from "node:zlib";
+import { PLACES } from "../web/src/places/registry";
+import { syncAssets } from "./atlas-3ds-delivery";
 import {
   runContainer,
   THREE_DS_CONTAINER_IMAGE,
@@ -33,7 +38,9 @@ const option = (key: string, fallback: string) => {
 };
 const place = option("--place", "tokyo-konbini"),
   dir = join(root, ".pocket-build/3ds"),
-  romfs = join(dir, "romfs");
+  romfs = join(dir, "atlas-romfs");
+const nativePlaces = join(dir, "places");
+const livePlaces = PLACES.filter((p) => p.status === "live" && p.load);
 const receipts = join(root, ".pocket-build/validation/3ds");
 mkdirSync(receipts, { recursive: true });
 const thin = args.includes("--thin");
@@ -43,16 +50,33 @@ const artifact = join(
 );
 const sha = (p: string) =>
   createHash("sha256").update(readFileSync(p)).digest("hex");
+function assets() {
+  return livePlaces.map((p) => {
+    const path = join(nativePlaces, `${p.id}.place`);
+    const data = readFileSync(path);
+    return {
+      id: p.id,
+      path,
+      sha256: sha(path),
+      bytes: data.length,
+      crc32: crc32(data),
+    };
+  });
+}
 async function build() {
-  if (!existsSync(join(romfs, "scene.place")))
-    throw new Error("cook first: bun tools/atlas-3ds.ts cook");
-  const placeHash = sha(join(romfs, "scene.place")),
-    placeBytes = readFileSync(join(romfs, "scene.place")).length;
+  const entries = assets();
+  mkdirSync(romfs, { recursive: true });
+  const atlasPath = join(dir, "romfs/atlas.3ds");
+  if (!existsSync(atlasPath))
+    throw new Error("cook the atlas: bun tools/atlas-3ds-assets.ts");
+  cpSync(atlasPath, join(romfs, "atlas.3ds"));
+  const atlasHash = sha(atlasPath);
   const pocketjsRevision = (
     await $`git -C ${join(root, "vendor/pocketjs")} rev-parse HEAD`.text()
   ).trim();
   const sourceHash = createHash("sha256")
-    .update(placeHash)
+    .update(atlasHash)
+    .update(JSON.stringify(entries.map(({ path, ...entry }) => entry)))
     .update(pocketjsRevision)
     .update(THREE_DS_CONTAINER_IMAGE);
   sourceHash.update(readFileSync(join(root, "n3ds/Makefile")));
@@ -61,21 +85,28 @@ async function build() {
   const buildId = sourceHash.digest("hex").slice(0, 12);
   const config = join(dir, "build/config.h");
   mkdirSync(join(dir, "build"), { recursive: true });
-  const header = `#define POCKETJS_HOST_ABI ${THREE_DS_DEV_HOST_ABI}\n#define POCKETJS_TARGET_ID "${THREE_DS_DEV_TARGET_ID}"\n#define ATLAS_BUILD_ID "${buildId}"\n#define ATLAS_PLACE_SHA "${placeHash}"\n#define ATLAS_PLACE_BYTES ${placeBytes}\n`;
+  const catalog = entries
+    .map(
+      (e) =>
+        `X(${JSON.stringify(e.id)}, "${e.sha256}", ${e.bytes}u, ${e.crc32}u)`,
+    )
+    .join(" ");
+  const header = `#define POCKETJS_HOST_ABI ${THREE_DS_DEV_HOST_ABI}\n#define POCKETJS_TARGET_ID "${THREE_DS_DEV_TARGET_ID}"\n#define ATLAS_BUILD_ID "${buildId}"\n#define ATLAS_CATALOG(X) ${catalog}\n`;
   if (!existsSync(config) || readFileSync(config, "utf8") !== header)
     writeFileSync(config, header);
   // Assemble and compile on the container's own filesystem. Docker Desktop's
   // shared mount can expose stale sizes for files just rewritten by bin2s.
-  const packedRomfs = thin ? join(dir, "thin-romfs") : romfs;
-  mkdirSync(packedRomfs, { recursive: true });
   writeFileSync(
-    join(packedRomfs, "manifest.json"),
-    JSON.stringify({
-      place,
-      sha256: placeHash,
-      bytes: placeBytes,
-      embedded: !thin,
-    }),
+    join(romfs, "manifest.json"),
+    JSON.stringify(
+      {
+        version: 1,
+        atlasSha256: atlasHash,
+        places: entries.map(({ path, ...e }) => e),
+      },
+      null,
+      2,
+    ) + "\n",
   );
   const snapshot = join(dir, `source-${buildId}.tar`);
   await $`tar --no-xattrs -cf ${snapshot} n3ds .pocket-build/3ds/build/config.h`.cwd(
@@ -85,8 +116,8 @@ async function build() {
     `mkdir -p /tmp/atlas-source /tmp/atlas-build
 tar -xf /atlas/.pocket-build/3ds/source-${buildId}.tar -C /tmp/atlas-source
 cp /tmp/atlas-source/.pocket-build/3ds/build/config.h /tmp/atlas-build/config.h
-make -f /tmp/atlas-source/n3ds/Makefile -j8 BUILD=/tmp/atlas-build SOURCE=/tmp/atlas-source/n3ds/src ROMFS=/atlas/.pocket-build/3ds/${thin ? "thin-romfs" : "romfs"} OUT=/atlas/dist/3ds/${thin ? "pocket-atlas-dev.3dsx" : "pocket-atlas.3dsx"}
-cp /tmp/atlas-build/scene.shbin /tmp/atlas-build/wet.shbin /tmp/atlas-build/atlas.elf /tmp/atlas-build/atlas.map /atlas/.pocket-build/3ds/build/`,
+make -f /tmp/atlas-source/n3ds/Makefile -j8 BUILD=/tmp/atlas-build SOURCE=/tmp/atlas-source/n3ds/src ROMFS=/atlas/.pocket-build/3ds/atlas-romfs OUT=/atlas/dist/3ds/${thin ? "pocket-atlas-dev.3dsx" : "pocket-atlas.3dsx"}
+cp /tmp/atlas-build/*.shbin /tmp/atlas-build/atlas.elf /tmp/atlas-build/atlas.map /atlas/.pocket-build/3ds/build/`,
     [{ hostPath: root, containerPath: "/atlas" }],
     "/atlas",
     {},
@@ -100,7 +131,8 @@ cp /tmp/atlas-build/scene.shbin /tmp/atlas-build/wet.shbin /tmp/atlas-build/atla
     container: THREE_DS_CONTAINER_IMAGE,
     bytes: readFileSync(artifact).length,
     sha256: sha(artifact),
-    placeSha256: sha(join(romfs, "scene.place")),
+    atlasSha256: atlasHash,
+    places: entries.map(({ path, ...e }) => e),
   };
   if (receipt.bytes > 32 * 1024 * 1024)
     throw new Error("native install limit: artifact exceeds 32 MiB");
@@ -117,7 +149,15 @@ async function connect() {
     "--keys",
     join(root, "vendor/pocketjs/.pocket/3ds/devices"),
   );
-  const devices = await discoverPocketRuntimes({ addresses: [host] });
+  let devices = await discoverPocketRuntimes({ addresses: [host] });
+  for (
+    let attempt = 0;
+    attempt < 2 && !devices.some((d) => d.address === host);
+    attempt++
+  ) {
+    await Bun.sleep(250);
+    devices = await discoverPocketRuntimes({ addresses: [host] });
+  }
   const device = devices.find((d) => d.address === host);
   if (!device) throw new Error(`no Pocket Runtime at ${host}:8131`);
   let token: Uint8Array | undefined;
@@ -157,11 +197,40 @@ async function status(
   await c.sendCtrl({ t: "atlas.control", ...ctl });
   return await p;
 }
+async function enterPlace(c: PocketRuntimeClient, id: string) {
+  await status(c, { place: id });
+  const deadline = Date.now() + 90000;
+  while (Date.now() < deadline) {
+    await Bun.sleep(400);
+    const state = await status(c);
+    if (state.place === id && state.phase === "running") return state;
+    if (state.error) throw new Error(String(state.error));
+  }
+  throw new Error(`Place did not start: ${id}`);
+}
+function shotNames(id: string): string[] {
+  const data = readFileSync(join(nativePlaces, `${id}.place`));
+  for (let i = 0; i < data.readUInt32LE(8); i++) {
+    const at = 16 + i * 16;
+    if (data.toString("ascii", at, at + 4) === "META") {
+      const offset = data.readUInt32LE(at + 4),
+        bytes = data.readUInt32LE(at + 8);
+      return JSON.parse(
+        data.toString("utf8", offset, offset + bytes),
+      ).camera.shots.map((shot: { name: string }) => shot.name);
+    }
+  }
+  throw new Error(`Missing camera metadata: ${id}`);
+}
 if (command === "cook") {
-  mkdirSync(romfs, { recursive: true });
-  await $`cargo run --release --locked -p pocket3d-place-cook -- --pica-from ${join(root, `.pocket-build/places/${place}/${place}.place`)} --out ${join(romfs, "scene.place")} --tex ${option("--tex", "256")}`.cwd(
-    root,
-  );
+  mkdirSync(nativePlaces, { recursive: true });
+  for (const p of livePlaces.filter(
+    (p) => !args.includes("--place") || p.id === place,
+  )) {
+    await $`cargo run --release --locked -p pocket3d-place-cook -- --pica-from ${join(root, `.pocket-build/places/${p.id}/${p.id}.place`)} --out ${join(nativePlaces, `${p.id}.place`)} --tex ${option("--tex", "256")}`.cwd(
+      root,
+    );
+  }
 } else if (command === "build") await build();
 else if (command === "install") {
   const receipt = await build();
@@ -173,12 +242,41 @@ else if (command === "install") {
     try {
       const c = await connect();
       try {
-        const running = await status(c);
-        if (running.build === receipt.buildId && running.phase === "running") {
+        let running = await status(c);
+        if (
+          running.build === receipt.buildId &&
+          ["running", "browser"].includes(String(running.phase))
+        ) {
+          const assetReceipts = thin
+            ? []
+            : await syncAssets(c, assets(), {
+                host: option("--asset-host", "") || undefined,
+                onProgress: (r, i, count) =>
+                  console.log(
+                    `Assets ${i}/${count}: ${r.sha256.slice(0, 12)} ${r.cached ? "cache verified" : "transferred and verified"}`,
+                  ),
+              });
+          const before = await status(c);
+          await Bun.sleep(600);
+          running = await status(c);
+          if (
+            running.build !== receipt.buildId ||
+            !["running", "browser"].includes(String(running.phase)) ||
+            running.error ||
+            Number(running.frame) <= Number(before.frame)
+          )
+            throw new Error(
+              `Installed runtime did not advance after asset sync: ${JSON.stringify(running)}`,
+            );
           writeFileSync(
             join(receipts, "installed.json"),
             JSON.stringify(
-              { ...receipt, running, transferExitCode: transfer.exitCode },
+              {
+                ...receipt,
+                running,
+                assetReceipts,
+                transferExitCode: transfer.exitCode,
+              },
               null,
               2,
             ) + "\n",
@@ -200,10 +298,52 @@ else if (command === "install") {
     throw new Error(
       `Native install did not reach the expected running build: ${lastError}`,
     );
+} else if (command === "package") {
+  await build();
+  const stage = join(dir, "release");
+  rmSync(stage, { recursive: true, force: true });
+  mkdirSync(join(stage, "3ds"), { recursive: true });
+  mkdirSync(join(stage, "pocket-atlas"));
+  cpSync(artifact, join(stage, "3ds/pocket-atlas.3dsx"));
+  for (const e of assets())
+    cpSync(e.path, join(stage, `pocket-atlas/${e.sha256}.place`));
+  cpSync(
+    join(romfs, "manifest.json"),
+    join(stage, "pocket-atlas/manifest.json"),
+  );
+  const archive = join(root, "dist/3ds/pocket-atlas-sd.zip");
+  rmSync(archive, { force: true });
+  await $`zip -q -r ${archive} 3ds pocket-atlas`.cwd(stage);
+  console.log(archive);
 } else {
   const c = await connect();
   try {
-    if (command === "status" || command === "ctl") {
+    if (
+      ["profile", "sweep", "tour"].includes(command) &&
+      args.includes("--place")
+    )
+      await enterPlace(c, place);
+    if (command === "sync") {
+      const assetReceipts = await syncAssets(c, assets(), {
+        host: option("--asset-host", "") || undefined,
+        onProgress: (r, i, count) =>
+          console.log(
+            `Assets ${i}/${count}: ${r.sha256.slice(0, 12)} ${r.cached ? "cache verified" : "transferred and verified"}`,
+          ),
+      });
+      const running = await status(c);
+      if (
+        !["browser", "running"].includes(String(running.phase)) ||
+        running.error
+      )
+        throw new Error(
+          `Asset sync completed but the view failed: ${JSON.stringify(running)}`,
+        );
+      writeFileSync(
+        join(receipts, "sync.json"),
+        JSON.stringify({ assetReceipts, running }, null, 2) + "\n",
+      );
+    } else if (command === "status" || command === "ctl") {
       const ctl = command === "ctl" ? JSON.parse(args[1] ?? "{}") : {};
       const s = await status(c, ctl);
       console.log(JSON.stringify(s, null, 2));
@@ -222,10 +362,19 @@ else if (command === "install") {
       await Bun.write(path, shot.png);
       console.log(path);
     } else if (command === "profile" || command === "sweep") {
+      const current = await status(c);
+      if (!current.place)
+        throw new Error("Enter a place first, or pass --place ID");
       const names = option(
         "--shots",
-        "Konbini,Puddles,Vending,Crossing,Inside,Wires",
+        shotNames(String(current.place)).join(","),
       ).split(",");
+      const available = shotNames(String(current.place));
+      for (const name of names)
+        if (!available.includes(name)) throw new Error(`Unknown shot: ${name}`);
+      const sampleCount = Number(option("--samples", "20"));
+      if (!Number.isInteger(sampleCount) || sampleCount < 2)
+        throw new Error("--samples must be an integer of at least 2");
       const rows = [];
       for (const shot of names)
         for (const step of command === "sweep"
@@ -234,6 +383,7 @@ else if (command === "install") {
           await status(c, {
             shot,
             step,
+            lodFloor: Number(option("--lod", "3")),
             hold: true,
             inputLock: true,
             ...(args.includes("--live")
@@ -241,11 +391,25 @@ else if (command === "install") {
               : { time: Number(option("--time", "10")) }),
           });
           await Bun.sleep(1200);
-          await status(c, { measure: true });
+          let previous = await status(c, { measure: true });
           const samples = [];
-          for (let i = 0; i < Number(option("--samples", "20")); i++) {
+          for (let i = 0; i < sampleCount; i++) {
             await Bun.sleep(120);
-            samples.push(await status(c));
+            const sample = await status(c);
+            if (
+              sample.phase !== "running" ||
+              sample.place !== current.place ||
+              sample.build !== current.build ||
+              sample.shot !== shot ||
+              sample.error ||
+              Number(sample.frame) <= Number(previous.frame) ||
+              Number(sample.measuredFrames) <= 0
+            )
+              throw new Error(
+                `Profile runtime stopped or changed: ${JSON.stringify(sample)}`,
+              );
+            samples.push(sample);
+            previous = sample;
           }
           const mean = (key: string) =>
             samples.reduce((n, s) => n + Number(s[key]), 0) / samples.length;
@@ -281,7 +445,7 @@ else if (command === "install") {
           );
         }
     } else if (command === "tour") {
-      await status(c, {
+      let previous = await status(c, {
         shot: 0,
         hold: false,
         play: true,
@@ -293,7 +457,19 @@ else if (command === "install") {
       const end = Date.now() + Number(option("--seconds", "60")) * 1000;
       while (Date.now() < end) {
         await Bun.sleep(500);
-        samples.push(await status(c));
+        const sample = await status(c);
+        if (
+          sample.phase !== "running" ||
+          sample.place !== previous.place ||
+          sample.build !== previous.build ||
+          sample.error ||
+          Number(sample.frame) <= Number(previous.frame)
+        )
+          throw new Error(
+            `Tour runtime stopped or changed: ${JSON.stringify(sample)}`,
+          );
+        samples.push(sample);
+        previous = sample;
       }
       const result = { samples, measured: samples.at(-1) };
       writeFileSync(
@@ -303,7 +479,7 @@ else if (command === "install") {
       console.log(result.measured);
     } else
       throw new Error(
-        "usage: cook | build | install | status | ctl JSON | capture | profile | sweep",
+        "usage: cook [--place ID] | build | install [--thin] | sync | package | status | ctl JSON | capture | profile | sweep | tour",
       );
   } finally {
     if (["profile", "sweep", "tour"].includes(command)) {

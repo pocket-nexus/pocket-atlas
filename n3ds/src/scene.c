@@ -2,6 +2,7 @@
 #include "devserver.h"
 #include "navigation.h"
 #include "scene_shbin.h"
+#include "water_shbin.h"
 #include "wet_shbin.h"
 #include <malloc.h>
 #include <math.h>
@@ -17,6 +18,16 @@ AtlasStats atlas = {.reflection = true,
                     .step = 4};
 extern const char *atlas_stage;
 static AtlasHeader *head;
+static unsigned configured_lod_floor = 3;
+static void apply_lod_floor(void) {
+  // The authored feature set defines shared rendering budgets. Open water
+  // scenes keep full geometry; dry day/dusk streets retain the middle LOD;
+  // wet night scenes retain the measured Old 3DS reflection/traffic budget.
+  atlas.lod_floor = configured_lod_floor < 3 ? configured_lod_floor
+                    : head && (head->features & SCENE_WATER) ? 0
+                    : head && (head->features & SCENE_SKY)   ? 1
+                                                             : 2;
+}
 static AtlasTexture *texture_info;
 static AtlasMaterial *materials;
 static AtlasDraw *draws;
@@ -36,7 +47,25 @@ static C3D_Tex reflection_tex, puddle_tex;
 static C3D_RenderTarget *reflection_target;
 static C3D_Mtx reflection_vp;
 static int reflected_loc, eye_loc, wet_loc;
-static bool using_wet;
+static bool using_wet, using_water;
+static DVLB_s *water_dvlb;
+static shaderProgram_s water_shader;
+static int uv_loc, wet_uv_loc, water_eye_loc, water_sky_loc, water_params_loc,
+    waves0_loc, waves1_loc;
+static bool glow_enabled = true, hud_enabled = true;
+static float exposure_ev, exposure_gain = 1;
+static bool hud_first = true, hud_last_connected;
+static int hud_previous_shot = -1;
+static unsigned hud_previous_effects = UINT32_MAX;
+static AtlasVertex *sky_vertices;
+#define SKY_SEGMENTS 32
+#define SKY_RINGS 16
+#define SKY_VERTICES (SKY_SEGMENTS * SKY_RINGS * 6)
+static bool reflection_enabled(void) {
+  return atlas.reflection && head && (head->features & SCENE_REFLECTION);
+}
+static void set_shot(unsigned n, bool midpoint);
+static void free_camera(void);
 static const float *last_model;
 static bool last_mirror;
 static int last_material = -1;
@@ -49,7 +78,7 @@ static C3D_Mtx projection, view, vp;
 static C3D_FogLut fog;
 static float shot_time, yaw, pitch, freeze_time = -1;
 static float detail_range = 6.0f;
-static bool camera_hold, input_lock;
+static bool camera_hold, input_lock, ui_input_block;
 static uint64_t last_control;
 static int stick_x, stick_y;
 static unsigned measured_frames, frame_hist[128];
@@ -81,6 +110,7 @@ static unsigned over, under;
 static int touch_x, touch_y;
 static bool touching;
 static float smooth_frame = 33.3f;
+static float frame_budget = 1000.0f / 30.0f;
 static float planes[6][4];
 static float distance_draw[4096];
 static uint32_t visible_draws[4096], visible_count;
@@ -152,6 +182,9 @@ static bool make_effect_textures(void) {
   return true;
 }
 bool scene_load(const char *path, char *error, size_t capacity) {
+  // Call only once the previous GPU frame has retired: resources may still
+  // be referenced by its command list. Choices deliberately survive unload.
+  scene_free();
   FILE *file = fopen(path, "rb");
   if (!file) {
     snprintf(error, capacity, "cannot open %s", path);
@@ -162,7 +195,7 @@ bool scene_load(const char *path, char *error, size_t capacity) {
   fseek(file, 0, SEEK_END);
   length = ftell(file);
   if (!read_at(file, 0, header, sizeof header) || header[0] != 0x45434c50 ||
-      header[1] != 4 || header[2] != 5 ||
+      header[1] != 5 || header[2] != 5 ||
       !read_at(file, 16, sect, sizeof sect)) {
     snprintf(error, capacity, "invalid PLCE header");
     fclose(file);
@@ -208,13 +241,14 @@ bool scene_load(const char *path, char *error, size_t capacity) {
       (uint64_t)candidate->shots * sizeof(AtlasShot) +
       (uint64_t)candidate->lights * sizeof(AtlasLight) +
       (uint64_t)candidate->dry_boxes * sizeof(AtlasBox) + candidate->skin_bytes;
-  if (candidate->version != 2 || required != ps || candidate->draws > 4096 ||
+  if (candidate->version != 3 || required != ps || candidate->draws > 4096 ||
       candidate->textures > 512 || candidate->shots == 0 ||
       candidate->shots > 32 || candidate->matrices > 2048 ||
       !candidate->frames ||
-      (uint64_t)candidate->matrices * candidate->frames * 48 != as)
+      (uint64_t)candidate->matrices * candidate->frames * 48 > as)
     goto invalid;
   head = candidate;
+  apply_lod_floor();
   texture_info = (AtlasTexture *)(head + 1);
   materials = (AtlasMaterial *)(texture_info + head->textures);
   draws = (AtlasDraw *)(materials + head->materials);
@@ -224,8 +258,8 @@ bool scene_load(const char *path, char *error, size_t capacity) {
   weights = (AtlasSkin *)(dry + head->dry_boxes);
   send_progress("Geometry and animation");
   geometry = linearMemAlign(gs, 128);
-  animation = malloc(as);
-  matrices = malloc(head->matrices * 48);
+  animation = malloc(as ? as : 4);
+  matrices = malloc(head->matrices ? head->matrices * 48 : 4);
   skin_vertices = calloc(head->draws, sizeof(void *));
   skin_back = calloc(head->draws, sizeof(void *));
   textures = calloc(head->textures, sizeof(C3D_Tex));
@@ -233,6 +267,8 @@ bool scene_load(const char *path, char *error, size_t capacity) {
       !textures || !read_at(file, go, geometry, gs) ||
       !read_at(file, ao, animation, as))
     goto invalid;
+  if (head->matrices)
+    memcpy(matrices, animation, head->matrices * 48);
   for (unsigned i = 0; i < head->draws; i++) {
     AtlasDraw *d = &draws[i];
     if (d->count > 65536 || d->material >= head->materials ||
@@ -310,7 +346,8 @@ bool scene_load(const char *path, char *error, size_t capacity) {
     AtlasTexture *t = &texture_info[i];
     if (t->width < 8 || t->height < 8 || t->width > 1024 || t->height > 1024 ||
         (t->width & (t->width - 1)) || (t->height & (t->height - 1)) ||
-        !t->levels || t->levels > 8 || (t->format != 3 && t->format != 4) ||
+        !t->levels || t->levels > 8 ||
+        (t->format != 0 && t->format != 3 && t->format != 4) ||
         !range(t->offset, t->bytes, ts))
       goto invalid;
     C3D_TexInitParams params = {t->width,  t->height,  t->levels - 1,
@@ -329,10 +366,22 @@ bool scene_load(const char *path, char *error, size_t capacity) {
     if (i % 8 == 0)
       devserver_poll();
   }
-  for (unsigned i = 0; i < head->materials; i++)
+  for (unsigned i = 0; i < head->materials; i++) {
+    AtlasMaterial *m = &materials[i];
+    if (m->track != UINT32_MAX &&
+        !range(m->track, (uint64_t)head->frames * 4, as))
+      goto invalid;
+    if (!m->cols || !m->rows || m->frames > (uint64_t)m->cols * m->rows)
+      goto invalid;
     if (materials[i].texture != UINT32_MAX &&
         materials[i].texture >= head->textures)
       goto invalid;
+  }
+  if ((head->sky_texture != UINT32_MAX &&
+       head->sky_texture >= head->textures) ||
+      (head->cloud_texture != UINT32_MAX &&
+       head->cloud_texture >= head->textures))
+    goto invalid;
   fclose(file);
   file = NULL;
   GSPGPU_FlushDataCache(geometry, gs);
@@ -345,6 +394,8 @@ bool scene_load(const char *path, char *error, size_t capacity) {
       shaderInstanceGetUniformLocation(shader.vertexShader, "projection");
   model_loc = shaderInstanceGetUniformLocation(shader.vertexShader, "model");
   tint_loc = shaderInstanceGetUniformLocation(shader.vertexShader, "tint");
+  uv_loc =
+      shaderInstanceGetUniformLocation(shader.vertexShader, "uv_transform");
   wet_dvlb = DVLB_ParseFile((u32 *)wet_shbin, wet_shbin_size);
   if (!wet_dvlb)
     goto invalid;
@@ -362,33 +413,83 @@ bool scene_load(const char *path, char *error, size_t capacity) {
       shaderInstanceGetUniformLocation(wet_shader.vertexShader, "reflected");
   eye_loc = shaderInstanceGetUniformLocation(wet_shader.vertexShader, "eye");
   wet_loc = shaderInstanceGetUniformLocation(wet_shader.vertexShader, "wet");
-  C3D_TexInitParams reflected_params = {
-      128, 256, 0, GPU_RGBA8, GPU_TEX_PROJECTION, true};
-  if (!C3D_TexInitWithParams(&reflection_tex, NULL, reflected_params) ||
-      !C3D_TexInit(&puddle_tex, 64, 64, GPU_RGBA4))
+  wet_uv_loc =
+      shaderInstanceGetUniformLocation(wet_shader.vertexShader, "uv_transform");
+  water_dvlb = DVLB_ParseFile((u32 *)water_shbin, water_shbin_size);
+  if (!water_dvlb)
     goto invalid;
-  reflection_target = C3D_RenderTargetCreateFromTex(
-      &reflection_tex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH16);
-  if (!reflection_target)
+  shaderProgramInit(&water_shader);
+  shaderProgramSetVsh(&water_shader, &water_dvlb->DVLE[0]);
+  if (shaderInstanceGetUniformLocation(water_shader.vertexShader,
+                                       "projection") != projection_loc ||
+      shaderInstanceGetUniformLocation(water_shader.vertexShader, "model") !=
+          model_loc ||
+      shaderInstanceGetUniformLocation(water_shader.vertexShader, "tint") !=
+          tint_loc)
     goto invalid;
-  C3D_TexSetFilter(&reflection_tex, GPU_LINEAR, GPU_LINEAR);
-  C3D_TexSetWrap(&reflection_tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
-  uint16_t *puddles = puddle_tex.data;
-  for (unsigned y = 0; y < 64; y++)
-    for (unsigned x = 0; x < 64; x++) {
-      unsigned index = 0;
-      for (unsigned b = 0; b < 3; b++)
-        index |= ((x >> b) & 1) << (2 * b) | ((y >> b) & 1) << (2 * b + 1);
-      index += ((y / 8) * 8 + x / 8) * 64;
-      float u = x * (2 * M_PI / 64), v = y * (2 * M_PI / 64);
-      float field = sinf(u + 0.7f * sinf(v * 2)) + 0.45f * cosf(2 * v + u) +
-                    0.23f * sinf(u * 5 - v * 3);
-      unsigned alpha = (unsigned)(clampf(0.38f + field * 0.48f, 0.12f, 1) * 15);
-      puddles[index] = 0xfff0 | alpha;
-    }
-  C3D_TexSetFilter(&puddle_tex, GPU_LINEAR, GPU_LINEAR);
-  C3D_TexSetWrap(&puddle_tex, GPU_REPEAT, GPU_REPEAT);
-  C3D_TexFlush(&puddle_tex);
+  waves0_loc =
+      shaderInstanceGetUniformLocation(water_shader.vertexShader, "waves0");
+  waves1_loc =
+      shaderInstanceGetUniformLocation(water_shader.vertexShader, "waves1");
+  water_eye_loc =
+      shaderInstanceGetUniformLocation(water_shader.vertexShader, "water_eye");
+  water_sky_loc =
+      shaderInstanceGetUniformLocation(water_shader.vertexShader, "water_sky");
+  water_params_loc = shaderInstanceGetUniformLocation(water_shader.vertexShader,
+                                                      "water_params");
+  if (head->features & SCENE_REFLECTION) {
+    C3D_TexInitParams reflected_params = {
+        128, 256, 0, GPU_RGBA8, GPU_TEX_PROJECTION, true};
+    if (!C3D_TexInitWithParams(&reflection_tex, NULL, reflected_params) ||
+        !C3D_TexInit(&puddle_tex, 64, 64, GPU_RGBA4))
+      goto invalid;
+    reflection_target = C3D_RenderTargetCreateFromTex(
+        &reflection_tex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH16);
+    if (!reflection_target)
+      goto invalid;
+    C3D_TexSetFilter(&reflection_tex, GPU_LINEAR, GPU_LINEAR);
+    C3D_TexSetWrap(&reflection_tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+    uint16_t *puddles = puddle_tex.data;
+    for (unsigned y = 0; y < 64; y++)
+      for (unsigned x = 0; x < 64; x++) {
+        unsigned index = 0;
+        for (unsigned b = 0; b < 3; b++)
+          index |= ((x >> b) & 1) << (2 * b) | ((y >> b) & 1) << (2 * b + 1);
+        index += ((y / 8) * 8 + x / 8) * 64;
+        float u = x * (2 * M_PI / 64), v = y * (2 * M_PI / 64);
+        float field = sinf(u + 0.7f * sinf(v * 2)) + 0.45f * cosf(2 * v + u) +
+                      0.23f * sinf(u * 5 - v * 3);
+        unsigned alpha =
+            (unsigned)(clampf(0.38f + field * 0.48f, 0.12f, 1) * 15);
+        puddles[index] = 0xfff0 | alpha;
+      }
+    C3D_TexSetFilter(&puddle_tex, GPU_LINEAR, GPU_LINEAR);
+    C3D_TexSetWrap(&puddle_tex, GPU_REPEAT, GPU_REPEAT);
+    C3D_TexFlush(&puddle_tex);
+  }
+  if (head->sky_texture != UINT32_MAX) {
+    sky_vertices = linearAlloc(SKY_VERTICES * sizeof(AtlasVertex));
+    if (!sky_vertices)
+      goto invalid;
+    unsigned at = 0;
+    static const unsigned corners[6][2] = {{0, 0}, {1, 0}, {1, 1},
+                                           {0, 0}, {1, 1}, {0, 1}};
+    for (unsigned y = 0; y < SKY_RINGS; y++)
+      for (unsigned x = 0; x < SKY_SEGMENTS; x++)
+        for (unsigned c = 0; c < 6; c++) {
+          float u = (x + corners[c][0]) / (float)SKY_SEGMENTS;
+          float v = (y + corners[c][1]) / (float)SKY_RINGS;
+          float az = u * 2 * M_PI, elevation = (v - .5f) * M_PI;
+          AtlasVertex *p = &sky_vertices[at++];
+          p->position[0] = sinf(az) * cosf(elevation) * 800;
+          p->position[1] = sinf(elevation) * 800;
+          p->position[2] = -cosf(az) * cosf(elevation) * 800;
+          p->uv[0] = u;
+          p->uv[1] = v;
+          memset(p->color, 255, 4);
+        }
+    GSPGPU_FlushDataCache(sky_vertices, SKY_VERTICES * sizeof(AtlasVertex));
+  }
   fx = linearAlloc(MAX_FX * sizeof(AtlasVertex));
   if (!fx || !make_effect_textures())
     goto invalid;
@@ -399,6 +500,10 @@ bool scene_load(const char *path, char *error, size_t capacity) {
   memcpy(atlas.position, shots[0].from, 12);
   memcpy(atlas.target, shots[0].from + 3, 12);
   atlas.fov = shots[0].from[6];
+  if (!atlas.cinematic) {
+    atlas.cinematic = true;
+    free_camera();
+  }
   return true;
 invalid:
   snprintf(error, capacity,
@@ -424,12 +529,76 @@ static void free_camera(void) {
   pitch = atan2f(dy, sqrtf(dx * dx + dz * dz));
   atlas.cinematic = false;
 }
+unsigned scene_features(void) { return head ? head->features : 0; }
+unsigned scene_shot_count(void) { return head ? head->shots : 0; }
+const char *scene_shot_name(unsigned i) {
+  return head && i < head->shots ? shots[i].name : "";
+}
+void scene_select_shot(unsigned i) {
+  if (head && i < head->shots)
+    set_shot(i, true);
+}
+void scene_settings_get(AtlasSettings *s) {
+  *s = (AtlasSettings){.reflection = atlas.reflection,
+                       .rain = atlas.rain,
+                       .haze = atlas.haze,
+                       .glow = glow_enabled,
+                       .cinematic = atlas.cinematic,
+                       .hud = hud_enabled,
+                       .hold = atlas.hold,
+                       .step = atlas.step,
+                       .lod_floor = configured_lod_floor,
+                       .exposure = exposure_ev};
+}
+void scene_settings_set(const AtlasSettings *s) {
+  atlas.reflection = s->reflection;
+  atlas.rain = s->rain;
+  atlas.haze = s->haze;
+  glow_enabled = s->glow;
+  hud_enabled = s->hud;
+  atlas.hold = s->hold;
+  atlas.step = s->step > 4 ? 4 : s->step;
+  configured_lod_floor = s->lod_floor > 3 ? 3 : s->lod_floor;
+  apply_lod_floor();
+  exposure_ev = isfinite(s->exposure) ? clampf(s->exposure, -2, 2) : 0;
+  exposure_gain = powf(2.0f, exposure_ev / 2.2f);
+  if (head && !s->cinematic)
+    free_camera();
+  else
+    atlas.cinematic = s->cinematic;
+  over = under = 0;
+  scene_hud_reset();
+}
+void scene_settings_reset(void) {
+  AtlasSettings s = {.reflection = true,
+                     .rain = true,
+                     .haze = true,
+                     .glow = true,
+                     .cinematic = true,
+                     .hud = true,
+                     .hold = false,
+                     .step = 4,
+                     .lod_floor = 3,
+                     .exposure = 0};
+  scene_settings_set(&s);
+}
+void scene_hud_reset(void) {
+  hud_first = true;
+  hud_previous_shot = -1;
+  hud_previous_effects = UINT32_MAX;
+}
+
+void scene_input_block(bool blocked) { ui_input_block = blocked; }
+void scene_frame_budget(float milliseconds) {
+  if (isfinite(milliseconds) && milliseconds >= 10 && milliseconds <= 100)
+    frame_budget = milliseconds;
+}
 void scene_update(float dt, uint32_t down, uint32_t held) {
   if (!head)
     return;
   if (input_lock && osGetTime() - last_control > 3000)
     input_lock = false;
-  if (input_lock)
+  if (input_lock || ui_input_block)
     down = held = 0;
   if (freeze_time >= 0)
     atlas.time = freeze_time;
@@ -457,7 +626,7 @@ void scene_update(float dt, uint32_t down, uint32_t held) {
   hidCircleRead(&pad);
   stick_x = pad.dx;
   stick_y = pad.dy;
-  if (input_lock)
+  if (input_lock || ui_input_block)
     pad.dx = pad.dy = 0;
   float lx, ly;
   atlas_stick(pad.dx, pad.dy, &lx, &ly);
@@ -500,7 +669,11 @@ void scene_update(float dt, uint32_t down, uint32_t held) {
   } else {
     yaw += lx * dt * 1.75f + drag_x;
     pitch = clampf(pitch + ly * dt * 1.3f - drag_y, -1.3f, 1.3f);
+    // Scene origins are geographic, so stairs/coast may sit below y=0.
+    // The free camera may fly; do not apply the street helper's ground clamp.
+    float height = atlas.position[1] + lift * dt * 1.8f;
     atlas_move(atlas.position, yaw, mx, my, lift, dt);
+    atlas.position[1] = height;
     atlas.target[0] = atlas.position[0] + sinf(yaw) * cosf(pitch);
     atlas.target[1] = atlas.position[1] + sinf(pitch);
     atlas.target[2] = atlas.position[2] - cosf(yaw) * cosf(pitch);
@@ -515,13 +688,13 @@ void scene_update(float dt, uint32_t down, uint32_t held) {
   if (!atlas.hold && atlas.frame > 90) {
     float cost = fmaxf(atlas.gpu_ms, atlas.update_ms + atlas.prepare_ms) +
                  atlas.submit_ms;
-    if (cost > 31.8f) {
+    if (cost > frame_budget * 0.954f) {
       under = 0;
       if (++over > 10 && atlas.step < 4) {
         atlas.step++;
         over = 0;
       }
-    } else if (cost < 24.0f) {
+    } else if (cost < frame_budget * 0.88f) {
       over = 0;
       if (++under > 90 && atlas.step > 0) {
         atlas.step--;
@@ -659,7 +832,7 @@ static void model_uniform(const float *m, bool mirror) {
     return;
   last_model = m;
   last_mirror = mirror;
-  if (using_wet) {
+  if (using_wet || using_water) {
     for (int i = 0; i < 3; i++)
       C3D_FVUnifSet(GPU_VERTEX_SHADER, model_loc + i, m[4 * i], m[4 * i + 1],
                     m[4 * i + 2], m[4 * i + 3]);
@@ -680,10 +853,11 @@ static void attributes(const void *v) {
   BufInfo_Add(b, v, sizeof(AtlasVertex), 3, 0x210);
 }
 static void common_state(void) {
-  using_wet = false;
+  using_wet = using_water = false;
   last_model = NULL;
   last_material = -1;
   C3D_BindProgram(&shader);
+  C3D_FVUnifSet(GPU_VERTEX_SHADER, uv_loc, 1, 1, 0, 0);
   C3D_AttrInfo *a = C3D_GetAttrInfo();
   AttrInfo_Init(a);
   AttrInfo_AddLoader(a, 0, GPU_FLOAT, 3);
@@ -704,16 +878,18 @@ static void common_state(void) {
   C3D_FogColor(rgba(head->fog[0], head->fog[1], head->fog[2], 1));
 }
 static void surface_program(bool wet) {
-  if (wet == using_wet)
+  if (wet == using_wet && !using_water)
     return;
   if (!wet) {
     common_state();
     return;
   }
   using_wet = true;
+  using_water = false;
   last_model = NULL;
   last_material = -1;
   C3D_BindProgram(&wet_shader);
+  C3D_FVUnifSet(GPU_VERTEX_SHADER, wet_uv_loc, 1, 1, 0, 0);
   C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, projection_loc, &vp);
   C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, reflected_loc, &reflection_vp);
   C3D_FVUnifSet(GPU_VERTEX_SHADER, eye_loc, atlas.position[0],
@@ -732,27 +908,94 @@ static void surface_program(bool wet) {
   C3D_TexEnvSrc(e, C3D_Alpha, GPU_CONSTANT, 0, 0);
   C3D_TexEnvFunc(e, C3D_Alpha, GPU_REPLACE);
 }
+static void water_program(void) {
+  if (using_water)
+    return;
+  using_water = true;
+  using_wet = false;
+  last_material = -1;
+  last_model = NULL;
+  C3D_BindProgram(&water_shader);
+  C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, projection_loc, &vp);
+  C3D_FVUnifSet(GPU_VERTEX_SHADER, water_eye_loc, atlas.position[0],
+                atlas.position[1], atlas.position[2], 1);
+  C3D_FVUnifSet(GPU_VERTEX_SHADER, water_sky_loc, head->horizon[0],
+                head->horizon[1], head->horizon[2], 1);
+  for (int i = 0; i < 6; i++)
+    C3D_TexEnvInit(C3D_GetTexEnv(i));
+  C3D_TexEnv *e = C3D_GetTexEnv(0);
+  C3D_TexEnvSrc(e, C3D_RGB, GPU_TEXTURE0, GPU_TEXTURE1, 0);
+  C3D_TexEnvFunc(e, C3D_RGB, GPU_MODULATE);
+  C3D_TexEnvSrc(e, C3D_Alpha, GPU_PRIMARY_COLOR, 0, 0);
+  C3D_TexEnvFunc(e, C3D_Alpha, GPU_REPLACE);
+  e = C3D_GetTexEnv(1);
+  C3D_TexEnvSrc(e, C3D_RGB, GPU_PREVIOUS, GPU_PRIMARY_COLOR, 0);
+  C3D_TexEnvFunc(e, C3D_RGB, GPU_MODULATE);
+}
+static float wrap01(float f) { return f - floorf(f); }
+static void material_uv(const AtlasMaterial *m) {
+  float t = atlas.time + m->phase, sx = 1, sy = 1, u = 0, v = 0;
+  if (m->frames > 1) {
+    int frame = (int)floorf(t * m->fps) % (int)m->frames;
+    if (frame < 0)
+      frame += m->frames;
+    sx = 1.0f / m->cols;
+    sy = 1.0f / m->rows;
+    u = (frame % m->cols) * sx;
+    v = (frame / m->cols) * sy;
+  }
+  u += wrap01(t * m->scroll[0]);
+  v += wrap01(t * m->scroll[1]);
+  C3D_FVUnifSet(GPU_VERTEX_SHADER, using_wet ? wet_uv_loc : uv_loc, sx, sy, u,
+                v);
+}
+
 static void draw_one(unsigned i, bool mirror, unsigned lod,
                      const DrawPlan *plan) {
   AtlasDraw *d = &draws[i];
   AtlasMaterial *m = &materials[d->material];
   if (d->lod[lod].count == 0)
     return;
-  bool wet = atlas.reflection && !mirror && (m->flags & MAT_WET);
-  surface_program(wet);
+  bool wet = reflection_enabled() && !mirror && (m->flags & MAT_WET);
+  if (m->flags & MAT_WATER)
+    water_program();
+  else
+    surface_program(wet);
   int material_key = (int)(d->material * 2 + mirror);
   model_uniform(d->node == UINT32_MAX ? ident : matrices + d->node * 12,
                 mirror);
   if (last_material != material_key) {
     last_material = material_key;
-    float color_scale = wet ? 1.0f : 1.0f / 255.0f;
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, tint_loc, color_scale, color_scale,
-                  color_scale, m->alpha * color_scale);
+    float color_scale = wet || using_water ? 1.0f : 1.0f / 255.0f;
+    float gain = exposure_gain;
+    if (m->track != UINT32_MAX) {
+      float f = fmodf(atlas.time * head->fps, (float)head->frames);
+      unsigned a = (unsigned)f, b = (a + 1) % head->frames;
+      const float *track =
+          (const float *)((const uint8_t *)animation + m->track);
+      gain *= powf(fmaxf(0, track[a] * (1 - (f - a)) + track[b] * (f - a)),
+                   1.0f / 2.2f);
+    }
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, tint_loc, color_scale * gain,
+                  color_scale * gain, color_scale * gain,
+                  m->alpha * color_scale);
     C3D_CullFace((m->flags & MAT_TWO_SIDED) ? GPU_CULL_NONE
                  : mirror                   ? GPU_CULL_FRONT_CCW
                                             : GPU_CULL_BACK_CCW);
     C3D_TexBind(wet ? 1 : 0,
                 m->texture == UINT32_MAX ? &white : &textures[m->texture]);
+    if (using_water) {
+      C3D_TexBind(1, m->texture == UINT32_MAX ? &white : &textures[m->texture]);
+      C3D_FVUnifSet(GPU_VERTEX_SHADER, waves0_loc, m->waves[0],
+                    wrap01(atlas.time * m->waves[1] * m->waves[0]),
+                    wrap01(atlas.time * m->waves[2] * m->waves[0]), 0);
+      C3D_FVUnifSet(GPU_VERTEX_SHADER, waves1_loc, m->waves[3],
+                    wrap01(atlas.time * m->waves[4] * m->waves[3]),
+                    wrap01(atlas.time * m->waves[5] * m->waves[3]), 0);
+      C3D_FVUnifSet(GPU_VERTEX_SHADER, water_params_loc, m->wave_mask,
+                    m->distance_roughness, m->wave_scale, 0);
+    } else
+      material_uv(m);
     if (wet)
       C3D_FVUnifSet(GPU_VERTEX_SHADER, wet_loc, 0.12f + m->wet * 0.35f, 0.48f,
                     0.12f, 0);
@@ -814,6 +1057,7 @@ static void fx_draw(unsigned begin, C3D_Tex *tex, bool additive, bool depth) {
   if (fx_count == begin)
     return;
   surface_program(false);
+  C3D_FVUnifSet(GPU_VERTEX_SHADER, uv_loc, 1, 1, 0, 0);
   C3D_CullFace(GPU_CULL_NONE);
   C3D_TexBind(0, tex);
   C3D_AlphaTest(false, GPU_ALWAYS, 0);
@@ -822,8 +1066,8 @@ static void fx_draw(unsigned begin, C3D_Tex *tex, bool additive, bool depth) {
   C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA,
                  additive ? GPU_ONE : GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE,
                  GPU_ZERO);
-  C3D_FVUnifSet(GPU_VERTEX_SHADER, tint_loc, 1.0f / 255, 1.0f / 255, 1.0f / 255,
-                1.0f / 255);
+  C3D_FVUnifSet(GPU_VERTEX_SHADER, tint_loc, exposure_gain / 255,
+                exposure_gain / 255, exposure_gain / 255, 1.0f / 255);
   model_uniform(ident, false);
   GSPGPU_FlushDataCache(fx + begin, (fx_count - begin) * sizeof(AtlasVertex));
   attributes(fx + begin);
@@ -848,7 +1092,7 @@ static void effects(void) {
   float r[3] = {view.r[0].x, view.r[0].y, view.r[0].z},
         u[3] = {view.r[1].x, view.r[1].y, view.r[1].z};
   unsigned start = fx_count;
-  if (atlas.haze) {
+  if ((atlas.haze && (head->features & SCENE_HAZE)) || glow_enabled) {
     for (unsigned i = 0; i < head->lights; i++) {
       AtlasLight *l = &lights[i];
       float dx = l->position[0] - atlas.position[0],
@@ -857,7 +1101,10 @@ static void effects(void) {
       float dist = sqrtf(dx * dx + dy * dy + dz * dz);
       if (dist > 90 || dist < 0.25f)
         continue;
-      float size = fminf(l->radius * 0.5f, 4.0f);
+      float size = fminf(
+          l->radius *
+              ((atlas.haze && (head->features & SCENE_HAZE)) ? 0.5f : 0.12f),
+          4.0f);
       float alpha = clampf(l->intensity * 0.006f, 0.015f, 0.10f);
       uint32_t col = rgba(l->color[0], l->color[1], l->color[2], alpha);
       quad(l->position, r[0] * size, r[1] * size, r[2] * size, u[0] * size,
@@ -959,8 +1206,8 @@ void scene_prepare(void) {
       }
     } else
       atlas.culled++;
-    if (atlas.reflection && !d->no_reflect &&
-        !(m->flags & (MAT_WET | MAT_GLASS | MAT_BLEND)) &&
+    if (reflection_enabled() && !d->no_reflect &&
+        !(m->flags & (MAT_WET | MAT_GLASS | MAT_BLEND | MAT_WATER)) &&
         visible(i, true, &dist) && dist <= 65 - atlas.step * 8) {
       unsigned lod = 3;
       if (d->lod[lod].count) {
@@ -985,6 +1232,43 @@ void scene_prepare(void) {
                         batch_used * sizeof(uint16_t));
   atlas.prepare_ms = (svcGetSystemTick() - start) * 1000.0f / SYSCLOCK_ARM11;
 }
+static void render_sky(void) {
+  if (!sky_vertices)
+    return;
+  common_state();
+  float centered[12] = {1, 0, 0, atlas.position[0], 0, 1, 0, atlas.position[1],
+                        0, 0, 1, atlas.position[2]};
+  model_uniform(centered, false);
+  C3D_CullFace(GPU_CULL_NONE);
+  C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+  C3D_AlphaTest(false, GPU_ALWAYS, 0);
+  C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
+  C3D_FVUnifSet(GPU_VERTEX_SHADER, tint_loc, exposure_gain / 255,
+                exposure_gain / 255, exposure_gain / 255, 1.0f / 255);
+  attributes(sky_vertices);
+  C3D_TexBind(0, &textures[head->sky_texture]);
+  C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE,
+                 GPU_ZERO);
+  C3D_DrawArrays(GPU_TRIANGLES, 0, SKY_VERTICES);
+  atlas.draws++;
+  atlas.triangles += SKY_VERTICES / 3;
+  if (head->cloud_texture != UINT32_MAX) {
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, uv_loc, 1, 1,
+                  wrap01(atlas.time * head->cloud_drift), 0);
+    C3D_TexBind(0, &textures[head->cloud_texture]);
+    // New RGBA8 cloud panoramas are premultiplied after the HDR grade.
+    // Retain compatibility with previously cached straight-alpha RGBA4 skies.
+    bool premultiplied = texture_info[head->cloud_texture].format == GPU_RGBA8;
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
+                   premultiplied ? GPU_ONE : GPU_SRC_ALPHA,
+                   GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE, GPU_ZERO);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, SKY_VERTICES);
+    atlas.draws++;
+    atlas.triangles += SKY_VERTICES / 3;
+  }
+  common_state();
+}
+
 void scene_render(C3D_RenderTarget *target) {
   u64 render_start = svcGetSystemTick();
   fx_count = 0;
@@ -995,7 +1279,7 @@ void scene_render(C3D_RenderTarget *target) {
                 ((uint32_t)(head->horizon[2] * 255) << 8) | 255;
   C3D_RenderTargetClear(target, C3D_CLEAR_ALL, bg, 0);
   C3D_FrameDrawOn(target);
-  if (atlas.reflection) {
+  if (reflection_enabled()) {
     reflection_vp = vp;
     C3D_RenderTargetClear(reflection_target, C3D_CLEAR_ALL, bg, 0);
     C3D_FrameDrawOn(reflection_target);
@@ -1005,6 +1289,7 @@ void scene_render(C3D_RenderTarget *target) {
     }
     C3D_FrameDrawOn(target);
   }
+  render_sky();
   for (unsigned j = 0; j < main_plan_count; j++) {
     DrawPlan *p = &main_plan[j];
     draw_one(p->draw, false, p->lod, p);
@@ -1070,8 +1355,10 @@ void scene_control(const char *json) {
   }
   if ((s = field(json, "lodFloor"))) {
     long n = strtol(s, NULL, 10);
-    if (n >= 0 && n < 3)
-      atlas.lod_floor = n;
+    if (n >= 0 && n <= 3) {
+      configured_lod_floor = n;
+      apply_lod_floor();
+    }
   }
   if ((s = field(json, "detailRange"))) {
     float n = strtof(s, NULL);
@@ -1099,6 +1386,16 @@ void scene_control(const char *json) {
   boolean(json, "reflection", &atlas.reflection);
   boolean(json, "rain", &atlas.rain);
   boolean(json, "haze", &atlas.haze);
+  boolean(json, "glow", &glow_enabled);
+  boolean(json, "bloom", &glow_enabled);
+  boolean(json, "hud", &hud_enabled);
+  if ((s = field(json, "exposure"))) {
+    float n = strtof(s, NULL);
+    if (isfinite(n)) {
+      exposure_ev = clampf(n, -2, 2);
+      exposure_gain = powf(2, exposure_ev / 2.2f);
+    }
+  }
   bool cinematic = atlas.cinematic;
   if (boolean(json, "cinematic", &cinematic)) {
     if (!cinematic)
@@ -1115,7 +1412,8 @@ void scene_status(char *out, size_t capacity) {
       out, capacity,
       "{\"t\":\"atlas.status\",\"build\":\"%s\",\"phase\":\"%s\",\"frame\":%lu,"
       "\"shot\":\"%"
-      "s\",\"step\":%lu,\"lodFloor\":%lu,\"hold\":%s,\"frameMs\":%.3f,"
+      "s\",\"step\":%lu,\"lodFloor\":%lu,\"lodSetting\":%u,\"hold\":%s,"
+      "\"frameMs\":%.3f,"
       "\"cpuMs\":%.3f,\"skinMs\":%.3f,\"updateMs\":%.3f,\"submitMs\":%.3f,"
       "\"prepareMs\":%.3f,\"skinnedVertices\":%lu,\"gpuMs\":%.3f,\"time\":%."
       "3f,\"draws\":%lu,\"triangles\":%lu,\"reflectionDraws\":%lu,"
@@ -1129,11 +1427,12 @@ void scene_status(char *out, size_t capacity) {
       "d]}",
       ATLAS_BUILD_ID, atlas_stage, (unsigned long)atlas.frame,
       shots ? shots[atlas.shot].name : "loading", (unsigned long)atlas.step,
-      (unsigned long)atlas.lod_floor, atlas.hold ? "true" : "false",
-      atlas.frame_ms, atlas.cpu_ms, atlas.skin_ms, atlas.update_ms,
-      atlas.submit_ms, atlas.prepare_ms, (unsigned long)atlas.skinned_vertices,
-      atlas.gpu_ms, atlas.time, (unsigned long)atlas.draws,
-      (unsigned long)atlas.triangles, (unsigned long)atlas.reflect_draws,
+      (unsigned long)atlas.lod_floor, configured_lod_floor,
+      atlas.hold ? "true" : "false", atlas.frame_ms, atlas.cpu_ms,
+      atlas.skin_ms, atlas.update_ms, atlas.submit_ms, atlas.prepare_ms,
+      (unsigned long)atlas.skinned_vertices, atlas.gpu_ms, atlas.time,
+      (unsigned long)atlas.draws, (unsigned long)atlas.triangles,
+      (unsigned long)atlas.reflect_draws,
       (unsigned long)atlas.reflect_triangles, (unsigned long)atlas.culled,
       atlas.reflection ? "true" : "false", atlas.rain ? "true" : "false",
       atlas.haze ? "true" : "false", atlas.position[0], atlas.position[1],
@@ -1145,12 +1444,11 @@ void scene_status(char *out, size_t capacity) {
       input_lock ? "true" : "false", stick_x, stick_y);
 }
 void scene_hud(void) {
-  static bool first = true, last_connected;
-  static int previous_shot = -1;
-  static unsigned previous_effects = UINT32_MAX;
+  if (!head)
+    return;
   DevserverSnapshot dev;
   devserver_snapshot(&dev);
-  if (first) {
+  if (hud_first) {
     consoleClear();
     printf("\x1b[H\x1b[36mPOCKET ATLAS\x1b[0m     Nintendo 3DS\n\n\n\n");
     for (unsigned i = 0; i < head->shots; i++)
@@ -1158,8 +1456,15 @@ void scene_hud(void) {
     printf("\nCircle pad: look  D-pad: move\n");
     printf("Touch / drag here to look around\n\n");
     printf("A next shot   B camera   L/R height\nX auto/hold   Y quality  "
-           "SELECT mirror\n\nL + R + START: Homebrew Launcher\n");
+           "SELECT settings\nSTART atlas   L+R+START exit\n");
     printf("\x1b[23;1H%s:%u", dev.ip, dev.port);
+  }
+  if (!hud_enabled) {
+    if (hud_first) {
+      printf("\x1b[2;1HPerformance overlay off\n");
+      hud_first = false;
+    }
+    return;
   }
   // Redrawing the entire console cost several milliseconds on Old 3DS.
   // Static instructions stay resident; refresh only three telemetry rows.
@@ -1170,26 +1475,37 @@ void scene_hud(void) {
   printf("%-15s %6lu triangles      ",
          atlas.cinematic ? "Cinematic" : "Free camera",
          (unsigned long)atlas.triangles);
-  if (previous_shot != atlas.shot) {
-    if (previous_shot >= 0)
-      printf("\x1b[%d;1H ", 5 + previous_shot);
+  if (hud_previous_shot != atlas.shot) {
+    if (hud_previous_shot >= 0)
+      printf("\x1b[%d;1H ", 5 + hud_previous_shot);
     printf("\x1b[%d;1H>", 5 + atlas.shot);
-    previous_shot = atlas.shot;
+    hud_previous_shot = atlas.shot;
   }
   unsigned effects = atlas.rain | (atlas.haze << 1) | (atlas.reflection << 2);
-  if (first || effects != previous_effects) {
+  if (hud_first || effects != hud_previous_effects) {
     printf("\x1b[21;1HRain %s  Haze %s  Reflection %s    ",
-           atlas.rain ? "on" : "off", atlas.haze ? "on" : "off",
-           atlas.reflection ? "on" : "off");
-    previous_effects = effects;
+           !(head->features & SCENE_RAIN) ? "--"
+           : atlas.rain                   ? "on"
+                                          : "off",
+           !(head->features & SCENE_HAZE) ? "--"
+           : atlas.haze                   ? "on"
+                                          : "off",
+           !(head->features & SCENE_REFLECTION) ? "--"
+           : atlas.reflection                   ? "on"
+                                                : "off");
+    hud_previous_effects = effects;
   }
-  if (first || dev.connected != last_connected) {
+  if (hud_first || dev.connected != hud_last_connected) {
     printf("\x1b[24;1H%-12s", dev.connected ? "CONNECTED" : "ready");
-    last_connected = dev.connected;
+    hud_last_connected = dev.connected;
   }
-  first = false;
+  hud_first = false;
 }
 void scene_free(void) {
+  // main parks the program and binds resident textures before releasing a
+  // drawn scene. Citro3D's public TexBind API does not accept NULL.
+  AtlasSettings saved;
+  scene_settings_get(&saved);
   if (head && textures) {
     for (unsigned i = 0; i < head->textures; i++)
       if (textures[i].data)
@@ -1215,6 +1531,12 @@ void scene_free(void) {
     shaderProgramFree(&wet_shader);
     DVLB_Free(wet_dvlb);
   }
+  if (water_dvlb) {
+    shaderProgramFree(&water_shader);
+    DVLB_Free(water_dvlb);
+  }
+  if (sky_vertices)
+    linearFree(sky_vertices);
   if (white.data)
     C3D_TexDelete(&white);
   if (glow.data)
@@ -1244,10 +1566,42 @@ void scene_free(void) {
   animation = matrices = NULL;
   fx = NULL;
   batch_indices[0] = batch_indices[1] = NULL;
-  dvlb = wet_dvlb = NULL;
+  dvlb = wet_dvlb = water_dvlb = NULL;
+  sky_vertices = NULL;
   reflection_target = NULL;
   memset(&white, 0, sizeof white);
   memset(&glow, 0, sizeof glow);
   memset(&puddle_tex, 0, sizeof puddle_tex);
   memset(&reflection_tex, 0, sizeof reflection_tex);
+  texture_info = NULL;
+  materials = NULL;
+  draws = NULL;
+  lights = NULL;
+  dry = NULL;
+  weights = NULL;
+  memset(local_half, 0, sizeof local_half);
+  memset(world_bounds, 0, sizeof world_bounds);
+  memset(&shader, 0, sizeof shader);
+  memset(&wet_shader, 0, sizeof wet_shader);
+  memset(&water_shader, 0, sizeof water_shader);
+  memset(&atlas, 0, sizeof atlas);
+  scene_settings_set(&saved);
+  atlas.fov = 45;
+  shot_time = yaw = pitch = 0;
+  freeze_time = -1;
+  camera_hold = input_lock = touching = ui_input_block = false;
+  last_control = 0;
+  stick_x = stick_y = touch_x = touch_y = 0;
+  smooth_frame = 33.3f;
+  visible_count = opaque_count = mirror_count = main_plan_count =
+      mirror_plan_count = 0;
+  batch_frame = batch_used = fx_count = 0;
+  using_wet = using_water = false;
+  last_model = NULL;
+  last_material = -1;
+  last_mirror = false;
+  measured_frames = 0;
+  measured_ms = measured_max = work_max = 0;
+  memset(frame_hist, 0, sizeof frame_hist);
+  detail_range = 6;
 }

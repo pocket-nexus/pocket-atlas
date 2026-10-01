@@ -7,6 +7,7 @@
 .fvec reflected[4]
 .fvec eye
 .fvec wet
+.fvec uv_transform
 .in inpos v0
 .in intex v1
 .in inclr v2
@@ -36,7 +37,10 @@
     mov r4.z, r3.w
     mov r4.w, constants.y
     mov outreflect, r4
-    mov outtex, intex
+    mul r0.xy, uv_transform.xy, intex.xy
+    add r0.xy, uv_transform.zw, r0.xy
+    mov r0.zw, intex.zw
+    mov outtex, r0
     mul r5.xy, wet.zz, r1.xz
     mov r5.zw, constants.xy
     mov outwet, r5

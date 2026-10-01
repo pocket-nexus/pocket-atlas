@@ -206,6 +206,185 @@ fn repack_geometry(old_geom: Vec<u8>, draws: &mut [Vec<u8>]) -> Vec<u8> {
     geom
 }
 
+// Display-referred panoramas preserve authored day/twilight colour, sunlight
+// and clouds without spending fragment instructions or an HDR target on PICA.
+fn sky_radiance(s: &pc::DaySky, d: Vec3) -> Vec3 {
+    let h = d.y;
+    let mut color =
+        Vec3::from(s.horizon).lerp(Vec3::from(s.zenith), h.max(0.0).powf(s.gradient_power));
+    if h < 0.0 {
+        color =
+            Vec3::from(s.horizon).lerp(Vec3::from(s.ground), (-h * s.ground_blend).clamp(0.0, 1.0));
+    }
+    let mu = d.dot(Vec3::from(s.sun_direction)).max(0.0);
+    let smooth =
+        ((mu - s.disc_cos_outer) / (s.disc_cos_inner - s.disc_cos_outer).max(1e-6)).clamp(0.0, 1.0);
+    color += Vec3::from(s.sun_color)
+        * (s.glow
+            * (s.glow_wide[0] * mu.powf(s.glow_wide[1])
+                + s.glow_tight[0] * mu.powf(s.glow_tight[1]))
+            + s.disc * smooth * smooth * (3.0 - 2.0 * smooth));
+    if let Some(t) = &s.twilight {
+        let a = Vec3::new(d.x, 0.0, d.z)
+            .normalize_or(Vec3::Z)
+            .dot(Vec3::new(s.sun_direction[0], 0.0, s.sun_direction[2]).normalize_or(Vec3::Z))
+            .clamp(-1.0, 1.0);
+        let toward = (a + 1.0) * 0.5;
+        let away = (1.0 - a) * 0.5;
+        color += Vec3::from(t.band.color)
+            * ((-h.abs() / t.band.height.max(1e-5)).exp()
+                * (1.0 - t.band.sun_bias + t.band.sun_bias * toward.powf(t.band.sun_power)));
+        let z = (h - t.belt.elevation) / t.belt.width.max(1e-5);
+        color += Vec3::from(t.belt.color) * ((-z * z).exp() * away.powf(t.belt.power));
+        color *= 1.0
+            - t.shadow.strength
+                * (-h.abs() / t.shadow.height.max(1e-5)).exp()
+                * away.powf(t.shadow.power);
+    }
+    color
+}
+// Match a filtered GPU panorama sample (repeat azimuth, clamp elevation).
+fn bilinear(image: &Rgba, u: f32, v: f32) -> [f32; 4] {
+    let x = u * image.w as f32 - 0.5;
+    let y = v * image.h as f32 - 0.5;
+    let (ix, iy) = (x.floor() as i32, y.floor() as i32);
+    let (fx, fy) = (x - x.floor(), y - y.floor());
+    let pixel = |a: i32, b: i32| {
+        image.px[b.clamp(0, image.h as i32 - 1) as usize * image.w as usize
+            + a.rem_euclid(image.w as i32) as usize]
+    };
+    let (a, b, c, d) = (
+        pixel(ix, iy),
+        pixel(ix + 1, iy),
+        pixel(ix, iy + 1),
+        pixel(ix + 1, iy + 1),
+    );
+    std::array::from_fn(|k| {
+        (a[k] * (1.0 - fx) + b[k] * fx) * (1.0 - fy) + (c[k] * (1.0 - fx) + d[k] * fx) * fy
+    })
+}
+// Compute the premultiplied *display* contribution, after composing the
+// original HDR sky + cloud radiance through the authored tone curve. Simply
+// toning the cloud in isolation then blending display RGB darkens its rim.
+// Empty sky texels are exactly zero, so bilinear filtering cannot
+// introduce a black fringe (runtime blend is ONE, ONE_MINUS_SRC_ALPHA).
+fn cloud_overlay(base: Vec3, radiance: Vec3, alpha: f32, post: &pc::Post) -> Vec3 {
+    let target = grade(base * (1.0 - alpha) + radiance, post);
+    (target - grade(base, post) * (1.0 - alpha)).max(Vec3::ZERO)
+}
+fn tiled_rgba8(img: &Rgba) -> Vec<u8> {
+    let mut out = vec![0; (img.w * img.h * 4) as usize];
+    for y in 0..img.h {
+        for x in 0..img.w {
+            let p = img.px[((img.h - 1 - y) * img.w + x) as usize];
+            // PICA GPU_RGBA8 stores ABGR byte order, i.e. little-endian RRGGBBAA.
+            let c = [
+                byte(p[3]),
+                byte(srgb(p[2])),
+                byte(srgb(p[1])),
+                byte(srgb(p[0])),
+            ];
+            let i = (((y / 8) * (img.w / 8) + x / 8) * 64) as usize + morton(x % 8, y % 8);
+            out[i * 4..i * 4 + 4].copy_from_slice(&c);
+        }
+    }
+    out
+}
+fn panorama(s: &pc::DaySky, post: &pc::Post, clouds: Option<&Rgba>) -> Rgba {
+    let (w, h) = if clouds.is_some() {
+        (1024, 512)
+    } else {
+        (512, 256)
+    };
+    let px = (0..h)
+        .flat_map(|y| {
+            (0..w).map(move |x| {
+                let az = (x as f32 + 0.5) / w as f32 * std::f32::consts::TAU;
+                let elevation = ((y as f32 + 0.5) / h as f32 - 0.5) * std::f32::consts::PI;
+                let d = Vec3::new(
+                    az.sin() * elevation.cos(),
+                    elevation.sin(),
+                    -az.cos() * elevation.cos(),
+                );
+                let (rgb, alpha) = if let Some(c) = clouds {
+                    let turn = az / std::f32::consts::TAU;
+                    let u = (turn * 2.0).fract();
+                    let lv = (elevation.max(0.0) / std::f32::consts::FRAC_PI_2).sqrt();
+                    let v = ((turn * 2.0).floor() + lv.clamp(0.5 / 512.0, 1.0 - 0.5 / 512.0)) * 0.5;
+                    let p = bilinear(c, u, v);
+                    let f = (d.y / s.fade_elevation.max(1e-5)).clamp(0.0, 1.0);
+                    let f = f * f * (3.0 - 2.0 * f);
+                    let radiance =
+                        (Vec3::from(s.cloud_sun) * p[1] + Vec3::from(s.cloud_ambient) * p[2]) * f;
+                    (
+                        cloud_overlay(sky_radiance(s, d), radiance, p[0] * f, post),
+                        p[0] * f,
+                    )
+                } else {
+                    (grade(sky_radiance(s, d), post), 1.0)
+                };
+                let c = rgb.map(linear);
+                [c.x, c.y, c.z, alpha]
+            })
+        })
+        .collect();
+    Rgba { w, h, px }
+}
+fn push_texture(src: &Rgba, alpha: bool, tex: &mut Vec<u8>, textures: &mut Vec<[u32; 8]>) -> u32 {
+    align(tex, 128);
+    let off = tex.len();
+    tex.extend(if alpha {
+        tiled_rgba8(src)
+    } else {
+        tiled(src, false)
+    });
+    textures.push([
+        src.w,
+        src.h,
+        if alpha { 0 } else { 3 },
+        1,
+        off as u32,
+        (tex.len() - off) as u32,
+        0,
+        1,
+    ]);
+    textures.len() as u32 - 1
+}
+fn source_position(d: &pc::Draw, bytes: &[u8], i: usize) -> Vec3 {
+    let p = &bytes[d.vertices.offset as usize + i * d.layout.stride() as usize..];
+    Vec3::from(d.pos_offset) + Vec3::new(q16(p, 0), q16(p, 2), q16(p, 4)) * Vec3::from(d.pos_scale)
+}
+fn sun_occluder(m: &pc::Meta, bytes: &[u8]) -> Option<crate::occlusion::Occluder> {
+    m.sun.as_ref()?.shadow.as_ref()?;
+    let mut tris = Vec::new();
+    for d in &m.draws {
+        let mat = &m.materials[d.material as usize];
+        if d.node.is_some()
+            || d.skin.is_some()
+            || mat.kind == pc::Kind::Glass
+            || mat.kind == pc::Kind::Water
+            || mat.blend != pc::Blend::Opaque
+        {
+            continue;
+        }
+        for tri in bytes[d.indices.offset as usize..(d.indices.offset + d.indices.size) as usize]
+            .chunks_exact(6)
+        {
+            let p: Vec<Vec3> = tri
+                .chunks_exact(2)
+                .map(|v| source_position(d, bytes, u16::from_le_bytes([v[0], v[1]]) as usize))
+                .collect();
+            tris.push(crate::occlusion::Tri {
+                a: p[0],
+                e1: p[1] - p[0],
+                e2: p[2] - p[0],
+                opacity: if mat.alpha_test > 0.0 { 0.55 } else { 1.0 },
+            });
+        }
+    }
+    Some(crate::occlusion::Occluder::new(tris, 1, 2000.0))
+}
+
 pub fn cook(input: &Path, output: &Path, cap: u32) {
     assert!(
         cap.is_power_of_two() && (64..=1024).contains(&cap),
@@ -231,11 +410,27 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
             mat.kind,
             pc::Kind::InteriorWindow | pc::Kind::Skyline | pc::Kind::Tower
         );
-        let ti = mat.albedo.or(mat.emission);
-        let key = (ti, if proc { mat.kind as u32 + 1 } else { 0 });
+        let water = mat.kind == pc::Kind::Water;
+        let ti = if water {
+            mat.normal
+        } else {
+            mat.albedo.or(mat.emission)
+        };
+        let grid = mat
+            .uv_anim
+            .map_or([1, 1], |a| [a.cols.max(1), a.rows.max(1)]);
+        let key = (
+            ti,
+            if proc || water {
+                mat.kind as u32 + 1
+            } else {
+                0
+            },
+            grid,
+        );
         let tx = if ti.is_some() || proc {
             *texkeys.entry(key).or_insert_with(|| {
-                let src = if proc {
+                let mut src = if proc {
                     procedural(mat.kind)
                 } else {
                     let id = ti.unwrap();
@@ -248,8 +443,22 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
                         px: d.px.clone(),
                     }
                 };
+                if water {
+                    // Fixed TEV consumes the wave normals as a bounded luminance
+                    // field; two independently scrolling layers modulate the
+                    // body/sky Fresnel colour evaluated by the vertex program.
+                    for p in &mut src.px {
+                        let slope = ((p[0] - 0.5) * 0.7 + (p[1] - 0.5) * 0.5).clamp(-0.4, 0.4);
+                        let v = linear((0.88 + slope * 0.28).clamp(0.65, 1.0));
+                        *p = [v, v, v, 1.0];
+                    }
+                }
                 // Text atlases retain 1024 so Japanese lettering survives the 400px display.
-                let limit = if src.w >= 4096 { 1024 } else { cap };
+                let limit = if src.w >= 2048 || grid[0] > 1 || grid[1] > 1 {
+                    1024
+                } else {
+                    cap
+                };
                 let (w, h) = textures::pow2_fit(src.w, src.h, limit);
                 let (w, h) = (w.max(8), h.max(8));
                 let mut level = textures::resize(&src, w, h);
@@ -260,7 +469,8 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
                 loop {
                     tex.extend(tiled(&level, alpha));
                     levels += 1;
-                    if level.w.min(level.h) <= 8 {
+                    if level.w.min(level.h) <= 8 || level.w / grid[0] <= 4 || level.h / grid[1] <= 4
+                    {
                         break;
                     }
                     level = textures::resize(&level, level.w / 2, level.h / 2);
@@ -305,28 +515,73 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
         if mat.depth_write {
             flags |= 128;
         }
+        if water {
+            flags |= 256;
+        }
         let alpha = if mat.kind == pc::Kind::Glass {
             0.16
         } else {
             mat.color[3]
         };
         let wet = mat.wet.as_ref().map_or(0.0, |w| w.puddles);
-        mats.push((tx, flags, alpha, wet, mat.roughness, mat.alpha_test));
+        let mut record = Vec::new();
+        u32s(&mut record, &[tx, flags]);
+        fs(&mut record, &[alpha, wet, mat.roughness, mat.alpha_test]);
+        let a = mat.uv_anim.unwrap_or_default();
+        u32s(&mut record, &[a.cols.max(1), a.rows.max(1), a.frames]);
+        fs(&mut record, &[a.fps, a.scroll[0], a.scroll[1], a.phase]);
+        u32s(&mut record, &[mat.emissive_track.unwrap_or(u32::MAX)]);
+        let water = mat.water.unwrap_or_default();
+        fs(&mut record, &water.waves[0]);
+        fs(&mut record, &water.waves[1]);
+        fs(
+            &mut record,
+            &[mat.normal_scale, water.mask, water.distance_roughness],
+        );
+        assert_eq!(record.len(), 92);
+        mats.push(record);
     }
     let mut draws = Vec::new();
     let mut skin_data = Vec::new();
     // World matrices and joint matrices are sampled once by the cooker.
     // Runtime interpolates 3x4 rows, with the original sample rate retained.
-    let frames = m.frames.max(1);
-    let matrices = m.nodes.len() + m.skins.iter().map(|s| s.joints.len()).sum::<usize>();
+    let mut used_nodes = std::collections::BTreeSet::new();
+    for d in &m.draws {
+        if let Some(n) = d.node {
+            used_nodes.insert(n);
+        }
+    }
+    for skin in &m.skins {
+        if let Some(&root) = skin.joints.first() {
+            used_nodes.insert(root);
+        }
+    }
+    let used_nodes: Vec<u32> = used_nodes.into_iter().collect();
+    let node_map: HashMap<u32, u32> = used_nodes
+        .iter()
+        .enumerate()
+        .map(|(i, &n)| (n, i as u32))
+        .collect();
+    let matrices = used_nodes.len() + m.skins.iter().map(|s| s.joints.len()).sum::<usize>();
+    // Long transport loops need not repeat every rigid transform at 15 Hz.
+    // Reduce only if their palette would exceed the Old 3DS animation budget.
+    let decimate = ((m.frames.max(1) as usize * matrices.max(1) * 48).div_ceil(10 * 1024 * 1024))
+        .max(1) as u32;
+    let frames = m.frames.max(1).div_ceil(decimate);
+    let fps = if m.frames > 0 {
+        m.fps * frames as f32 / m.frames as f32
+    } else {
+        m.fps
+    };
     let mut skin_base = Vec::new();
-    let mut at = m.nodes.len();
+    let mut at = used_nodes.len();
     for s in &m.skins {
         skin_base.push(at);
         at += s.joints.len();
     }
     let mut world0 = Vec::new();
-    for frame in 0..frames {
+    for sampled in 0..frames {
+        let frame = (sampled as u64 * m.frames.max(1) as u64 / frames as u64) as u32;
         let mut world = vec![Mat4::IDENTITY; m.nodes.len()];
         for (i, n) in m.nodes.iter().enumerate() {
             let (t, q) = if let Some(r) = &n.track {
@@ -350,7 +605,9 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
             };
             let local = Mat4::from_scale_rotation_translation(Vec3::from(n.scale), q, t);
             world[i] = n.parent.map_or(local, |p| world[p as usize] * local);
-            fs(&mut anim, &rows(world[i]));
+        }
+        for &i in &used_nodes {
+            fs(&mut anim, &rows(world[i as usize]));
         }
         for s in &m.skins {
             for (j, &n) in s.joints.iter().enumerate() {
@@ -362,10 +619,33 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
                 );
             }
         }
-        if frame == 0 {
+        if sampled == 0 {
             world0 = world;
         }
     }
+    let track_start = anim.len();
+    for track in &m.material_tracks {
+        let count = (track.data.size / 4).max(1);
+        for sampled in 0..frames {
+            let frame = sampled as u64 * m.frames.max(1) as u64 / frames as u64;
+            fs(
+                &mut anim,
+                &[readf(
+                    src_anim,
+                    track.data.offset as usize + (frame % count as u64) as usize * 4,
+                )],
+            );
+        }
+    }
+    for mat in &mut mats {
+        let track = u32::from_le_bytes(mat[52..56].try_into().unwrap());
+        if track != u32::MAX {
+            mat[52..56].copy_from_slice(
+                &((track_start + track as usize * frames as usize * 4) as u32).to_le_bytes(),
+            );
+        }
+    }
+    let occluder = sun_occluder(&m, src_geom);
     let baker = crate::bake::Baker::new(
         &m.lights,
         (m.atmosphere.hemisphere_sky, m.atmosphere.hemisphere_ground),
@@ -395,13 +675,28 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
             let world = d
                 .node
                 .map_or(pos, |i| world0[i as usize].transform_point3(pos));
-            let light = if d.layout == pc::VertexLayout::Baked {
+            let mut light = if d.layout == pc::VertexLayout::Baked {
                 let k = p[27] as f32 / 255.0;
                 Vec3::new(p[24] as f32, p[25] as f32, p[26] as f32)
                     .map(|v| (v / 255.0 * k).powi(2) * 64.0)
             } else {
                 baker.irradiance(world, n, mat.env_strength, false, 1.0) + Vec3::splat(0.08)
             };
+            let world_n = d.node.map_or(n, |i| {
+                world0[i as usize].transform_vector3(n).normalize_or(n)
+            });
+            if !mat.interior && !matches!(mat.kind, pc::Kind::Unlit | pc::Kind::Water) {
+                if let Some(sun) = &m.sun {
+                    let direction = Vec3::from(sun.direction);
+                    let visibility = occluder
+                        .as_ref()
+                        .map_or(1.0, |o| o.ray_visibility(world, world_n, direction, 2000.0));
+                    light += Vec3::from(sun.radiance)
+                        * (world_n.dot(direction).max(0.0)
+                            * visibility
+                            * std::f32::consts::FRAC_1_PI);
+                }
+            }
             let base = Vec3::new(mat.color[0], mat.color[1], mat.color[2]);
             let color = match mat.kind {
                 pc::Kind::Products => {
@@ -431,6 +726,19 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
                 pc::Kind::Tower => {
                     uv[1] = pos.y / 352.0;
                     Vec3::ONE
+                }
+                pc::Kind::Water => {
+                    let w = mat.water.unwrap_or_default();
+                    let body = Vec3::from(w.body).lerp(
+                        Vec3::from(w.shallow.unwrap_or(w.body)),
+                        if mat.vertex_color {
+                            vc.x.clamp(0.0, 1.0)
+                        } else {
+                            0.0
+                        },
+                    );
+                    uv = [world.x, world.z];
+                    grade(body * Vec3::from(m.atmosphere.hemisphere_sky), &m.post)
                 }
                 pc::Kind::Unlit => grade(
                     base * if mat.vertex_color { vc } else { Vec3::ONE },
@@ -467,7 +775,16 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
             };
             fs(&mut geom, &pos.to_array());
             fs(&mut geom, &uv);
-            geom.extend([byte(color.x), byte(color.y), byte(color.z), 255]);
+            geom.extend([
+                byte(color.x),
+                byte(color.y),
+                byte(color.z),
+                if mat.vertex_color && (mat.blend != pc::Blend::Opaque || mat.alpha_test > 0.0) {
+                    p[23]
+                } else {
+                    255
+                },
+            ]);
             positions.push(pos);
         }
         let mut lod = Vec::new();
@@ -545,7 +862,9 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
         let center = (lo + hi) * 0.5;
         let radius = (hi - lo).length() * 0.5;
         // Bounds of skinned people follow their root at runtime.
-        let root = d.skin.map_or(u32::MAX, |s| m.skins[s as usize].joints[0]);
+        let root = d
+            .skin
+            .map_or(u32::MAX, |s| node_map[&m.skins[s as usize].joints[0]]);
         let mut rec = Vec::new();
         u32s(
             &mut rec,
@@ -554,7 +873,7 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
                 vo as u32,
                 d.vertex_count,
                 skoff,
-                d.node.unwrap_or(u32::MAX),
+                d.node.map_or(u32::MAX, |n| node_map[&n]),
                 root,
                 d.no_reflect as u32,
                 0,
@@ -644,18 +963,21 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
     let mut gpu_materials = Vec::new();
     let mut state_ids = HashMap::new();
     let mut material_ids = Vec::new();
-    for &(t, f, a, w, r, c) in &mats {
-        let key = (
-            t,
-            f,
-            a.to_bits(),
-            if f & 4 != 0 { w.to_bits() } else { 0 },
-            if f & 4 != 0 { r.to_bits() } else { 0 },
-            if f & 8 != 0 { c.to_bits() } else { 0 },
-        );
+    for material in &mats {
+        let mut key = material.clone();
+        let flags = get(&key, 4);
+        if flags & (4 | 256) == 0 {
+            key[12..20].fill(0);
+        }
+        if flags & 8 == 0 {
+            key[20..24].fill(0);
+        }
+        if flags & 256 == 0 {
+            key[56..92].fill(0);
+        }
         let id = *state_ids.entry(key).or_insert_with(|| {
             let id = gpu_materials.len() as u32;
-            gpu_materials.push((t, f, a, w, r, c));
+            gpu_materials.push(material.clone());
             id
         });
         material_ids.push(id);
@@ -667,18 +989,92 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
     }
     draws.sort_by_key(|d| (get(d, 0), get(d, 16) != u32::MAX || get(d, 12) != u32::MAX));
     geom = repack_geometry(geom, &mut draws);
+    let mut effect_lights: Vec<([f32; 3], f32, [f32; 3], f32)> = m
+        .fog_lights
+        .iter()
+        .map(|l| {
+            (
+                l.position,
+                l.radius,
+                grade(Vec3::from(l.color) * l.intensity, &m.post).to_array(),
+                l.intensity,
+            )
+        })
+        .collect();
+    // Dusk sign light pools already exist in the shared scene. Their compact
+    // glows use the same authored positions, without a full-screen HDR bloom.
+    if effect_lights.is_empty() && m.day_sky.as_ref().is_some_and(|s| s.twilight.is_some()) {
+        for light in m.lights.iter().filter(|l| l.node.is_none()).take(64) {
+            let radius = if light.kind == pc::LightKind::Rect {
+                light.size[0].max(light.size[1]).max(1.0)
+            } else {
+                1.5
+            };
+            effect_lights.push((
+                light.position,
+                radius,
+                grade(Vec3::from(light.color), &m.post).to_array(),
+                4.0,
+            ));
+        }
+    }
+    let mut features = 0u32;
+    if m.rain.active {
+        features |= 1;
+    }
+    if !m.fog_lights.is_empty() && m.atmosphere.haze_density > 0.0 {
+        features |= 2;
+    }
+    if !effect_lights.is_empty() {
+        features |= 8;
+    }
+    if m.materials
+        .iter()
+        .any(|v| v.wet.as_ref().is_some_and(|w| w.planar))
+    {
+        features |= 4;
+    }
+    if m.materials.iter().any(|v| v.kind == pc::Kind::Water) {
+        features |= 32;
+    }
+    if m.materials.iter().any(|v| v.uv_anim.is_some()) {
+        features |= 64;
+    }
+    if matrices > 0 && frames > 1 {
+        features |= 128;
+    }
+    let (mut sky_texture, mut cloud_texture, mut cloud_drift) = (u32::MAX, u32::MAX, 0.0);
+    if let Some(sky) = &m.day_sky {
+        features |= 16;
+        sky_texture = push_texture(
+            &panorama(sky, &m.post, None),
+            false,
+            &mut tex,
+            &mut textures,
+        );
+        if let Some(id) = sky.clouds {
+            let cloud = decode(&m.textures[id as usize], src_tex);
+            cloud_texture = push_texture(
+                &panorama(sky, &m.post, Some(&cloud)),
+                true,
+                &mut tex,
+                &mut textures,
+            );
+            cloud_drift = sky.drift;
+        }
+    }
     // PICA binary tables followed by skin weights. All offsets in bytes.
     u32s(
         &mut table,
         &[
-            2,
+            3,
             textures.len() as u32,
             mats.len() as u32,
             draws.len() as u32,
             m.camera.shots.len() as u32,
             matrices as u32,
             frames,
-            m.fog_lights.len() as u32,
+            effect_lights.len() as u32,
             m.rain.dry_boxes.len() as u32,
             skin_data.len() as u32,
         ],
@@ -686,7 +1082,7 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
     fs(
         &mut table,
         &[
-            m.fps,
+            fps,
             m.atmosphere.fog_density,
             m.atmosphere.haze_density,
             m.rain.active as u8 as f32,
@@ -707,12 +1103,14 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
         &grade(Vec3::from(m.atmosphere.sky_horizon), &m.post).to_array(),
     );
     fs(&mut table, &[0.0]);
+    u32s(&mut table, &[features, sky_texture, cloud_texture]);
+    fs(&mut table, &[cloud_drift]);
+    assert_eq!(table.len(), 120);
     for t in &textures {
         u32s(&mut table, t);
     }
-    for &(t, f, a, w, r, cut) in &mats {
-        u32s(&mut table, &[t, f]);
-        fs(&mut table, &[a, w, r, cut]);
+    for material in &mats {
+        table.extend(material);
     }
     for d in &draws {
         table.extend(d);
@@ -730,21 +1128,18 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
         }
         fs(&mut table, &[s.duration]);
     }
-    for l in &m.fog_lights {
-        fs(&mut table, &l.position);
-        fs(&mut table, &[l.radius]);
-        fs(
-            &mut table,
-            &grade(Vec3::from(l.color) * l.intensity, &m.post).to_array(),
-        );
-        fs(&mut table, &[l.intensity]);
+    for (position, radius, color, intensity) in &effect_lights {
+        fs(&mut table, position);
+        fs(&mut table, &[*radius]);
+        fs(&mut table, color);
+        fs(&mut table, &[*intensity]);
     }
     for b in &m.rain.dry_boxes {
         fs(&mut table, &b[0]);
         fs(&mut table, &b[1]);
     }
     table.extend(&skin_data);
-    let summary = serde_json::json!({"target":"3ds","version":2,"name":m.name,"kind":m.kind,"sourceMaterials":m.materials.len(),"textures":textures.len(),"draws":draws.len(),"textureBytes":tex.len(),"geometryBytes":geom.len(),"animationBytes":anim.len(),"matrices":matrices,"frames":frames,"fps":m.fps,"camera":m.camera});
+    let summary = serde_json::json!({"target":"3ds","version":3,"name":m.name,"kind":m.kind,"sourceMaterials":m.materials.len(),"textures":textures.len(),"draws":draws.len(),"textureBytes":tex.len(),"geometryBytes":geom.len(),"animationBytes":anim.len(),"matrices":matrices,"frames":frames,"fps":fps,"features":features,"sourceNodes":m.nodes.len(),"camera":m.camera});
     let meta = serde_json::to_vec(&summary).unwrap();
     let out = pc::write(&[
         (pc::TAG_META, &meta, 16),
@@ -803,6 +1198,78 @@ mod tests {
         }
         // Eight vertices and two shared index ranges; LOD aliases aren't copied four times.
         assert_eq!(output.len(), 206);
+    }
+
+    #[test]
+    fn sky_bake_retains_day_gradient_and_twilight_direction() {
+        let mut sky: pc::DaySky = serde_json::from_value(serde_json::json!({
+            "zenith":[0.1,0.2,0.4], "horizon":[0.4,0.5,0.6], "ground":[0.04,0.04,0.04],
+            "gradient_power":1.0,"ground_blend":2.0,"sun_direction":[1.0,0.0,0.0],
+            "sun_color":[1.0,1.0,1.0],"glow":0.0,"glow_wide":[1.0,2.0],"glow_tight":[1.0,20.0],
+            "disc":0.0,"disc_cos_inner":0.9999,"disc_cos_outer":0.999,
+            "clouds":null,"cloud_sun":[1.0,1.0,1.0],"cloud_ambient":[0.1,0.1,0.1],
+            "fade_elevation":0.1,"drift":0.001,"twilight":null
+        }))
+        .unwrap();
+        assert!((sky_radiance(&sky, Vec3::Y) - Vec3::from(sky.zenith)).length() < 1e-6);
+        assert!((sky_radiance(&sky, Vec3::NEG_Y) - Vec3::from(sky.ground)).length() < 1e-6);
+        assert!((sky_radiance(&sky, Vec3::X) - Vec3::from(sky.horizon)).length() < 1e-6);
+        sky.twilight = Some(pc::Twilight {
+            band: pc::TwilightBand {
+                color: [0.5, 0.1, 0.0],
+                height: 0.1,
+                sun_bias: 1.0,
+                sun_power: 2.0,
+            },
+            belt: pc::TwilightBelt {
+                color: [0.0; 3],
+                elevation: 0.1,
+                width: 0.05,
+                power: 2.0,
+            },
+            shadow: pc::TwilightShadow {
+                strength: 0.0,
+                height: 0.1,
+                power: 2.0,
+            },
+        });
+        let toward = sky_radiance(&sky, Vec3::X);
+        let away = sky_radiance(&sky, Vec3::NEG_X);
+        assert!((toward - away - Vec3::new(0.5, 0.1, 0.0)).length() < 1e-6);
+        assert!((away - Vec3::from(sky.horizon)).length() < 1e-6);
+    }
+
+    #[test]
+    fn cloud_edges_filter_without_dark_halos_and_preserve_hdr_grade() {
+        let mut post = pc::Post::default();
+        post.tone = pc::ToneCurve::Aces;
+        for base in [Vec3::new(0.5, 0.67, 0.9), Vec3::new(0.1, 0.22, 0.6)] {
+            let background = grade(base, &post);
+            for alpha in [0.02, 0.25, 0.7, 1.0] {
+                let radiance = Vec3::splat(3.0) * alpha;
+                let cloud = cloud_overlay(base, radiance, alpha, &post);
+                let expected = grade(base * (1.0 - alpha) + radiance, &post);
+                assert!((cloud + background * (1.0 - alpha) - expected).length() < 1e-6);
+                // Filtering from a cloud texel into a fully transparent texel
+                // is convex interpolation of completed sky colours, not an
+                // extra multiplication of already-filtered RGB by opacity.
+                for edge in [0.01, 0.1, 0.5, 0.9] {
+                    let filtered = cloud * edge + background * (1.0 - alpha * edge);
+                    assert!((filtered - background.lerp(expected, edge)).length() < 1e-6);
+                    assert!(filtered.min_element() >= background.min_element() - 1e-6);
+                }
+            }
+        }
+        assert_eq!(cloud_overlay(Vec3::ONE, Vec3::ZERO, 0.0, &post), Vec3::ZERO);
+    }
+    #[test]
+    fn rgba8_upload_has_pica_abgr_channels_and_preserves_alpha() {
+        let mut px = vec![[0.0; 4]; 64];
+        px[0] = [1.0, linear(0.5), 0.0, 0.25];
+        let bytes = tiled_rgba8(&Rgba { w: 8, h: 8, px });
+        let offset = morton(0, 7) * 4;
+        assert_eq!(&bytes[offset..offset + 4], &[64, 0, 128, 255]);
+        assert_eq!(&bytes[0..4], &[0, 0, 0, 0]);
     }
 
     #[test]

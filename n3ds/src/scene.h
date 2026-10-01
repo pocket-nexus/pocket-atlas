@@ -14,7 +14,33 @@ typedef struct {
   int shot;
   float position[3], target[3], fov;
 } AtlasStats;
+enum {
+  SCENE_RAIN = 1,
+  SCENE_HAZE = 2,
+  SCENE_REFLECTION = 4,
+  SCENE_GLOW = 8,
+  SCENE_SKY = 16,
+  SCENE_WATER = 32,
+  SCENE_UV_ANIMATION = 64,
+  SCENE_MOTION = 128
+};
+typedef struct {
+  bool reflection, rain, haze, glow, cinematic, hud, hold;
+  unsigned step,
+      lod_floor;  // lod_floor: 0..2 fixed, 3 automatic by asset features
+  float exposure; // display exposure adjustment in EV, -2..2
+} AtlasSettings;
 extern AtlasStats atlas;
+unsigned scene_features(void);
+unsigned scene_shot_count(void);
+const char *scene_shot_name(unsigned index);
+void scene_select_shot(unsigned index);
+void scene_settings_get(AtlasSettings *settings);
+void scene_settings_set(const AtlasSettings *settings);
+void scene_settings_reset(void);
+void scene_hud_reset(void);
+void scene_input_block(bool blocked);
+void scene_frame_budget(float milliseconds);
 void atlas_diagnostic(const char *message);
 bool scene_load(const char *path, char *error, size_t capacity);
 void scene_update(float dt, uint32_t down, uint32_t held);
