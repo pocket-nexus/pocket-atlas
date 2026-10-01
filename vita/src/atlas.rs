@@ -17,9 +17,9 @@ use pocketjs_vita::input::Pad;
 use vita2d_sys as g;
 
 use crate::camera;
-use crate::frame::{tiled_at, tiled_u8, Rng, GRAIN, LUT, MASK_H, MASK_W};
-use crate::gpu::{bind, BlendMode, Gpu, Layout, Out, PipeKey, Pipeline, Uniforms, S, U};
-use crate::scene::{fmt, rows4x4, wrap, Seq};
+use crate::frame::{Rng, GRAIN, LUT, MASK_H, MASK_W};
+use crate::gpu::{bind, tiled_at, tiled_u8, BlendMode, Gpu, Layout, Out, PipeKey, Pipeline, Uniforms, S, U};
+use crate::scene::{find, fmt, rows4x4, wrap, Seq};
 use crate::shaders::Key;
 
 const W: u32 = 960;
@@ -61,8 +61,8 @@ pub struct Atlas {
     goal: Option<(f32, f32)>,
     /// The browser's focused place (a wider, steady ring) and the places in
     /// its current list (full brightness; the rest dimmed).
-    pub highlight: Option<usize>,
-    pub listed: Vec<bool>,
+    highlight: Option<usize>,
+    listed: Vec<bool>,
     idle: f32,
     time: f32,
     tick: u32,
@@ -286,17 +286,9 @@ impl Atlas {
     unsafe fn load_in(path: &str, vram: &mut Arena, mem: &mut Arena) -> Result<Self, String> {
         let t0 = std::time::Instant::now();
         let mut f = Seq::open(path)?;
-        let mut head = [0u8; 16];
-        f.read_at(0, &mut head)?;
-        let count = u32::from_le_bytes(head[8..12].try_into().unwrap()) as usize;
-        let mut table = vec![0u8; 16 + count * 16];
-        table[..16].copy_from_slice(&head);
-        f.read_at(16, &mut table[16..])?;
-        let sections = pc::Pack::parse_header_as(&table, pc::atlas::MAGIC).map_err(|e| format!("{path}: {e}"))?;
-        let find = |tag: [u8; 4]| sections.iter().find(|s| s.tag == tag).copied().ok_or(format!("{path}: missing section"));
-        let (s_meta, s_tex) = (find(pc::TAG_META)?, find(pc::TAG_TEXTURES)?);
-        let mut meta_bytes = vec![0u8; s_meta.size as usize];
-        f.read_at(s_meta.offset as u64, &mut meta_bytes)?;
+        let sections = f.sections(pc::atlas::MAGIC)?;
+        let (s_meta, s_tex) = (find(&sections, pc::TAG_META)?, find(&sections, pc::TAG_TEXTURES)?);
+        let meta_bytes = f.section(&s_meta)?;
         let meta: AtlasMeta = serde_json::from_slice(&meta_bytes).map_err(|e| format!("atlas META: {e}"))?;
 
         let mut up = Uploader::new(4 << 20)?;
@@ -409,6 +401,12 @@ impl Atlas {
         let p = &self.meta.places[i];
         self.goal = Some(((p.lat * 0.75).clamp(-40.0, 55.0), p.lon - 4.0));
         self.idle = 0.0;
+    }
+
+    /// Marks the browser's focused place and the places in its list.
+    pub fn mark(&mut self, focus: Option<usize>, list: &[usize]) {
+        self.highlight = focus;
+        self.listed = (0..self.meta.places.len()).map(|i| list.contains(&i)).collect();
     }
 
     /// A pack texture (place previews), if `i` names one.
@@ -708,23 +706,12 @@ impl Atlas {
     }
 }
 
-/// The atlas pack of a development build (USB share) or a packaged one.
-pub fn pack_paths() -> &'static [&'static str] {
-    if cfg!(feature = "usb-debug") {
-        &["host0:atlas/atlas.pack", "ux0:data/pocket-atlas/atlas.pack", "app0:atlas.pack"]
-    } else {
-        &["app0:atlas.pack", "ux0:data/pocket-atlas/atlas.pack"]
-    }
+/// Where the atlas pack is looked for, in order.
+pub fn pack_paths() -> Vec<String> {
+    crate::paths::candidates("atlas.pack")
 }
 
 /// Where a place's pack is looked for, in order.
 pub fn place_paths(id: &str) -> Vec<String> {
-    let mut v = Vec::new();
-    if cfg!(feature = "usb-debug") {
-        v.push(format!("host0:atlas/places/{id}.place"));
-    }
-    v.push(format!("app0:places/{id}.place"));
-    v.push(format!("ux0:data/pocket-atlas/places/{id}.place"));
-    v
+    crate::paths::candidates(&format!("places/{id}.place"))
 }
-

@@ -87,11 +87,7 @@ impl Rig {
     }
 
     pub fn next_shot(&mut self) {
-        if !self.shots.is_empty() {
-            self.shot = (self.shot + 1) % self.shots.len();
-            self.shot_time = 0.0;
-        }
-        self.mode = Mode::Cinematic;
+        self.set_shot(self.shot + 1);
     }
 
     /// `stick`: left (move x, z), right (look x, y); `lift`: up/down in m/s.

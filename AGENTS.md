@@ -11,3 +11,4 @@
 - After the app dies on the device, restart `bun tools/atlas.ts serve`: the kernel driver reconnects, but the old host session stays dead and Devkit cannot report status.
 - A place's rendering work goes into the shared renderer, cooker and web materials, keyed by the kind of place (night street, daytime slope, interior, …), not into code that only one place can use.
 - Places built from film or anime stills recreate the real location only: no characters from the source. Take geometry and details from photographs and pilgrimage records of the real spot.
+- To make, rebuild, polish or review a place, follow the `pocket-atlas-place` skill (`.claude/skills/pocket-atlas-place/`): research, scene, fidelity pass, device loop, budgets and the traps the first four places hit.

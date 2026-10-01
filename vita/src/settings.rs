@@ -1,11 +1,13 @@
 //! The settings sheet over a running place (SELECT): frame rate profile,
 //! quality step, resolution, anti-aliasing, the effects the place has,
 //! exposure, the camera shot and the performance overlay. Choices carry to
-//! the next place and are kept in `ux0:data/pocket-atlas/settings.json`;
-//! what is not chosen follows the profile.
+//! the next place and are kept in `settings.json` in the data folder; what
+//! is not chosen follows the profile. The renderer's profile is the one in
+//! force (control messages switch it for measurements); the sheet shows and
+//! steps from it.
 
 use pocket3d_gxm::target::Msaa;
-use serde_json::{json, Value};
+use serde_json::json;
 
 use crate::camera::{Mode, Rig};
 use crate::frame::{Renderer, SCALES};
@@ -13,7 +15,7 @@ use crate::gpu::Gpu;
 use crate::profile::{self, Profile};
 use crate::ui::{accent, rgb, Button, Style, Ui, T};
 
-const PATH: &str = "ux0:data/pocket-atlas/settings.json";
+const FILE: &str = "settings.json";
 
 /// The player's choices; `None` follows the profile (and its governor).
 pub struct Prefs {
@@ -31,7 +33,7 @@ pub struct Prefs {
 
 impl Prefs {
     pub fn load(hud: bool) -> Self {
-        let v: Value = std::fs::read(PATH).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
+        let v = crate::paths::read_json(FILE).unwrap_or_default();
         let b = |k: &str| v[k].as_bool();
         Self {
             profile: v["profile"].as_str().and_then(profile::by_name).unwrap_or(&profile::VITA30),
@@ -52,8 +54,7 @@ impl Prefs {
             "profile": self.profile.name, "step": self.step, "scale": self.scale, "msaa": self.msaa, "bloom": self.bloom,
             "haze": self.haze, "reflection": self.reflection, "rain": self.rain, "exposureEv": self.exposure_ev, "hud": self.hud,
         });
-        let _ = std::fs::create_dir_all("ux0:data/pocket-atlas");
-        let _ = std::fs::write(PATH, v.to_string());
+        crate::paths::write_json(FILE, &v);
     }
 
     /// Sets the renderer to the profile, then the choices over it.
@@ -65,7 +66,7 @@ impl Prefs {
     /// The choices over the renderer's current profile (the governor keeps
     /// its step unless one is chosen).
     pub fn overrides(&self, r: &mut Renderer) {
-        let d = crate::frame::Settings::for_profile(self.profile);
+        let d = crate::frame::Settings::for_profile(r.profile);
         let s = &mut r.settings;
         s.msaa = match self.msaa {
             Some(v) => if v { Msaa::X4 } else { Msaa::None },
@@ -145,8 +146,12 @@ impl Sheet {
     }
 
     /// Moves the focus bar (control messages).
-    pub fn focus(&mut self, row: usize) {
-        self.row = row;
+    /// Moves the focus bar to a row by its label (control messages; which
+    /// rows exist depends on the place's effects).
+    pub fn focus(&mut self, label: &str, r: &Renderer) {
+        if let Some(k) = Self::rows(r).iter().position(|row| Self::label(*row).eq_ignore_ascii_case(label)) {
+            self.row = k;
+        }
     }
 
     fn rows(r: &Renderer) -> Vec<Row> {
@@ -184,7 +189,7 @@ impl Sheet {
     fn value(row: Row, p: &Prefs, r: &Renderer, rig: &Rig) -> String {
         let n = r.profile.steps.len();
         match row {
-            Row::Profile => profile_label(p.profile).into(),
+            Row::Profile => profile_label(r.profile).into(),
             Row::Quality => match p.step {
                 Some(k) => format!("Step {} of {n}", k + 1),
                 None => format!("Auto · step {} of {n}", r.governor.step + 1),
@@ -237,10 +242,10 @@ impl Sheet {
         }
         if pressed & SCE_CTRL_TRIANGLE != 0 {
             let hud = p.hud;
-            *p = Prefs { profile: p.profile, step: None, scale: None, msaa: None, bloom: None, haze: None, reflection: None, rain: None, exposure_ev: 0.0, hud };
+            *p = Prefs { profile: r.profile, step: None, scale: None, msaa: None, bloom: None, haze: None, reflection: None, rain: None, exposure_ev: 0.0, hud };
             p.apply(r);
             p.save();
-            self.note = Some((format!("Settings follow {}", profile_label(p.profile)), 2.0));
+            self.note = Some((format!("Settings follow {}", profile_label(r.profile)), 2.0));
             return Outcome::None;
         }
         if pressed & SCE_CTRL_DOWN != 0 {
@@ -262,7 +267,7 @@ impl Sheet {
         match row {
             Row::Profile => {
                 let all = profile::ALL;
-                let k = all.iter().position(|q| q.name == p.profile.name).unwrap_or(0);
+                let k = all.iter().position(|q| q.name == r.profile.name).unwrap_or(0);
                 p.profile = all[cycle(k, all.len())];
                 // Steps differ between profiles.
                 p.step = None;

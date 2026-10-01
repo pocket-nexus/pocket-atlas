@@ -10,6 +10,7 @@
 //! mipmapped and block-compressed; animation is resampled uniformly.
 
 mod atlas;
+mod extras;
 mod uifont;
 mod bake;
 mod env;
@@ -55,20 +56,16 @@ fn pc_of(raw: &gltf::json::Extras) -> Value {
     extras(raw).get("pocketAtlas").cloned().unwrap_or(Value::Null)
 }
 
-fn f(v: &Value, k: &str, d: f32) -> f32 {
-    v.get(k).and_then(|x| x.as_f64()).map(|x| x as f32).unwrap_or(d)
-}
+use extras::{f, v3};
+use pc::color::encode8 as srgb8;
 
-fn v3(v: &Value) -> [f32; 3] {
-    let a = v.as_array();
-    let g = |i: usize| a.and_then(|a| a.get(i)).and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
-    [g(0), g(1), g(2)]
-}
-
-fn srgb8(c: f32) -> u8 {
-    let c = c.clamp(0.0, 1.0);
-    let s = if c <= 0.0031308 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
-    (s * 255.0 + 0.5) as u8
+/// Where static geometry is chunked: a grid cell (32 m near the middle,
+/// 256 m beyond), or one chunk for the whole primitive (open water: its cost
+/// is per pixel, and chunks only add draws).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum Cell {
+    Grid(i32, i32),
+    Whole,
 }
 
 // ------------------------------------------------------------------ builder
@@ -102,7 +99,7 @@ struct Cook<'a> {
     tex_cap: u32,
     blobs: Blobs,
     textures: Vec<pc::Texture>,
-    tex_keys: HashMap<(usize, u8, bool), u32>,
+    tex_keys: HashMap<(usize, u8, bool, (u32, u32)), u32>,
     materials: Vec<pc::Material>,
     mat_keys: HashMap<usize, u32>,
     material_names: HashMap<String, u32>,
@@ -113,7 +110,8 @@ impl<'a> Cook<'a> {
     /// `cells`: a flipbook's (columns, rows), (1, 1) otherwise.
     fn texture(&mut self, tex: gltf::Texture, role: pc::TexRole, alpha_wanted: bool, cap: u32, cells: (u32, u32)) -> u32 {
         let image = tex.source().index();
-        let key = (image, role as u8, alpha_wanted);
+        // A flipbook keeps a shorter mip chain than the same image elsewhere.
+        let key = (image, role as u8, alpha_wanted, cells);
         if let Some(&i) = self.tex_keys.get(&key) {
             return i;
         }
@@ -191,22 +189,7 @@ impl<'a> Cook<'a> {
         };
         let alpha_test = if m.alpha_mode() == gltf::material::AlphaMode::Mask { m.alpha_cutoff().unwrap_or(0.5) } else { 0.0 };
         let wants_alpha = blend != pc::Blend::Opaque || alpha_test > 0.0;
-        let uv_anim = {
-            let n = |k: &str, d: f64| x.get(k).and_then(|v| v.as_f64()).unwrap_or(d);
-            let frames = n("frames", 1.0).max(1.0) as u32;
-            let scroll = x.get("scroll").map(|v| {
-                let a = v.as_array().map(|a| a.iter().map(|x| x.as_f64().unwrap_or(0.0) as f32).collect::<Vec<_>>()).unwrap_or_default();
-                [a.first().copied().unwrap_or(0.0), a.get(1).copied().unwrap_or(0.0)]
-            });
-            (frames > 1 || scroll.is_some_and(|s| s != [0.0, 0.0])).then(|| pc::UvAnim {
-                cols: n("cols", frames as f64).max(1.0) as u32,
-                rows: n("rows", 1.0).max(1.0) as u32,
-                frames,
-                fps: n("fps", 8.0) as f32,
-                scroll: scroll.unwrap_or([0.0, 0.0]),
-                phase: n("phase", 0.0) as f32,
-            })
-        };
+        let uv_anim = extras::uv_anim(&x);
         let cap = self.tex_cap;
         let cells = uv_anim.filter(|a| a.frames > 1).map_or((1, 1), |a| (a.cols, a.rows));
         let albedo = pbr.base_color_texture().map(|t| self.texture(t.texture(), pc::TexRole::Color, wants_alpha, cap, cells));
@@ -246,19 +229,7 @@ impl<'a> Cook<'a> {
             .and_then(|c| c.get("clearcoatFactor"))
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0) as f32;
-        let water = (kind == pc::Kind::Water).then(|| {
-            let layer = |i: usize, d: [f32; 3]| -> [f32; 3] {
-                let a = x.get("waves").and_then(|w| w.get(i)).and_then(|l| l.as_array());
-                a.map_or(d, |a| core::array::from_fn(|k| a.get(k).and_then(|v| v.as_f64()).map_or(d[k], |v| v as f32)))
-            };
-            pc::Water {
-                waves: [layer(0, [0.12, 0.35, 0.12]), layer(1, [0.31, -0.22, 0.27])],
-                body: x.get("body").map_or([0.01, 0.035, 0.045], |b| { let c = v3(b); [c[0], c[1], c[2]] }),
-                distance_roughness: f(&x, "distanceRoughness", 0.0004),
-                shallow: x.get("shallow").filter(|v| v.is_array()).map(|v| { let c = v3(v); [c[0], c[1], c[2]] }),
-                mask: f(&x, "mask", 0.0),
-            }
-        });
+        let water = (kind == pc::Kind::Water).then(|| extras::water(&x, m.name().unwrap_or("material")));
         let name = m.name().unwrap_or("material").to_string();
         let out = pc::Material {
             name: name.clone(),
@@ -285,7 +256,7 @@ impl<'a> Cook<'a> {
             damp,
             drops: x.get("glass").map(|g| f(g, "drops", 0.0)).unwrap_or(0.0),
             clearcoat,
-            polygon_offset: x.get("polygonOffset").and_then(|p| p.as_array()).map(|a| [a[0].as_f64().unwrap_or(0.0) as f32, a[1].as_f64().unwrap_or(0.0) as f32]),
+            polygon_offset: x.get("polygonOffset").filter(|p| p.is_array()).map(|p| extras::arr(p, [0.0; 2])),
             emissive_track: None,
             uv_anim,
             water,
@@ -502,20 +473,14 @@ fn push_draw(b: geometry::Built, material: u32, layout: pc::VertexLayout, node: 
 }
 
 fn main() {
-    if std::env::args().nth(1).as_deref() == Some("ui-font") {
-        let argv: Vec<String> = std::env::args().collect();
-        let get = |k: &str| argv.iter().position(|x| x == k).and_then(|i| argv.get(i + 1)).cloned().unwrap_or_else(|| panic!("ui-font: missing {k}"));
-        let (places, out) = (PathBuf::from(get("--places")), PathBuf::from(get("--out")));
-        let (lr, lb, cr, cb) = (PathBuf::from(get("--latin")), PathBuf::from(get("--latin-bold")), PathBuf::from(get("--cjk")), PathBuf::from(get("--cjk-bold")));
-        uifont::bake(&places, [&lr, &lb], [&cr, &cb], &out);
-        return;
-    }
     if std::env::args().nth(1).as_deref() == Some("atlas") {
         let argv: Vec<String> = std::env::args().collect();
         let get = |k: &str| argv.iter().position(|x| x == k).and_then(|i| argv.get(i + 1)).cloned();
+        let need = |k: &str| PathBuf::from(get(k).unwrap_or_else(|| panic!("atlas: missing {k} (the interface font's faces)")));
         let input = PathBuf::from(get("--in").unwrap_or_else(|| ".pocket-build/atlas/globe".into()));
         let output = get("--out").map(PathBuf::from).unwrap_or_else(|| input.parent().unwrap_or(&input).join("atlas.pack"));
-        atlas::cook(&input, &output);
+        let faces = uifont::Faces { latin: [need("--latin"), need("--latin-bold")], cjk: [need("--cjk"), need("--cjk-bold")] };
+        atlas::cook(&input, &output, &faces);
         return;
     }
     let a = args();
@@ -1028,12 +993,12 @@ fn main() {
     // Per bucket: vertices, triangles, and the positions on edges the chunk
     // shares with another chunk of the same primitive (locked in its LODs).
     type Bucket = (Vec<Vertex>, Vec<[u32; 3]>, HashSet<[u32; 3]>);
-    let mut static_buckets: BTreeMap<(u32, i32, i32, bool, bool), Bucket> = BTreeMap::new();
-    let cell_of = |p: Vec3, cell: f32| -> (i32, i32) {
+    let mut static_buckets: BTreeMap<(u32, Cell, bool, bool), Bucket> = BTreeMap::new();
+    let cell_of = |p: Vec3, cell: f32| -> Cell {
         let far = p.x.abs() > 140.0 || p.z.abs() > 140.0;
         let size = if far { 256.0 } else { cell };
         let o = if far { 1000 } else { 0 };
-        ((p.x / size).floor() as i32 + o, (p.z / size).floor() as i32 + o)
+        Cell::Grid((p.x / size).floor() as i32 + o, (p.z / size).floor() as i32 + o)
     };
     let mut scene_min = Vec3::splat(f32::MAX);
     let mut scene_max = Vec3::splat(f32::MIN);
@@ -1044,14 +1009,14 @@ fn main() {
         // Open water is one draw however far it reaches: its cost is per
         // pixel, and chunks of it only add draws.
         let water = cook.materials[p.material as usize].kind == pc::Kind::Water;
-        let cells: Vec<(i32, i32)> = p
+        let cells: Vec<Cell> = p
             .tris
             .iter()
-            .map(|t| if water { (i32::MIN / 2, 0) } else { cell_of((p.verts[t[0] as usize].pos + p.verts[t[1] as usize].pos + p.verts[t[2] as usize].pos) / 3.0, a.cell) })
+            .map(|t| if water { Cell::Whole } else { cell_of((p.verts[t[0] as usize].pos + p.verts[t[1] as usize].pos + p.verts[t[2] as usize].pos) / 3.0, a.cell) })
             .collect();
         // Edges (by position, across attribute seams) whose triangles land in
         // different chunks.
-        let mut edge_cell: HashMap<([u32; 3], [u32; 3]), (i32, i32)> = HashMap::new();
+        let mut edge_cell: HashMap<([u32; 3], [u32; 3]), Cell> = HashMap::new();
         let mut cut: HashSet<[u32; 3]> = HashSet::new();
         for (t, &cell) in p.tris.iter().zip(&cells) {
             for k in 0..3 {
@@ -1064,8 +1029,8 @@ fn main() {
                 }
             }
         }
-        for (t, &(cx, cz)) in p.tris.iter().zip(&cells) {
-            let e = static_buckets.entry((p.material, cx, cz, p.no_reflect, p.baked)).or_default();
+        for (t, &cell) in p.tris.iter().zip(&cells) {
+            let e = static_buckets.entry((p.material, cell, p.no_reflect, p.baked)).or_default();
             let base = e.0.len() as u32;
             for &i in t {
                 let pos = p.verts[i as usize].pos;
@@ -1128,7 +1093,7 @@ fn main() {
             }
         }
     };
-    for ((material, _, _, no_reflect, baked), (verts, tris, locks)) in &static_buckets {
+    for ((material, _, no_reflect, baked), (verts, tris, locks)) in &static_buckets {
         // Weld identical vertices inside the bucket.
         let mut map: HashMap<[u32; 11], u32> = HashMap::new();
         let mut uv: Vec<Vertex> = Vec::new();
@@ -1402,17 +1367,7 @@ fn main() {
             cloud_ambient: v3(&cl["ambientColor"]),
             fade_elevation: f(cl, "fadeElevation", 0.04),
             drift: f(cl, "driftTurnsPerSecond", 0.0),
-            twilight: sky_day["twilight"].is_object().then(|| {
-                let t = &sky_day["twilight"];
-                let (b, l, sh) = (&t["band"], &t["belt"], &t["shadow"]);
-                pc::Twilight {
-                    band: v3(&b["color"]).into(),
-                    band_shape: [f(b, "height", 0.075), f(b, "sunBias", 0.85), f(b, "sunPower", 2.2)],
-                    belt: v3(&l["color"]).into(),
-                    belt_shape: [f(l, "elevation", 0.14), f(l, "width", 0.09), f(l, "power", 1.5)],
-                    shadow: [f(sh, "strength", 0.0), f(sh, "height", 0.07), f(sh, "power", 1.6)],
-                }
-            }),
+            twilight: sky_day["twilight"].is_object().then(|| extras::twilight(&sky_day["twilight"])),
         }
     });
     let px = &sx["post"];

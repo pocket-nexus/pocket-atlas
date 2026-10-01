@@ -123,29 +123,33 @@ const PLACE_DIR = `${PLACES_DIR}/${PLACE}`;
 const PACK = `${PLACE_DIR}/${PLACE}.place`;
 /** The globe and place list (`cook-atlas`, from web/scripts/export-atlas.ts). */
 const ATLAS_PACK = resolve(ROOT, ".pocket-build/atlas/atlas.pack");
-const UI_FONT = resolve(ROOT, ".pocket-build/atlas/ui.font");
 const FONTS = resolve(ROOT, ".pocket-build/fonts");
 const NOTO_REVISION = "f8d157532fbfaeda587e826d4cd5b21a49186f7c";
+/** SHA-256 of the Noto Sans CJK JP faces at NOTO_REVISION. */
+const NOTO_SHA256: Record<string, string> = {
+  "NotoSansCJKjp-Medium.otf": "dd523e580e3413c480b2d701bf64e534c20f8419e3cfb6a44c2bdcd8d2a6c052",
+  "NotoSansCJKjp-Bold.otf": "e53dcb0dcb2922e45d01aae1ebd2f382bb81d4229b18b6b883bd170678af1f76",
+};
 
-/** Noto Sans CJK JP Medium and Bold (OFL), fetched once into `.pocket-build/fonts`. */
-async function cjkFonts(): Promise<[string, string]> {
+/**
+ * The interface font's faces: Inter Regular/Bold from PocketJS, Noto Sans CJK
+ * JP Medium/Bold (OFL) fetched once into `.pocket-build/fonts` and checked.
+ */
+async function fontFaces(): Promise<string[]> {
   mkdirSync(FONTS, { recursive: true });
-  const paths = ["Medium", "Bold"].map((w) => `${FONTS}/NotoSansCJKjp-${w}.otf`) as [string, string];
-  for (const path of paths) {
-    if (existsSync(path)) continue;
-    const name = path.split("/").pop()!;
-    const r = await fetch(`https://raw.githubusercontent.com/notofonts/noto-cjk/${NOTO_REVISION}/Sans/OTF/Japanese/${name}`);
-    if (!r.ok) throw new Error(`${name}: ${r.status}`);
-    writeFileSync(path, new Uint8Array(await r.arrayBuffer()));
+  const cjk: string[] = [];
+  for (const [name, sha] of Object.entries(NOTO_SHA256)) {
+    const path = `${FONTS}/${name}`;
+    if (!existsSync(path)) {
+      const r = await fetch(`https://raw.githubusercontent.com/notofonts/noto-cjk/${NOTO_REVISION}/Sans/OTF/Japanese/${name}`);
+      if (!r.ok) throw new Error(`${name}: ${r.status}`);
+      writeFileSync(path, new Uint8Array(await r.arrayBuffer()));
+    }
+    if (createHash("sha256").update(readFileSync(path)).digest("hex") !== sha) throw new Error(`${path}: checksum mismatch`);
+    cjk.push(path);
   }
-  return paths;
-}
-
-/** The interface font (`ui.font`): Inter from PocketJS, Noto Sans CJK, the places' characters. */
-async function bakeUiFont(): Promise<void> {
-  const [cjk, cjkBold] = await cjkFonts();
   const inter = `${POCKETJS}/assets/fonts`;
-  await $`cargo run --release -p pocket3d-place-cook -- ui-font --places ${resolve(ROOT, ".pocket-build/atlas/globe/places.json")} --latin ${inter}/Inter-Regular.ttf --latin-bold ${inter}/Inter-Bold.ttf --cjk ${cjk} --cjk-bold ${cjkBold} --out ${UI_FONT}`.cwd(ROOT);
+  return ["--latin", `${inter}/Inter-Regular.ttf`, "--latin-bold", `${inter}/Inter-Bold.ttf`, "--cjk", cjk[0]!, "--cjk-bold", cjk[1]!];
 }
 
 /** Every cooked place pack: [id, path]. */
@@ -179,7 +183,6 @@ function sync(): void {
   if (!places.length) throw new Error(`no cooked place under ${PLACES_DIR}: run \`bun tools/atlas.ts cook\` first`);
   const copied = places.filter(([id, path]) => copyIfChanged(path, `${SHARE}/places/${id}.place`)).map(([id]) => id);
   if (existsSync(ATLAS_PACK) && copyIfChanged(ATLAS_PACK, `${SHARE}/atlas.pack`)) copied.push("atlas");
-  if (existsSync(UI_FONT) && copyIfChanged(UI_FONT, `${SHARE}/ui.font`)) copied.push("ui.font");
   console.log(`atlas: synced shaders${copied.length ? ` and ${copied.join(", ")}` : ""} to ${SHARE}`);
 }
 
@@ -407,8 +410,6 @@ async function vpk(): Promise<void> {
   for (const [id, path] of places) cpSync(path, `${stage}/places/${id}.place`);
   if (!existsSync(ATLAS_PACK)) throw new Error(`${ATLAS_PACK} missing: run \`bun tools/atlas.ts cook-atlas\` first`);
   cpSync(ATLAS_PACK, `${stage}/atlas.pack`);
-  if (!existsSync(UI_FONT)) throw new Error(`${UI_FONT} missing: run \`bun tools/atlas.ts cook-atlas\` first`);
-  cpSync(UI_FONT, `${stage}/ui.font`);
   console.log(`atlas: staged ${hashes.length} programs, the atlas and ${places.map(([id]) => id).join(", ")} in ${stage}`);
   await build({ standalone: true, assets: stage });
 }
@@ -480,8 +481,8 @@ else if (command === "ctl") {
 } else if (command === "cook") {
   await $`cargo run --release -p pocket3d-place-cook -- --in ${PLACE_DIR}`.cwd(ROOT);
 } else if (command === "cook-atlas") {
-  await $`cargo run --release -p pocket3d-place-cook -- atlas --in ${resolve(ROOT, ".pocket-build/atlas/globe")} --out ${ATLAS_PACK}`.cwd(ROOT);
-  await bakeUiFont();
+  const faces = await fontFaces();
+  await $`cargo run --release -p pocket3d-place-cook -- atlas --in ${resolve(ROOT, ".pocket-build/atlas/globe")} --out ${ATLAS_PACK} ${faces}`.cwd(ROOT);
 } else if (command === "capture") {
   const out = value("--out", resolve(ROOT, `.pocket-build/validation/captures/${new Date().toISOString().replace(/[:.]/g, "-")}.png`));
   await dev("capture", "--out", out);

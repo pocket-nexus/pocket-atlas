@@ -12,7 +12,7 @@ use pocket3d_gxm::target::{ColorFormat, Depth, Msaa, Target};
 use vita2d_sys as g;
 
 use crate::camera::{self, View};
-use crate::gpu::{bind, BlendMode, Gpu, Layout, Out, PipeKey, Pipeline, Uniforms, S, U};
+use crate::gpu::{tiled_at, tiled_u8, bind, BlendMode, Gpu, Layout, Out, PipeKey, Pipeline, Uniforms, S, U};
 use crate::scene::{rows4x4, Scene};
 use crate::profile::{Governor, Profile, Step};
 use crate::shaders::Key;
@@ -191,6 +191,7 @@ pub struct Stats {
 
 /// Material resolved to shader programs and constants.
 struct Mat {
+    kind: pc::Kind,
     alpha_test: bool,
     /// Profiling class: 0 wet ground, 1 other lit, 2 glass, 3 window,
     /// 4 products, 5 unlit, 6 skyline and tower.
@@ -279,9 +280,6 @@ fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: boo
         if sun {
             defines.push("SUN");
         }
-        if m.fog {
-            defines.push("FOG");
-        }
         if m.water.is_some_and(|w| w.shallow.is_some()) && m.vertex_color {
             defines.push("SHALLOW");
         }
@@ -292,7 +290,7 @@ fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: boo
     if m.alpha_test > 0.0 && matches!(m.kind, pc::Kind::Standard | pc::Kind::Unlit) {
         defines.push("ALPHA_TEST");
     }
-    if m.fog && !m.interior && matches!(m.kind, pc::Kind::Standard | pc::Kind::Unlit | pc::Kind::Glass | pc::Kind::InteriorWindow) {
+    if m.fog && !m.interior && matches!(m.kind, pc::Kind::Standard | pc::Kind::Unlit | pc::Kind::Glass | pc::Kind::InteriorWindow | pc::Kind::Water) {
         defines.push("FOG");
     }
     let blend = match (m.kind, m.blend) {
@@ -331,6 +329,7 @@ fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: boo
         pc::Kind::Tower | pc::Kind::Skyline => 6,
     };
     Mat {
+        kind: m.kind,
         alpha_test: m.alpha_test > 0.0 && matches!(m.kind, pc::Kind::Standard | pc::Kind::Unlit),
         class,
         fs,
@@ -440,29 +439,6 @@ pub(crate) const MASK_H: usize = 256;
 /// The GPU may still read the two frames before this one.
 const MASK_BUFFERS: usize = 3;
 pub(crate) const GRAIN: usize = 64;
-
-/// An 8-bit single-channel tiled texture (32×32 tiles) over `px`.
-pub(crate) unsafe fn tiled_u8(px: *mut u8, w: usize, h: usize, linear: bool, repeat: bool) -> Result<g::SceGxmTexture, String> {
-    let mut t: g::SceGxmTexture = core::mem::zeroed();
-    // GXM spells swizzles in ABGR order: U8_R111 puts the texel in alpha and
-    // reads 1 in red. RRRR puts it in every channel, as the shaders read `.r`.
-    let r = g::sceGxmTextureInitTiled(&mut t, px.cast(), g::SceGxmTextureFormat_SCE_GXM_TEXTURE_FORMAT_U8_RRRR, w as u32, h as u32, 0);
-    if r < 0 {
-        return Err(format!("tiled texture {w}x{h} 0x{:08x}", r as u32));
-    }
-    let f = if linear { g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_LINEAR } else { g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_POINT };
-    g::sceGxmTextureSetMinFilter(&mut t, f);
-    g::sceGxmTextureSetMagFilter(&mut t, f);
-    let a = if repeat { g::SceGxmTextureAddrMode_SCE_GXM_TEXTURE_ADDR_REPEAT } else { g::SceGxmTextureAddrMode_SCE_GXM_TEXTURE_ADDR_CLAMP };
-    g::sceGxmTextureSetUAddrMode(&mut t, a);
-    g::sceGxmTextureSetVAddrMode(&mut t, a);
-    Ok(t)
-}
-
-/// Byte offset of texel (x, y) in a tiled 8-bit texture `w` texels wide.
-pub(crate) fn tiled_at(x: usize, y: usize, w: usize) -> usize {
-    ((y / 32) * (w / 32) + x / 32) * 1024 + (y % 32) * 32 + x % 32
-}
 
 /// The screen mask the composite multiplies by: vignette, letterbox bars
 /// (`bars` = how far they have closed) and the dip to black.
@@ -845,7 +821,7 @@ impl Renderer {
             }
             // Baked surfaces light only moving sources per pixel (at most 2);
             // with vertex lights, moving meshes light per vertex.
-            let vlit = !baked && m.lit && self.settings.vertex_lights && m.fs == "standard_f.cg";
+            let vlit = !baked && m.lit && self.settings.vertex_lights && m.kind == pc::Kind::Standard;
             let main: &[usize] = if !m.lit { &[0] } else if baked { &[0, 1] } else { &[0, 2, 4] };
             for n in main {
                 for tier in if m.lit { &[0usize, 1, 2][..] } else { &[0usize][..] } {
@@ -882,7 +858,7 @@ impl Renderer {
             gpu.want(&Key::new("fill_f.cg", &[]));
         }
         if self.day_sky {
-            gpu.want(&Key::new("sky_day_f.cg", if self.twilight { &["TWILIGHT"][..] } else { &[] }));
+            gpu.want(&self.sky_key());
         }
     }
 
@@ -893,7 +869,7 @@ impl Renderer {
         if v == 1 || d.node.is_some() || m.transparent || m.class == 2 || m.class == 3 || m.water.is_some() {
             return None;
         }
-        let vs = surface_key(v, !m.alpha_test, (false, false, false, false));
+        let vs = surface_key(v, !m.alpha_test, VsNeeds::default());
         let fs = Key::new("shadow_f.cg", if m.alpha_test { &["ALPHA_TEST"][..] } else { &[] });
         Some((vs, fs, [Layout::Static, Layout::Skinned, Layout::Baked][v]))
     }
@@ -1347,10 +1323,18 @@ impl Renderer {
         &self.masks[i].1
     }
 
+    /// The sky's fragment program: the night gradient, or the day sky (with
+    /// its twilight terms after sunset).
+    fn sky_key(&self) -> Key {
+        match (self.day_sky, self.twilight) {
+            (true, true) => Key::new("sky_day_f.cg", &["TWILIGHT"]),
+            (true, false) => Key::new("sky_day_f.cg", &[]),
+            _ => Key::new("sky_f.cg", &[]),
+        }
+    }
+
     unsafe fn sky(&mut self, ctx: *mut g::SceGxmContext, gpu: &mut Gpu, f: &FrameConsts, out: Out, msaa: u32) {
-        let fs = if self.day_sky { "sky_day_f.cg" } else { "sky_f.cg" };
-        let defs: &[&str] = if self.day_sky && self.twilight { &["TWILIGHT"] } else { &[] };
-        let key = PipeKey { vs: key_v("sky_v.cg", &[]), fs: Key::new(fs, defs), layout: Layout::Pos2, blend: BlendMode::Opaque, output: out, msaa };
+        let key = PipeKey { vs: key_v("sky_v.cg", &[]), fs: self.sky_key(), layout: Layout::Pos2, blend: BlendMode::Opaque, output: out, msaa };
         let Some(p) = gpu.pipeline(&key) else { return };
         let p = &*(p as *const Pipeline);
         self.use_pipeline(ctx, p);
@@ -1462,7 +1446,7 @@ impl Renderer {
             let mut pp = self.pipe_cache[slot];
             if pp.is_null() {
                 // Moving and skinned standard meshes: lights per vertex.
-                let vlit = n > 0 && !d.baked && self.settings.vertex_lights && self.mats[mi].fs == "standard_f.cg";
+                let vlit = n > 0 && !d.baked && self.settings.vertex_lights && self.mats[mi].kind == pc::Kind::Standard;
                 let mut vs = surface_key(v, self.settings.flat, vs_needs(&self.mats[mi], tier, mirror));
                 let mut fs = if self.settings.flat { Key::new("debug_f.cg", &[]) } else { frag_key(&self.mats[mi], if vlit { 0 } else { n }, mirror, d.baked, tier) };
                 if vlit && !self.settings.flat {
@@ -1506,7 +1490,7 @@ impl Renderer {
             u.set(p, U::Dequant, &d.dequant);
             u.set(p, U::ViewProj, &f.vp);
             match m.uv_anim {
-                Some(a) => u.set(p, U::Uv, &a.apply(d.uv, f.time)),
+                Some(a) => u.set(p, U::Uv, &a.apply(d.uv, f.eye[3])),
                 None => u.set(p, U::Uv, &d.uv),
             }
             if let Some(s) = d.skin {
@@ -1545,7 +1529,8 @@ impl Renderer {
             u.set(p, U::Haze, &f.skyline_haze);
             if let Some(w) = &m.water {
                 // Offsets wrap: the wave texture repeats.
-                let layer = |l: &[f32; 3]| [l[0], 0.0, (f.time * l[1] * l[0]).fract(), (f.time * l[2] * l[0]).fract()];
+                let t = f.eye[3];
+                let layer = |l: &[f32; 3]| [l[0], 0.0, (t * l[1] * l[0]).rem_euclid(1.0), (t * l[2] * l[0]).rem_euclid(1.0)];
                 let (a, b) = (layer(&w.waves[0]), layer(&w.waves[1]));
                 u.set(p, U::Wave, &[a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]]);
                 u.set(p, U::WaterK, &[w.body[0], w.body[1], w.body[2], w.distance_roughness]);
@@ -1663,23 +1648,32 @@ fn variant(d: &crate::scene::DrawGpu) -> usize {
 }
 
 /// Varyings a material program reads beyond world position, normal and
-/// UV: (tangent, vertex colour, clip position for the mirror lookup). The
-/// vertex program writes only these; unread varyings cost parameter-buffer
-/// bandwidth on the tiler.
-fn vs_needs(m: &Mat, tier: usize, mirror: bool) -> (bool, bool, bool, bool) {
+/// UV. The vertex program writes only these; unread varyings cost
+/// parameter-buffer bandwidth on the tiler.
+#[derive(Clone, Copy, Default)]
+struct VsNeeds {
+    tangent: bool,
+    color: bool,
+    /// Clip position, for the mirror lookup.
+    screen: bool,
+    /// World-plane wave coordinates instead of the mesh UV (water).
+    waves: bool,
+}
+
+fn vs_needs(m: &Mat, tier: usize, mirror: bool) -> VsNeeds {
     let has = |d: &str| m.defines.contains(&d);
-    match m.fs {
-        "standard_f.cg" => (has("NORMAL_MAP") && tier == 0 && !mirror, has("VERTEX_COLOR"), has("PLANAR") && !mirror, false),
-        "window_f.cg" | "skyline_f.cg" => (true, true, false, false),
-        "unlit_f.cg" | "products_f.cg" => (false, true, false, false),
-        "water_f.cg" => (false, has("SHALLOW"), false, true),
-        _ => (false, false, false, false),
+    match m.kind {
+        pc::Kind::Standard => VsNeeds { tangent: has("NORMAL_MAP") && tier == 0 && !mirror, color: has("VERTEX_COLOR"), screen: has("PLANAR") && !mirror, waves: false },
+        pc::Kind::InteriorWindow | pc::Kind::Skyline => VsNeeds { tangent: true, color: true, ..VsNeeds::default() },
+        pc::Kind::Unlit | pc::Kind::Products => VsNeeds { color: true, ..VsNeeds::default() },
+        pc::Kind::Water => VsNeeds { color: has("SHALLOW"), waves: true, ..VsNeeds::default() },
+        pc::Kind::Glass | pc::Kind::Tower => VsNeeds::default(),
     }
 }
 
 /// `flat`: profiling variant that outputs position and world only (pairs
 /// with debug_f.cg).
-fn surface_key(variant: usize, flat: bool, (tangent, color, screen, waves): (bool, bool, bool, bool)) -> Key {
+fn surface_key(variant: usize, flat: bool, n: VsNeeds) -> Key {
     let mut defs: Vec<&str> = match variant {
         1 => vec!["SKINNED", "MAX_BONES=24"],
         2 => vec!["BAKED"],
@@ -1688,7 +1682,7 @@ fn surface_key(variant: usize, flat: bool, (tangent, color, screen, waves): (boo
     if flat {
         defs.push("FLAT");
     } else {
-        for (on, d) in [(tangent, "TANGENT"), (color, "COLOR"), (screen, "SCREEN"), (waves, "WAVES")] {
+        for (on, d) in [(n.tangent, "TANGENT"), (n.color, "COLOR"), (n.screen, "SCREEN"), (n.waves, "WAVES")] {
             if on {
                 defs.push(d);
             }
@@ -1718,7 +1712,7 @@ fn frag_key(m: &Mat, lights: usize, reflection: bool, baked: bool, tier: usize) 
         defs.push("BAKED");
     }
     // The standard and glass programs have the reduced tiers.
-    if m.fs == "standard_f.cg" || m.fs == "glass_f.cg" {
+    if matches!(m.kind, pc::Kind::Standard | pc::Kind::Glass) {
         match tier {
             1 => defs.push("LITE"),
             2 => defs.push("FAR"),
@@ -1882,7 +1876,6 @@ struct FrameConsts {
     haze: HazeConsts,
     fx: FxConsts,
     day: Option<DaySkyConsts>,
-    time: f32,
 }
 
 /// `sky_day_f.cg` uniforms.
@@ -2007,11 +2000,12 @@ impl FrameConsts {
                     cloud_sun: [d.cloud_sun[0], d.cloud_sun[1], d.cloud_sun[2], d.glow_wide[1]],
                     cloud_amb: [d.cloud_ambient[0], d.cloud_ambient[1], d.cloud_ambient[2], d.disc_cos_inner],
                     tw: d.twilight.as_ref().map_or([[0.0; 4]; 4], |t| {
+                        let (b, l, s) = (&t.band, &t.belt, &t.shadow);
                         [
-                            [t.band[0], t.band[1], t.band[2], t.band_shape[0]],
-                            [t.belt[0], t.belt[1], t.belt[2], t.belt_shape[0]],
-                            [t.band_shape[1], t.band_shape[2], t.belt_shape[1], t.belt_shape[2]],
-                            [t.shadow[0], t.shadow[1], t.shadow[2], 0.0],
+                            [b.color[0], b.color[1], b.color[2], b.height],
+                            [l.color[0], l.color[1], l.color[2], l.elevation],
+                            [b.sun_bias, b.sun_power, l.width, l.power],
+                            [s.strength, s.height, s.power, 0.0],
                         ]
                     }),
                 }
@@ -2024,7 +2018,6 @@ impl FrameConsts {
             clouds: tex(scene.meta.day_sky.as_ref().and_then(|d| d.clouds).or(fx_meta.clouds)),
             haze,
             fx,
-            time,
         }
     }
 }

@@ -14,6 +14,7 @@ mod camera;
 mod frame;
 mod gpu;
 mod hostfs;
+mod paths;
 mod profile;
 mod provision;
 mod scene;
@@ -90,7 +91,7 @@ unsafe fn loading_frame(font: *mut g::vita2d_pgf, title: &str, lines: &[String],
     graphics::present();
 }
 
-/// Copies `host0:atlas/outbox/<name>` to `ux0:data/pocket-atlas/<name>` (a
+/// Copies `host0:atlas/outbox/<name>` to the data folder (a
 /// packaged build to install from VitaShell) and records the result next to
 /// the source as `<name>.done`.
 fn fetch(name: &str) {
@@ -98,14 +99,14 @@ fn fetch(name: &str) {
         if name.is_empty() || name.contains(['/', '\\', ':']) || name.contains("..") {
             return Err(format!("refusing file name {name:?}"));
         }
-        let _ = std::fs::create_dir_all("ux0:data/pocket-atlas");
+        let _ = std::fs::create_dir_all(paths::DATA);
         let mut src = std::fs::File::open(format!("host0:atlas/outbox/{name}")).map_err(|e| e.to_string())?;
-        let to = format!("ux0:data/pocket-atlas/{name}");
+        let to = format!("{}/{name}", paths::DATA);
         let mut dst = std::fs::File::create(&to).map_err(|e| format!("{to}: {e}"))?;
         std::io::copy(&mut src, &mut dst).map_err(|e| e.to_string())
     })();
     let text = match result {
-        Ok(n) => format!("ok {n} ux0:data/pocket-atlas/{name}"),
+        Ok(n) => format!("ok {n} {}/{name}", paths::DATA),
         Err(e) => format!("error {e}"),
     };
     let _ = hostfs::write(&format!("host0:atlas/outbox/{name}.done"), text.as_bytes());
@@ -234,15 +235,29 @@ struct App {
     /// render settings, kept across screens.
     browser: browser::Browser,
     prefs: settings::Prefs,
-    /// Accent of the place being entered (its settings sheet).
+    /// Every place's display name and accent, from the atlas pack.
+    places: Vec<PlaceRef>,
+}
+
+/// A place to enter: its id, the name its screens show and its accent.
+#[derive(Clone)]
+struct PlaceRef {
+    id: String,
+    name: String,
     accent: [f32; 3],
+}
+
+impl App {
+    fn place(&self, id: &str) -> PlaceRef {
+        self.places.iter().find(|p| p.id == id).cloned().unwrap_or(PlaceRef { id: id.into(), name: id.into(), accent: [0.4, 0.6, 1.0] })
+    }
 }
 
 /// Which screen runs next: the atlas (with a place to select), or a place
 /// (id, display name, a control message to apply once it runs).
 enum Next {
     Atlas(Option<String>),
-    Place(String, String, Option<Value>),
+    Place(PlaceRef, Option<Value>),
 }
 
 /// The programs this build uses, for packaging (`atlas.ts vpk`): rewritten
@@ -266,7 +281,7 @@ unsafe fn run_atlas(app: &mut App, select: Option<String>) -> Next {
     // can still be on its way back: an allocation failure is retried.
     for attempt in 0..6 {
         error.clear();
-        for &path in atlas::pack_paths() {
+        for path in atlas::pack_paths().iter().map(String::as_str) {
             match atlas::Atlas::load(path) {
                 Ok(a) => {
                     loaded = Some(a);
@@ -285,8 +300,9 @@ unsafe fn run_atlas(app: &mut App, select: Option<String>) -> Next {
     let Some(mut atlas) = loaded else {
         // Development builds without an atlas pack go straight to a place.
         pocketjs_vita::vita_log(format_args!("atlas: {error}"));
-        return Next::Place(DEFAULT_PLACE.into(), DEFAULT_PLACE.into(), None);
+        return Next::Place(app.place(DEFAULT_PLACE), None);
     };
+    app.places = atlas.meta.places.iter().map(|p| PlaceRef { id: p.id.clone(), name: format!("{}, {}", p.name, p.locality), accent: p.accent }).collect();
     app.browser.attach(&mut atlas);
     if let Some(id) = &select {
         app.browser.select(&mut atlas, id);
@@ -343,7 +359,7 @@ unsafe fn run_atlas(app: &mut App, select: Option<String>) -> Next {
                 continue;
             }
             let id = v["place"].as_str().map(String::from).or_else(|| app.browser.focused(&atlas).map(|p| p.id.clone())).unwrap_or_else(|| DEFAULT_PLACE.into());
-            go = Some(Next::Place(id, String::new(), Some(v)));
+            go = Some(Next::Place(app.place(&id), Some(v)));
         }
         // The globe turns while a menu or the keyboard is up; the stick only
         // when neither is.
@@ -351,17 +367,8 @@ unsafe fn run_atlas(app: &mut App, select: Option<String>) -> Next {
         let still = input::Pad { buttons: 0, lx: 128, ly: 128, rx: 128, ry: 128 };
         let spun = atlas.update(raw.min(0.1), if input_free { &pad } else { &still });
         if go.is_none() && !app.dev.menu.visible {
-            if let Some(browser::Action::Enter(id)) = app.browser.update(&mut atlas, raw.min(0.1), &pad, pressed, spun) {
-                go = Some(Next::Place(id, String::new(), None));
-            }
-        }
-        if let Some(Next::Place(id, name, _)) = &mut go {
-            if let Some(p) = atlas.meta.places.iter().find(|p| &p.id == id) {
-                *name = format!("{}, {}", p.name, p.locality);
-                app.accent = p.accent;
-            }
-            if name.is_empty() {
-                *name = id.clone();
+            if let Some(browser::Action::Enter(id)) = app.browser.update(&mut atlas, raw.min(0.1), pressed, spun) {
+                go = Some(Next::Place(app.place(&id), None));
             }
         }
 
@@ -494,13 +501,13 @@ fn main() {
             ui,
             browser: browser::Browser::new(),
             prefs: settings::Prefs::load(live),
-            accent: [0.4, 0.6, 1.0],
+            places: Vec::new(),
         };
         let mut next = Next::Atlas(None);
         loop {
             next = match next {
                 Next::Atlas(select) => run_atlas(&mut app, select),
-                Next::Place(id, name, first) => run_place(&mut app, &id, &name, first),
+                Next::Place(place, first) => run_place(&mut app, place, first),
             };
         }
     }
@@ -508,8 +515,10 @@ fn main() {
 
 /// One place: load its pack, render it until START or a control message
 /// leaves it, then free its memory.
-unsafe fn run_place(app: &mut App, id: &str, name: &str, first: Option<Value>) -> Next {
+unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Next {
+    let (id, name) = (place.id.as_str(), place.name.as_str());
     let title = format!("POCKET ATLAS  /  {}", name.to_uppercase());
+    let others = app.places.clone();
     let (font, live, clocks) = (app.font, app.live, app.clocks);
     let mut clock_resets = app.clock_resets;
     let mut gpu = &mut app.gpu;
@@ -518,7 +527,6 @@ unsafe fn run_place(app: &mut App, id: &str, name: &str, first: Option<Value>) -
     let fence = &mut app.fence;
     let prefs = &mut app.prefs;
     let ui = &app.ui;
-    let place_accent = app.accent;
     {
             // ---------------------------------------------------------- load
             let mut scene = None;
@@ -622,15 +630,16 @@ unsafe fn run_place(app: &mut App, id: &str, name: &str, first: Option<Value>) -
                         continue;
                     }
                     if let Some(p) = v["place"].as_str().filter(|p| *p != id) {
-                        switch = Some(Next::Place(p.to_string(), p.to_string(), Some(v.clone())));
+                        let to = others.iter().find(|o| o.id == p).cloned().unwrap_or(PlaceRef { id: p.into(), name: p.into(), accent: place.accent });
+                        switch = Some(Next::Place(to, Some(v.clone())));
                         continue;
                     }
                     apply_control(&v, &mut rig, &mut renderer, &mut ctl, &mut prefs.hud);
                     if let Some(open) = v["sheet"].as_bool() {
                         sheet.open = open;
                     }
-                    if let Some(row) = v["sheetRow"].as_u64() {
-                        sheet.focus(row as usize);
+                    if let Some(row) = v["sheetRow"].as_str() {
+                        sheet.focus(row, &renderer);
                     }
                 }
                 if let Some(n) = switch {
@@ -746,7 +755,7 @@ unsafe fn run_place(app: &mut App, id: &str, name: &str, first: Option<Value>) -
                 }
                 let (w, h) = frame::SCALES[renderer.level()];
                 let stats = format!("{fps:.1} fps  {frame_ms:.1} ms  ·  {w}×{h}  ·  step {} of {}", renderer.governor.step + 1, renderer.profile.steps.len());
-                sheet.draw(ui, &mut gpu, prefs, &renderer, &rig, name, place_accent, &stats);
+                sheet.draw(ui, &mut gpu, prefs, &renderer, &rig, name, place.accent, &stats);
                 dev.overlay();
                 let t_display = Instant::now();
                 g::sceGxmEndScene(ctx, core::ptr::null(), fence.signal((frame_no % 2) as usize));

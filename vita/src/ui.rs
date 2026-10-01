@@ -14,11 +14,13 @@ use pocket3d_gxm::mem::{Arena, Kind, Ring};
 use pocket3d_gxm::target::Msaa;
 use vita2d_sys as g;
 
-use crate::frame::{tiled_at, tiled_u8};
-use crate::gpu::{bind, BlendMode, Gpu, Layout, Out, PipeKey, Pipeline, Uniforms, S, U};
+use crate::gpu::{bind, tiled_at, tiled_u8, BlendMode, Gpu, Layout, Out, PipeKey, Pipeline, Uniforms, S, U};
+use crate::scene::{find, Seq};
+use pocket3d_place as pc;
 use crate::shaders::Key;
 
-/// Text styles: the baked atlas's style order (cooker `uifont::STYLES`).
+/// Text styles, in the order of the shared table `pc::atlas::STYLES` (the
+/// baked font's style index; checked by name when the font loads).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum T {
     /// Regular 15 px: secondary lines.
@@ -40,35 +42,24 @@ pub enum T {
 }
 
 impl T {
+    const ALL: [T; 8] = [T::Caption, T::Label, T::Body, T::Strong, T::Title, T::Heading, T::Brand, T::Small];
+
+    fn name(self) -> &'static str {
+        pc::atlas::STYLES[self as usize].0
+    }
+
     /// Em size in pixels.
-    pub const fn px(self) -> f32 {
-        match self {
-            T::Caption | T::Small => 15.0,
-            T::Label => 13.0,
-            T::Body | T::Strong => 17.0,
-            T::Title => 21.0,
-            T::Heading => 27.0,
-            T::Brand => 34.0,
-        }
+    pub fn px(self) -> f32 {
+        pc::atlas::STYLES[self as usize].1
     }
 }
 
-#[derive(Clone, Copy)]
-struct Glyph {
-    x: u16,
-    y: u16,
-    w: u16,
-    h: u16,
-    left: i16,
-    top: i16,
-    adv: f32,
-}
-
-/// The baked interface font: coverage atlas (U8, tiled) and glyph table.
+/// The baked interface font (`FONT` and `META.font` in the atlas pack):
+/// coverage atlas (U8, tiled) and glyph table.
 struct Baked {
     tex: g::SceGxmTexture,
     size: (f32, f32),
-    glyphs: HashMap<u64, Glyph>,
+    glyphs: HashMap<u64, pc::atlas::Glyph>,
     _vram: Arena,
 }
 
@@ -77,17 +68,34 @@ impl Baked {
         (t as u64) << 32 | c as u64
     }
 
-    unsafe fn load(paths: &[&str]) -> Result<Self, String> {
-        let bytes = paths.iter().find_map(|p| std::fs::read(p).ok()).ok_or("ui.font not found")?;
-        if bytes.len() < 20 || bytes[..4] != *b"PAUF" {
-            return Err("ui.font: bad header".into());
+    /// From the first atlas pack found, read through `Seq` (no stat on the
+    /// USB share).
+    unsafe fn load() -> Result<Self, String> {
+        let mut err = String::from("no atlas pack");
+        for path in crate::paths::candidates("atlas.pack") {
+            match Self::load_from(&path) {
+                Ok(b) => return Ok(b),
+                Err(e) if !e.contains("No such file") => err = e,
+                Err(_) => {}
+            }
         }
-        let u = |o: usize| u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap()) as usize;
-        let (ml, w, h) = (u(8), u(12), u(16));
-        let meta: serde_json::Value = serde_json::from_slice(&bytes[20..20 + ml]).map_err(|e| format!("ui.font: {e}"))?;
-        let px = &bytes[20 + ml..];
+        Err(err)
+    }
+
+    unsafe fn load_from(path: &str) -> Result<Self, String> {
+        let mut f = Seq::open(path)?;
+        let sections = f.sections(pc::atlas::MAGIC)?;
+        let meta: pc::atlas::AtlasMeta = serde_json::from_slice(&f.section(&find(&sections, pc::TAG_META)?)?).map_err(|e| format!("{path}: {e}"))?;
+        let font = meta.font.ok_or(format!("{path}: no interface font"))?;
+        for t in T::ALL {
+            if font.styles.get(t as usize).map(|s| s.name.as_str()) != Some(t.name()) {
+                return Err(format!("{path}: font style {} is not `{}`", t as usize, t.name()));
+            }
+        }
+        let (w, h) = (font.width as usize, font.height as usize);
+        let px = f.section(&find(&sections, pc::atlas::TAG_FONT)?)?;
         if px.len() < w * h || w % 32 != 0 || h % 32 != 0 {
-            return Err("ui.font: atlas size".into());
+            return Err(format!("{path}: font atlas {w}×{h}"));
         }
         let mut vram = Arena::new(Kind::Cdram, w * h + 4096);
         let mem = vram.alloc(w * h, 4096)?;
@@ -97,15 +105,7 @@ impl Baked {
             }
         }
         let tex = tiled_u8(mem, w, h, true, false)?;
-        let mut glyphs = HashMap::new();
-        for gl in meta["glyphs"].as_array().into_iter().flatten() {
-            let n = |i: usize| gl[i].as_f64().unwrap_or(0.0);
-            let (style, cp) = (n(0) as u64, n(1) as u64);
-            glyphs.insert(
-                style << 32 | cp,
-                Glyph { x: n(2) as u16, y: n(3) as u16, w: n(4) as u16, h: n(5) as u16, left: n(6) as i16, top: n(7) as i16, adv: n(8) as f32 },
-            );
-        }
+        let glyphs = font.glyphs.into_iter().map(|gl| ((gl.style as u64) << 32 | gl.cp as u64, gl)).collect();
         Ok(Self { tex, size: (w as f32, h as f32), glyphs, _vram: vram })
     }
 
@@ -114,16 +114,7 @@ impl Baked {
     }
 
     fn width(&self, t: T, s: &str) -> f32 {
-        s.chars().map(|c| self.glyphs.get(&Self::key(t, c)).map_or(0.0, |g| g.adv)).sum()
-    }
-}
-
-/// Where the baked font is looked for, in order.
-fn font_paths() -> &'static [&'static str] {
-    if cfg!(feature = "usb-debug") {
-        &["host0:atlas/ui.font", "ux0:data/pocket-atlas/ui.font", "app0:ui.font"]
-    } else {
-        &["app0:ui.font", "ux0:data/pocket-atlas/ui.font"]
+        s.chars().map(|c| self.glyphs.get(&Self::key(t, c)).map_or(0.0, |g| g.advance)).sum()
     }
 }
 
@@ -236,14 +227,12 @@ pub enum Button {
     Square,
     L,
     R,
-    Start,
-    Select,
     Stick,
     Pad,
 }
 
 pub struct Ui {
-    pub font: *mut g::vita2d_pgf,
+    font: *mut g::vita2d_pgf,
     /// Vector fonts (null when the system has none): Japanese-first and
     /// Chinese-first, and the size that matches the PGF font at a scale.
     ja: *mut g::vita2d_pvf,
@@ -253,6 +242,9 @@ pub struct Ui {
     /// Glyph vertices, written per frame (three frames in flight at most).
     ring: RefCell<Ring>,
     text_ib: *const u16,
+    /// The three interface pipelines (flat, image, text) and the shader
+    /// generation they were looked up at.
+    pipes: RefCell<(u32, [*const Pipeline; 3])>,
     quad_vb: *const f32,
     quad_ib: *const u16,
     /// Holds the quad for the life of the process.
@@ -286,7 +278,7 @@ impl Ui {
             let (a, b) = (g::vita2d_pgf_text_width(font, 1.0, m) as f32, g::vita2d_pvf_text_width(ja, 1.0, m) as f32);
             if a > 0.0 && b > 0.0 { a / b } else { 1.0 }
         };
-        let baked = match Baked::load(font_paths()) {
+        let baked = match Baked::load() {
             Ok(b) => Some(b),
             Err(e) => {
                 pocketjs_vita::vita_log(format_args!("atlas: {e}; system fonts only"));
@@ -302,7 +294,7 @@ impl Ui {
         }
         let ring = RefCell::new(Ring::new(MAX_QUADS * 64, 3)?);
         pocketjs_vita::vita_log(format_args!("atlas: ui fonts baked={} pvf ja={} zh={}", baked.as_ref().map_or(0, |b| b.glyphs.len()), !ja.is_null(), zh != ja));
-        Ok(Self { font, ja, zh, pvf_scale, baked, ring, text_ib, quad_vb: vb, quad_ib: ib, _mem: mem })
+        Ok(Self { font, ja, zh, pvf_scale, baked, ring, text_ib, pipes: RefCell::new((u32::MAX, [core::ptr::null(); 3])), quad_vb: vb, quad_ib: ib, _mem: mem })
     }
 
     /// Starts a frame's text: glyph vertices of the frame three back are free.
@@ -325,6 +317,31 @@ impl Ui {
         PipeKey { vs: Key::new("text_v.cg", &[]), fs: Key::new("text_f.cg", &[]), layout: Layout::Text, blend: BlendMode::Premultiplied, output: Out::Uchar4, msaa: Msaa::None.gxm() }
     }
 
+    /// A pipeline (0 flat, 1 image, 2 text), looked up again when shaders
+    /// reload; bound with the interface's fixed state.
+    unsafe fn pipeline(&self, gpu: &mut Gpu, which: usize) -> Option<&'static Pipeline> {
+        let mut c = self.pipes.borrow_mut();
+        if c.0 != gpu.epoch {
+            *c = (gpu.epoch, [core::ptr::null(); 3]);
+        }
+        if c.1[which].is_null() {
+            let key = match which {
+                0 => Self::key(false),
+                1 => Self::key(true),
+                _ => Self::text_key(),
+            };
+            c.1[which] = gpu.pipeline(&key).map_or(core::ptr::null(), |p| p as *const Pipeline);
+        }
+        let p = c.1[which].as_ref()?;
+        let ctx = g::vita2d_get_context();
+        g::sceGxmSetVertexProgram(ctx, p.vp);
+        g::sceGxmSetFragmentProgram(ctx, p.fp);
+        g::sceGxmSetFrontDepthFunc(ctx, g::SceGxmDepthFunc_SCE_GXM_DEPTH_FUNC_ALWAYS);
+        g::sceGxmSetFrontDepthWriteEnable(ctx, g::SceGxmDepthWriteMode_SCE_GXM_DEPTH_WRITE_DISABLED);
+        g::sceGxmSetCullMode(ctx, g::SceGxmCullMode_SCE_GXM_CULL_NONE);
+        Some(p)
+    }
+
     /// Programs the interface uses, so they compile before it is first drawn.
     pub fn warm(gpu: &mut Gpu) {
         for k in [Self::key(false), Self::key(true), Self::text_key()] {
@@ -337,14 +354,8 @@ impl Ui {
         if w <= 0.0 || h <= 0.0 || x >= W || y >= H || x + w <= 0.0 || y + h <= 0.0 {
             return;
         }
-        let Some(p) = gpu.pipeline(&Self::key(tex.is_some())) else { return };
-        let p = &*(p as *const Pipeline);
+        let Some(p) = self.pipeline(gpu, tex.is_some() as usize) else { return };
         let ctx = g::vita2d_get_context();
-        g::sceGxmSetVertexProgram(ctx, p.vp);
-        g::sceGxmSetFragmentProgram(ctx, p.fp);
-        g::sceGxmSetFrontDepthFunc(ctx, g::SceGxmDepthFunc_SCE_GXM_DEPTH_FUNC_ALWAYS);
-        g::sceGxmSetFrontDepthWriteEnable(ctx, g::SceGxmDepthWriteMode_SCE_GXM_DEPTH_WRITE_DISABLED);
-        g::sceGxmSetCullMode(ctx, g::SceGxmCullMode_SCE_GXM_CULL_NONE);
         // A soft edge spreads outside the rectangle.
         let pad = (s.soft - 1.0).max(0.0) + 1.0;
         let (hw, hh) = (w * 0.5, h * 0.5);
@@ -423,8 +434,6 @@ impl Ui {
     }
 
     unsafe fn baked_text(&self, gpu: &mut Gpu, b: &Baked, x: f32, y: f32, color: [f32; 4], t: T, s: &str) {
-        let Some(p) = gpu.pipeline(&Self::text_key()) else { return };
-        let p = &*(p as *const Pipeline);
         let n = s.chars().filter(|&c| b.glyphs.get(&Baked::key(t, c)).is_some_and(|g| g.w > 0)).count();
         if n == 0 || n > MAX_QUADS {
             return;
@@ -445,14 +454,10 @@ impl Ui {
                 core::ptr::copy_nonoverlapping(quad.as_ptr(), v.add(q * 16), 16);
                 q += 1;
             }
-            pen += gl.adv;
+            pen += gl.advance;
         }
+        let Some(p) = self.pipeline(gpu, 2) else { return };
         let ctx = g::vita2d_get_context();
-        g::sceGxmSetVertexProgram(ctx, p.vp);
-        g::sceGxmSetFragmentProgram(ctx, p.fp);
-        g::sceGxmSetFrontDepthFunc(ctx, g::SceGxmDepthFunc_SCE_GXM_DEPTH_FUNC_ALWAYS);
-        g::sceGxmSetFrontDepthWriteEnable(ctx, g::SceGxmDepthWriteMode_SCE_GXM_DEPTH_WRITE_DISABLED);
-        g::sceGxmSetCullMode(ctx, g::SceGxmCullMode_SCE_GXM_CULL_NONE);
         let u = Uniforms::reserve(ctx, p);
         u.set(p, U::Fill, &color);
         bind(ctx, p, S::Source, &b.tex);
@@ -567,15 +572,10 @@ impl Ui {
                 }
                 r * 2.0
             }
-            Button::L | Button::R | Button::Start | Button::Select => {
-                let label = match b {
-                    Button::L => "L",
-                    Button::R => "R",
-                    Button::Start => "START",
-                    _ => "SELECT",
-                };
+            Button::L | Button::R => {
+                let label = if b == Button::L { "L" } else { "R" };
                 let tw = self.width(T::Label, label);
-                let w = (tw + 14.0).max(24.0);
+                let w = self.button_width(b);
                 self.rect(gpu, cx - w * 0.5, cy - 9.0, w, 18.0, &Style::fill(5.0, rgb(0x0b0d12, 0.62 * opacity)).stroke(1.0, rgb(0xc8ccd6, 0.7 * opacity)));
                 self.text(gpu, (cx - tw * 0.5).round(), cy + 5.0, rgb(0xe6e8ee, opacity), T::Label, label);
                 w
@@ -594,6 +594,15 @@ impl Ui {
         }
     }
 
+    /// The width a button glyph takes.
+    pub fn button_width(&self, b: Button) -> f32 {
+        match b {
+            Button::L | Button::R => 24.0,
+            Button::Pad => 16.0,
+            _ => 20.0,
+        }
+    }
+
     /// Button glyph then a label; returns the advance.
     ///
     /// # Safety
@@ -601,11 +610,7 @@ impl Ui {
     pub unsafe fn hint(&self, gpu: &mut Gpu, x: f32, cy: f32, buttons: &[Button], label: &str, opacity: f32) -> f32 {
         let mut cx = x;
         for b in buttons {
-            let w = match b {
-                Button::L | Button::R | Button::Start | Button::Select => (self.width(T::Label, if *b == Button::Start { "START" } else if *b == Button::Select { "SELECT" } else { "L" }) + 14.0).max(24.0),
-                Button::Pad => 16.0,
-                _ => 20.0,
-            };
+            let w = self.button_width(*b);
             self.button(gpu, cx + w * 0.5, cy, *b, opacity);
             cx += w + 3.0;
         }
