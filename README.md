@@ -17,7 +17,6 @@ A pack connects the two: the web app exports a place as glTF 2.0 with `extras.po
 | --- | --- | --- | --- |
 | Rainy Night Konbini | `tokyo-konbini` | Tokyo backstreet | wet ground with a planar reflection, rain, lit haze, interior-mapped windows, baked vertex lighting, moving lights |
 | Suga Shrine Stairs | `suga-shrine-stairs` | Yotsuya, Tokyo (the 男坂 stairs) | sun with a shadow map, sky occlusion baked into the vertices, alpha-tested foliage, daytime sky with a cloud panorama, ACES grade |
-| Suga Shrine Stairs | `suga-shrine-stairs` | Yotsuya, Tokyo | directional sun with a shadow map, alpha-tested foliage and its shadows, baked cumulus sky panorama, daylight sky probe |
 
 Real places fall into a finite set of kinds: night streets, daytime residential slopes, interiors, waterfronts, parks. Each first-party place brings its kind's rendering to the best quality the handheld holds, and the work goes into the shared renderer and cooker so later places of the same kind reuse it.
 
@@ -54,8 +53,9 @@ git submodule update --init
 (cd web && bun scripts/export-place.ts --place tokyo-konbini --seconds 20)  # → .pocket-build/places/tokyo-konbini/scene.glb (the device loops the 20 s of traffic)
 bun tools/atlas.ts cook --place tokyo-konbini  # → .pocket-build/places/tokyo-konbini/tokyo-konbini.place
 
-# The atlas: the globe and the place list for the device's picker
+# The atlas: the globe, the place list and each place's preview card
 (cd web && bun scripts/export-atlas.ts)       # → .pocket-build/atlas/globe/ (maps, view-ray bakes, places.json)
+(cd web && bun scripts/preview-place.ts)      # → .pocket-build/places/<id>/preview.png (the registry's `preview` shot)
 bun tools/atlas.ts cook-atlas                 # → .pocket-build/atlas/atlas.pack
 
 # 2. Development loop on a console running Pocket Devkit (PocketJS apps/devkit)
@@ -70,7 +70,9 @@ bun tools/atlas.ts capture                    # → .pocket-build/validation/cap
 bun tools/atlas.ts vpk                        # → dist/vita/pocket-atlas-PKAT00001.vpk
 ```
 
-The app opens on the atlas: the web globe (sky, halo and atmosphere baked for the device's fixed camera; surface, clouds and city lights shaded per pixel at 720×408 with 4× MSAA) and the place list. Up/down picks a place, × or ○ enters it, START returns to the atlas. Leaving a place frees its video memory before the next one loads. `ctl` messages naming a `place` enter it; `{"atlas": true}` returns.
+The app opens on the atlas: the web globe (sky, halo and atmosphere baked for the device's fixed camera; surface, clouds and city lights shaded per pixel at 720×408 with 4× MSAA) and the place browser beside it. L and R switch its lists: **Featured** (the registry's `featured` places), **Explore** (every place, nearest the point the globe faces first; the list re-sorts while the left stick spins the globe), **Saved** (△ on a place; kept in `ux0:data/pocket-atlas/saved.json`) and **Search** (□ opens the system keyboard; each word must match the name, native name, locality, country, tags, kind or author). Up/down moves through the list and turns the globe to the place; the focused row opens into a postcard with the place's preview (a 512×256 BC1 texture in `atlas.pack`, from `scripts/preview-place.ts`), kind, tags and author. Text is set in the system's vector fonts (PVF): a Latin face, the Korean face for Hangul, and the Japanese face, or the Chinese one for strings with Han characters and no kana. × enters an open place, START returns to the atlas. Leaving a place frees its video memory before the next one loads. `ctl` messages naming a `place` enter it; `{"atlas": true}` returns, and takes `tab` (`featured`, `explore`, `saved`, `search`), `search` (a query), `select` and `save` (place ids) and `keyboard: true` (opens the search keyboard).
+
+SELECT in a place opens the settings sheet: frame rate profile (`vita30`, `vita60`, `cinematic`), quality step (the governor's, or one held), resolution, 4× MSAA, bloom, and the place's lit haze, reflections and rain when it has them, exposure (±2 EV), the camera shot and the performance overlay. A resolution whose targets do not fit in video memory is refused. While the sheet is on screen the governor holds its step: the sheet's own cost (about 1 ms at step 0 on Rainy Night Konbini) is in those frame times. Choices carry to the next place and are kept in `ux0:data/pocket-atlas/settings.json`; the ones not made follow the profile.
 
 Commands that cook, sync or measure take `--place ID` (default `tokyo-konbini`). Shader sources in `vita/shaders` hot-reload: `bun tools/atlas.ts sync` copies them to the USB share and the device recompiles the programs whose expanded source changed. Compiled programs are cached on the share by content hash; `vpk` packages the ones listed in the device's `gxp/manifest.txt`.
 
@@ -102,6 +104,10 @@ A place exported with a directional light gets the sun per pixel: the static sce
 `extras.bake.skyOcclusion` in a place's export makes the cooker cast cosine-weighted rays (48 within 1.5 m for Suga Shrine Stairs, the web's N8AO radius) from every baked vertex against a BVH of the static triangles; the unblocked share scales the hemisphere and environment terms. Edges split for it only down to 1 m near where the camera goes, coarser with distance.
 
 A `gradient-sun-cloudpanorama` sky annotation draws the web's daytime sky (`sky_day_f.cg`), and `extras.post` carries the tone curve (ACES or AgX), grade, vignette, grain and bloom the device bakes into its colour table.
+
+## Signage
+
+A material annotated `kind: "sign"` cooks as an unlit HDR surface. `frames`, `cols`, `rows` and `fps` play its texture as a flipbook (frame `f` in column `f % cols`, row `f / cols` from the top left; the mesh's coordinates span one cell) and `scroll: [u, v]` moves it in texture widths per second (`UvAnim` in the pack). The device offsets the draw's coordinate transform each frame, so an animated sign costs what a still one does.
 
 ## Status on hardware
 

@@ -58,6 +58,18 @@ export interface PlaceDef {
   status: PlaceStatus;
   weather: string;
   accent: string;
+  /** Who made the place ("Pocket Atlas" for first-party places). */
+  author?: string;
+  /** Kind of place, the rendering work it draws on (night-street, daytime-slope, …). */
+  kind?: string;
+  /** Short descriptors for cards: time of day, weather, what is there. */
+  tags?: string[];
+  /** One sentence about the place. */
+  summary?: string;
+  /** Listed under Featured. */
+  featured?: boolean;
+  /** Cinematic shot the preview card is captured from. */
+  preview?: string;
   load?: () => Promise<PlaceModule>;
 }
 

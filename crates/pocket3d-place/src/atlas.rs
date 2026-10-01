@@ -40,6 +40,21 @@ pub struct AtlasPlace {
     pub accent: [f32; 3],
     /// A pack exists and the place can be entered.
     pub enterable: bool,
+    #[serde(default)]
+    pub author: String,
+    /// Kind of place (night-street, daytime-slope, …).
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub featured: bool,
+    /// Preview card (texture index): the place's preview shot, 16:9 stored
+    /// in a 2:1 texture.
+    #[serde(default)]
+    pub preview: Option<u32>,
 }
 
 /// Camera, sun and shading constants of the web globe, for the fixed atlas view.

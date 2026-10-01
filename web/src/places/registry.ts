@@ -18,6 +18,12 @@ export const PLACES: PlaceDef[] = [
     status: "live",
     weather: "Rain · 14°C",
     accent: "#4fe3c1",
+    author: "Pocket Atlas",
+    kind: "night-street",
+    tags: ["Night", "Rain", "Konbini"],
+    summary: "A 24-hour konbini on a rain-soaked Tokyo backstreet.",
+    featured: true,
+    preview: "Konbini",
     load: () => import("./tokyo-konbini/index"),
   },
   {
@@ -34,6 +40,12 @@ export const PLACES: PlaceDef[] = [
     status: "live",
     weather: "Clear · 31°C",
     accent: "#ff5a4e",
+    author: "Pocket Atlas",
+    kind: "daytime-slope",
+    tags: ["Summer afternoon", "Stairs", "Shrine"],
+    summary: "The stone stairs below Suga Shrine in Yotsuya, on a clear summer afternoon.",
+    featured: true,
+    preview: "Below",
     load: () => import("./suga-shrine-stairs/index"),
   },
   {
@@ -49,6 +61,9 @@ export const PLACES: PlaceDef[] = [
     status: "soon",
     weather: "Humid · 27°C",
     accent: "#ff4f7a",
+    author: "Pocket Atlas",
+    kind: "night-street",
+    tags: ["Night", "Neon", "Street food"],
   },
   {
     id: "seoul-pojangmacha",
@@ -63,6 +78,9 @@ export const PLACES: PlaceDef[] = [
     status: "soon",
     weather: "Snow · −3°C",
     accent: "#ff8a3d",
+    author: "Pocket Atlas",
+    kind: "night-street",
+    tags: ["Night", "Snow", "Street food"],
   },
   {
     id: "shanghai-longtang",
@@ -77,6 +95,9 @@ export const PLACES: PlaceDef[] = [
     status: "soon",
     weather: "Mist · 18°C",
     accent: "#ffcf5a",
+    author: "Pocket Atlas",
+    kind: "night-street",
+    tags: ["Midnight", "Mist", "Alley"],
   },
   {
     id: "mumbai-chai-stall",
@@ -91,6 +112,9 @@ export const PLACES: PlaceDef[] = [
     status: "soon",
     weather: "Monsoon · 28°C",
     accent: "#ffb347",
+    author: "Pocket Atlas",
+    kind: "daytime-street",
+    tags: ["Monsoon", "Rain", "Street food"],
   },
   {
     id: "istanbul-last-ferry",
@@ -105,6 +129,9 @@ export const PLACES: PlaceDef[] = [
     status: "soon",
     weather: "Breeze · 16°C",
     accent: "#6ab8ff",
+    author: "Pocket Atlas",
+    kind: "waterfront",
+    tags: ["Blue hour", "Ferry", "Harbour"],
   },
   {
     id: "paris-cafe",
@@ -119,6 +146,9 @@ export const PLACES: PlaceDef[] = [
     status: "soon",
     weather: "Drizzle · 11°C",
     accent: "#ffd28a",
+    author: "Pocket Atlas",
+    kind: "night-street",
+    tags: ["Night", "Drizzle", "Café"],
   },
   {
     id: "london-pub",
@@ -133,6 +163,9 @@ export const PLACES: PlaceDef[] = [
     status: "soon",
     weather: "Drizzle · 9°C",
     accent: "#e8c07a",
+    author: "Pocket Atlas",
+    kind: "night-street",
+    tags: ["Evening", "Drizzle", "Pub"],
   },
   {
     id: "reykjavik-harbour",
@@ -147,6 +180,9 @@ export const PLACES: PlaceDef[] = [
     status: "soon",
     weather: "Clear · −6°C",
     accent: "#7dffb2",
+    author: "Pocket Atlas",
+    kind: "waterfront",
+    tags: ["Night", "Aurora", "Harbour"],
   },
   {
     id: "new-york-diner",
@@ -161,6 +197,9 @@ export const PLACES: PlaceDef[] = [
     status: "soon",
     weather: "Steam · 7°C",
     accent: "#ff5f5f",
+    author: "Pocket Atlas",
+    kind: "interior",
+    tags: ["3 AM", "Diner"],
   },
   {
     id: "san-francisco-russian-hill",
@@ -175,6 +214,9 @@ export const PLACES: PlaceDef[] = [
     status: "soon",
     weather: "Fog · 12°C",
     accent: "#ff9e6b",
+    author: "Pocket Atlas",
+    kind: "daytime-slope",
+    tags: ["Fog", "Hill", "Streets"],
   },
   {
     id: "mexico-city-taqueria",
@@ -189,6 +231,9 @@ export const PLACES: PlaceDef[] = [
     status: "soon",
     weather: "Clear · 15°C",
     accent: "#ff4fd8",
+    author: "Pocket Atlas",
+    kind: "night-street",
+    tags: ["Midnight", "Street food"],
   },
   {
     id: "rio-hillside",
@@ -203,6 +248,9 @@ export const PLACES: PlaceDef[] = [
     status: "soon",
     weather: "Warm · 24°C",
     accent: "#5fff9e",
+    author: "Pocket Atlas",
+    kind: "night-slope",
+    tags: ["Night", "Hillside"],
   },
   {
     id: "sydney-harbour",
@@ -217,6 +265,9 @@ export const PLACES: PlaceDef[] = [
     status: "soon",
     weather: "Storm · 19°C",
     accent: "#63d2ff",
+    author: "Pocket Atlas",
+    kind: "waterfront",
+    tags: ["Storm", "Harbour"],
   },
   {
     id: "cairo-rooftop",
@@ -231,6 +282,9 @@ export const PLACES: PlaceDef[] = [
     status: "soon",
     weather: "Dry · 22°C",
     accent: "#ffc36b",
+    author: "Pocket Atlas",
+    kind: "rooftop",
+    tags: ["Dusk", "Rooftop", "River"],
   },
 ];
 

@@ -212,6 +212,7 @@ struct Mat {
     envk: [f32; 4],
     wet: [f32; 4],
     wet2: [f32; 4],
+    uv_anim: Option<pc::UvAnim>,
 }
 
 fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: bool) -> Mat {
@@ -341,6 +342,7 @@ fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: boo
         envk: [m.env_strength * env_scene, m.clearcoat.max(m.drops), 0.08, 1.0],
         wet: [w.puddles, w.darken, w.roughness, w.ripple],
         wet2: [1.0 / w.puddle_scale.max(0.01), d.darken, d.roughness, d.streaks],
+        uv_anim: m.uv_anim,
     }
 }
 
@@ -961,6 +963,28 @@ impl Renderer {
         self.level() * 2 + (self.settings.msaa != Msaa::X4) as usize
     }
 
+    /// Effects this place has (the settings sheet offers only these).
+    pub fn has_rain(&self) -> bool {
+        self.has_rain
+    }
+
+    pub fn has_haze(&self) -> bool {
+        self.has_haze
+    }
+
+    pub fn has_reflection(&self) -> bool {
+        self.has_reflection
+    }
+
+    /// Makes the targets of a resolution level, so a change of resolution
+    /// can be refused when video memory does not hold them.
+    ///
+    /// # Safety
+    /// Render thread, outside any scene.
+    pub unsafe fn prepare_level(&mut self, level: usize) -> Result<(), String> {
+        self.ensure_level(level.min(SCALES.len() - 1))
+    }
+
     /// Quality step the governor holds.
     pub fn step(&self) -> Step {
         let mut step = self.profile.steps[self.governor.step.min(self.profile.steps.len() - 1)];
@@ -1453,7 +1477,10 @@ impl Renderer {
             u.set(p, U::Model, &scene.model_rows(d));
             u.set(p, U::Dequant, &d.dequant);
             u.set(p, U::ViewProj, &f.vp);
-            u.set(p, U::Uv, &d.uv);
+            match m.uv_anim {
+                Some(a) => u.set(p, U::Uv, &a.apply(d.uv, f.time)),
+                None => u.set(p, U::Uv, &d.uv),
+            }
             if let Some(s) = d.skin {
                 let mut bones = core::mem::take(&mut self.bones);
                 scene.bone_rows(s, &mut bones);
@@ -1816,6 +1843,7 @@ struct FrameConsts {
     haze: HazeConsts,
     fx: FxConsts,
     day: Option<DaySkyConsts>,
+    time: f32,
 }
 
 /// `sky_day_f.cg` uniforms.
@@ -1946,6 +1974,7 @@ impl FrameConsts {
             clouds: tex(scene.meta.day_sky.as_ref().and_then(|d| d.clouds).or(fx_meta.clouds)),
             haze,
             fx,
+            time,
         }
     }
 }

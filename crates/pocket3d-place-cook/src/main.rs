@@ -172,7 +172,8 @@ impl<'a> Cook<'a> {
         let x = pc_of(m.extras());
         let pbr = m.pbr_metallic_roughness();
         let kind = match x.get("kind").and_then(|k| k.as_str()) {
-            Some("unlit") => pc::Kind::Unlit,
+            // Signs are unlit HDR surfaces, often with animated coordinates.
+            Some("unlit") | Some("sign") => pc::Kind::Unlit,
             Some("glass") => pc::Kind::Glass,
             Some("interiorWindow") => pc::Kind::InteriorWindow,
             Some("products") => pc::Kind::Products,
@@ -225,6 +226,21 @@ impl<'a> Cook<'a> {
             .and_then(|c| c.get("clearcoatFactor"))
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0) as f32;
+        let uv_anim = {
+            let n = |k: &str, d: f64| x.get(k).and_then(|v| v.as_f64()).unwrap_or(d);
+            let frames = n("frames", 1.0).max(1.0) as u32;
+            let scroll = x.get("scroll").map(|v| {
+                let a = v.as_array().map(|a| a.iter().map(|x| x.as_f64().unwrap_or(0.0) as f32).collect::<Vec<_>>()).unwrap_or_default();
+                [a.first().copied().unwrap_or(0.0), a.get(1).copied().unwrap_or(0.0)]
+            });
+            (frames > 1 || scroll.is_some_and(|s| s != [0.0, 0.0])).then(|| pc::UvAnim {
+                cols: n("cols", frames as f64).max(1.0) as u32,
+                rows: n("rows", 1.0).max(1.0) as u32,
+                frames,
+                fps: n("fps", 8.0) as f32,
+                scroll: scroll.unwrap_or([0.0, 0.0]),
+            })
+        };
         let name = m.name().unwrap_or("material").to_string();
         let out = pc::Material {
             name: name.clone(),
@@ -253,6 +269,7 @@ impl<'a> Cook<'a> {
             clearcoat,
             polygon_offset: x.get("polygonOffset").and_then(|p| p.as_array()).map(|a| [a[0].as_f64().unwrap_or(0.0) as f32, a[1].as_f64().unwrap_or(0.0) as f32]),
             emissive_track: None,
+            uv_anim,
         };
         self.materials.push(out);
         let i = (self.materials.len() - 1) as u32;
@@ -760,6 +777,7 @@ fn main() {
             clearcoat: 0.0,
             polygon_offset: None,
             emissive_track: None,
+            uv_anim: None,
         };
         cook.materials.push(mat);
         let mi = (cook.materials.len() - 1) as u32;

@@ -152,6 +152,38 @@ pub struct Material {
     pub polygon_offset: Option<[f32; 2]>,
     /// Index into `Meta::material_tracks` driving emission (neon flicker).
     pub emissive_track: Option<u32>,
+    /// Animated texture coordinates (LED signs, screens, tickers).
+    #[serde(default)]
+    pub uv_anim: Option<UvAnim>,
+}
+
+/// A material's texture coordinates over time: a flipbook of `frames`
+/// cells in a `cols` × `rows` grid (cell `f` at column `f % cols`, row
+/// `f / cols`, from the top left) played at `fps`, then a scroll in texture
+/// widths per second. The mesh's coordinates span one cell.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct UvAnim {
+    pub cols: u32,
+    pub rows: u32,
+    pub frames: u32,
+    pub fps: f32,
+    pub scroll: [f32; 2],
+}
+
+impl UvAnim {
+    /// `uv` = (scale u, scale v, offset u, offset v) at `time` seconds.
+    pub fn apply(&self, uv: [f32; 4], time: f32) -> [f32; 4] {
+        let mut uv = uv;
+        if self.frames > 1 {
+            let (cols, rows) = (self.cols.max(1), self.rows.max(1));
+            let f = ((time * self.fps).floor() as i64).rem_euclid(self.frames as i64) as u32;
+            let (cw, ch) = (1.0 / cols as f32, 1.0 / rows as f32);
+            uv = [uv[0] * cw, uv[1] * ch, uv[2] * cw + (f % cols) as f32 * cw, uv[3] * ch + (f / cols) as f32 * ch];
+        }
+        uv[2] += (time * self.scroll[0]).fract();
+        uv[3] += (time * self.scroll[1]).fract();
+        uv
+    }
 }
 
 // ---------------------------------------------------------------- geometry
