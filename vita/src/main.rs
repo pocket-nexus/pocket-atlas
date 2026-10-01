@@ -392,6 +392,7 @@ unsafe fn run_atlas(app: &mut App, select: Option<String>) -> Next {
         let wait_ms = t_wait.elapsed().as_secs_f32() * 1000.0;
         g::vita2d_pool_reset();
         g::vita2d_start_drawing_advanced(core::ptr::null_mut(), 0);
+        app.ui.begin_frame();
         atlas.present(&mut app.gpu);
         g::sceGxmSetViewport(ctx, 480.0, 480.0, 272.0, -272.0, 0.5, 0.5);
         let t_ui = Instant::now();
@@ -723,6 +724,7 @@ unsafe fn run_place(app: &mut App, id: &str, name: &str, first: Option<Value>) -
                 wait_ms = wait_ms * 0.9 + t_wait.elapsed().as_secs_f32() * 1000.0 * 0.1;
                 g::vita2d_pool_reset();
                 g::vita2d_start_drawing_advanced(core::ptr::null_mut(), 0);
+                ui.begin_frame();
                 renderer.present(&mut gpu);
                 g::sceGxmSetViewport(ctx, 480.0, 480.0, 272.0, -272.0, 0.5, 0.5);
                 if prefs.hud {

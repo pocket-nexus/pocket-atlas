@@ -10,6 +10,7 @@
 //! mipmapped and block-compressed; animation is resampled uniformly.
 
 mod atlas;
+mod uifont;
 mod bake;
 mod env;
 mod geometry;
@@ -486,6 +487,14 @@ fn push_draw(b: geometry::Built, material: u32, layout: pc::VertexLayout, node: 
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("ui-font") {
+        let argv: Vec<String> = std::env::args().collect();
+        let get = |k: &str| argv.iter().position(|x| x == k).and_then(|i| argv.get(i + 1)).cloned().unwrap_or_else(|| panic!("ui-font: missing {k}"));
+        let (places, out) = (PathBuf::from(get("--places")), PathBuf::from(get("--out")));
+        let (lr, lb, cr, cb) = (PathBuf::from(get("--latin")), PathBuf::from(get("--latin-bold")), PathBuf::from(get("--cjk")), PathBuf::from(get("--cjk-bold")));
+        uifont::bake(&places, [&lr, &lb], [&cr, &cb], &out);
+        return;
+    }
     if std::env::args().nth(1).as_deref() == Some("atlas") {
         let argv: Vec<String> = std::env::args().collect();
         let get = |k: &str| argv.iter().position(|x| x == k).and_then(|i| argv.get(i + 1)).cloned();

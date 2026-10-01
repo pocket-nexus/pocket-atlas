@@ -1,15 +1,134 @@
 //! Interface drawing over the presented frame, in display pixels (960×544,
 //! top-left origin): rounded rectangles with a vertical gradient, a border
-//! and a soft edge, images in them (`ui_v.cg` / `ui_f.cg`), and text in the
-//! system's vector fonts (PVF: Latin, Japanese, Chinese and Korean faces).
+//! and a soft edge, images in them (`ui_v.cg` / `ui_f.cg`), and text. Text
+//! comes from the baked atlas `ui.font` (Inter and Noto Sans CJK at the
+//! interface's sizes, drawn 1:1 on whole pixels, one draw per string;
+//! `text_v.cg` / `text_f.cg`); a string with a character the atlas lacks
+//! (typed into the search) falls back to the system's vector fonts (PVF).
 //! Colours are display-encoded and premultiplied.
 
-use pocket3d_gxm::mem::{Arena, Kind};
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+use pocket3d_gxm::mem::{Arena, Kind, Ring};
 use pocket3d_gxm::target::Msaa;
 use vita2d_sys as g;
 
+use crate::frame::{tiled_at, tiled_u8};
 use crate::gpu::{bind, BlendMode, Gpu, Layout, Out, PipeKey, Pipeline, Uniforms, S, U};
 use crate::shaders::Key;
+
+/// Text styles: the baked atlas's style order (cooker `uifont::STYLES`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum T {
+    /// Regular 15 px: secondary lines.
+    Caption,
+    /// Bold 13 px: uppercase labels, chips, tabs.
+    Label,
+    /// Regular 17 px.
+    Body,
+    /// Bold 17 px.
+    Strong,
+    /// Bold 21 px.
+    Title,
+    /// Bold 27 px.
+    Heading,
+    /// Bold 34 px.
+    Brand,
+    /// Bold 15 px.
+    Small,
+}
+
+impl T {
+    /// Em size in pixels.
+    pub const fn px(self) -> f32 {
+        match self {
+            T::Caption | T::Small => 15.0,
+            T::Label => 13.0,
+            T::Body | T::Strong => 17.0,
+            T::Title => 21.0,
+            T::Heading => 27.0,
+            T::Brand => 34.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Glyph {
+    x: u16,
+    y: u16,
+    w: u16,
+    h: u16,
+    left: i16,
+    top: i16,
+    adv: f32,
+}
+
+/// The baked interface font: coverage atlas (U8, tiled) and glyph table.
+struct Baked {
+    tex: g::SceGxmTexture,
+    size: (f32, f32),
+    glyphs: HashMap<u64, Glyph>,
+    _vram: Arena,
+}
+
+impl Baked {
+    fn key(t: T, c: char) -> u64 {
+        (t as u64) << 32 | c as u64
+    }
+
+    unsafe fn load(paths: &[&str]) -> Result<Self, String> {
+        let bytes = paths.iter().find_map(|p| std::fs::read(p).ok()).ok_or("ui.font not found")?;
+        if bytes.len() < 20 || bytes[..4] != *b"PAUF" {
+            return Err("ui.font: bad header".into());
+        }
+        let u = |o: usize| u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap()) as usize;
+        let (ml, w, h) = (u(8), u(12), u(16));
+        let meta: serde_json::Value = serde_json::from_slice(&bytes[20..20 + ml]).map_err(|e| format!("ui.font: {e}"))?;
+        let px = &bytes[20 + ml..];
+        if px.len() < w * h || w % 32 != 0 || h % 32 != 0 {
+            return Err("ui.font: atlas size".into());
+        }
+        let mut vram = Arena::new(Kind::Cdram, w * h + 4096);
+        let mem = vram.alloc(w * h, 4096)?;
+        for y in 0..h {
+            for x in 0..w {
+                *mem.add(tiled_at(x, y, w)) = px[y * w + x];
+            }
+        }
+        let tex = tiled_u8(mem, w, h, true, false)?;
+        let mut glyphs = HashMap::new();
+        for gl in meta["glyphs"].as_array().into_iter().flatten() {
+            let n = |i: usize| gl[i].as_f64().unwrap_or(0.0);
+            let (style, cp) = (n(0) as u64, n(1) as u64);
+            glyphs.insert(
+                style << 32 | cp,
+                Glyph { x: n(2) as u16, y: n(3) as u16, w: n(4) as u16, h: n(5) as u16, left: n(6) as i16, top: n(7) as i16, adv: n(8) as f32 },
+            );
+        }
+        Ok(Self { tex, size: (w as f32, h as f32), glyphs, _vram: vram })
+    }
+
+    fn has(&self, t: T, s: &str) -> bool {
+        s.chars().all(|c| self.glyphs.contains_key(&Self::key(t, c)))
+    }
+
+    fn width(&self, t: T, s: &str) -> f32 {
+        s.chars().map(|c| self.glyphs.get(&Self::key(t, c)).map_or(0.0, |g| g.adv)).sum()
+    }
+}
+
+/// Where the baked font is looked for, in order.
+fn font_paths() -> &'static [&'static str] {
+    if cfg!(feature = "usb-debug") {
+        &["host0:atlas/ui.font", "ux0:data/pocket-atlas/ui.font", "app0:ui.font"]
+    } else {
+        &["app0:ui.font", "ux0:data/pocket-atlas/ui.font"]
+    }
+}
+
+/// Glyph quads per frame (four 16-byte vertices each).
+const MAX_QUADS: usize = 4096;
 
 /// Premultiplied colour from `0xRRGGBB` and an opacity.
 pub fn rgb(hex: u32, a: f32) -> [f32; 4] {
@@ -130,6 +249,10 @@ pub struct Ui {
     ja: *mut g::vita2d_pvf,
     zh: *mut g::vita2d_pvf,
     pvf_scale: f32,
+    baked: Option<Baked>,
+    /// Glyph vertices, written per frame (three frames in flight at most).
+    ring: RefCell<Ring>,
+    text_ib: *const u16,
     quad_vb: *const f32,
     quad_ib: *const u16,
     /// Holds the quad for the life of the process.
@@ -163,8 +286,28 @@ impl Ui {
             let (a, b) = (g::vita2d_pgf_text_width(font, 1.0, m) as f32, g::vita2d_pvf_text_width(ja, 1.0, m) as f32);
             if a > 0.0 && b > 0.0 { a / b } else { 1.0 }
         };
-        pocketjs_vita::vita_log(format_args!("atlas: ui fonts pvf ja={} zh={} scale {pvf_scale:.3}", !ja.is_null(), zh != ja));
-        Ok(Self { font, ja, zh, pvf_scale, quad_vb: vb, quad_ib: ib, _mem: mem })
+        let baked = match Baked::load(font_paths()) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                pocketjs_vita::vita_log(format_args!("atlas: {e}; system fonts only"));
+                None
+            }
+        };
+        let text_ib = mem.alloc(MAX_QUADS * 6 * 2, 16)?.cast::<u16>();
+        for q in 0..MAX_QUADS {
+            let v = (q * 4) as u16;
+            for (k, i) in [0u16, 1, 2, 2, 1, 3].iter().enumerate() {
+                *text_ib.add(q * 6 + k) = v + i;
+            }
+        }
+        let ring = RefCell::new(Ring::new(MAX_QUADS * 64, 3)?);
+        pocketjs_vita::vita_log(format_args!("atlas: ui fonts baked={} pvf ja={} zh={}", baked.as_ref().map_or(0, |b| b.glyphs.len()), !ja.is_null(), zh != ja));
+        Ok(Self { font, ja, zh, pvf_scale, baked, ring, text_ib, quad_vb: vb, quad_ib: ib, _mem: mem })
+    }
+
+    /// Starts a frame's text: glyph vertices of the frame three back are free.
+    pub fn begin_frame(&self) {
+        self.ring.borrow_mut().next_frame();
     }
 
     fn key(tex: bool) -> PipeKey {
@@ -178,9 +321,13 @@ impl Ui {
         }
     }
 
+    fn text_key() -> PipeKey {
+        PipeKey { vs: Key::new("text_v.cg", &[]), fs: Key::new("text_f.cg", &[]), layout: Layout::Text, blend: BlendMode::Premultiplied, output: Out::Uchar4, msaa: Msaa::None.gxm() }
+    }
+
     /// Programs the interface uses, so they compile before it is first drawn.
     pub fn warm(gpu: &mut Gpu) {
-        for k in [Self::key(false), Self::key(true)] {
+        for k in [Self::key(false), Self::key(true), Self::text_key()] {
             gpu.want(&k.vs);
             gpu.want(&k.fs);
         }
@@ -242,23 +389,80 @@ impl Ui {
         self.draw(gpu, None, x, y + blur * 0.25, w, h, [0.0, 0.0, 1.0, 1.0], &s);
     }
 
-    /// Text with its baseline at `y`.
+    /// Text with its baseline at `y`; returns its advance.
     ///
     /// # Safety
     /// Inside the display scene.
-    pub unsafe fn text(&self, x: f32, y: f32, color: [f32; 4], scale: f32, s: &str) {
-        if s.is_empty() || color[3] <= 0.004 {
+    pub unsafe fn text(&self, gpu: &mut Gpu, x: f32, y: f32, color: [f32; 4], t: T, s: &str) -> f32 {
+        if s.is_empty() {
+            return 0.0;
+        }
+        match &self.baked {
+            Some(b) if b.has(t, s) => {
+                if color[3] > 0.004 {
+                    self.baked_text(gpu, b, x, y, color, t, s);
+                }
+                b.width(t, s)
+            }
+            _ => {
+                let scale = self.pgf_scale(t);
+                if color[3] > 0.004 {
+                    let c = std::ffi::CString::new(s.replace('\0', " ")).unwrap();
+                    match self.pvf(s) {
+                        Some(f) => {
+                            g::vita2d_pvf_draw_text(f, x.round() as i32, y.round() as i32, abgr(color), scale * self.pvf_scale, c.as_ptr());
+                        }
+                        None => {
+                            g::vita2d_pgf_draw_text(self.font, x.round() as i32, y.round() as i32, abgr(color), scale, c.as_ptr());
+                        }
+                    }
+                }
+                self.system_width(scale, s)
+            }
+        }
+    }
+
+    unsafe fn baked_text(&self, gpu: &mut Gpu, b: &Baked, x: f32, y: f32, color: [f32; 4], t: T, s: &str) {
+        let Some(p) = gpu.pipeline(&Self::text_key()) else { return };
+        let p = &*(p as *const Pipeline);
+        let n = s.chars().filter(|&c| b.glyphs.get(&Baked::key(t, c)).is_some_and(|g| g.w > 0)).count();
+        if n == 0 || n > MAX_QUADS {
             return;
         }
-        let c = std::ffi::CString::new(s.replace('\0', " ")).unwrap();
-        match self.pvf(s) {
-            Some(f) => {
-                g::vita2d_pvf_draw_text(f, x.round() as i32, y.round() as i32, abgr(color), scale * self.pvf_scale, c.as_ptr());
+        let Some(vb) = self.ring.borrow_mut().alloc(n * 64, 16) else { return };
+        let v = vb.cast::<f32>();
+        let (iw, ih) = (1.0 / b.size.0, 1.0 / b.size.1);
+        let (mut pen, by) = (x, y.round());
+        let mut q = 0;
+        for c in s.chars() {
+            let Some(gl) = b.glyphs.get(&Baked::key(t, c)) else { continue };
+            if gl.w > 0 {
+                let (x0, y0) = (pen.round() + gl.left as f32, by + gl.top as f32);
+                let (x1, y1) = (x0 + gl.w as f32, y0 + gl.h as f32);
+                let (u0, v0) = (gl.x as f32 * iw, gl.y as f32 * ih);
+                let (u1, v1) = ((gl.x + gl.w) as f32 * iw, (gl.y + gl.h) as f32 * ih);
+                let quad = [x0, y0, u0, v0, x1, y0, u1, v0, x0, y1, u0, v1, x1, y1, u1, v1];
+                core::ptr::copy_nonoverlapping(quad.as_ptr(), v.add(q * 16), 16);
+                q += 1;
             }
-            None => {
-                g::vita2d_pgf_draw_text(self.font, x.round() as i32, y.round() as i32, abgr(color), scale, c.as_ptr());
-            }
+            pen += gl.adv;
         }
+        let ctx = g::vita2d_get_context();
+        g::sceGxmSetVertexProgram(ctx, p.vp);
+        g::sceGxmSetFragmentProgram(ctx, p.fp);
+        g::sceGxmSetFrontDepthFunc(ctx, g::SceGxmDepthFunc_SCE_GXM_DEPTH_FUNC_ALWAYS);
+        g::sceGxmSetFrontDepthWriteEnable(ctx, g::SceGxmDepthWriteMode_SCE_GXM_DEPTH_WRITE_DISABLED);
+        g::sceGxmSetCullMode(ctx, g::SceGxmCullMode_SCE_GXM_CULL_NONE);
+        let u = Uniforms::reserve(ctx, p);
+        u.set(p, U::Fill, &color);
+        bind(ctx, p, S::Source, &b.tex);
+        g::sceGxmSetVertexStream(ctx, 0, vb.cast());
+        g::sceGxmDraw(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, self.text_ib.cast(), (q * 6) as u32);
+    }
+
+    /// The system font scale for a style's size (PGF units; PVF via `pvf_scale`).
+    fn pgf_scale(&self, t: T) -> f32 {
+        t.px() / 19.0
     }
 
     fn pvf(&self, s: &str) -> Option<*mut g::vita2d_pvf> {
@@ -268,10 +472,7 @@ impl Ui {
         Some(if chinese(s) { self.zh } else { self.ja })
     }
 
-    pub unsafe fn width(&self, scale: f32, s: &str) -> f32 {
-        if s.is_empty() {
-            return 0.0;
-        }
+    unsafe fn system_width(&self, scale: f32, s: &str) -> f32 {
         let c = std::ffi::CString::new(s.replace('\0', " ")).unwrap();
         match self.pvf(s) {
             Some(f) => g::vita2d_pvf_text_width(f, scale * self.pvf_scale, c.as_ptr()) as f32,
@@ -279,17 +480,27 @@ impl Ui {
         }
     }
 
+    pub unsafe fn width(&self, t: T, s: &str) -> f32 {
+        if s.is_empty() {
+            return 0.0;
+        }
+        match &self.baked {
+            Some(b) if b.has(t, s) => b.width(t, s),
+            _ => self.system_width(self.pgf_scale(t), s),
+        }
+    }
+
     /// `s`, cut with an ellipsis to fit `max` pixels.
-    pub unsafe fn fit(&self, scale: f32, s: &str, max: f32) -> String {
-        if self.width(scale, s) <= max {
+    pub unsafe fn fit(&self, t: T, s: &str, max: f32) -> String {
+        if self.width(t, s) <= max {
             return s.to_string();
         }
         let chars: Vec<char> = s.chars().collect();
         let (mut lo, mut hi) = (0usize, chars.len());
         while lo < hi {
             let mid = (lo + hi + 1) / 2;
-            let t: String = chars[..mid].iter().collect::<String>() + "…";
-            if self.width(scale, &t) <= max { lo = mid } else { hi = mid - 1 }
+            let cut: String = chars[..mid].iter().collect::<String>() + "…";
+            if self.width(t, &cut) <= max { lo = mid } else { hi = mid - 1 }
         }
         chars[..lo].iter().collect::<String>().trim_end().to_string() + "…"
     }
@@ -298,15 +509,17 @@ impl Ui {
     ///
     /// # Safety
     /// Inside the display scene.
-    pub unsafe fn text_shadow(&self, x: f32, y: f32, color: [f32; 4], scale: f32, s: &str) {
+    pub unsafe fn text_shadow(&self, gpu: &mut Gpu, x: f32, y: f32, color: [f32; 4], t: T, s: &str) -> f32 {
         let k = color[3];
-        self.text(x + 1.0, y + 1.5, rgb(0x000000, 0.7 * k), scale, s);
-        self.text(x, y, color, scale, s);
+        self.text(gpu, x + 1.0, y + 1.5, rgb(0x000000, 0.7 * k), t, s);
+        self.text(gpu, x, y, color, t, s)
     }
 
     /// Right-aligned text ending at `x`.
-    pub unsafe fn text_right(&self, x: f32, y: f32, color: [f32; 4], scale: f32, s: &str) {
-        self.text(x - self.width(scale, s), y, color, scale, s);
+    pub unsafe fn text_right(&self, gpu: &mut Gpu, x: f32, y: f32, color: [f32; 4], t: T, s: &str) -> f32 {
+        let w = self.width(t, s);
+        self.text(gpu, x - w, y, color, t, s);
+        w
     }
 
     /// Restricts every following draw (text included) to a rectangle, through
@@ -330,7 +543,7 @@ impl Ui {
     /// Inside the display scene.
     pub unsafe fn button(&self, gpu: &mut Gpu, cx: f32, cy: f32, b: Button, opacity: f32) -> f32 {
         let face = |c: u32| rgb(c, opacity);
-        let r = 9.0;
+        let r = 10.0;
         let disc = |c: [f32; 4]| Style::fill(r, rgb(0x0b0d12, 0.62 * opacity)).stroke(1.5, alpha(c, 0.9));
         match b {
             Button::Cross | Button::Circle | Button::Triangle | Button::Square => {
@@ -344,8 +557,13 @@ impl Ui {
                 match b {
                     Button::Circle => self.rect(gpu, cx - 4.5, cy - 4.5, 9.0, 9.0, &Style::fill(4.5, [0.0; 4]).stroke(1.6, c)),
                     Button::Square => self.rect(gpu, cx - 4.0, cy - 4.0, 8.0, 8.0, &Style::fill(0.5, [0.0; 4]).stroke(1.5, c)),
-                    Button::Cross => self.text(cx - self.width(0.62, "×") * 0.5, cy + 5.0, c, 0.62, "×"),
-                    _ => self.text(cx - self.width(0.5, "△") * 0.5, cy + 4.5, c, 0.5, "△"),
+                    Button::Cross => {
+                        self.rect(gpu, cx - 5.0, cy - 1.0, 10.0, 2.0, &Style::fill(1.0, c));
+                        self.rect(gpu, cx - 1.0, cy - 5.0, 2.0, 10.0, &Style::fill(1.0, c));
+                    }
+                    _ => {
+                        self.text(gpu, cx - self.width(T::Small, "△") * 0.5, cy + 5.0, c, T::Small, "△");
+                    }
                 }
                 r * 2.0
             }
@@ -356,10 +574,10 @@ impl Ui {
                     Button::Start => "START",
                     _ => "SELECT",
                 };
-                let tw = self.width(0.5, label);
-                let w = (tw + 14.0).max(22.0);
-                self.rect(gpu, cx - w * 0.5, cy - 8.0, w, 16.0, &Style::fill(5.0, rgb(0x0b0d12, 0.62 * opacity)).stroke(1.0, rgb(0xc8ccd6, 0.7 * opacity)));
-                self.text(cx - tw * 0.5, cy + 4.5, rgb(0xe6e8ee, opacity), 0.5, label);
+                let tw = self.width(T::Label, label);
+                let w = (tw + 14.0).max(24.0);
+                self.rect(gpu, cx - w * 0.5, cy - 9.0, w, 18.0, &Style::fill(5.0, rgb(0x0b0d12, 0.62 * opacity)).stroke(1.0, rgb(0xc8ccd6, 0.7 * opacity)));
+                self.text(gpu, (cx - tw * 0.5).round(), cy + 5.0, rgb(0xe6e8ee, opacity), T::Label, label);
                 w
             }
             Button::Stick => {
@@ -384,15 +602,15 @@ impl Ui {
         let mut cx = x;
         for b in buttons {
             let w = match b {
-                Button::L | Button::R | Button::Start | Button::Select => self.width(0.5, if *b == Button::Start { "START" } else if *b == Button::Select { "SELECT" } else { "L" }).max(8.0) + 14.0,
+                Button::L | Button::R | Button::Start | Button::Select => (self.width(T::Label, if *b == Button::Start { "START" } else if *b == Button::Select { "SELECT" } else { "L" }) + 14.0).max(24.0),
                 Button::Pad => 16.0,
-                _ => 18.0,
+                _ => 20.0,
             };
             self.button(gpu, cx + w * 0.5, cy, *b, opacity);
             cx += w + 3.0;
         }
-        cx += 4.0;
-        self.text(cx, cy + 5.0, rgb(0xd8dbe2, 0.85 * opacity), 0.62, label);
-        cx + self.width(0.62, label) - x
+        cx += 5.0;
+        let w = self.text(gpu, cx, cy + 5.0, rgb(0xe2e5ec, 0.92 * opacity), T::Small, label);
+        cx + w - x
     }
 }

@@ -191,6 +191,8 @@ pub enum Layout {
     Pos2,
     /// Atlas globe: position f32×3, uv f32×2 (20 bytes).
     Globe,
+    /// Interface text: position f32×2 (display pixels), uv f32×2 (16 bytes).
+    Text,
 }
 
 impl Layout {
@@ -217,6 +219,7 @@ impl Layout {
             Layout::Fx => (&[("aSeed", 0, U16N, 4), ("aCorner", 8, F32, 2), ("aA", 16, F32, 3), ("aB", 28, F32, 3)], 40),
             Layout::Pos2 => (&[("aPosition", 0, F32, 2)], 8),
             Layout::Globe => (&[("aPosition", 0, F32, 3), ("aUv", 12, F32, 2)], 20),
+            Layout::Text => (&[("aPosition", 0, F32, 2), ("aUv", 8, F32, 2)], 16),
         }
     }
 }

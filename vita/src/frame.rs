@@ -426,7 +426,9 @@ pub(crate) const GRAIN: usize = 64;
 /// An 8-bit single-channel tiled texture (32×32 tiles) over `px`.
 pub(crate) unsafe fn tiled_u8(px: *mut u8, w: usize, h: usize, linear: bool, repeat: bool) -> Result<g::SceGxmTexture, String> {
     let mut t: g::SceGxmTexture = core::mem::zeroed();
-    let r = g::sceGxmTextureInitTiled(&mut t, px.cast(), g::SceGxmTextureFormat_SCE_GXM_TEXTURE_FORMAT_U8_R111, w as u32, h as u32, 0);
+    // GXM spells swizzles in ABGR order: U8_R111 puts the texel in alpha and
+    // reads 1 in red. RRRR puts it in every channel, as the shaders read `.r`.
+    let r = g::sceGxmTextureInitTiled(&mut t, px.cast(), g::SceGxmTextureFormat_SCE_GXM_TEXTURE_FORMAT_U8_RRRR, w as u32, h as u32, 0);
     if r < 0 {
         return Err(format!("tiled texture {w}x{h} 0x{:08x}", r as u32));
     }
