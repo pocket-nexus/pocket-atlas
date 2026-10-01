@@ -145,6 +145,8 @@ pub struct Timeline {
     /// sceGxmEndScene (GPU backpressure shows up in both).
     pub cpu: Vec<(&'static str, f32, f32)>,
     mark: std::time::Instant,
+    /// When the frame's first scene was handed to the GPU.
+    pub first_kick: Option<std::time::Instant>,
 }
 
 impl Timeline {
@@ -159,7 +161,7 @@ impl Timeline {
                 g::SceGxmNotification { address, value: 0 }
             })
             .collect();
-        Self { slots, value: 0, on: false, passes: Vec::new(), cpu: Vec::new(), mark: std::time::Instant::now() }
+        Self { slots, value: 0, on: false, passes: Vec::new(), cpu: Vec::new(), mark: std::time::Instant::now(), first_kick: None }
     }
 
     /// Ends the open scene on `ctx` (drawn into `target`) and, when
@@ -172,6 +174,7 @@ impl Timeline {
             // CPU time recording the scene, then inside sceGxmEndScene.
             let t = std::time::Instant::now();
             target.end(ctx, None);
+            self.first_kick.get_or_insert(t);
             let record = t.duration_since(self.mark).as_secs_f32() * 1000.0;
             self.cpu.push((name, record, t.elapsed().as_secs_f32() * 1000.0));
             self.mark = std::time::Instant::now();
@@ -190,8 +193,9 @@ impl Timeline {
 
 #[derive(Default)]
 pub struct Stats {
-    /// Main-pass triangles per material index (profiling).
+    /// Main-pass triangles and draws per material index (profiling).
     pub by_material: Vec<u32>,
+    pub draws_by_material: Vec<u32>,
     pub reflection: PassStats,
     pub main: PassStats,
     pub fx_quads: u32,
@@ -331,7 +335,11 @@ fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: boo
         _ => m.color,
     };
     let emissive = match m.kind {
-        pc::Kind::InteriorWindow => [m.emissive[0], 0.0, 0.0, 0.0],
+        // Room intensity, then the tint (white without one).
+        pc::Kind::InteriorWindow => {
+            let t = m.tint.unwrap_or([1.0; 3]);
+            [m.emissive[0], t[0], t[1], t[2]]
+        }
         _ => [m.emissive[0], m.emissive[1], m.emissive[2], m.alpha_test],
     };
     let class = match m.kind {
@@ -517,19 +525,22 @@ struct VistaConsts {
     k: [f32; 4],
     /// Horizontal direction toward the sun.
     sun: [f32; 4],
+    /// Glow, band.
     glow: [f32; 4],
-    /// `gain` × the sky on the horizon at the table's knots.
+    /// `gain` × the horizon's base part and sun side at the tables' knots.
     sky: [f32; 4 * pc::VistaHaze::SKY_KNOTS],
+    sun_sky: [f32; 4 * pc::VistaHaze::SKY_KNOTS],
 }
 
 impl VistaConsts {
     fn new(haze: &pc::VistaHaze, scene: &Scene) -> Self {
         let a = &scene.meta.atmosphere;
         let day = scene.meta.day_sky.as_ref();
-        let table = haze.sky_table(day, a.sky_horizon);
-        let mut sky = [0.0; 4 * pc::VistaHaze::SKY_KNOTS];
-        for (k, c) in table.iter().enumerate() {
-            sky[k * 4..k * 4 + 3].copy_from_slice(c);
+        let (base, side) = haze.sky_tables(day, a.sky_horizon);
+        let (mut sky, mut sun_sky) = ([0.0; 4 * pc::VistaHaze::SKY_KNOTS], [0.0; 4 * pc::VistaHaze::SKY_KNOTS]);
+        for k in 0..pc::VistaHaze::SKY_KNOTS {
+            sky[k * 4..k * 4 + 3].copy_from_slice(&base[k]);
+            sun_sky[k * 4..k * 4 + 3].copy_from_slice(&side[k]);
         }
         let s = day.map_or([0.0, 0.0, -1.0], |d| d.sun_direction);
         let h = glam::Vec2::new(s[0], s[2]).normalize_or(glam::Vec2::new(0.0, -1.0));
@@ -537,8 +548,9 @@ impl VistaConsts {
         Self {
             k: [haze.density, haze.inversion, 1.0 / (s * core::f32::consts::LN_2), haze.density * s],
             sun: [h.x, h.y, 0.0, 0.0],
-            glow: [haze.glow[0], haze.glow[1], haze.glow[2], 0.0],
+            glow: [haze.glow[0], haze.glow[1], haze.glow[2], haze.band],
             sky,
+            sun_sky,
         }
     }
 }
@@ -1095,9 +1107,26 @@ impl Renderer {
         step
     }
 
-    /// Resolution level in use: the fixed setting, or the governor's step.
+    /// Resolution level in use: the fixed setting, or the governor's (a
+    /// boost level above step 0, or the step's).
     pub fn level(&self) -> usize {
-        if (self.settings.scale as usize) < SCALES.len() { self.settings.scale as usize } else { self.step().level }
+        if (self.settings.scale as usize) < SCALES.len() { self.settings.scale as usize } else { self.governor.level(self.profile) }
+    }
+
+    /// Feeds the governor a frame (see `Governor::feedback`); a boost level
+    /// whose targets do not fit in video memory becomes the cap.
+    ///
+    /// # Safety
+    /// Render thread, outside any scene.
+    pub unsafe fn feedback(&mut self, frame_ms: f32, gpu_ms: Option<f32>, raw_ms: f32) {
+        let p = self.profile;
+        if self.governor.feedback(p, frame_ms, gpu_ms, raw_ms) && (self.settings.scale as usize) >= SCALES.len() {
+            let level = self.governor.level(p);
+            if self.ensure_level(level).is_err() {
+                self.governor.boost -= 1;
+                self.governor.boost_cap = self.governor.boost;
+            }
+        }
     }
 
     /// Switches profile: settings back to the profile's, governor to its
@@ -1152,6 +1181,7 @@ impl Renderer {
         self.timeline.passes.clear();
         self.timeline.cpu.clear();
         self.timeline.mark = t0;
+        self.timeline.first_kick = None;
 
         let aspect = W as f32 / H as f32;
         let proj = camera::projection(view.fov_y, aspect, 0.1);
@@ -1269,8 +1299,23 @@ impl Renderer {
             let a = &self.main_t(mi).texture as *const _;
             // Without haze buffers the prefilter's haze input is weighted out.
             let b = self.hazes.get(hi).map_or(a, |t| &t.texture as *const _);
-            let texel = [1.0 / self.main_t(mi).width as f32, 1.0 / self.main_t(mi).height as f32, 0.0, 0.0];
-            self.post(ctx, gpu, &mut *pre, "prefilter_f.cg", &[(S::Scene, a), (S::HazeTex, b)], &[(U::Texel, texel), (U::Threshold, [self.post.bloom_threshold, self.post.bloom_smoothing, haze_w, 0.0])], &frame)?;
+            // Places with light fields threshold each scene pixel (PER_PIXEL):
+            // at a 2×2 block per output pixel the taps sit on pixel centres,
+            // at larger blocks they average 2×2 each.
+            let ratio = self.main_t(mi).width as f32 / (*pre).width as f32;
+            let texel = [1.0 / self.main_t(mi).width as f32, 1.0 / self.main_t(mi).height as f32, if ratio <= 2.0 { 0.5 } else { 1.0 }, 0.0];
+            let fs = if self.has_fields { Key::new("prefilter_f.cg", &["PER_PIXEL"]) } else { Key::new("prefilter_f.cg", &[]) };
+            self.post_keyed(
+                ctx,
+                gpu,
+                &mut *pre,
+                key_v("post_v.cg", &[]),
+                fs,
+                &[(S::Scene, a), (S::HazeTex, b)],
+                &[(U::Texel, texel), (U::Threshold, [self.post.bloom_threshold, self.post.bloom_smoothing, haze_w, 0.0])],
+                &[],
+                &frame,
+            )?;
             let (d8, d16) = (&mut self.down[0] as *mut Target, &mut self.down[1] as *mut Target);
             let (u8_, u4) = (&mut self.up[0] as *mut Target, &mut self.up[1] as *mut Target);
             // (source, destination, support for upsamples)
@@ -1635,6 +1680,7 @@ impl Renderer {
                 u.set(p, U::VistaSun, &v.sun);
                 u.set(p, U::VistaGlow, &v.glow);
                 u.set(p, U::VistaSky, &v.sky);
+                u.set(p, U::VistaSunSky, &v.sun_sky);
             }
             if let Some(w) = &m.water {
                 // Offsets wrap: the wave texture repeats.
@@ -1690,8 +1736,10 @@ impl Renderer {
             if !mirror {
                 if self.stats.by_material.len() <= mi {
                     self.stats.by_material.resize(mi + 1, 0);
+                    self.stats.draws_by_material.resize(mi + 1, 0);
                 }
                 self.stats.by_material[mi] += count / 3;
+                self.stats.draws_by_material[mi] += 1;
             }
         }
         g::sceGxmSetFrontDepthBias(ctx, 0, 0);
@@ -1843,6 +1891,7 @@ fn fixed_keys() -> Vec<Key> {
         Key::new("haze_f.cg", &["HAZE_LIGHTS=4"]),
         Key::new("haze_f.cg", &["HAZE_LIGHTS=6"]),
         Key::new("prefilter_f.cg", &[]),
+        Key::new("prefilter_f.cg", &["PER_PIXEL"]),
         Key::new("down_f.cg", &[]),
         Key::new("up_f.cg", &[]),
         Key::new("post_v.cg", &["GRAIN"]),

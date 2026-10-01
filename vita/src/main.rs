@@ -203,6 +203,7 @@ fn apply_control(v: &Value, rig: &mut Rig, r: &mut Renderer, ctl: &mut Control, 
     // Pins the governor's quality step; `hold` keeps it there.
     if let Some(n) = v["settings"]["step"].as_u64() {
         r.governor.step = (n as usize).min(r.profile.steps.len() - 1);
+        r.governor.boost = 0;
     }
     r.governor.hold = v["settings"]["hold"].as_bool().unwrap_or(r.governor.hold);
     r.timeline.on = v["settings"]["profile"].as_bool().unwrap_or(r.timeline.on);
@@ -603,6 +604,9 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
             let mut clock = 0.0f32;
             let mut frame_ms = 0.0f32;
             let mut last_vcount = sceDisplayGetVcount();
+            let mut t_vblank = Instant::now();
+            let mut last_gpu: Option<f32> = None;
+            let mut gpu_done: Option<Instant> = None;
             let mut wait_ms = 0.0f32;
             let mut swap_ms = 0.0f32;
             let mut manifest_state = app.manifest_state;
@@ -725,8 +729,7 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                 // Profiling serializes the GPU, and the settings sheet adds its
                 // own cost: neither frame time steers the governor.
                 if !renderer.timeline.on && !sheet.visible() {
-                    let p = renderer.profile;
-                    renderer.governor.feedback(p, frame_ms);
+                    renderer.feedback(frame_ms, last_gpu, raw * 1000.0);
                 }
                 let fade = if ctl.view.is_some() { 0.0 } else { rig.fade };
                 let bars = if ctl.view.is_some() { 0.0 } else { rig.bars };
@@ -771,9 +774,33 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                 // even instead of alternating between one and two refreshes.
                 let interval = (renderer.profile.budget_ms / 16.68).round().max(1.0) as i32;
                 let since = sceDisplayGetVcount().wrapping_sub(last_vcount);
+                // The frame's GPU time for the governor: its display scene's
+                // completion, polled in 0.5 ms steps while the CPU waits for
+                // the refresh (stopping 2 ms short of it), from the later of
+                // its first scene's kick and the previous frame's completion.
+                let slot = (frame_no % 2) as usize;
+                let mut done_at = None;
                 if interval > 1 && (0..interval).contains(&since) {
-                    sceDisplayWaitVblankStartMulti((interval - since) as u32);
+                    let deadline = t_vblank + Duration::from_micros((interval as u64) * 16_683 - 2_000);
+                    while Instant::now() < deadline {
+                        if fence.done(slot) {
+                            done_at = Some(Instant::now());
+                            break;
+                        }
+                        vitasdk_sys::sceKernelDelayThread(500);
+                    }
+                    let since = sceDisplayGetVcount().wrapping_sub(last_vcount);
+                    if (0..interval).contains(&since) {
+                        sceDisplayWaitVblankStartMulti((interval - since) as u32);
+                    }
                 }
+                let start = match (renderer.timeline.first_kick, gpu_done) {
+                    (Some(k), Some(c)) => Some(k.max(c)),
+                    (k, _) => k,
+                };
+                last_gpu = done_at.zip(start).map(|(d, s)| d.saturating_duration_since(s).as_secs_f32() * 1000.0);
+                gpu_done = done_at;
+                t_vblank = Instant::now();
                 last_vcount = sceDisplayGetVcount();
                 let t_swap = Instant::now();
                 g::vita2d_swap_buffers();
@@ -785,7 +812,8 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                 // Main-pass triangles by material, heaviest first (profiling).
                 let mut by: Vec<(usize, u32)> = renderer.stats.by_material.iter().copied().enumerate().filter(|x| x.1 > 0).collect();
                 by.sort_by(|a, b| b.1.cmp(&a.1));
-                let heavy: Vec<Value> = by.iter().take(10).map(|(i, t)| json!([scene.meta.materials[*i].name, t])).collect();
+                // [material, triangles, draws] of the main pass, heaviest 64.
+                let heavy: Vec<Value> = by.iter().take(64).map(|(i, t)| json!([scene.meta.materials[*i].name, t, renderer.stats.draws_by_material.get(*i).copied().unwrap_or(0)])).collect();
                 dev.engine = json!({
                     "stage": "running",
                     "place": id,
@@ -804,7 +832,7 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                     "clockResets": clock_resets,
                     "sheet": sheet.open,
                     "view": {"pos": view.pos.to_array(), "target": view.target.to_array(), "fov": view.fov_y, "mode": if rig.mode == Mode::Cinematic { "cinematic" } else { "free" }, "shot": rig.shot_name()},
-                    "settings": {"msaa": s.msaa == Msaa::X4, "reflection": s.reflection, "haze": s.haze, "bloom": s.bloom, "rain": s.rain, "cullCw": s.cull_cw, "exposure": s.exposure, "maxLights": s.max_lights, "flat": s.flat, "scale": s.scale, "level": renderer.level(), "profile": renderer.profile.name, "step": renderer.governor.step, "steps": renderer.profile.steps.len(), "hold": renderer.governor.hold, "budgetMs": renderer.profile.budget_ms, "fx": s.fx, "amortize": s.amortize, "reflSize": s.reflection_size, "hazeSize": renderer.step().haze_size, "hazeLights": renderer.step().haze_lights, "bloomFull": renderer.step().bloom_full, "streaks": s.streaks, "steam": s.steam, "detailMaps": s.detail_maps, "vertexLights": s.vertex_lights, "detailM": renderer.step().detail_m, "lodPixels": renderer.step().lod_pixels},
+                    "settings": {"msaa": s.msaa == Msaa::X4, "reflection": s.reflection, "haze": s.haze, "bloom": s.bloom, "rain": s.rain, "cullCw": s.cull_cw, "exposure": s.exposure, "maxLights": s.max_lights, "flat": s.flat, "scale": s.scale, "level": renderer.level(), "profile": renderer.profile.name, "step": renderer.governor.step, "boost": renderer.governor.boost, "gpuMs": renderer.governor.gpu_ms, "steps": renderer.profile.steps.len(), "hold": renderer.governor.hold, "budgetMs": renderer.profile.budget_ms, "fx": s.fx, "amortize": s.amortize, "reflSize": s.reflection_size, "hazeSize": renderer.step().haze_size, "hazeLights": renderer.step().haze_lights, "bloomFull": renderer.step().bloom_full, "streaks": s.streaks, "steam": s.steam, "detailMaps": s.detail_maps, "vertexLights": s.vertex_lights, "detailM": renderer.step().detail_m, "lodPixels": renderer.step().lod_pixels},
                     "uptime": started.elapsed().as_secs(),
                     "passes": renderer.timeline.passes.iter().map(|(n, ms)| json!([n, ms])).collect::<Vec<_>>(),
                     "cpuPasses": renderer.timeline.cpu.iter().map(|(n, rec, end)| json!([n, rec, end])).collect::<Vec<_>>(),

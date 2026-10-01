@@ -220,7 +220,7 @@ async function lint(): Promise<void> {
     ["standard_f.cg", ["LIGHTS=0", "BAKED", "FAR", "ALBEDO_MAP", "VISTA"]], ["standard_f.cg", ["LIGHTS=1", "BAKED", "ALBEDO_MAP", "NORMAL_MAP", "ORM_MAP", "EMISSION_MAP", "VISTA"]],
     ["standard_f.cg", ["LIGHTS=2", "BAKED", "LITE", "WET", "PLANAR", "ALBEDO_MAP", "VISTA"]], ["standard_f.cg", ["LIGHTS=0", "VERTEX_LIGHTS", "ALBEDO_MAP", "VISTA", "BLEND"]],
     ["unlit_f.cg", ["ALBEDO_MAP", "VERTEX_COLOR", "VISTA"]], ["glass_f.cg", ["LIGHTS=0", "BAKED", "VISTA"]], ["window_f.cg", ["VISTA"]], ["water_f.cg", ["VISTA"]],
-    ["post_v.cg", []], ["post_v.cg", ["GRAIN"]], ["haze_f.cg", ["HAZE_LIGHTS=2"]], ["haze_f.cg", ["HAZE_LIGHTS=6"]], ["prefilter_f.cg", []], ["down_f.cg", []], ["up_f.cg", []], ["composite_f.cg", []], ["composite_f.cg", ["HAZE", "BLOOM"]], ["blit_f.cg", []],
+    ["post_v.cg", []], ["post_v.cg", ["GRAIN"]], ["haze_f.cg", ["HAZE_LIGHTS=2"]], ["haze_f.cg", ["HAZE_LIGHTS=6"]], ["prefilter_f.cg", []], ["prefilter_f.cg", ["PER_PIXEL"]], ["down_f.cg", []], ["up_f.cg", []], ["composite_f.cg", []], ["composite_f.cg", ["HAZE", "BLOOM"]], ["blit_f.cg", []],
   ];
   const tmp = resolve(ROOT, ".pocket-build/atlas/lint");
   mkdirSync(tmp, { recursive: true });

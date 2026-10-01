@@ -72,15 +72,16 @@ enum Cell {
 /// Cell edge for a point `r` metres (the larger of |x| and |z|) from the
 /// origin: `near` within 140 m, 256 m to 1 km, then the power of two at or
 /// below r (1 km cells from 1 to 2 km, 2 km cells from 2 to 4 km, … up to
-/// 16 km), so a chunk covers a similar angle from the shots near the origin
-/// and a 45 km vista stays a few draws per material per octave of distance.
+/// 64 km), so a chunk covers a similar angle from the shots near the origin
+/// and a vista to the horizon stays a few draws per material per octave of
+/// distance.
 fn cell_size(r: f32, near: f32) -> f32 {
     if r <= 140.0 {
         near
     } else if r <= 1024.0 {
         256.0
     } else {
-        r.log2().floor().exp2().min(16384.0)
+        r.log2().floor().exp2().min(65536.0)
     }
 }
 
@@ -89,6 +90,7 @@ fn cell_at(p: Vec3, near: f32, min: f32) -> Cell {
     let size = cell_size(p.x.abs().max(p.z.abs()), near).max(min);
     Cell::Grid(size as u32, (p.x / size).floor() as i32, (p.z / size).floor() as i32)
 }
+
 
 /// A cell's nearest distance from the origin (the larger of |x| and |z|).
 fn cell_distance(cell: Cell) -> f32 {
@@ -154,6 +156,8 @@ struct Cook<'a> {
     /// The place's loop (s): what light fields repeat over unless their
     /// material names its own.
     period: f32,
+    /// Materials annotated `lodBias` (pack index → bias, None = "auto").
+    lod_bias: HashMap<u32, Option<f32>>,
 }
 
 impl<'a> Cook<'a> {
@@ -206,6 +210,7 @@ impl<'a> Cook<'a> {
             wrap_t: wrap(sampler.wrap_t()),
             has_alpha,
             mean,
+            lod_bias: 0.0,
         });
         let i = (self.textures.len() - 1) as u32;
         self.tex_keys.insert(key, i);
@@ -314,9 +319,13 @@ impl<'a> Cook<'a> {
             uv_anim,
             water,
             lights,
+            tint: (kind == pc::Kind::InteriorWindow).then(|| extras::tint(&x)).flatten(),
         };
         self.materials.push(out);
         let i = (self.materials.len() - 1) as u32;
+        if let Some(b) = extras::lod_bias(&x) {
+            self.lod_bias.insert(i, b);
+        }
         self.mat_keys.insert(key, i);
         self.material_names.insert(name, i);
         (i, transform)
@@ -507,6 +516,14 @@ fn read_light_field(cook: &mut Cook, prim: &gltf::Primitive, xf: Mat4, moving: b
     cook.log.push(format!("light field {name}: {n} lights ({moving_n} moving, {blinks} blinking)"));
 }
 
+/// The LOD bias for a texture whose mapping averages `log2_ratio` (log2 of
+/// its texel densities' ratio): the full difference, so the mip follows the
+/// sparser direction, from a ratio of 1.5 up to a bias of −2. Below 1.5 the
+/// texture keeps the renderer's own bias.
+fn anisotropy_bias(log2_ratio: f32) -> Option<f32> {
+    (log2_ratio >= 1.5f32.log2()).then(|| -log2_ratio.min(2.0))
+}
+
 fn node_matrix(n: &gltf::Node) -> Mat4 {
     Mat4::from_cols_array_2d(&n.transform().matrix())
 }
@@ -650,6 +667,7 @@ fn main() {
             let p = f(t, "frames", 0.0) / f(t, "fps", 15.0).max(1e-3);
             if p > 0.0 { p } else { 120.0 }
         },
+        lod_bias: HashMap::new(),
     };
 
     // ---- walk the scene
@@ -735,6 +753,61 @@ fn main() {
         }
     }
     println!("walked scene: {} primitives, {} materials, {} textures ({} ms)", prims.len(), cook.materials.len(), cook.textures.len(), t0.elapsed().as_millis());
+
+    // ---- `lodBias` (materials that ask for it): a number, or "auto" — a
+    // texture whose mapping lays more texels per metre one way than the
+    // other (mean over the area it covers) gets a negative bias, so the
+    // GPU's isotropic mip choice follows the sparser direction instead of
+    // blurring it (window grids whose floors blur at 480×272).
+    let mut aniso: HashMap<u32, (f64, f64)> = HashMap::new();
+    let mut manual: HashMap<u32, f32> = HashMap::new();
+    for (&mi, &b) in &cook.lod_bias {
+        let m = &cook.materials[mi as usize];
+        for t in [m.albedo, m.emission].into_iter().flatten() {
+            match b {
+                Some(b) => {
+                    let e = manual.entry(t).or_insert(b);
+                    *e = e.min(b);
+                }
+                None => {
+                    aniso.entry(t).or_default();
+                }
+            }
+        }
+    }
+    for p in &prims {
+        if !cook.lod_bias.contains_key(&p.material) {
+            continue;
+        }
+        let m = &cook.materials[p.material as usize];
+        for t in [m.albedo, m.emission].into_iter().flatten() {
+            if !aniso.contains_key(&t) {
+                continue;
+            }
+            let tex = &cook.textures[t as usize];
+            let texels = Vec2::new(tex.width as f32, tex.height as f32);
+            let e = aniso.entry(t).or_default();
+            for tri in &p.tris {
+                let v = tri.map(|i| p.verts[i as usize]);
+                if let Some((log2_ratio, area)) = geometry::texel_anisotropy(v.map(|v| v.pos), v.map(|v| v.uv), texels) {
+                    e.0 += (log2_ratio * area) as f64;
+                    e.1 += area as f64;
+                }
+            }
+        }
+    }
+    for (t, (sum, area)) in aniso {
+        let mean = if area > 0.0 { (sum / area) as f32 } else { 0.0 };
+        let bias = anisotropy_bias(mean).unwrap_or(0.0);
+        let tex = &mut cook.textures[t as usize];
+        tex.lod_bias = bias;
+        cook.log.push(format!("texture {}: texels {:.2}:1 across its {:.0} m², LOD bias {bias:.2}", tex.name, mean.exp2(), area));
+    }
+    for (t, bias) in manual {
+        let tex = &mut cook.textures[t as usize];
+        tex.lod_bias = tex.lod_bias.min(bias);
+        cook.log.push(format!("texture {}: LOD bias {:.2}", tex.name, tex.lod_bias));
+    }
 
     // ---- node table for moving content (ancestors included for hierarchy)
     let mut node_ids: BTreeMap<usize, u32> = BTreeMap::new();
@@ -889,6 +962,7 @@ fn main() {
             uv_anim: None,
             water: None,
             lights: None,
+            tint: None,
         };
         cook.materials.push(mat);
         let mi = (cook.materials.len() - 1) as u32;
@@ -1003,6 +1077,7 @@ fn main() {
                 wrap_t: pc::Wrap::Clamp,
                 has_alpha: false,
                 mean: [0.0; 4],
+                lod_bias: 0.0,
             });
             (cook.textures.len() - 1) as u32
         })
@@ -1250,9 +1325,11 @@ fn main() {
     }
     let _ = &prims.iter().map(|p| p.world).count();
 
-    // ---- light fields: one vertex per light, by cell (no smaller than
-    // 512 m: a light costs one vertex, a draw much more), at most
-    // `LightPoint::PER_DRAW` per draw
+    // ---- light fields: one vertex per light, by geometry's cells (no
+    // smaller than 512 m), at most `LightPoint::PER_DRAW` per draw. Twice
+    // those cells drew 32 instead of 47 field draws at Griffith
+    // Observatory's Lawn but cost 0.64 ms more GPU: the clipper's work on
+    // 20 000 more lights outside the view outweighs 15 draws.
     let mut field_cells: BTreeMap<(u32, Cell), Vec<pc::LightPoint>> = BTreeMap::new();
     for (material, l) in &field {
         let (lo, hi) = l.bounds();
@@ -1424,6 +1501,7 @@ fn main() {
             wrap_t: wrap,
             has_alpha: false,
             mean: [0.0; 4],
+                lod_bias: 0.0,
         });
         (cook.textures.len() - 1) as u32
     };
@@ -1506,6 +1584,7 @@ fn main() {
                 wrap_t: pc::Wrap::Clamp,
                 has_alpha: false,
                 mean: [0.0; 4],
+                lod_bias: 0.0,
             });
             Some((cook.textures.len() - 1) as u32)
         });
@@ -1608,9 +1687,30 @@ mod tests {
         assert_eq!(cell_at(Vec3::new(-300.0, 0.0, 900.0), 32.0, 0.0), Cell::Grid(256, -2, 3));
         assert_eq!(cell_at(Vec3::new(1500.0, 0.0, 0.0), 32.0, 0.0), Cell::Grid(1024, 1, 0));
         assert_eq!(cell_at(Vec3::new(0.0, 0.0, 30_000.0), 32.0, 0.0), Cell::Grid(16384, 0, 1));
-        assert_eq!(cell_at(Vec3::new(0.0, 0.0, 45_000.0), 32.0, 0.0), Cell::Grid(16384, 0, 2));
+        assert_eq!(cell_at(Vec3::new(0.0, 0.0, 45_000.0), 32.0, 0.0), Cell::Grid(32768, 0, 1));
+        assert_eq!(cell_at(Vec3::new(-110_000.0, 0.0, 5_000.0), 32.0, 0.0), Cell::Grid(65536, -2, 0));
         // Light fields: no cell under 512 m.
         assert_eq!(cell_at(Vec3::new(100.0, 0.0, 100.0), 32.0, 512.0), Cell::Grid(512, 0, 0));
+    }
+
+    #[test]
+    fn anisotropic_mappings_get_a_bias() {
+        // A wall 48 m wide and 128 m tall over a 256² window grid: 5.3
+        // texels per metre across, 2 up.
+        let p = [Vec3::ZERO, Vec3::new(48.0, 0.0, 0.0), Vec3::new(48.0, 128.0, 0.0)];
+        let uv = [Vec2::ZERO, Vec2::new(1.0, 0.0), Vec2::new(1.0, 1.0)];
+        let (r, area) = geometry::texel_anisotropy(p, uv, Vec2::splat(256.0)).unwrap();
+        assert!((r - (8.0f32 / 3.0).log2()).abs() < 1e-4, "{r}");
+        assert!((area - 48.0 * 64.0).abs() < 1e-2);
+        assert!((anisotropy_bias(r).unwrap() + 1.415).abs() < 1e-3);
+        // Square texels on a slanted face; a ratio under 1.5 keeps no bias.
+        let q = [Vec3::ZERO, Vec3::new(2.0, 0.0, 0.0), Vec3::new(2.0, 2.0, 1.0)];
+        let (r, _) = geometry::texel_anisotropy(q, [Vec2::ZERO, Vec2::new(0.5, 0.0), Vec2::new(0.5, 0.5)], Vec2::splat(256.0)).unwrap();
+        assert!((r - (5.0f32.sqrt() / 2.0).log2()).abs() < 1e-4, "{r}");
+        assert_eq!(anisotropy_bias(r), None);
+        assert_eq!(anisotropy_bias(3.0), Some(-2.0));
+        // A constant UV (roofs reading one texel) has no mapping.
+        assert!(geometry::texel_anisotropy(p, [Vec2::splat(0.1); 3], Vec2::splat(256.0)).is_none());
     }
 
     #[test]

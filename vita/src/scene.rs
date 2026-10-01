@@ -206,8 +206,10 @@ impl Scene {
             let mut tex = up.texture(vram, fmt(t.format), t.width, t.height, t.mips, &buf).map_err(|e| format!("texture {}: {e}", t.name))?;
             tex.set_wrap(wrap(t.wrap_s), wrap(t.wrap_t));
             if matches!(t.role, pc::TexRole::Color | pc::TexRole::Normal | pc::TexRole::Orm) {
-                // No anisotropic filtering on GXM: keep ground textures crisp at grazing angles.
-                tex.set_lod_bias(-0.375);
+                // No anisotropic filtering on GXM: keep ground textures crisp
+                // at grazing angles; the cooker's bias for anisotropic
+                // mappings comes on top (`lodBias`).
+                tex.set_lod_bias(-0.375 + t.lod_bias);
             }
             bytes_tex += tex.bytes;
             slots[i] = Some(tex);

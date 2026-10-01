@@ -82,6 +82,21 @@ pub fn light_point(p: [f32; 3], color: [f32; 3], light: Option<&[f32]>, path: Op
     }
 }
 
+/// An interior window's `tint` (linear RGB, three numbers); None when
+/// absent or malformed (white).
+pub fn tint(x: &Value) -> Option<[f32; 3]> {
+    x.get("tint").and_then(|t| t.as_array()).filter(|a| a.len() >= 3 && a.iter().take(3).all(|v| v.is_number())).map(|_| v3(&x["tint"]))
+}
+
+/// A material's `lodBias`: a number (mip levels, clamped to −3..1), or
+/// `"auto"` (None: measured from the texture's mapping).
+pub fn lod_bias(x: &Value) -> Option<Option<f32>> {
+    match x.get("lodBias")? {
+        Value::String(s) if s == "auto" => Some(None),
+        v => v.as_f64().map(|b| Some((b as f32).clamp(-3.0, 1.0))),
+    }
+}
+
 /// The vista haze (scene `haze` with an `inversion`); `None` for the night
 /// streets' lit haze, which shares the key. `band` (the weight of the sky's
 /// sun-side terms in the inscatter) is 1, the dome, when absent.
@@ -145,6 +160,25 @@ mod tests {
         assert_eq!((p.path, p.path_cycles, p.blink_cycles, p.duty), ([0.0, 0.0, -900.0], 2.0, 0.0, 1.0));
         let b = light_point([0.0; 3], [1.0, 0.0, 0.0], None, None, Some(&[40.0, 0.1]));
         assert_eq!((b.blink_cycles, b.duty, b.intensity), (40.0, 0.1, 0.0));
+    }
+
+    #[test]
+    fn interior_tint() {
+        let x = json!({"kind": "interiorWindow", "intensity": 2.4, "tint": [1.0, 0.78, 0.36]});
+        assert_eq!(tint(&x), Some([1.0, 0.78, 0.36]));
+        // Places without one (the konbini, Akihabara) stay white.
+        assert_eq!(tint(&json!({"kind": "interiorWindow", "intensity": 1.4})), None);
+        assert_eq!(tint(&json!({"tint": [1, 0.5]})), None);
+        assert_eq!(tint(&json!({"tint": "warm"})), None);
+    }
+
+    #[test]
+    fn lod_bias_number_or_auto() {
+        assert_eq!(lod_bias(&json!({"lodBias": "auto"})), Some(None));
+        assert_eq!(lod_bias(&json!({"lodBias": -1.5})), Some(Some(-1.5)));
+        assert_eq!(lod_bias(&json!({"lodBias": -9})), Some(Some(-3.0)));
+        assert_eq!(lod_bias(&json!({"lodBias": "sharp"})), None);
+        assert_eq!(lod_bias(&json!({})), None);
     }
 
     #[test]

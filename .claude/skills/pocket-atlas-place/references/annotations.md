@@ -6,7 +6,7 @@ The web exporter (`web/src/places/shared/export.ts`) writes glTF 2.0 with these 
 
 | `kind` | Cooks as | Fields |
 | --- | --- | --- |
-| (none) | `Standard`: lit, baked vertex lighting when static | glTF PBR; `wet`, `damp`, `polygonOffset: [factor, units]`, `fog` |
+| (none) | `Standard`: lit, baked vertex lighting when static | glTF PBR; `wet`, `damp`, `polygonOffset: [factor, units]`, `fog`, `lodBias` (any kind with a texture: mip levels, or `"auto"`: the cooker measures how many more texels per metre the mapping lays one way than the other and biases by the ratio, from 1.5:1 up to −2; for window grids whose floors blur on the Vita's isotropic mips) |
 | `unlit` | `Unlit`: HDR colour × texture, no lighting | `color: [r, g, b]` (HDR, linear), `fog` |
 | `sign` | `Unlit` with `UvAnim` [Signage] | `color`; flipbook `frames`, `cols`, `rows`, `fps`; `scroll: [u, v]` (widths/s); `phase` (s). Flipbook first, then scroll; mesh UVs span frame 0's cell (v down) |
 | `glass` | `Glass`, premultiplied blend | Use the shared glass material so the web blends the same way |
@@ -32,4 +32,4 @@ Any material may carry `frames`/`scroll` (e.g. surf strips): `UvAnim` applies to
 - `post` — `tone` (`agx` or `aces`), `exposure`, `contrast`, `saturation`, `lift`, `gain`, `vignette`, `grain`, `bloom {threshold, smoothing, intensity}`.
 - `camera.shots` — named `from`/`to` keyframes (`pos`, `target`, `fov`) and durations; the device's cinematic rig plays them, `tools/atlas.ts` measures them by name.
 - Haze: night streets with `fogLights`; other kinds leave it out (no haze pass).
-- `haze` with an `inversion` — the vista haze [Dusk vistas]: `density` (ρ0, 1/m), `inversion` (H, place y), `scale` (s, m), `gain`, `glow: [r, g, b]`, `band` (weight of the sky's sun-side terms, the glow lobes and the afterglow band, in the inscatter; default 1, the dome); replaces the uniform fog on every material that has fog. Without `inversion`, `haze` is the night streets' lit haze.
+- `haze` with an `inversion` — the vista haze [Dusk vistas]: `density` (ρ0, 1/m), `inversion` (H, place y), `scale` (s, m), `gain`, `glow: [r, g, b]`, `band` (the weight of the sky's sun side, the glow lobes and the afterglow band, in the inscatter of clear air: `w = band + (1 − band)·(1 − T)`, so it reaches 1 at full optical depth; default 1, the dome at any depth); replaces the uniform fog on every material that has fog. Without `inversion`, `haze` is the night streets' lit haze.

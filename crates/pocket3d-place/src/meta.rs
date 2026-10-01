@@ -69,6 +69,13 @@ pub struct Texture {
     /// when it drops the map (an ORM map's occlusion, roughness, metalness).
     #[serde(default)]
     pub mean: [f32; 4],
+    /// Mip level bias for the texture's mapping: a texture laid with more
+    /// texels per metre along one direction than the other (a window grid
+    /// of narrow windows and tall floors) is blurred by isotropic mip
+    /// selection along the sparser direction; a negative bias picks the
+    /// level by that direction instead.
+    #[serde(default)]
+    pub lod_bias: f32,
 }
 
 // --------------------------------------------------------------- materials
@@ -166,6 +173,10 @@ pub struct Material {
     pub water: Option<Water>,
     #[serde(default)]
     pub lights: Option<LightField>,
+    /// Interior windows: linear colour the traced room is multiplied by
+    /// (a museum hall's warm light); white when absent.
+    #[serde(default)]
+    pub tint: Option<Vec3>,
 }
 
 /// A light field's sprites (web `places/shared/lights.ts`). Per light and
@@ -624,34 +635,36 @@ impl DaySky {
     /// whose azimuth cosine to the sun is `a` (`sky_day_f.cg` and the web's
     /// `places/shared/sky.ts` at h = 0; no clouds, no disc).
     pub fn horizon_at(&self, a: f32) -> Vec3 {
-        self.horizon_weighted(a, 1.0)
+        let (base, sun) = self.horizon_parts(a);
+        core::array::from_fn(|k| base[k] + sun[k])
     }
 
-    /// [`DaySky::horizon_at`] with the sun-side terms (the glow lobes and
-    /// the afterglow band) weighted by `band` (the vista haze's `band`).
-    pub fn horizon_weighted(&self, a: f32, band: f32) -> Vec3 {
+    /// [`DaySky::horizon_at`] in two parts, both under the Earth's shadow:
+    /// the base (the gradient's horizon and the anti-twilight belt) and the
+    /// sun side (the glow lobes and the afterglow band), which the vista
+    /// haze weighs by its optical depth.
+    pub fn horizon_parts(&self, a: f32) -> (Vec3, Vec3) {
         let a = a.clamp(-1.0, 1.0);
         let t = 1e-5f32.powf(self.gradient_power);
-        let mut c: Vec3 = core::array::from_fn(|k| self.horizon[k] + (self.zenith[k] - self.horizon[k]) * t);
+        let mut base: Vec3 = core::array::from_fn(|k| self.horizon[k] + (self.zenith[k] - self.horizon[k]) * t);
         let s = self.sun_direction;
         let mu = (a * (s[0] * s[0] + s[2] * s[2]).sqrt()).max(0.0);
         let lobe = |w: [f32; 2]| if mu > 0.0 { w[0] * mu.powf(w[1]) } else { 0.0 };
-        let glow = band * self.glow * (lobe(self.glow_wide) + lobe(self.glow_tight));
-        for k in 0..3 {
-            c[k] += self.sun_color[k] * glow;
-        }
+        let glow = self.glow * (lobe(self.glow_wide) + lobe(self.glow_tight));
+        let mut sun: Vec3 = self.sun_color.map(|c| c * glow);
         if let Some(tw) = &self.twilight {
             let toward = (a + 1.0) * 0.5;
             let away = ((1.0 - a) * 0.5).max(0.0);
-            let band = band * (1.0 + (toward.powf(tw.band.sun_power) - 1.0) * tw.band.sun_bias);
+            let band = 1.0 + (toward.powf(tw.band.sun_power) - 1.0) * tw.band.sun_bias;
             let bz = tw.belt.elevation / tw.belt.width.max(1e-6);
             let belt = (-bz * bz).exp() * away.powf(tw.belt.power);
             let shadow = 1.0 - tw.shadow.strength * away.powf(tw.shadow.power);
             for k in 0..3 {
-                c[k] = (c[k] + tw.band.color[k] * band + tw.belt.color[k] * belt) * shadow;
+                base[k] = (base[k] + tw.belt.color[k] * belt) * shadow;
+                sun[k] = (sun[k] + tw.band.color[k] * band) * shadow;
             }
         }
-        c
+        (base, sun)
     }
 }
 
@@ -663,10 +676,12 @@ impl DaySky {
 /// scale)` above. Between the eye and a point d metres away the optical
 /// depth is `d · (G(y_p) − G(y_e)) / (y_p − y_e)` with G the antiderivative
 /// of ρ; a surface keeps `T = e^(−τ)` of its colour and gains
-/// `(gain · sky(horizon toward the point) + glow · ρ(y_p) / density) · (1 − T)`,
-/// the sky's sun-side terms (glow lobes, afterglow band) weighted by `band`.
-/// Additive surfaces and the light field take `T` only. Replaces the uniform
-/// fog on every material that has fog.
+/// `(gain · (base + w · sun) + glow · ρ(y_p) / density) · (1 − T)`, with
+/// base and sun the two parts of the sky on the horizon toward the point
+/// ([`DaySky::horizon_parts`]) and `w = band + (1 − band) · (1 − T)`: the
+/// afterglow's share grows with the optical depth, so far terrain meets the
+/// sky in every azimuth. Additive surfaces and the light field take `T`
+/// only. Replaces the uniform fog on every material that has fog.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct VistaHaze {
     pub density: f32,
@@ -674,7 +689,8 @@ pub struct VistaHaze {
     pub scale: f32,
     pub gain: f32,
     pub glow: Vec3,
-    /// Weight of the sky's sun-side terms in the inscatter (1: the dome).
+    /// Weight of the sky's sun side in the inscatter of clear air (`w` at
+    /// T = 1; 1: the dome at any depth).
     #[serde(default = "one")]
     pub band: f32,
 }
@@ -684,7 +700,7 @@ fn one() -> f32 {
 }
 
 impl VistaHaze {
-    /// Knots of [`VistaHaze::sky_table`]: the horizon colour at
+    /// Knots of [`VistaHaze::sky_tables`]: the horizon at
     /// `sqrt((1 − a) / 2) = k / (SKY_KNOTS − 1)` (finer toward the sun).
     pub const SKY_KNOTS: usize = 17;
 
@@ -710,15 +726,21 @@ impl VistaHaze {
         (-tau.max(0.0)).exp()
     }
 
-    /// `gain` × the sky on the horizon at the knots (see `SKY_KNOTS`), its
-    /// sun-side terms × `band`; the renderer interpolates linearly between
-    /// them. Without a day sky, the night sky's horizon colour everywhere.
-    pub fn sky_table(&self, sky: Option<&DaySky>, night_horizon: Vec3) -> [Vec3; Self::SKY_KNOTS] {
-        core::array::from_fn(|k| {
+    /// `gain` × the two parts of the sky on the horizon at the knots (see
+    /// `SKY_KNOTS`): the base, then the sun side; the renderer interpolates
+    /// linearly between knots and adds `w` × the sun side. Without a day
+    /// sky, the night sky's horizon colour as the base.
+    pub fn sky_tables(&self, sky: Option<&DaySky>, night_horizon: Vec3) -> ([Vec3; Self::SKY_KNOTS], [Vec3; Self::SKY_KNOTS]) {
+        let parts: [(Vec3, Vec3); Self::SKY_KNOTS] = core::array::from_fn(|k| {
             let u = k as f32 / (Self::SKY_KNOTS - 1) as f32;
-            let c = sky.map_or(night_horizon, |s| s.horizon_weighted(1.0 - 2.0 * u * u, self.band));
-            c.map(|x| x * self.gain)
-        })
+            sky.map_or((night_horizon, [0.0; 3]), |s| s.horizon_parts(1.0 - 2.0 * u * u))
+        });
+        (core::array::from_fn(|k| parts[k].0.map(|x| x * self.gain)), core::array::from_fn(|k| parts[k].1.map(|x| x * self.gain)))
+    }
+
+    /// The sun side's weight at transmittance `t`.
+    pub fn sun_weight(&self, t: f32) -> f32 {
+        self.band + (1.0 - self.band) * (1.0 - t)
     }
 }
 
@@ -792,35 +814,41 @@ mod haze_tests {
     }
 
     #[test]
-    fn band_weights_the_sun_side_terms() {
+    fn parts_split_the_dome() {
         let sky = blue_hour();
         // Toward the sun (a = 1): mu = |sun.xz|, toward = 1, away = 0.
         let s = sky.sun_direction;
         let mu = (s[0] * s[0] + s[2] * s[2]).sqrt();
         let base = 0.09 + (0.01 - 0.09) * 1e-5f32.powf(0.45);
-        let lobes = 0.5 * 0.4 * (0.4 * mu.powf(3.0) + 0.6 * mu.powf(24.0));
-        let band = 0.45 * (1.0 + (1.0 - 1.0) * 0.9);
-        let want = base + 0.25 * (lobes + band);
-        assert!((sky.horizon_weighted(1.0, 0.25)[0] - want).abs() < 1e-5);
-        // Opposite the sun only the band term's floor scales.
+        let sun = 0.5 * 0.4 * (0.4 * mu.powf(3.0) + 0.6 * mu.powf(24.0)) + 0.45;
+        let (b, u) = sky.horizon_parts(1.0);
+        assert!((b[0] - base).abs() < 1e-6 && (u[0] - sun).abs() < 1e-5, "{b:?} {u:?}");
+        // Opposite the sun: the belt in the base, the band's floor on the
+        // sun side, both under the Earth's shadow.
         let belt = (-(0.12f32 / 0.09).powi(2)).exp() * 0.08;
-        let want = (base + 0.25 * 0.45 * 0.1 + belt) * 0.65;
-        assert!((sky.horizon_weighted(-1.0, 0.25)[0] - want).abs() < 1e-5);
-        // band = 1 is the dome, and absent from older packs it reads as 1.
-        assert_eq!(sky.horizon_weighted(0.3, 1.0), sky.horizon_at(0.3));
+        let (b, u) = sky.horizon_parts(-1.0);
+        assert!((b[0] - (base + belt) * 0.65).abs() < 1e-6 && (u[0] - 0.45 * 0.1 * 0.65).abs() < 1e-6);
+        // The parts add up to the dome.
+        let (b, u) = sky.horizon_parts(0.3);
+        let d = sky.horizon_at(0.3);
+        assert!((0..3).all(|k| (b[k] + u[k] - d[k]).abs() < 1e-6));
+        // Griffith: w runs from `band` in clear air to 1 at full depth, so
+        // gain 1 without glow meets the dome where T → 0.
+        let griffith = VistaHaze { density: 1.6e-4, inversion: -60.0, scale: 60.0, gain: 1.0, glow: [0.0; 3], band: 0.25 };
+        assert_eq!((griffith.sun_weight(1.0), griffith.sun_weight(0.0)), (0.25, 1.0));
+        assert!((griffith.sun_weight(0.6) - 0.55).abs() < 1e-6);
+        let (ta, tb) = VistaHaze { gain: 1.25, ..griffith }.sky_tables(Some(&sky), [0.0; 3]);
+        let (b, u) = sky.horizon_parts(1.0);
+        assert!((ta[0][1] - 1.25 * b[1]).abs() < 1e-6 && (tb[0][1] - 1.25 * u[1]).abs() < 1e-6);
+        // Absent from older packs, `band` reads as 1.
         let h: VistaHaze = serde_json::from_str(r#"{"density":1e-4,"inversion":0,"scale":50,"gain":1,"glow":[0,0,0]}"#).unwrap();
         assert_eq!(h.band, 1.0);
-        // The table carries gain × the weighted horizon.
-        let griffith = VistaHaze { density: 1.6e-4, inversion: -60.0, scale: 60.0, gain: 1.25, glow: [0.0045, 0.003, 0.0035], band: 0.25 };
-        let t = griffith.sky_table(Some(&sky), [0.0; 3]);
-        let w = sky.horizon_weighted(1.0, 0.25);
-        assert!((t[0][1] - 1.25 * w[1]).abs() < 1e-6);
     }
 
     #[test]
     fn sky_table_interpolates_within_two_percent() {
         let sky = blue_hour();
-        let table = HAZE.sky_table(Some(&sky), [0.0; 3]);
+        let (base, sun) = HAZE.sky_tables(Some(&sky), [0.0; 3]);
         let n = (VistaHaze::SKY_KNOTS - 1) as f32;
         let mut worst = 0.0f32;
         for i in 0..=720 {
@@ -831,7 +859,8 @@ mod haze_tests {
             let f = u - k as f32;
             let exact = sky.horizon_at(a);
             for c in 0..3 {
-                let lerp = table[k][c] + (table[k + 1][c] - table[k][c]) * f;
+                let at = |t: &[Vec3; VistaHaze::SKY_KNOTS]| t[k][c] + (t[k + 1][c] - t[k][c]) * f;
+                let lerp = at(&base) + at(&sun);
                 // Relative to the brightest channel at that azimuth.
                 let peak = exact[0].max(exact[1]).max(exact[2]);
                 worst = worst.max((lerp - exact[c]).abs() / peak);
