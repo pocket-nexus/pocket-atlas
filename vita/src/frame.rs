@@ -534,6 +534,8 @@ pub struct Renderer {
     has_haze: bool,
     has_reflection: bool,
     day_sky: bool,
+    /// The day sky carries twilight terms (`TWILIGHT`).
+    twilight: bool,
 }
 
 /// The sun's shadow map: the static scene rendered once from the sun, its
@@ -782,6 +784,7 @@ impl Renderer {
             has_haze,
             has_reflection,
             day_sky: scene.meta.day_sky.is_some(),
+            twilight: scene.meta.day_sky.as_ref().is_some_and(|d| d.twilight.is_some()),
         })
     }
 
@@ -859,7 +862,7 @@ impl Renderer {
             gpu.want(&Key::new("fill_f.cg", &[]));
         }
         if self.day_sky {
-            gpu.want(&Key::new("sky_day_f.cg", &[]));
+            gpu.want(&Key::new("sky_day_f.cg", if self.twilight { &["TWILIGHT"][..] } else { &[] }));
         }
     }
 
@@ -1326,7 +1329,8 @@ impl Renderer {
 
     unsafe fn sky(&mut self, ctx: *mut g::SceGxmContext, gpu: &mut Gpu, f: &FrameConsts, out: Out, msaa: u32) {
         let fs = if self.day_sky { "sky_day_f.cg" } else { "sky_f.cg" };
-        let key = PipeKey { vs: key_v("sky_v.cg", &[]), fs: Key::new(fs, &[]), layout: Layout::Pos2, blend: BlendMode::Opaque, output: out, msaa };
+        let defs: &[&str] = if self.day_sky && self.twilight { &["TWILIGHT"] } else { &[] };
+        let key = PipeKey { vs: key_v("sky_v.cg", &[]), fs: Key::new(fs, defs), layout: Layout::Pos2, blend: BlendMode::Opaque, output: out, msaa };
         let Some(p) = gpu.pipeline(&key) else { return };
         let p = &*(p as *const Pipeline);
         self.use_pipeline(ctx, p);
@@ -1347,6 +1351,10 @@ impl Renderer {
             u.set(p, U::SkyDisc, &d.disc);
             u.set(p, U::CloudSun, &d.cloud_sun);
             u.set(p, U::CloudAmb, &d.cloud_amb);
+            u.set(p, U::TwBand, &d.tw[0]);
+            u.set(p, U::TwBelt, &d.tw[1]);
+            u.set(p, U::TwShape, &d.tw[2]);
+            u.set(p, U::TwShadow, &d.tw[3]);
         }
         bind(ctx, p, S::Clouds, f.clouds);
         g::sceGxmSetVertexStream(ctx, 0, self.tri_vb.cast());
@@ -1854,6 +1862,9 @@ struct DaySkyConsts {
     disc: [f32; 4],
     cloud_sun: [f32; 4],
     cloud_amb: [f32; 4],
+    /// Twilight: band colour + height, belt colour + elevation, (band sun
+    /// bias, band sun power, belt width, belt power), shadow terms.
+    tw: [[f32; 4]; 4],
 }
 
 impl FrameConsts {
@@ -1964,6 +1975,14 @@ impl FrameConsts {
                     disc: [c[0], c[1], c[2], d.disc_cos_outer],
                     cloud_sun: [d.cloud_sun[0], d.cloud_sun[1], d.cloud_sun[2], d.glow_wide[1]],
                     cloud_amb: [d.cloud_ambient[0], d.cloud_ambient[1], d.cloud_ambient[2], d.disc_cos_inner],
+                    tw: d.twilight.as_ref().map_or([[0.0; 4]; 4], |t| {
+                        [
+                            [t.band[0], t.band[1], t.band[2], t.band_shape[0]],
+                            [t.belt[0], t.belt[1], t.belt[2], t.belt_shape[0]],
+                            [t.band_shape[1], t.band_shape[2], t.belt_shape[1], t.belt_shape[2]],
+                            [t.shadow[0], t.shadow[1], t.shadow[2], 0.0],
+                        ]
+                    }),
                 }
             }),
             pixel: 2.0 * ty / H as f32,

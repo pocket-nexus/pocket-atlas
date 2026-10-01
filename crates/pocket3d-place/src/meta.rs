@@ -168,11 +168,15 @@ pub struct UvAnim {
     pub frames: u32,
     pub fps: f32,
     pub scroll: [f32; 2],
+    /// Seconds added to the place's clock.
+    #[serde(default)]
+    pub phase: f32,
 }
 
 impl UvAnim {
     /// `uv` = (scale u, scale v, offset u, offset v) at `time` seconds.
     pub fn apply(&self, uv: [f32; 4], time: f32) -> [f32; 4] {
+        let time = time + self.phase;
         let mut uv = uv;
         if self.frames > 1 {
             let (cols, rows) = (self.cols.max(1), self.rows.max(1));
@@ -404,6 +408,26 @@ pub struct DaySky {
     pub fade_elevation: f32,
     /// Panorama turns per second.
     pub drift: f32,
+    /// After sunset: afterglow, anti-twilight arch and the Earth's shadow.
+    #[serde(default)]
+    pub twilight: Option<Twilight>,
+}
+
+/// Twilight terms over the daytime sky (web `places/shared/sky.ts`), with
+/// h the ray's elevation sine and a the cosine of its azimuth to the sun:
+/// `band · e^(−|h|/height) · mix(1, ((a+1)/2)^sun_power, sun_bias)` along the
+/// horizon, `belt · e^(−((h−elevation)/width)²) · ((1−a)/2)^power` opposite
+/// the sun, and the sky scaled by `1 − strength · e^(−|h|/height) · ((1−a)/2)^power`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Twilight {
+    pub band: Vec3,
+    /// height, sun bias, sun power
+    pub band_shape: [f32; 3],
+    pub belt: Vec3,
+    /// elevation, width, power
+    pub belt_shape: [f32; 3],
+    /// strength, height, power
+    pub shadow: [f32; 3],
 }
 
 // -------------------------------------------------------------------- post
