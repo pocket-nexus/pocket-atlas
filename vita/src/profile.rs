@@ -163,11 +163,15 @@ pub const VITA30: Profile = Profile {
     detail_maps: true,
     alternate: false,
     vertex_lights: true,
-    // 544×308, 640×362, 720×408. Measured at Griffith Observatory (serialized
-    // GPU at step 0): the Lawn takes 20.8, 22.7, 25.0 and 27.8 ms from
-    // 480×272 up; the main pass grows ~2.2 ms per 480×272 of pixels and the
-    // composite with it, the bloom chain not at all.
-    boost: &[3, 2, 1],
+    // 544×308 and 640×362. Measured at Griffith Observatory (serialized GPU
+    // at step 0): the Lawn takes 20.8, 22.7, 25.0 and 27.8 ms from 480×272
+    // to 720×408; the main pass grows ~2.2 ms per 480×272 of pixels and the
+    // composite with it, the bloom chain not at all. 720×408 rendered for
+    // minutes without a fault but leaves the Lawn no headroom while running
+    // (its frames finish at the refresh), and both device hangs of its
+    // first tests came in sessions that had made its targets: left out
+    // until a hang-free run proves it.
+    boost: &[3, 2],
 };
 
 pub const ALL: [&Profile; 3] = [&VITA30, &VITA60, &CINEMATIC];
@@ -228,11 +232,15 @@ impl Governor {
 
     /// `frame_ms`: smoothed frame time; `gpu_ms`: this frame's GPU time, or
     /// None when it did not finish before the refresh it was due at.
-    /// Returns true when it climbed to a new boost level (its targets must
-    /// be made).
-    pub fn feedback(&mut self, profile: &Profile, frame_ms: f32, gpu_ms: Option<f32>, raw_ms: f32) -> bool {
+    /// `boost`: whether resolution boosts are allowed (not with a fixed
+    /// resolution). Returns true when it climbed to a new boost level (its
+    /// targets must be made).
+    pub fn feedback(&mut self, profile: &Profile, frame_ms: f32, gpu_ms: Option<f32>, raw_ms: f32, boost: bool) -> bool {
         if self.hold {
             return false;
+        }
+        if !boost {
+            self.boost = 0;
         }
         let g = gpu_ms.unwrap_or(profile.budget_ms);
         self.gpu_ms = if self.gpu_ms == 0.0 { g } else { self.gpu_ms * 0.9 + g * 0.1 };
@@ -253,7 +261,7 @@ impl Governor {
         } else {
             self.boost_held = 0;
         }
-        if self.step == 0 && self.boost < profile.boost.len().min(self.boost_cap) && self.boost_held >= self.boost_wait && gpu_ms.is_some() {
+        if boost && self.step == 0 && self.boost < profile.boost.len().min(self.boost_cap) && self.boost_held >= self.boost_wait && gpu_ms.is_some() {
             let (from, to) = (self.level(profile), profile.boost[self.boost]);
             let predicted = self.gpu_ms * (1.0 + 0.35 * (pixels(to) / pixels(from) - 1.0));
             if predicted <= profile.budget_ms * 0.8 {

@@ -374,9 +374,4 @@ export class Kits {
     this.m.clear();
     return tris;
   }
-
-  /** Triangles per material so far (for the budget log). */
-  tally(): string {
-    return [...this.m].map(([mat, k]) => `${mat.name.replace("griffith-", "")} ${k.triangles}`).join(", ");
-  }
 }

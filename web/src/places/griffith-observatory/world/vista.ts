@@ -4,7 +4,7 @@ import { buildLightField, type LightFieldOptions, type LightSet } from "../../sh
 import type { GriffithWorld } from "./context";
 import { HAZE } from "./haze";
 import { LOOP } from "./layout";
-import { CITY_COUNTS, cityLightSets } from "./vista/city";
+import { cityLightSets } from "./vista/city";
 import { buildLandmarks } from "./vista/landmarks";
 import { buildPlants } from "./vista/plants";
 import { buildTerrainGeometry } from "./vista/terrain";
@@ -36,23 +36,16 @@ export function addLights(w: GriffithWorld, set: LightSet, opts: LightFieldOptio
 }
 
 export function buildVista(w: GriffithWorld): void {
-  const t0 = performance.now();
-  const { geometry, stats } = buildTerrainGeometry();
+  const { geometry } = buildTerrainGeometry();
   const ground = new MeshStandardMaterial({ name: "vista-ground", vertexColors: true, roughness: 1, metalness: 0 });
   const mesh = w.mesh(geometry, ground, 0, 0, 0, w.root, { cast: false, receive: false });
   mesh.name = "vista-terrain";
-  console.info(`[griffith] vista terrain: ${stats.tiles} tiles (${stats.hidden} hidden, viewshed ${stats.viewshedMs} ms), ${stats.triangles} triangles + ${stats.skirts} skirt + ${stats.ring} ring, by distance ${stats.bands.join("/")}, ${Math.round(performance.now() - t0)} ms`);
 
-  const t1 = performance.now();
   const landmarks = buildLandmarks(w);
   addLights(w, landmarks.beacons);
-  console.info(`[griffith] vista landmarks: ${landmarks.triangles} triangles, ${landmarks.beacons.count} beacon / work lights, ${Math.round(performance.now() - t1)} ms`);
 
-  const t2 = performance.now();
-  const plants = buildPlants(w);
-  console.info(`[griffith] vista plants: ${plants.trees} trees, ${plants.shrubs} shrubs, ${plants.triangles} triangles, ${Math.round(performance.now() - t2)} ms`);
+  buildPlants(w);
 
   // The static carpet's gain is set against p09: the Terrace carpet's mean reads ~(42, 40, 46).
   for (const set of cityLightSets()) addLights(w, set, set.name === "city" ? { ...VISTA_LIGHTS, gain: CARPET_GAIN } : VISTA_LIGHTS);
-  console.info(`[griffith] vista lights: ${CITY_COUNTS.static} static, ${CITY_COUNTS.signals} signal heads, ${CITY_COUNTS.moving} moving`);
 }

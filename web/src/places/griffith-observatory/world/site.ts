@@ -208,7 +208,6 @@ export function buildSite(w: GriffithWorld, lib: ObsLib): void {
   geo.computeBoundingSphere();
   const m = w.mesh(geo, lib.hillside(), 0, 0, 0, w.root, { cast: false });
   m.name = "site-ground";
-  console.info(`[griffith] site ground: RTIN ${idx.length / 3} triangles, ${pos.length / 3} vertices`);
 }
 
 /** Cover class at (x, z): the ortho-derived map, open chaparral outside it. */
@@ -283,7 +282,6 @@ export function buildPlanting(w: GriffithWorld, lib: ObsLib): number {
     }
   footPlanting(K, lib, r);
   const tris = K.emit(w);
-  console.info(`[griffith] site planting: ${tris} triangles, ${detailed} near trees as leaf clusters`);
   return tris;
 }
 

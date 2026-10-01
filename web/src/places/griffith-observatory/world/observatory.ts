@@ -15,7 +15,6 @@ import { buildPlanting, buildSite } from "./site";
  * (`observatory/plan.ts`); floodlights are real lights the cooker bakes.
  */
 export function buildObservatory(w: GriffithWorld): void {
-  const t0 = performance.now();
   const lib = new ObsLib(w.baker, w.quality);
   lib.bakeAll();
   w.updaters.push((_dt, t) => {
@@ -25,11 +24,9 @@ export function buildObservatory(w: GriffithWorld): void {
   const { piers } = buildBlock(K, lib);
   const drum = buildDrum(K, lib);
   const domes = buildDomes(K, lib);
-  const lights = buildFloodlights(w, lib, K, { piers, drum, domes });
-  console.info(`[griffith] building by material: ${K.tally()}`);
-  const tris = K.emit(w);
-  const g = buildGrounds(w, lib);
+  buildFloodlights(w, lib, K, { piers, drum, domes });
+  K.emit(w);
+  buildGrounds(w, lib);
   buildSite(w, lib);
-  const plants = buildPlanting(w, lib);
-  console.info(`[griffith] observatory: ${tris} triangles, ${lights} floodlights; grounds ${g.triangles} triangles, ${g.lights} lamps; planting ${plants} triangles; ${lib.count} materials, ${Math.round(performance.now() - t0)} ms`);
+  buildPlanting(w, lib);
 }

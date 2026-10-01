@@ -205,8 +205,7 @@ export class GriffithStage extends PlaceStage<GriffithWorld, GriffithAudio> {
     const stats = batchStatic(world.root);
     console.info(`[griffith] batched ${stats.before} meshes into ${stats.after}`);
     this.scene.add(world.root);
-    const hazed = HAZE.apply(this.scene);
-    console.info(`[griffith] haze on ${hazed} materials`);
+    HAZE.apply(this.scene);
 
     await progress(0.88, "Capturing the terrace");
     // The probe hangs over the lawn in front of the façade: the sky, the lit

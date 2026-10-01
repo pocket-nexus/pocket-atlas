@@ -1120,7 +1120,8 @@ impl Renderer {
     /// Render thread, outside any scene.
     pub unsafe fn feedback(&mut self, frame_ms: f32, gpu_ms: Option<f32>, raw_ms: f32) {
         let p = self.profile;
-        if self.governor.feedback(p, frame_ms, gpu_ms, raw_ms) && (self.settings.scale as usize) >= SCALES.len() {
+        let free = (self.settings.scale as usize) >= SCALES.len();
+        if self.governor.feedback(p, frame_ms, gpu_ms, raw_ms, free) {
             let level = self.governor.level(p);
             if self.ensure_level(level).is_err() {
                 self.governor.boost -= 1;

@@ -239,7 +239,6 @@ export function buildGrounds(w: GriffithWorld, lib: ObsLib): { triangles: number
   lights += yard(w, K, lib);
   roadDetail(K, lib);
   outbuildings(K, lib);
-  console.info(`[griffith] grounds by material: ${K.tally()}`);
   const triangles = K.emit(w);
   return { triangles, lights };
 }
