@@ -35,6 +35,7 @@ const CLOUD_SIZE = 1024;
 
 const CLOUD_BAKE = /* glsl */ `
 uniform vec3 uSun;
+uniform float uCoverage;
 #define PI 3.14159265
 const float RE = 6371000.0;
 const float CB = 1400.0;
@@ -75,7 +76,7 @@ float cloudShape(vec3 p, float alt, out float hL) {
     vec2 site = o + hash22(bc) - f;
     if (dot(site, site) > 0.85) continue;
     vec3 hc = hash32(bc + 11.0);
-    if (hc.x > 0.6) continue;
+    if (hc.x > uCoverage) continue;
     vec2 rel = -site * CELL;
     float rb = CELL * (0.12 + 0.2 * hc.y);
     float tall = 0.45 + 0.75 * hc.z;
@@ -186,11 +187,15 @@ const CLOUD_BODY = /* glsl */ `
   outColor = vec4((1.0 - T) * haze, clamp(sunAcc * haze / ${SKY.sunScale.toFixed(1)}, 0.0, 1.0), clamp(ambAcc * haze, 0.0, 1.0), 1.0);
 `;
 
-/** Bakes the cumulus panorama for a sun direction (unit vector toward the sun). */
-export function bakeClouds(baker: Baker, sun: Vector3): Texture {
+/**
+ * Bakes the cumulus panorama for a sun direction (unit vector toward the
+ * sun). `coverage` is the share of cloud cells that hold a cloud (0.6 over
+ * Yotsuya; other places pass their own).
+ */
+export function bakeClouds(baker: Baker, sun: Vector3, opts: { coverage?: number } = {}): Texture {
   const tex = baker.bake(CLOUD_SIZE, CLOUD_SIZE, CLOUD_BODY, {
     header: CLOUD_BAKE,
-    uniforms: { uSun: { value: sun.clone() } },
+    uniforms: { uSun: { value: sun.clone() }, uCoverage: { value: opts.coverage ?? 0.6 } },
     mipmaps: false,
     repeat: false,
     tiles: 16,
