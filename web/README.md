@@ -40,6 +40,7 @@ Requires WebGL 2. Tested in Chrome on Apple silicon (ANGLE / Metal).
 | --- | --- |
 | `#/place/<id>` | open a place directly (`#/place/tokyo-konbini`, `#/place/suga-shrine-stairs`) |
 | `?q=low\|medium\|high\|ultra` | force a quality preset (otherwise picked from the GPU, persisted when changed in the UI) |
+| `?geometry=full\|handheld` | daytime authoring density for train, railway and foliage; defaults to full, independent of lighting quality |
 | `?shot` | capture mode: no UI, no intro, muted |
 | `?cam=Konbini\|Puddles\|Vending\|Crossing\|Inside\|Wires` | start at a named shot (konbini) |
 | `?cam=Crossing\|Blossom\|Tracks\|Train\|Lane\|Spring` | start at a named shot (Sangubashi in Bloom) |
@@ -245,7 +246,8 @@ and foliage helpers. It uses the common `PlaceStage` lifecycle, sky baker
 and post chain; Suga also reuses its materials, geometry and foliage. Its reusable tree builder grows tapered limbs
 and alpha-tested branch sprays; a seeded canvas atlas draws each cherry
 flower with five notched petals and stamens. Instanced curved petals settle
-in gutters or drift in the breeze. Spring audio is synthesised wind, city
+in gutters; ordinary 24-joint skin batches carry the windborne petals through
+the glTF animation path. Spring audio is synthesised wind, city
 hum and occasional birds, with a timed crossing bell and wheel rumble.
 
 An eight-car, photo-based Odakyu 1000-series local passes every 64 seconds.
@@ -258,8 +260,9 @@ the shared daylight shadow map near the crossing. Start at
 `/?q=high&cam=Train&t=16#/place/sangubashi-crossing` to review the arrival.
 
 See [the place notes](src/places/sangubashi-crossing/README.md) for real-location
-references and reconstruction limits. This is the Three.js reference for
-visual acceptance; no Vita build, shader compile or device timing is claimed.
+references, reconstruction limits and the offline Vita export/build workflow.
+The handheld geometry profile and cooked packs have host validation; device
+shader compilation, GPU timing and physical screen acceptance remain pending.
 
 ## Layout
 

@@ -98,6 +98,7 @@ pub enum U {
     Wave,
     WaterK,
     WaterShallow,
+    MovingShadowK,
     Count,
 }
 
@@ -111,6 +112,7 @@ const UNIFORM_NAMES: [&str; U::Count as usize] = [
     "uRect", "uLocal", "uTexRect", "uShape", "uFill", "uFill2", "uStroke", "uStrokeW",
     "uTwBand", "uTwBelt", "uTwShape", "uTwShadow",
     "uWave", "uWaterK", "uWaterShallow",
+    "uMovingShadowK",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,12 +141,14 @@ pub enum S {
     Inscatter,
     Transmit,
     Shadow,
+    MovingShadow,
     Count,
 }
 
 const SAMPLER_NAMES: [&str; S::Count as usize] = [
     "uAlbedo", "uNormalMap", "uOrm", "uEmission", "uEnv", "uPuddles", "uRipples", "uReflSharp", "uReflBlur", "uBeads", "uClouds",
     "uScene", "uHazeTex", "uBloom", "uSource", "uSupport", "uLut", "uMask", "uGrain", "uLights", "uInscatter", "uTransmit", "uShadow",
+    "uMovingShadow",
 ];
 
 pub type Param = *const g::SceGxmProgramParameter;

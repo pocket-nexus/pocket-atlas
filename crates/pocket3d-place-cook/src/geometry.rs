@@ -1,6 +1,6 @@
 //! Triangle soup → quantized, chunked, indexed draws.
 
-use glam::{Vec2, Vec3};
+use glam::{Mat3, Mat4, Vec2, Vec3};
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -97,6 +97,60 @@ fn u16_indices(tris: &[[u32; 3]]) -> Vec<u8> {
     idx
 }
 
+/// Index triangle soup without crossing shading or deformation seams. Use
+/// every attribute, including the full tangent frame and joint influences:
+/// position/normal/UV equality alone is not enough for normal-mapped or
+/// skinned meshes. Unreferenced vertices are removed at the same time.
+pub fn weld(verts: &[Vertex], tris: &[[u32; 3]]) -> (Vec<Vertex>, Vec<[u32; 3]>) {
+    let mut map: HashMap<[u32; 16], u32> = HashMap::new();
+    let mut unique = Vec::new();
+    let remapped = tris
+        .iter()
+        .map(|tri| {
+            tri.map(|i| {
+                let v = verts[i as usize];
+                let key = [
+                    v.pos.x.to_bits(), v.pos.y.to_bits(), v.pos.z.to_bits(),
+                    v.normal.x.to_bits(), v.normal.y.to_bits(), v.normal.z.to_bits(),
+                    v.tangent[0].to_bits(), v.tangent[1].to_bits(), v.tangent[2].to_bits(), v.tangent[3].to_bits(),
+                    v.uv.x.to_bits(), v.uv.y.to_bits(),
+                    u32::from_le_bytes(v.color), u32::from_le_bytes(v.joints),
+                    u32::from_le_bytes(v.weights), u32::from_le_bytes(v.light),
+                ];
+                *map.entry(key).or_insert_with(|| {
+                    unique.push(v);
+                    (unique.len() - 1) as u32
+                })
+            })
+        })
+        .collect();
+    (unique, remapped)
+}
+
+/// Upper bound on local-to-world distance magnification. The maximum row
+/// sum of AᵀA bounds its largest eigenvalue: exact for rigid/uniform scale,
+/// conservative for shear from nested non-uniformly scaled nodes.
+pub fn error_scale(world: Mat4) -> f32 {
+    let a = Mat3::from_mat4(world);
+    let gram = (a.transpose() * a).to_cols_array_2d();
+    (0..3).map(|r| (0..3).map(|c| gram[c][r].abs()).sum::<f32>()).fold(0.0, f32::max).sqrt().max(1e-6)
+}
+
+/// A position shared by distinct solid-palette surfaces is a material seam.
+/// Lock both sides before simplification, so edge collapse cannot introduce
+/// triangles interpolating between different paint or reflectance values.
+pub fn palette_locks(verts: &[Vertex]) -> Vec<bool> {
+    let position = |p: Vec3| [p.x, p.y, p.z].map(|v| if v == 0.0 { 0 } else { v.to_bits() });
+    let mut first = HashMap::new();
+    let mut seams = std::collections::HashSet::new();
+    for v in verts {
+        let key = position(v.pos);
+        let surface = [v.uv.x.to_bits(), v.uv.y.to_bits(), u32::from_le_bytes(v.color)];
+        if *first.entry(key).or_insert(surface) != surface { seams.insert(key); }
+    }
+    verts.iter().map(|v| seams.contains(&position(v.pos))).collect()
+}
+
 /// Simplified index list over `verts` for distant draws: shading attributes
 /// (normal, baked light, vertex colour, UV) weigh into the error, borders
 /// between chunks stay locked. `None` when it removes less than a third.
@@ -104,7 +158,7 @@ fn u16_indices(tris: &[[u32; 3]]) -> Vec<u8> {
 /// most `max_error` (m) off. `locked` vertices stay where they are (edges
 /// shared with a neighbouring chunk, so chunks stay sealed); open borders of
 /// the mesh itself (tube ends, rails) may simplify. None if nothing goes.
-pub fn simplify(verts: &[Vertex], tris: &[[u32; 3]], keep: f32, max_error: f32, locked: &[bool]) -> Option<(Vec<[u32; 3]>, f32)> {
+pub fn simplify(verts: &[Vertex], tris: &[[u32; 3]], keep: f32, max_error: f32, locked: &[bool], uv_weight: f32) -> Option<(Vec<[u32; 3]>, f32)> {
     if tris.len() < 64 {
         return None;
     }
@@ -121,7 +175,7 @@ pub fn simplify(verts: &[Vertex], tris: &[[u32; 3]], keep: f32, max_error: f32, 
             [v.normal.x, v.normal.y, v.normal.z, lum, c[0], c[1], c[2], v.uv.x, v.uv.y]
         })
         .collect();
-    let weights = [0.4, 0.4, 0.4, 2.0, 0.5, 0.5, 0.5, 0.02, 0.02];
+    let weights = [0.4, 0.4, 0.4, 2.0, 0.5, 0.5, 0.5, uv_weight, uv_weight];
     let flat: Vec<u32> = tris.iter().flatten().copied().collect();
     let mut err = 0.0f32;
     let out = meshopt::simplify_with_attributes_and_locks(
@@ -183,12 +237,29 @@ pub fn build(verts: &[Vertex], tris: &[[u32; 3]], layout: pocket3d_place::Vertex
             out.extend(v.weights);
         }
     }
+    // Quantization makes some distinct source floats identical on the GPU
+    // (notably tangents recomputed independently for triangle soup). Dedup
+    // the complete packed record only after its bounds are fixed, so this
+    // step changes neither decoded attributes nor quantization precision.
+    let mut unique: HashMap<&[u8], u32> = HashMap::new();
+    let mut packed = Vec::with_capacity(out.len());
+    let remap: Vec<u32> = out.chunks_exact(stride).map(|bytes| {
+        *unique.entry(bytes).or_insert_with(|| {
+            let i = (packed.len() / stride) as u32;
+            packed.extend_from_slice(bytes);
+            i
+        })
+    }).collect();
+    let remap_tris = |ts: &[[u32; 3]]| -> Vec<[u32; 3]> {
+        ts.iter().map(|t| t.map(|i| remap[i as usize])).collect()
+    };
+    let vertex_count = (packed.len() / stride) as u32;
     Built {
-        vertices: out,
-        indices: u16_indices(&cache_order(tris, verts.len())),
-        vertex_count: verts.len() as u32,
+        vertices: packed,
+        indices: u16_indices(&cache_order(&remap_tris(tris), vertex_count as usize)),
+        vertex_count,
         index_count: (tris.len() * 3) as u32,
-        lods: lods.into_iter().map(|(t, e)| (u16_indices(&t), (t.len() * 3) as u32, e)).collect(),
+        lods: lods.into_iter().map(|(t, e)| (u16_indices(&cache_order(&remap_tris(&t), vertex_count as usize)), (t.len() * 3) as u32, e)).collect(),
         pos_offset: center.to_array(),
         pos_scale: half.to_array(),
         uv_offset: uvc.to_array(),
@@ -270,20 +341,25 @@ fn part_widths(verts: &[Vertex], tris: &[[u32; 3]]) -> Vec<f32> {
         .collect()
 }
 
-/// LOD1 (≤ 6 cm off) and LOD2 (≤ 25 cm off), nested so each level only
+/// LODs at the requested metre error bounds, nested so each level only
 /// removes triangles: with `drop_parts`, parts narrower than the level's
 /// error go (window bars, rails, small boxes, which no edge collapse can
 /// reduce), then the rest simplifies to 40 % of the level above. A level is kept when it has
 /// at most two thirds of the triangles of the level above (a draw may have
 /// only the coarse one).
-pub fn lods(verts: &[Vertex], tris: &[[u32; 3]], locked: &[bool], drop_parts: bool) -> Vec<(Vec<[u32; 3]>, f32)> {
+/// Skinned meshes keep their topology: the simplifier's error metric does
+/// not include joint weights and cannot bound error after deformation.
+pub fn lods(verts: &[Vertex], tris: &[[u32; 3]], layout: pocket3d_place::VertexLayout, locked: &[bool], drop_parts: bool, bounds: &[f32], uv_weight: f32) -> Vec<(Vec<[u32; 3]>, f32)> {
+    if layout == pocket3d_place::VertexLayout::Skinned {
+        return Vec::new();
+    }
     let widths = if drop_parts { part_widths(verts, tris) } else { vec![f32::MAX; verts.len()] };
     let mut out: Vec<(Vec<[u32; 3]>, f32)> = Vec::new();
     let (mut prev, mut prev_err) = (tris.to_vec(), 0.0f32);
-    for bound in [0.06f32, 0.25] {
+    for &bound in bounds {
         let kept: Vec<[u32; 3]> = prev.iter().filter(|t| widths[t[0] as usize] > bound).copied().collect();
         let mut err = if kept.len() < prev.len() { bound } else { prev_err };
-        let level = match simplify(verts, &kept, 0.4, bound - prev_err, locked) {
+        let level = match simplify(verts, &kept, 0.4, bound - prev_err, locked, uv_weight) {
             Some((l, e)) => {
                 err = err.max(prev_err + e);
                 l
@@ -481,4 +557,208 @@ pub fn product_card(src: &[Vertex]) -> (Vec<Vertex>, Vec<[u32; 3]>) {
         verts.extend([vtx(a, side, 0.0, 0.0), vtx(b, side, 1.0, 0.0), vtx(b, side, 1.0, 1.0), vtx(a, side, 0.0, 1.0)]);
     }
     (verts, vec![[0, 1, 2], [0, 2, 3], [4, 6, 5], [4, 7, 6]])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pocket3d_place::VertexLayout;
+
+    fn vertex(pos: Vec3) -> Vertex {
+        Vertex {
+            pos,
+            normal: Vec3::Y,
+            tangent: [1.0, 0.0, 0.0, 1.0],
+            color: [255; 4],
+            weights: [255, 0, 0, 0],
+            ..Vertex::default()
+        }
+    }
+
+    #[test]
+    fn weld_indexes_triangle_soup_without_changing_packed_vertices() {
+        let (a, b, c) = (vertex(Vec3::ZERO), vertex(Vec3::X), vertex(Vec3::Z));
+        let input = [a, b, c, a, b, c, vertex(Vec3::splat(100.0))];
+        let tris = [[0, 1, 2], [3, 4, 5]];
+        let (verts, indexed) = weld(&input, &tris);
+        assert_eq!(verts.len(), 3);
+        assert_eq!(indexed, [[0, 1, 2], [0, 1, 2]]);
+        // Across every packed layout, the indexed stream fetches exactly the
+        // bytes the original soup did. Ignore its unreferenced seventh vertex.
+        for layout in [VertexLayout::Static, VertexLayout::Baked, VertexLayout::Skinned] {
+            let old = build(&input[..6], &tris, layout, Vec::new());
+            let new = build(&verts, &indexed, layout, Vec::new());
+            let stride = layout.stride() as usize;
+            for (before, after) in old.indices.chunks_exact(2).zip(new.indices.chunks_exact(2)) {
+                let before = u16::from_le_bytes(before.try_into().unwrap()) as usize;
+                let after = u16::from_le_bytes(after.try_into().unwrap()) as usize;
+                assert_eq!(
+                    &old.vertices[before * stride..(before + 1) * stride],
+                    &new.vertices[after * stride..(after + 1) * stride],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn packed_weld_merges_only_gpu_identical_attributes_and_remaps_lods() {
+        let a = vertex(Vec3::ZERO);
+        let mut tangent_noise = a;
+        tangent_noise.tangent[2] = 0.000001;
+        let mut other_joint = a;
+        other_joint.joints[0] = 1;
+        let verts = [a, vertex(Vec3::X), vertex(Vec3::Z), tangent_noise, other_joint];
+        let tris = [[0, 1, 2], [3, 1, 2], [4, 1, 2]];
+        let b = build(&verts, &tris, VertexLayout::Skinned, vec![(vec![[3, 1, 2], [4, 1, 2]], 0.06)]);
+        assert_eq!(b.vertex_count, 4);
+        assert_eq!(b.index_count, 9);
+        let lod_indices: Vec<u16> = b.lods[0].0.chunks_exact(2).map(|i| u16::from_le_bytes(i.try_into().unwrap())).collect();
+        assert_eq!(lod_indices, [0, 1, 2, 3, 1, 2]);
+        // Joint index is the first byte following the 24-byte rigid layout.
+        assert_eq!(b.vertices[24], 0);
+        assert_eq!(b.vertices[3 * 32 + 24], 1);
+    }
+
+    #[test]
+    fn weld_preserves_shading_and_deformation_seams() {
+        let base = vertex(Vec3::ZERO);
+        let mut variants = vec![base];
+        for axis in 0..3 {
+            let mut v = base; v.pos[axis] += 0.25; variants.push(v);
+            let mut v = base; v.normal[axis] += 0.25; variants.push(v);
+        }
+        for axis in 0..4 {
+            let mut v = base; v.tangent[axis] += 0.25; variants.push(v);
+            let mut v = base; v.color[axis] -= 1; variants.push(v);
+            let mut v = base; v.joints[axis] += 1; variants.push(v);
+            let mut v = base; v.weights[axis] ^= 1; variants.push(v);
+            let mut v = base; v.light[axis] += 1; variants.push(v);
+        }
+        for axis in 0..2 {
+            let mut v = base; v.uv[axis] += 0.25; variants.push(v);
+        }
+        let tris: Vec<[u32; 3]> = (0..variants.len() as u32).map(|i| [0, i, 0]).collect();
+        let (verts, indexed) = weld(&variants, &tris);
+        assert_eq!(verts.len(), variants.len());
+        assert_eq!(indexed, tris);
+    }
+
+    fn boxes() -> (Vec<Vertex>, Vec<[u32; 3]>) {
+        let mut verts = Vec::new();
+        let mut tris = Vec::new();
+        for (i, width) in [0.02f32, 0.12, 2.0].into_iter().enumerate() {
+            let base = verts.len() as u32;
+            for p in [[0., 0., 0.], [1., 0., 0.], [0., 1., 0.], [1., 1., 0.], [0., 0., 1.], [1., 0., 1.], [0., 1., 1.], [1., 1., 1.]] {
+                verts.push(vertex(Vec3::from(p) * width + Vec3::X * i as f32 * 3.0));
+            }
+            for tri in [[0, 1, 2], [1, 3, 2], [4, 6, 5], [5, 6, 7], [0, 4, 1], [1, 4, 5], [2, 3, 6], [3, 7, 6], [0, 2, 4], [2, 6, 4], [1, 5, 3], [3, 5, 7]] {
+                tris.push(tri.map(|n| n + base));
+            }
+        }
+        (verts, tris)
+    }
+
+    #[test]
+    fn rigid_lods_drop_only_parts_below_the_declared_error() {
+        let (verts, tris) = boxes();
+        for layout in [VertexLayout::Static, VertexLayout::Baked] {
+            let levels = lods(&verts, &tris, layout, &[false; 24], true, &[0.06, 0.25], 0.02);
+            assert_eq!(levels.len(), 2);
+            assert_eq!(levels[0].0.len(), 24);
+            assert_eq!(levels[0].1, 0.06);
+            assert!(levels[0].0.iter().flatten().all(|&i| i >= 8));
+            assert_eq!(levels[1].0.len(), 12);
+            assert_eq!(levels[1].1, 0.25);
+            assert!(levels[1].0.iter().flatten().all(|&i| i >= 16));
+            // Emissive/sign geometry uses the same path with part removal off.
+            assert!(lods(&verts, &tris, layout, &[false; 24], false, &[0.06, 0.25], 0.02).is_empty());
+        }
+    }
+
+    #[test]
+    fn skinning_never_uses_rigid_topology_simplification() {
+        let (mut verts, tris) = boxes();
+        for (i, v) in verts.iter_mut().enumerate() {
+            v.joints[0] = (i / 8) as u8;
+        }
+        for drop_parts in [false, true] {
+            assert!(lods(&verts, &tris, VertexLayout::Skinned, &[false; 24], drop_parts, &[0.01, 0.025, 0.06, 0.25], 0.02).is_empty());
+        }
+    }
+
+    #[test]
+    fn simplification_locks_chunk_edges_and_bounds_redundant_tessellation() {
+        let mut verts = Vec::new();
+        let mut tris = Vec::new();
+        let mut locked = Vec::new();
+        for z in 0..=10 {
+            for x in 0..=10 {
+                verts.push(vertex(Vec3::new(x as f32 * 0.1, 0.0, z as f32 * 0.1)));
+                locked.push(x == 0 || x == 10 || z == 0 || z == 10);
+            }
+        }
+        for z in 0..10u32 {
+            for x in 0..10u32 {
+                let a = z * 11 + x;
+                tris.extend([[a, a + 11, a + 1], [a + 1, a + 11, a + 12]]);
+            }
+        }
+        let (reduced, error) = simplify(&verts, &tris, 0.4, 0.004, &locked, 0.02).unwrap();
+        assert!(reduced.len() < tris.len());
+        assert!(error <= 0.004);
+        for (i, is_locked) in locked.into_iter().enumerate() {
+            if is_locked { assert!(reduced.iter().flatten().any(|&index| index as usize == i)); }
+        }
+    }
+
+    #[test]
+    fn moving_error_bound_accounts_for_scale_and_nested_shear() {
+        let rotation = Mat4::from_rotation_y(0.31);
+        assert!((error_scale(rotation) - 1.0).abs() < 1e-6);
+        let scaled = rotation * Mat4::from_scale(Vec3::new(2.0, 3.0, 0.5));
+        assert!((error_scale(scaled) - 3.0).abs() < 1e-6);
+        let sheared = Mat4::from_scale(Vec3::new(2.0, 1.0, 0.5)) * rotation;
+        let bound = error_scale(sheared);
+        for i in 0..360 {
+            let angle = i as f32 * std::f32::consts::PI / 180.0;
+            let direction = Vec3::new(angle.cos(), 0.2, angle.sin()).normalize();
+            assert!(sheared.transform_vector3(direction).length() <= bound + 1e-6);
+        }
+    }
+
+    #[test]
+    fn palette_simplification_locks_both_sides_of_a_shared_position_seam() {
+        let mut verts = Vec::new();
+        let mut tris = Vec::new();
+        for side in 0..2u32 {
+            let base = verts.len() as u32;
+            for z in 0..=10 {
+                for x in 0..=10 {
+                    let mut v = vertex(Vec3::new(side as f32 + x as f32 * 0.1, 0.0, z as f32 * 0.1));
+                    v.uv = if side == 0 { Vec2::new(0.1, 1.0) } else { Vec2::new(0.9, 0.0) };
+                    v.color = if side == 0 { [240, 160, 80, 255] } else { [80, 160, 240, 255] };
+                    verts.push(v);
+                }
+            }
+            for z in 0..10u32 {
+                for x in 0..10u32 {
+                    let a = base + z * 11 + x;
+                    tris.extend([[a, a + 11, a + 1], [a + 1, a + 11, a + 12]]);
+                }
+            }
+        }
+        let locks = palette_locks(&verts);
+        assert_eq!(locks.iter().filter(|&&v| v).count(), 22);
+        let (reduced, _) = simplify(&verts, &tris, 0.1, 0.25, &locks, 0.5).unwrap();
+        for (i, &locked) in locks.iter().enumerate() {
+            if locked { assert!(reduced.iter().flatten().any(|&j| j as usize == i)); }
+        }
+        for tri in reduced {
+            let a = verts[tri[0] as usize];
+            for i in tri {
+                assert_eq!(verts[i as usize].uv, a.uv);
+                assert_eq!(verts[i as usize].color, a.color);
+            }
+        }
+    }
 }

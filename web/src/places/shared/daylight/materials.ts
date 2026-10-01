@@ -2,6 +2,7 @@ import { Color, DoubleSide, MeshBasicMaterial, MeshStandardMaterial, Vector2, ty
 import type { Quality } from "../../../core/quality";
 import type { Baker, SurfaceMaps } from "../bake";
 import * as SURF from "./surfaces";
+import { glassMaterial } from "../glass";
 
 export type Tint = [number, number, number];
 
@@ -207,7 +208,7 @@ export class DayLib {
 
   /** Thin railway glazing: real openings and interior geometry behind the reflection. */
   clearGlass(): MeshStandardMaterial {
-    return this.memo("clear-glass", () => new MeshStandardMaterial({
+    return this.memo("clear-glass", () => glassMaterial({
       color: 0x708f91, roughness: 0.13, metalness: 0.18,
       transparent: true, opacity: 0.24, depthWrite: false, side: DoubleSide,
       envMapIntensity: 0.85,

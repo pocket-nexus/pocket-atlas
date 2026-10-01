@@ -1,4 +1,4 @@
-import { CubeCamera, HalfFloatType, PMREMGenerator, Scene, Vector3, WebGLCubeRenderTarget, type DirectionalLight, type FogExp2, type InstancedMesh, type Mesh, type PerspectiveCamera, type Texture, type WebGLRenderTarget } from "three";
+import { CubeCamera, HalfFloatType, PMREMGenerator, Scene, Vector3, WebGLCubeRenderTarget, type DirectionalLight, type FogExp2, type InstancedMesh, type Mesh, type PerspectiveCamera, type Skeleton, type SkinnedMesh, type Texture, type WebGLRenderTarget } from "three";
 import type { PlaceDef, Stage, StageContext } from "../../core/types";
 import type { Baker } from "./bake";
 import { CameraRig, type Box6, type Shot, type ShotKey } from "./camera";
@@ -229,10 +229,12 @@ export abstract class PlaceStage<W extends ExportWorld = ExportWorld, A extends 
     this.baker.dispose();
     this.envTarget?.dispose();
     this.envCube?.dispose();
+    const skeletons = new Set<Skeleton>();
     this.scene.traverse((o) => {
       const m = o as Mesh;
       if (m.isMesh) {
         if ((m as InstancedMesh).isInstancedMesh) (m as InstancedMesh).dispose();
+        if ((m as SkinnedMesh).isSkinnedMesh) skeletons.add((m as SkinnedMesh).skeleton);
         m.geometry.dispose();
         const mats = Array.isArray(m.material) ? m.material : [m.material];
         for (const mat of mats) {
@@ -241,6 +243,7 @@ export abstract class PlaceStage<W extends ExportWorld = ExportWorld, A extends 
         }
       }
     });
+    for (const skeleton of skeletons) skeleton.dispose();
     this.sun?.shadow.map?.dispose();
     const w = window as unknown as { pocketAtlasExport?: unknown };
     if (w.pocketAtlasExport === this.exportHook) delete w.pocketAtlasExport;

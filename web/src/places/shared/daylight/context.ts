@@ -1,5 +1,6 @@
 import { Group, Mesh, Vector3, type BufferGeometry, type Material, type Object3D } from "three";
 import type { Quality } from "../../../core/quality";
+import type { GeometryProfile } from "../../../core/params";
 import { Rng } from "../../../core/random";
 import type { Atlas, AtlasRect } from "../atlas";
 import type { Ctx } from "../canvas";
@@ -26,7 +27,7 @@ export class DayWorld {
   readonly printed: Material;
   readonly lit: Material;
 
-  constructor(lib: DayLib, atlas: Atlas, quality: Quality, seed: number) {
+  constructor(lib: DayLib, atlas: Atlas, quality: Quality, seed: number, readonly geometry: GeometryProfile = "full") {
     this.lib = lib;
     this.atlas = atlas;
     this.quality = quality;

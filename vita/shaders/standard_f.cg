@@ -5,7 +5,8 @@
 // opacity there instead (the blend keeps the destination's distance).
 //
 // Defines: LIGHTS (0..4), ALBEDO_MAP, NORMAL_MAP, ORM_MAP, EMISSION_MAP,
-// VERTEX_COLOR, ALPHA_TEST, BLEND (alpha-blended), WET, PLANAR, DAMP,
+// VERTEX_COLOR, VERTEX_PBR (solid roughness/metalness in UV), ALPHA_TEST,
+// BLEND (alpha-blended), WET, PLANAR, DAMP,
 // CLEARCOAT, INTERIOR, FOG,
 // REFLECTION (mirror pass: cheaper film, no planar lookup), BAKED (static
 // diffuse lighting from the vertices; LIGHTS then counts moving lights only),
@@ -64,6 +65,10 @@ uniform float4 uSunDir;    // direction towards the sun, -
 uniform float4 uSunRad;    // radiance (colour × intensity), normal offset (m)
 uniform float4 uSunMat[2]; // world → shadow-map uv
 uniform float4 uShadowK;   // near-plane distance along the light, 1 / range, bias, map size (texels)
+#ifdef MOVING_SHADOW
+uniform sampler2D uMovingShadow;
+uniform float4 uMovingShadowK; // same depth range and UV projection, smaller moving map
+#endif
 
 // Packed distance along the light (shadow_f.cg).
 float shadowDepth(float2 uv)
@@ -77,16 +82,36 @@ float shadowDepth(float2 uv)
 float sunLit(float3 sp)
 {
     float4 wp = float4(sp, 1.0);
-    float2 t = float2(dot(uSunMat[0], wp), dot(uSunMat[1], wp)) * uShadowK.w - 0.5;
+    float2 mapUv = float2(dot(uSunMat[0], wp), dot(uSunMat[1], wp));
+    if (mapUv.x < 0.0 || mapUv.y < 0.0 || mapUv.x > 1.0 || mapUv.y > 1.0) return 1.0;
+    float2 t = mapUv * uShadowK.w - 0.5;
     float2 f = frac(t);
     float2 uv = (t - f + 0.5) / uShadowK.w;
     float o = 1.0 / uShadowK.w;
     float d = (-dot(uSunDir.xyz, sp) - uShadowK.x) * uShadowK.y - uShadowK.z;
-    float s00 = step(d, shadowDepth(uv));
-    float s10 = step(d, shadowDepth(uv + float2(o, 0.0)));
-    float s01 = step(d, shadowDepth(uv + float2(0.0, o)));
-    float s11 = step(d, shadowDepth(uv + float2(o, o)));
-    return lerp(lerp(s00, s10, f.x), lerp(s01, s11, f.x), f.y);
+    float lit = 1.0;
+    float s00, s10, s01, s11;
+#ifndef FAR
+    s00 = step(d, shadowDepth(uv));
+    s10 = step(d, shadowDepth(uv + float2(o, 0.0)));
+    s01 = step(d, shadowDepth(uv + float2(0.0, o)));
+    s11 = step(d, shadowDepth(uv + float2(o, o)));
+    lit = lerp(lerp(s00, s10, f.x), lerp(s01, s11, f.x), f.y);
+#endif
+#ifdef MOVING_SHADOW
+    t = float2(dot(uSunMat[0], wp), dot(uSunMat[1], wp)) * uMovingShadowK.w - 0.5;
+    f = frac(t);
+    uv = (t - f + 0.5) / uMovingShadowK.w;
+    o = 1.0 / uMovingShadowK.w;
+    d = (-dot(uSunDir.xyz, sp) - uMovingShadowK.x) * uMovingShadowK.y - uMovingShadowK.z;
+    float3 decode = float3(1.0, 1.0 / 255.0, 1.0 / 65025.0);
+    s00 = step(d, dot(tex2D(uMovingShadow, uv).rgb, decode));
+    s10 = step(d, dot(tex2D(uMovingShadow, uv + float2(o, 0.0)).rgb, decode));
+    s01 = step(d, dot(tex2D(uMovingShadow, uv + float2(0.0, o)).rgb, decode));
+    s11 = step(d, dot(tex2D(uMovingShadow, uv + float2(o, o)).rgb, decode));
+    lit = min(lit, lerp(lerp(s00, s10, f.x), lerp(s01, s11, f.x), f.y));
+#endif
+    return lit;
 }
 #endif
 #if LIGHTS > 0
@@ -186,6 +211,12 @@ half4 main(
 #endif
     half roughness = (half)uPbr.x;
     half metalness = (half)uPbr.y;
+#ifdef VERTEX_PBR
+    // Solid-material batches carry each surface's constants through UVs.
+    // Keep them in FAR/LITE too: their values are not a texture average.
+    roughness = (half)saturate(vUv.x);
+    metalness = (half)saturate(vUv.y);
+#endif
 #ifdef ORM_MAP
     half3 orm = tex2D(uOrm, vUv).rgb;
     roughness *= orm.g;
@@ -305,7 +336,7 @@ half4 main(
 
 #ifdef SUN
     {
-#ifdef FAR
+#if defined(FAR) && !defined(MOVING_SHADOW)
         float lit = 1.0;
 #else
         // Offset along the geometric normal against self-shadowing acne.

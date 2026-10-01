@@ -217,7 +217,7 @@ struct Mat {
     water: Option<pc::Water>,
 }
 
-fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: bool) -> Mat {
+fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: bool, moving_shadow: bool) -> Mat {
     let orm_mean = if m.kind == pc::Kind::Standard { m.orm.map(|t| textures[t as usize].mean) } else { None };
     let mut defines: Vec<&'static str> = Vec::new();
     let mut tex = [None; 4];
@@ -236,6 +236,9 @@ fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: boo
         defines.push("ALBEDO_MAP");
     }
     if m.kind == pc::Kind::Standard {
+        if m.vertex_pbr {
+            defines.push("VERTEX_PBR");
+        }
         if let Some(t) = m.normal {
             tex[1] = Some(t as usize);
             defines.push("NORMAL_MAP");
@@ -265,6 +268,9 @@ fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: boo
         }
         if sun && !m.interior {
             defines.push("SUN");
+            if moving_shadow {
+                defines.push("MOVING_SHADOW");
+            }
             // The sun's highlight only shows on smooth or metallic surfaces.
             let rough = m.orm.map_or(m.roughness, |t| m.roughness * textures[t as usize].mean[1]);
             let metal = m.orm.map_or(m.metalness, |t| m.metalness * textures[t as usize].mean[2]);
@@ -546,10 +552,16 @@ struct SunPass {
     mat: [f32; 8],
     k: [f32; 4],
     ready: bool,
+    /// Rigid moving casters use a separate map; the streets stay cached.
+    moving: Option<(Target, g::SceGxmTexture)>,
+    moving_ready: bool,
+    moving_k: [f32; 4],
+    planes: [Vec4; 6],
+    moving_error: f32,
 }
 
 impl SunPass {
-    unsafe fn new(vram: &mut Arena, mem: &mut Arena, sun: &pc::Sun) -> Result<Self, String> {
+    unsafe fn new(vram: &mut Arena, mem: &mut Arena, sun: &pc::Sun, moving: bool) -> Result<Self, String> {
         let l = Vec3::from(sun.direction).normalize_or(Vec3::Y);
         let sh = sun.shadow.clone().unwrap_or(pc::SunShadow { position: (l * 80.0).to_array(), ortho: [-40.0, 40.0, -40.0, 40.0, 1.0, 160.0], map_size: 2048, bias: 0.0, normal_bias: 0.02, radius: 1.0 });
         let size = sh.map_size.clamp(512, 2048);
@@ -570,6 +582,13 @@ impl SunPass {
         let vrow = ry * -0.5 + rw * 0.5;
         let near = pos.dot(-l) + o[4];
         let range = (o[5] - o[4]).max(1.0);
+        let moving = if moving {
+            let target = Target::new(vram, mem, 512, 512, ColorFormat::Rgba8, Msaa::None, Depth::Transient)?;
+            let mut map = target.texture;
+            g::sceGxmTextureSetMinFilter(&mut map, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_POINT);
+            g::sceGxmTextureSetMagFilter(&mut map, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_POINT);
+            Some((target, map))
+        } else { None };
         Ok(Self {
             target,
             map,
@@ -580,6 +599,11 @@ impl SunPass {
             // Bias: the authored depth bias over the range, at least ~2 cm.
             k: [near, 1.0 / range, sh.bias.abs().max(0.02 / range), size as f32],
             ready: false,
+            moving,
+            moving_ready: false,
+            moving_k: [near, 1.0 / range, sh.bias.abs().max(0.04 / range), 512.0],
+            planes: [r.w_axis + r.x_axis, r.w_axis - r.x_axis, r.w_axis + r.y_axis, r.w_axis - r.y_axis, r.z_axis, r.w_axis - r.z_axis],
+            moving_error: (o[1] - o[0]).max(o[3] - o[2]) / 512.0,
         })
     }
 }
@@ -726,9 +750,10 @@ impl Renderer {
 
         let env_scene = scene.meta.atmosphere.environment_strength;
         let has_sun = scene.meta.sun.is_some();
-        let mats: Vec<Mat> = scene.meta.materials.iter().map(|m| material(m, env_scene, &scene.meta.textures, has_sun)).collect();
+        let moving_shadow = has_sun && scene.meta.draws.iter().any(|d| d.node.is_some() && d.cast_shadow && scene.meta.materials[d.material as usize].blend == pc::Blend::Opaque);
+        let mats: Vec<Mat> = scene.meta.materials.iter().map(|m| material(m, env_scene, &scene.meta.textures, has_sun, moving_shadow)).collect();
         let sun = match &scene.meta.sun {
-            Some(s) => Some(SunPass::new(&mut vram, &mut mem, s)?),
+            Some(s) => Some(SunPass::new(&mut vram, &mut mem, s, moving_shadow)?),
             None => None,
         };
         let has_rain = scene.meta.rain.active;
@@ -862,11 +887,11 @@ impl Renderer {
         }
     }
 
-    /// Shadow-pass programs for a draw that casts: static, opaque or cut out.
+    /// Shadow-pass programs for static or rigid opaque/cut-out casters.
     fn shadow_keys(&self, d: &crate::scene::DrawGpu) -> Option<(Key, Key, Layout)> {
         let m = &self.mats[d.material as usize];
         let v = variant(d);
-        if v == 1 || d.node.is_some() || m.transparent || m.class == 2 || m.class == 3 || m.water.is_some() {
+        if v == 1 || m.transparent || m.class == 2 || m.class == 3 || m.water.is_some() {
             return None;
         }
         let vs = surface_key(v, !m.alpha_test, VsNeeds::default());
@@ -874,13 +899,21 @@ impl Renderer {
         Some((vs, fs, [Layout::Static, Layout::Skinned, Layout::Baked][v]))
     }
 
-    /// Draws the sun's shadow map once every program it needs is ready.
-    unsafe fn shadow_pass(&mut self, ctx: *mut g::SceGxmContext, gpu: &mut Gpu, scene: &Scene) -> Result<(), String> {
+    /// Cached static map or the smaller per-frame map of rigid moving casters.
+    unsafe fn shadow_pass(&mut self, ctx: *mut g::SceGxmContext, gpu: &mut Gpu, scene: &Scene, moving: bool) -> Result<(), String> {
         let Some(sp) = self.sun.as_mut().map(|s| s as *mut SunPass) else { return Ok(()) };
         let fill = PipeKey { vs: key_v("post_v.cg", &[]), fs: Key::new("fill_f.cg", &[]), layout: Layout::Pos2, blend: BlendMode::Opaque, output: Out::Uchar4, msaa: Msaa::None.gxm() };
         let Some(fill) = gpu.pipeline(&fill).map(|p| p as *const Pipeline) else { return Ok(()) };
         let mut draws = Vec::new();
         for (i, d) in scene.draws.iter().enumerate() {
+            if d.node.is_some() != moving || !scene.meta.draws[i].cast_shadow { continue; }
+            if moving {
+                let (lo, hi) = scene.bounds(d);
+                if (*sp).planes.iter().any(|p| {
+                    let v = Vec3::new(if p.x >= 0.0 { hi.x } else { lo.x }, if p.y >= 0.0 { hi.y } else { lo.y }, if p.z >= 0.0 { hi.z } else { lo.z });
+                    p.truncate().dot(v) + p.w < 0.0
+                }) { continue; }
+            }
             let Some((vs, fs, layout)) = self.shadow_keys(d) else { continue };
             let key = PipeKey { vs, fs, layout, blend: BlendMode::Opaque, output: Out::Uchar4, msaa: Msaa::None.gxm() };
             match gpu.pipeline(&key) {
@@ -888,8 +921,9 @@ impl Renderer {
                 None => return Ok(()),
             }
         }
-        let size = (*sp).target.width;
-        (*sp).target.begin(ctx, 1.0)?;
+        let target = if moving { &mut (*sp).moving.as_mut().unwrap().0 } else { &mut (*sp).target } as *mut Target;
+        let size = (*target).width;
+        (*target).begin(ctx, 1.0)?;
         Self::viewport(ctx, size, size);
         g::sceGxmSetCullMode(ctx, g::SceGxmCullMode_SCE_GXM_CULL_NONE);
         g::sceGxmSetFrontDepthBias(ctx, 0, 0);
@@ -922,10 +956,14 @@ impl Renderer {
                 bind(ctx, p, S::Albedo, &scene.textures[t].gxm);
             }
             g::sceGxmSetVertexStream(ctx, 0, d.vb.cast());
-            g::sceGxmDraw(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, d.ib.cast(), d.count);
+            let lod = if moving { d.lods.iter().rev().find(|l| l.2 <= (*sp).moving_error) } else { None };
+            let (ib, count) = lod.map_or((d.ib, d.count), |l| (l.0, l.1));
+            if count > 0 {
+                g::sceGxmDraw(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, ib.cast(), count);
+            }
         }
-        (*sp).target.end(ctx, None);
-        (*sp).ready = true;
+        self.timeline.end(ctx, &*target, if moving { "moving-shadow" } else { "sun-shadow" });
+        if moving { (*sp).moving_ready = true; } else { (*sp).ready = true; }
         Ok(())
     }
 
@@ -1074,7 +1112,10 @@ impl Renderer {
 
         // ---------------------------------------------------- sun shadow
         if self.sun.as_ref().is_some_and(|s| !s.ready) {
-            self.shadow_pass(ctx, gpu, scene)?;
+            self.shadow_pass(ctx, gpu, scene, false)?;
+        }
+        if self.sun.as_ref().is_some_and(|s| s.moving.is_some()) {
+            self.shadow_pass(ctx, gpu, scene, true)?;
         }
 
         // ---------------------------------------------------- reflection
@@ -1497,7 +1538,9 @@ impl Renderer {
                 let mut bones = core::mem::take(&mut self.bones);
                 scene.bone_rows(s, &mut bones);
                 // The skinned program holds MAX_BONES = 24 bones (3 rows each).
-                u.set(p, U::Bones, &bones[..bones.len().min(24 * 12)]);
+                // Upload the declared array length, including a short final batch.
+                bones.resize(24 * 12, 0.0);
+                u.set(p, U::Bones, &bones);
                 self.bones = bones;
             }
             let gain = scene.emissive_gain[mi];
@@ -1544,6 +1587,10 @@ impl Renderer {
                 u.set(p, U::SunMat, &sp.mat);
                 u.set(p, U::ShadowK, &sp.k);
                 bind(ctx, p, S::Shadow, &sp.map);
+                if let Some((_, map)) = &sp.moving {
+                    u.set(p, U::MovingShadowK, if sp.moving_ready { &sp.moving_k } else { &sp.k });
+                    bind(ctx, p, S::MovingShadow, if sp.moving_ready { map } else { &sp.map });
+                }
             }
             if n > 0 {
                 let k = n * 4;

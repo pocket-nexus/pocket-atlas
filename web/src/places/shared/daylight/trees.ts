@@ -1,9 +1,11 @@
-import { BufferGeometry, CatmullRomCurve3, Color, DoubleSide, DynamicDrawUsage, Float32BufferAttribute, InstancedMesh, MeshStandardMaterial, Object3D, Vector3 } from "three";
+import { BufferGeometry, CatmullRomCurve3, Color, DoubleSide, Float32BufferAttribute, InstancedMesh, MeshStandardMaterial, Object3D, Vector3 } from "three";
 import { Rng } from "../../../core/random";
 import { canvas, toTexture } from "../canvas";
 import { merge } from "../shapes";
+import { rigidParticles } from "../rigid-particles";
 import type { DayWorld } from "./context";
 import { cardsGeometry, cluster, leafMaterial, limb, type Cards } from "./foliage";
+import { driftingPetalSeeds, petalPose } from "./petal-motion";
 
 /** A twig atlas, with individually drawn five-petalled flowers and visible stamens. */
 function blossomMaterial(w: DayWorld) {
@@ -65,17 +67,20 @@ export interface TreeSpec {
 /** Branch-led crown: open gaps, tapering wood and radial normals, never solid spheres. */
 export function tree(w: DayWorld, spec: TreeSpec): void {
   const r = new Rng(spec.seed), base = new Vector3(...spec.at);
+  const handheld = w.geometry === "handheld";
+  const branch = (pts: Vector3[], r0: number, r1: number, radial: number) =>
+    limb(pts, r0, r1, handheld ? Math.max(3, Math.ceil(radial * 0.6)) : radial, handheld ? 1.5 : 3);
   const h = spec.height, radius = spec.radius;
   const top = base.clone().add(new Vector3(spec.lean?.[0] ?? 0.25, h * 0.4, spec.lean?.[1] ?? 0));
-  const woods: BufferGeometry[] = [limb([base, base.clone().lerp(top, 0.5).add(new Vector3(-0.12, 0, 0.08)), top], h * 0.045, h * 0.026, 10)];
+  const woods: BufferGeometry[] = [branch([base, base.clone().lerp(top, 0.5).add(new Vector3(-0.12, 0, 0.08)), top], h * 0.045, h * 0.026, 10)];
   for (let j = 0; j < 5; j++) {
     const a = j * 1.256;
-    woods.push(limb([base.clone().add(new Vector3(Math.cos(a) * 0.5, 0.02, Math.sin(a) * 0.5)), base.clone().add(new Vector3(0, 0.7, 0))], 0.1, 0.13, 5));
+    woods.push(branch([base.clone().add(new Vector3(Math.cos(a) * 0.5, 0.02, Math.sin(a) * 0.5)), base.clone().add(new Vector3(0, 0.7, 0))], 0.1, 0.13, 5));
   }
   const crown = base.clone().add(new Vector3(top.x - base.x, h * 0.73, 0));
   const cr = new Vector3(radius, h * 0.4, radius);
   const cards: Cards = { pos: [], nor: [], uv: [], idx: [] };
-  const density = w.quality.level === "low" ? 7 : 13;
+  const density = handheld || w.quality.level === "low" ? 7 : 13;
   for (let j = 0; j < 9; j++) {
     const a = j * 2.399 + r.range(-0.3, 0.3);
     const dir = new Vector3(Math.cos(a), 0, Math.sin(a));
@@ -83,14 +88,14 @@ export function tree(w: DayWorld, spec: TreeSpec): void {
     const tip = top.clone().addScaledVector(dir, length).add(new Vector3(0, rise, 0));
     const mid = top.clone().lerp(tip, 0.53).add(new Vector3(0, 0.5, 0));
     const curve = new CatmullRomCurve3([top, mid, tip]);
-    woods.push(limb([top, mid, tip], h * 0.021, 0.025, 7));
+    woods.push(branch([top, mid, tip], h * 0.021, 0.025, 7));
     for (let k = 0; k < 9; k++) {
       const t = 0.22 + k * 0.088;
       const p = curve.getPoint(t);
       const side = new Vector3(-dir.z, r.range(0.08, 0.4), dir.x).multiplyScalar((k % 2 ? 1 : -1) * radius * r.range(0.2, 0.43));
       side.y = r.range(0.05, h * 0.15);
       const end = p.clone().add(side).addScaledVector(dir, radius * 0.15);
-      woods.push(limb([p, p.clone().lerp(end, 0.6).add(new Vector3(0, 0.15, 0)), end], 0.034, 0.006, 5));
+      woods.push(branch([p, p.clone().lerp(end, 0.6).add(new Vector3(0, 0.15, 0)), end], 0.034, 0.006, 5));
       for (const f of [0.48, 0.8, 1.0]) {
         const at = p.clone().lerp(end, f);
         cluster(cards, r, at, crown, cr, radius * 0.11, density, spec.bloom ? r.pick([0, 0, 2, 3]) : r.pick([0, 1, 2]), spec.bloom ? 0.55 : 0.73);
@@ -122,7 +127,7 @@ function petalGeometry(): BufferGeometry {
   return g;
 }
 
-export function petalDrift(w: DayWorld, groundY: (z: number) => number): void {
+export function petalDrift(w: DayWorld, groundY: (z: number) => number, loopSeconds = 64): void {
   const r = new Rng(500), dummy = new Object3D();
   const mat = new MeshStandardMaterial({ color: 0xffd5e3, roughness: 0.9, side: DoubleSide, emissive: 0x5e283e, emissiveIntensity: 0.16 });
   mat.name = "fallen-cherry-petal";
@@ -139,22 +144,14 @@ export function petalDrift(w: DayWorld, groundY: (z: number) => number): void {
   }
   settled.receiveShadow = true; w.root.add(settled);
   const count = w.quality.level === "low" ? 90 : 260;
-  const flying = new InstancedMesh(petalGeometry(), mat, count);
-  flying.name = "petals-on-the-breeze"; flying.userData.dynamic = true;
-  flying.instanceMatrix.setUsage(DynamicDrawUsage); flying.frustumCulled = false;
-  const seeds = Array.from({ length: count }, () => ({ x: r.range(-9, 9), y: r.range(0, 11), z: r.range(-36, 20), phase: r.range(0, 6.28), size: r.range(0.035, 0.08) }));
+  const seeds = driftingPetalSeeds(count);
+  const flying = rigidParticles(settled.geometry, mat, seeds.map((p) => p.size), "petals-on-the-breeze");
   const update = (_dt: number, t: number) => {
     seeds.forEach((p, i) => {
-      const x = ((p.x + t * 0.23 + 9) % 18 + 18) % 18 - 9;
-      const z = p.z + Math.sin(t * 0.19 + p.phase) * 0.9;
-      const height = ((p.y - t * 0.13) % 11 + 11) % 11;
-      dummy.position.set(x + Math.sin(t * 0.7 + p.phase) * 0.55, groundY(z) + height + 0.05, z);
-      dummy.rotation.set(t * 0.65 + p.phase, Math.sin(t * 0.6 + p.phase), t * 0.37 + p.phase);
-      // Suppress near-eye intersections: a tiny petal must never cover the view as a giant polygon.
-      const nearFade = Math.min(1, Math.max(0, (dummy.position.distanceTo(w.viewPosition) - 0.8) / 1.2));
-      dummy.scale.setScalar(p.size * nearFade); dummy.updateMatrix(); flying.setMatrixAt(i, dummy.matrix);
+      const pose = petalPose(p, t, loopSeconds, groundY);
+      flying.bones[i].position.set(pose.x, pose.y, pose.z);
+      flying.bones[i].rotation.set(pose.rx, pose.ry, pose.rz);
     });
-    flying.instanceMatrix.needsUpdate = true;
   };
-  update(0, 0); w.update(update); w.root.add(flying);
+  update(0, 0); w.update(update); w.root.add(flying.root);
 }

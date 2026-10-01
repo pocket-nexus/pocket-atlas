@@ -167,7 +167,7 @@ export function foliage(w: DayWorld) {
   return {
     begin: (): Cards => ({ pos: [], nor: [], uv: [], idx: [] }),
     clump: (c: Cards, r: Rng, at: Vector3, radius: number, count: number) =>
-      cluster(c, r, at, at.clone().setY(at.y - radius * 0.6), new Vector3(radius, radius, radius), radius * 0.6, count, 3, radius * 1.1),
+      cluster(c, r, at, at.clone().setY(at.y - radius * 0.6), new Vector3(radius, radius, radius), radius * 0.6, w.geometry === "handheld" ? Math.max(4, Math.round(count * 0.55)) : count, 3, radius * 1.1),
     end: (c: Cards) => {
       if (c.idx.length) w.mesh(cardsGeometry(c), leafMaterial(w), 0, 0, 0, w.root);
     },

@@ -2,7 +2,7 @@
 // over PocketJS's wired debug transport (vendor/pocketjs), sync shader
 // sources, fetch captures, and package the standalone VPK.
 //
-//   bun tools/atlas.ts cook [--place ID]            # scene.glb → <place>.place
+//   bun tools/atlas.ts cook [--place ID] [--tex 1024] # scene.glb → <place>.place
 //   bun tools/atlas.ts cook-atlas                   # web export-atlas → atlas.pack (globe + places)
 //   bun tools/atlas.ts serve                         # USB host (keep running)
 //   bun tools/atlas.ts build  [--title P3B1D7273] [--debug]
@@ -213,6 +213,10 @@ async function lint(): Promise<void> {
     ...["STREAK", "SPLASH", "STEAM", "BEACON"].map((d): [string, string[]] => ["fx_f.cg", [d]]),
     ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "SUN_SPEC", "ALBEDO_MAP", "NORMAL_MAP", "ORM_MAP", "FOG"]], ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "ALPHA_TEST", "ALBEDO_MAP", "EMISSION_MAP", "FOG"]],
     ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "FAR", "ALBEDO_MAP", "FOG"]], ["shadow_f.cg", []], ["shadow_f.cg", ["ALPHA_TEST"]], ["fill_f.cg", []], ["sky_day_f.cg", []], ["sky_day_f.cg", ["TWILIGHT"]],
+    ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "MOVING_SHADOW", "SUN_SPEC", "ALBEDO_MAP", "NORMAL_MAP", "ORM_MAP", "FOG"]],
+    ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "MOVING_SHADOW", "FAR", "ALBEDO_MAP", "FOG"]],
+    ["standard_f.cg", ["LIGHTS=0", "SUN", "MOVING_SHADOW", "SUN_SPEC", "FOG"]],
+    ...[[], ["FAR"], ["LITE"], ["REFLECTION"]].map((tier): [string, string[]] => ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "MOVING_SHADOW", "SUN_SPEC", "VERTEX_COLOR", "VERTEX_PBR", "FOG", ...tier]]),
     ["globe_v.cg", []], ["globe_f.cg", []], ["marker_v.cg", []], ["marker_f.cg", []], ["ui_v.cg", []], ["ui_f.cg", []], ["ui_f.cg", ["TEX"]], ["text_v.cg", []], ["text_f.cg", []], ["surface_v.cg", ["WAVES"]], ["water_f.cg", ["SUN", "FOG"]], ["water_f.cg", []], ["water_f.cg", ["SUN", "FOG", "SHALLOW"]], ["surface_v.cg", ["WAVES", "COLOR"]], ["surface_v.cg", ["FLAT"]], ["surface_v.cg", ["BAKED", "FLAT"]],
     ["post_v.cg", []], ["post_v.cg", ["GRAIN"]], ["haze_f.cg", ["HAZE_LIGHTS=2"]], ["haze_f.cg", ["HAZE_LIGHTS=6"]], ["prefilter_f.cg", []], ["down_f.cg", []], ["up_f.cg", []], ["composite_f.cg", []], ["composite_f.cg", ["HAZE", "BLOOM"]], ["blit_f.cg", []],
   ];
@@ -479,7 +483,9 @@ else if (command === "ctl") {
 } else if (command === "serve") {
   await dev("serve");
 } else if (command === "cook") {
-  await $`cargo run --release -p pocket3d-place-cook -- --in ${PLACE_DIR}`.cwd(ROOT);
+  const tex = Number(value("--tex", "1024"));
+  if (![128, 256, 512, 1024, 2048].includes(tex)) throw new Error("--tex must be 128, 256, 512, 1024 or 2048");
+  await $`cargo run --release -p pocket3d-place-cook -- --in ${PLACE_DIR} --tex ${tex}`.cwd(ROOT);
 } else if (command === "cook-atlas") {
   const faces = await fontFaces();
   await $`cargo run --release -p pocket3d-place-cook -- atlas --in ${resolve(ROOT, ".pocket-build/atlas/globe")} --out ${ATLAS_PACK} ${faces}`.cwd(ROOT);

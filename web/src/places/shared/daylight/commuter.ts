@@ -1,6 +1,6 @@
 import {
-  CircleGeometry, CylinderGeometry, ExtrudeGeometry, Group, Path,
-  Shape, ShapeGeometry, TorusGeometry, type BufferGeometry, type Material,
+  CircleGeometry, CylinderGeometry, DoubleSide, ExtrudeGeometry, Group, Path, RingGeometry,
+  Shape, ShapeGeometry, TorusGeometry, type BufferGeometry, type Material, type Vector3,
 } from "three";
 import { box } from "../geo";
 import { atlasPlane, instance, Parts, rod, tube, v3 } from "../shapes";
@@ -36,15 +36,45 @@ function rounded(width: number, height: number, radius: number): Shape {
   s.lineTo(x, y + r); s.quadraticCurveTo(x, y, x + r, y);
   return s;
 }
-function ring(width: number, height: number, radius: number, thickness: number) {
+function ring(width: number, height: number, radius: number, thickness: number, segments = 5) {
   const outer = rounded(width, height, radius);
   const inner = rounded(width - thickness * 2, height - thickness * 2, Math.max(0.01, radius - thickness));
-  outer.holes.push(new Path(inner.getPoints(5)));
-  return new ShapeGeometry(outer, 5);
+  outer.holes.push(new Path(inner.getPoints(segments)));
+  return new ShapeGeometry(outer, segments);
 }
 
 /** Parts are merged inside each car; articulated nodes and wheelsets stay separately animated. */
 export function commuter(w: DayWorld, spec: CommuterSpec) {
+  const handheld = w.geometry === "handheld";
+  const curves = handheld ? 1 : 5;
+  const sheets = new Map<Material, Material>();
+  const parts = () => {
+    const p = new Parts();
+    return {
+      add(mat: Material, geo: BufferGeometry, cast = true) {
+        if (geo.userData.thinBand) {
+          if (!sheets.has(mat)) {
+            const sheet = mat.clone(); sheet.side = DoubleSide; sheet.name = `${mat.name}-thin-band`;
+            sheets.set(mat, sheet);
+          }
+          mat = sheets.get(mat)!;
+        }
+        p.add(mat, geo, cast);
+      },
+      bake: () => p.bake(),
+    };
+  };
+  const cylinder = (r0: number, r1: number, height: number, sides: number) =>
+    new CylinderGeometry(r0, r1, height, handheld ? Math.max(4, Math.min(12, Math.ceil(sides * 0.43))) : sides);
+  const roundedRing = (width: number, height: number, radius: number, thickness: number) => ring(width, height, radius, thickness, curves);
+  const hose = (pts: Vector3[], radius: number) => tube(pts, radius, handheld ? 3 : 6, handheld ? 4 : 16);
+  const hoop = (radius: number, thickness: number, radial: number, sides: number) => {
+    if (!handheld) return new TorusGeometry(radius, thickness, radial, sides);
+    const g = new RingGeometry(radius - thickness, radius + thickness, sides > 20 ? 12 : 8);
+    // Opaque, two-sided bands retain handles, fan guards and spring windings.
+    g.userData.thinBand = true;
+    return g;
+  };
   const root = new Group(); root.name = "commuter-train"; root.userData.dynamic = true;
   const steel = w.lib.stainless(), edge = w.lib.plain(0xb8c0be, 0.29, 0.78);
   const rubber = w.lib.plain(0x242b2c, 0.91), chassis = w.lib.plain(0x424a4c, 0.78, 0.45);
@@ -78,9 +108,25 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
     body.position.x = -index * CAR_PITCH - HALF;
     if (car.cab === "rear") body.rotation.y = Math.PI;
     root.add(body);
-    const p = new Parts();
-    const b = (mat: Material, size: [number, number, number], at: [number, number, number]) => p.add(mat, box(...size).translate(...at));
-    const bar = (mat: Material, a: [number, number, number], z: [number, number, number], r = 0.012, n = 8) => p.add(mat, rod(v3(...a), v3(...z), r, n));
+    const p = parts();
+    const b = (mat: Material, size: [number, number, number], at: [number, number, number]) => {
+      const g = box(...size);
+      if (handheld) {
+        const axes = [0, 1, 2].sort((a, b) => size[a] - size[b]);
+        const [thin, middle, long] = axes, idx = Array.from(g.index!.array);
+        // Sub-pixel plate edges and the end caps of narrow trim are not visible
+        // at handheld scale. Preserve both broad faces and their exact extent.
+        if ((size[thin] <= 0.07 && size[thin] < size[middle] * 0.28) || (size[thin] <= 0.035 && size[middle] <= 0.08)) g.setIndex(idx.slice(thin * 12, thin * 12 + 12));
+        else if (size[middle] <= 0.07 && size[middle] < size[long] * 0.15) g.setIndex(idx.filter((_v, i) => Math.floor(i / 12) !== long));
+      }
+      p.add(mat, g.translate(...at));
+    };
+    const bar = (mat: Material, a: [number, number, number], z: [number, number, number], r = 0.012, n = 8) => {
+      const g = rod(v3(...a), v3(...z), r, handheld ? (r <= 0.018 ? 3 : 5) : n);
+      // The ends meet a support or another bar; leave them open on handheld.
+      if (handheld) g.setIndex(Array.from(g.index!.array).slice(0, g.groups[0].count));
+      p.add(mat, g);
+    };
     const sideGeo = (mat: Material, geo: BufferGeometry, x: number, y: number, z: number, side: number, cast = true) => {
       if (side < 0) geo.rotateY(Math.PI);
       p.add(mat, geo.translate(x, y, z), cast);
@@ -96,7 +142,7 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
     const profile = new Shape();
     profile.moveTo(-SIDE, 3.3); profile.lineTo(-SIDE, 3.42); profile.quadraticCurveTo(-1.42, 3.77, -0.65, 3.83);
     profile.quadraticCurveTo(0, 3.88, 0.65, 3.83); profile.quadraticCurveTo(1.42, 3.77, SIDE, 3.42); profile.lineTo(SIDE, 3.3); profile.closePath();
-    const roof = new ExtrudeGeometry(profile, { depth: HALF * 2, steps: 1, bevelEnabled: false, curveSegments: 10 });
+    const roof = new ExtrudeGeometry(profile, { depth: HALF * 2, steps: 1, bevelEnabled: false, curveSegments: handheld ? 4 : 10 });
     roof.rotateY(Math.PI / 2).translate(-HALF, 0, 0); p.add(w.lib.plain(0x929895, 0.63, 0.5), roof);
 
     for (const s of [-1, 1]) {
@@ -123,9 +169,9 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
       }
       for (const [x, width] of windows) {
         // Three layers: metal reveal, black EPDM gasket, inset clear pane.
-        sideGeo(edge, ring(width + 0.085, 1.1, 0.09, 0.039), x, 2.595, z + s * 0.04, s);
-        sideGeo(rubber, ring(width + 0.015, 1.027, 0.064, 0.025), x, 2.595, z + s * 0.048, s);
-        sideGeo(glass, new ShapeGeometry(rounded(width - 0.038, 0.975, 0.045), 5), x, 2.595, z + s * 0.026, s, false);
+        sideGeo(edge, roundedRing(width + 0.085, 1.1, 0.09, 0.039), x, 2.595, z + s * 0.04, s);
+        sideGeo(rubber, roundedRing(width + 0.015, 1.027, 0.064, 0.025), x, 2.595, z + s * 0.048, s);
+        sideGeo(glass, new ShapeGeometry(rounded(width - 0.038, 0.975, 0.045), curves), x, 2.595, z + s * 0.026, s, false);
         if (width > 2) {
           b(edge, [0.044, 1, 0.026], [x, 2.595, z + s * 0.052]);
           for (const dx of [-0.23, 0.23]) b(edge, [0.14, 0.014, 0.04], [x + dx, 2.37, z - s * 0.035]);
@@ -159,8 +205,8 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
           b(blue, [0.717, 0.28, 0.012], [xx, 1.85, dz + s * 0.03]);
           b(steel, [0.717, 0.15, 0.045], [xx, 3.13, dz]);
           for (const wx of [-0.299, 0.299]) b(steel, [0.119, 0.86, 0.045], [xx + wx, 2.665, dz]);
-          sideGeo(rubber, ring(0.51, 0.87, 0.075, 0.027), xx, 2.655, dz + s * 0.03, s);
-          sideGeo(glass, new ShapeGeometry(rounded(0.455, 0.813, 0.053), 5), xx, 2.655, dz + s * 0.018, s, false);
+          sideGeo(rubber, roundedRing(0.51, 0.87, 0.075, 0.027), xx, 2.655, dz + s * 0.03, s);
+          sideGeo(glass, new ShapeGeometry(rounded(0.455, 0.813, 0.053), curves), xx, 2.655, dz + s * 0.018, s, false);
           sideGeo(w.printed, atlasPlane(0.11, 0.15, notice), xx, 2.4, dz + s * 0.042, s, false);
           b(edge, [0.019, 0.1, 0.018], [xx + Math.sign(dx) * 0.27, 2.17, dz + s * 0.035]);
         }
@@ -177,7 +223,7 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
       bar(edge, [-9.25, 3.05, s * 0.7], [car.cab ? 7.55 : 9.25, 3.05, s * 0.7], 0.018);
       for (let x = -9; x < (car.cab ? 7.5 : 9.2); x += 0.48) {
         bar(interior, [x, 3.03, s * 0.7], [x, 2.79, s * 0.7], 0.017, 5);
-        p.add(interior, new TorusGeometry(0.07, 0.014, 5, 12).translate(x, 2.72, s * 0.7));
+        p.add(interior, hoop(0.07, 0.014, 5, 12).translate(x, 2.72, s * 0.7));
       }
       for (const [x, width] of windows) {
         if (car.cab && x > 7) continue;
@@ -199,8 +245,8 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
         for (const dx of [-1.12, 1.12]) b(chassis, [0.025, 0.025, 0.017], [x + dx, 4.03, s * 0.81]);
       }
       for (const dx of [-0.62, 0.62]) {
-        p.add(chassis, new CircleGeometry(0.41, 24).rotateX(-Math.PI / 2).translate(x + dx, 4.121, 0));
-        for (const r of [0.15, 0.28, 0.4]) p.add(edge, new TorusGeometry(r, 0.009, 4, 24).rotateX(Math.PI / 2).translate(x + dx, 4.129, 0));
+        p.add(chassis, new CircleGeometry(0.41, handheld ? 12 : 24).rotateX(-Math.PI / 2).translate(x + dx, 4.121, 0));
+        for (const r of [0.15, 0.28, 0.4]) p.add(edge, hoop(r, 0.009, 4, 24).rotateX(Math.PI / 2).translate(x + dx, 4.129, 0));
         for (const a of [0, Math.PI / 4, Math.PI / 2, Math.PI * 0.75]) {
           const vx = Math.cos(a) * 0.4, vz = Math.sin(a) * 0.4;
           bar(edge, [x + dx - vx, 4.13, -vz], [x + dx + vx, 4.13, vz], 0.007, 5);
@@ -211,7 +257,7 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
     if (car.pantograph) {
       for (const x of [8.2, 9]) for (const z of [-0.58, 0.58]) {
         bar(chassis, [x, 3.84, z], [x, 4.14, z], 0.03);
-        for (let y = 3.92; y < 4.13; y += 0.044) p.add(interior, new CylinderGeometry(0.076, 0.076, 0.027, 12).translate(x, y, z));
+        for (let y = 3.92; y < 4.13; y += 0.044) p.add(interior, cylinder(0.076, 0.076, 0.027, 12).translate(x, y, z));
       }
       b(chassis, [1.3, 0.085, 1.33], [8.5, 4.16, 0]);
       for (const z of [-0.42, 0.42]) {
@@ -223,7 +269,7 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
       bar(edge, [9.15, 4.85, -0.45], [9.15, 4.85, 0.45], 0.028);
       for (const x of [8.02, 8.21]) {
         bar(chassis, [x, 5.55, -0.88], [x, 5.55, 0.88], 0.025);
-        p.add(edge, tube([v3(x, 5.48, -1.02), v3(x, 5.55, -0.8), v3(x, 5.55, 0.8), v3(x, 5.48, 1.02)], 0.014));
+        p.add(edge, hose([v3(x, 5.48, -1.02), v3(x, 5.55, -0.8), v3(x, 5.55, 0.8), v3(x, 5.48, 1.02)], 0.014));
       }
       b(dust, [0.48, 0.18, 0.34], [7.65, 3.98, -0.6]);
       bar(chassis, [7.65, 4.04, -0.6], [-8.9, 3.82, -0.67], 0.018);
@@ -241,11 +287,11 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
           b(chassis, [0.012, 0.43, 0.014], [x + dx, 0.7, s * 0.947]);
           b(edge, [0.075, 0.019, 0.02], [x + dx + 0.17, 0.75, s * 0.953]);
         }
-        for (const dx of [-len * 0.45, len * 0.45]) for (const y of [0.5, 0.9]) p.add(edge, new CircleGeometry(0.018, 6).rotateY(s < 0 ? Math.PI : 0).translate(x + dx, y, s * 0.953));
+        for (const dx of [-len * 0.45, len * 0.45]) for (const y of [0.5, 0.9]) p.add(edge, new CircleGeometry(0.018, handheld ? 4 : 6).rotateY(s < 0 ? Math.PI : 0).translate(x + dx, y, s * 0.953));
       }
     }
     for (const z of [-0.48, 0.48]) {
-      p.add(dust, new CylinderGeometry(0.18, 0.18, 1.23, 14).rotateZ(Math.PI / 2).translate(3.28, 0.48, z));
+      p.add(dust, cylinder(0.18, 0.18, 1.23, 14).rotateZ(Math.PI / 2).translate(3.28, 0.48, z));
       bar(chassis, [-8, 0.98, z], [8, 0.98, z], 0.031);
     }
 
@@ -254,10 +300,10 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
       for (const s of [-1, 1]) {
         b(dust, [2.92, 0.17, 0.18], [bx, 0.57, s * 0.93]);
         b(chassis, [1.0, 0.14, 0.19], [bx, 0.83, s * 0.97]);
-        p.add(rubber, new CylinderGeometry(0.3, 0.33, 0.17, 18).translate(bx, 0.92, s * 0.7));
+        p.add(rubber, cylinder(0.3, 0.33, 0.17, 18).translate(bx, 0.92, s * 0.7));
         for (const dx of [-0.97, 0.97]) {
-          p.add(chassis, new CylinderGeometry(0.165, 0.165, 0.16, 16).rotateX(Math.PI / 2).translate(bx + dx, 0.44, s * 1.015));
-          for (let y = 0.58; y < 0.8; y += 0.044) p.add(edge, new TorusGeometry(0.09, 0.016, 5, 10).rotateX(Math.PI / 2).translate(bx + dx, y, s * 0.94));
+          p.add(chassis, cylinder(0.165, 0.165, 0.16, 16).rotateX(Math.PI / 2).translate(bx + dx, 0.44, s * 1.015));
+          for (let y = 0.58; y < 0.8; y += 0.044) p.add(edge, hoop(0.09, 0.016, 5, 10).rotateX(Math.PI / 2).translate(bx + dx, y, s * 0.94));
           bar(edge, [bx + dx * 0.85, 0.47, s * 0.99], [bx + dx * 0.4, 0.81, s * 0.99], 0.025);
           b(chassis, [0.1, 0.27, 0.19], [bx + dx * 0.68, 0.39, s * 0.64]);
         }
@@ -267,14 +313,20 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
       for (const dx of [-0.97, 0.97]) {
         const axle = new Group(); axle.name = `wheelset-${car.number}-${bx}-${dx}`; axle.position.set(bx + dx, WHEEL_RADIUS, 0);
         axle.userData.dynamic = true; body.add(axle); wheels.push(axle);
-        const q = new Parts();
-        q.add(chassis, new CylinderGeometry(0.074, 0.074, 1.9, 10).rotateX(Math.PI / 2));
+        const q = parts();
+        q.add(chassis, cylinder(0.074, 0.074, 1.9, 10).rotateX(Math.PI / 2));
         for (const s of [-1, 1]) {
-          q.add(edge, new CylinderGeometry(WHEEL_RADIUS, WHEEL_RADIUS, 0.12, 28).rotateX(Math.PI / 2).translate(0, 0, s * 0.5335));
-          q.add(chassis, new CylinderGeometry(0.38, 0.38, 0.132, 28).rotateX(Math.PI / 2).translate(0, 0, s * 0.5335));
-          q.add(dust, new CylinderGeometry(0.15, 0.15, 0.19, 16).rotateX(Math.PI / 2).translate(0, 0, s * 0.54));
-          q.add(edge, new TorusGeometry(0.429, 0.019, 5, 28).translate(0, 0, s * 0.484));
-          for (let a = 0; a < Math.PI * 2; a += Math.PI / 3) q.add(edge, new CylinderGeometry(0.018, 0.018, 0.012, 6).rotateX(Math.PI / 2).translate(Math.cos(a) * 0.23, Math.sin(a) * 0.23, s * 0.605));
+          q.add(edge, cylinder(WHEEL_RADIUS, WHEEL_RADIUS, 0.12, 28).rotateX(Math.PI / 2).translate(0, 0, s * 0.5335));
+          q.add(chassis, cylinder(0.38, 0.38, 0.132, 28).rotateX(Math.PI / 2).translate(0, 0, s * 0.5335));
+          q.add(dust, cylinder(0.15, 0.15, 0.19, 16).rotateX(Math.PI / 2).translate(0, 0, s * 0.54));
+          const flange = hoop(0.429, 0.019, 5, 28);
+          if (handheld) {
+            // The rear face is inside the wheel: share its opaque metal draw.
+            delete flange.userData.thinBand;
+            if (s < 0) flange.rotateY(Math.PI);
+          }
+          q.add(edge, flange.translate(0, 0, s * 0.484));
+          for (let a = 0; a < Math.PI * 2; a += Math.PI / 3) q.add(edge, cylinder(0.018, 0.018, 0.012, 6).rotateX(Math.PI / 2).translate(Math.cos(a) * 0.23, Math.sin(a) * 0.23, s * 0.605));
         }
         instance(q.bake(), axle);
       }
@@ -287,14 +339,14 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
       for (const z of [-0.99, 0.99]) b(steel, [0.07, 2.16, 0.88], [x, 2.35, z]);
       b(steel, [0.07, 0.32, 1.13], [x, 3.22, 0]);
       b(interior, [0.04, 1.93, 0.78], [x - end * 0.04, 2.27, 0]);
-      p.add(glass, new ShapeGeometry(rounded(0.44, 0.68, 0.05), 5).rotateY(end * Math.PI / 2).translate(x + end * 0.023, 2.7, 0), false);
+      p.add(glass, new ShapeGeometry(rounded(0.44, 0.68, 0.05), curves).rotateY(end * Math.PI / 2).translate(x + end * 0.023, 2.7, 0), false);
       for (let i = 0; i < 6; i++) {
         const xx = x + end * (0.02 + i * 0.041);
         for (const z of [-0.56, 0.56]) b(i % 2 ? dust : rubber, [0.025, 2.12, 0.09], [xx, 2.32, z]);
         b(i % 2 ? dust : rubber, [0.025, 0.09, 1.21], [xx, 3.38, 0]);
       }
       b(chassis, [0.55, 0.16, 0.2], [x + end * 0.19, 0.96, 0]);
-      for (const z of [-0.78, 0.78]) p.add(rubber, tube([v3(x, 1.08, z), v3(x + end * 0.35, 0.78, z), v3(x + end * 0.2, 0.49, z), v3(x, 0.72, z)], 0.028));
+      for (const z of [-0.78, 0.78]) p.add(rubber, hose([v3(x, 1.08, z), v3(x + end * 0.35, 0.78, z), v3(x + end * 0.2, 0.49, z), v3(x, 0.72, z)], 0.028));
     }
 
     if (car.cab) {
@@ -310,8 +362,8 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
       for (const z of [-0.94, 0.94, 0]) {
         const width = z === 0 ? 0.65 : 0.83, height = z === 0 ? 0.86 : 1.17;
         const y = z === 0 ? 2.51 : 2.62;
-        p.add(rubber, ring(width + 0.05, height + 0.05, 0.095, 0.04).rotateY(Math.PI / 2).translate(x + 0.076, y, z));
-        p.add(glass, new ShapeGeometry(rounded(width - 0.025, height - 0.025, 0.07), 5).rotateY(Math.PI / 2).translate(x + 0.064, y, z), false);
+        p.add(rubber, roundedRing(width + 0.05, height + 0.05, 0.095, 0.04).rotateY(Math.PI / 2).translate(x + 0.076, y, z));
+        p.add(glass, new ShapeGeometry(rounded(width - 0.025, height - 0.025, 0.07), curves).rotateY(Math.PI / 2).translate(x + 0.064, y, z), false);
       }
       b(face, [0.075, 0.14, 0.77], [x + 0.055, 2.995, 0]);
       for (const z of [-0.94, 0.94]) b(w.lib.plain(0x253d45, 0.2), [0.015, 0.24, 0.79], [x + 0.063, 3.055, z]);
@@ -321,10 +373,10 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
         bar(rubber, [x + 0.12, 2.04, z - 0.11], [x + 0.13, 2.46, z + 0.14], 0.017);
         bar(rubber, [x + 0.14, 2.31, z + 0.06], [x + 0.14, 2.77, z + 0.29], 0.014);
         b(chassis, [0.058, 0.24, 0.56], [x + 0.086, 1.865, z]);
-        p.add(edge, ring(0.56, 0.24, 0.035, 0.022).rotateY(Math.PI / 2).translate(x + 0.12, 1.865, z));
+        p.add(edge, roundedRing(0.56, 0.24, 0.035, 0.022).rotateY(Math.PI / 2).translate(x + 0.12, 1.865, z));
         for (const dz of [-0.13, 0.13]) {
           const lit = (z * dz < 0) === (car.cab === "front");
-          p.add(lit ? (car.cab === "front" ? light : red) : lens, new ShapeGeometry(rounded(0.2, 0.16, 0.035), 5).rotateY(Math.PI / 2).translate(x + 0.123, 1.865, z + dz), false);
+          p.add(lit ? (car.cab === "front" ? light : red) : lens, new ShapeGeometry(rounded(0.2, 0.16, 0.035), curves).rotateY(Math.PI / 2).translate(x + 0.123, 1.865, z + dz), false);
         }
       }
       // Door handle, hinges, hand rails, anti-climber and open coupler notch in the skirt.

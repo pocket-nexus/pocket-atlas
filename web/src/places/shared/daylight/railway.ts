@@ -1,4 +1,4 @@
-import { CircleGeometry, CylinderGeometry, TorusGeometry, Vector3, type Material, type Mesh, type Object3D } from "three";
+import { CircleGeometry, CylinderGeometry, Quaternion, TorusGeometry, Vector3, type Material, type Mesh, type Object3D } from "three";
 import { box, cable } from "../geo";
 import { atlasPlane, rod, v3 } from "../shapes";
 import { JP_SANS } from "../canvas";
@@ -84,6 +84,18 @@ export function safetyRail(w: DayWorld, points: Vector3[]): void {
 
 /** A narrow-gauge double line: ballast, concrete sleepers, steel rails and rubber crossing panels. */
 export function railway(w: DayWorld, skew: number, halfLength = 66): void {
+  const handheld = w.geometry === "handheld";
+  // Long fences and contact wires retain their spacing and silhouette. At
+  // handheld resolution their tiny round cross-sections need fewer faces;
+  // attached thin bars have no visible end caps.
+  const railRod = (a: Vector3, b: Vector3, radius: number, sides = 6, endRadius = radius) => {
+    if (!handheld) return rod(a, b, radius, sides, endRadius);
+    const d = b.clone().sub(a), length = d.length();
+    const n = radius < 0.02 ? 3 : radius < 0.06 ? 5 : 8;
+    const geo = new CylinderGeometry(endRadius, radius, length, n, 1, radius < 0.02);
+    geo.applyQuaternion(new Quaternion().setFromUnitVectors(v3(0, 1, 0), d.normalize()));
+    return geo.translate((a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2);
+  };
   const g = w.group(0, 0, 0, -Math.atan(skew));
   if (halfLength > 66) for (const s of [-1, 1]) w.mesh(box(halfLength - 60, 0.24, 36), w.lib.ground(), s * (halfLength + 60) / 2, -0.58, 0, g);
   const ballast = w.lib.granite([0.39, 0.37, 0.4]);
@@ -95,7 +107,9 @@ export function railway(w: DayWorld, skew: number, halfLength = 66): void {
       w.mesh(box(0.22, 0.14, 2.05), sleeper, x, -0.075, center, g);
       for (const dz of [-0.5335, 0.5335]) {
         w.mesh(box(0.3, 0.04, 0.2), rust, x, 0.015, center + dz, g);
-        for (const s of [-1, 1]) w.mesh(box(0.06, 0.05, 0.06), rust, x, 0.038, center + dz + s * 0.11, g);
+        // Outside the crossing's approach, the 6 cm bolt heads cover less
+        // than a pixel. The fastening plates and every sleeper remain.
+        if (!handheld || Math.abs(x) < 32) for (const s of [-1, 1]) w.mesh(box(0.06, 0.05, 0.06), rust, x, 0.038, center + dz + s * 0.11, g);
       }
     }
     for (const dz of [-0.5335, 0.5335]) {
@@ -112,32 +126,32 @@ export function railway(w: DayWorld, skew: number, halfLength = 66): void {
   for (const z of [-4.25, 4.25]) for (const side of [-1, 1]) {
     w.mesh(box(halfLength - 4, 0.19, 0.34), w.lib.concrete(), side * (halfLength + 4) / 2, -0.04, z, g);
     for (let x = 4; x < halfLength; x += 2) {
-      w.mesh(rod(v3(x * side, 0, z), v3(x * side, 1.32, z), 0.026), fence, 0, 0, 0, g);
-      for (const yy of [0.22, 1.28]) w.mesh(rod(v3(x * side, yy, z), v3((x + 2) * side, yy, z), 0.018), fence, 0, 0, 0, g);
-      for (let xx = 0; xx < 2; xx += 0.23) w.mesh(rod(v3((x + xx) * side, 0.2, z), v3((x + xx) * side, 1.28, z), 0.006), fence, 0, 0, 0, g);
+      w.mesh(railRod(v3(x * side, 0, z), v3(x * side, 1.32, z), 0.026), fence, 0, 0, 0, g);
+      for (const yy of [0.22, 1.28]) w.mesh(railRod(v3(x * side, yy, z), v3((x + 2) * side, yy, z), 0.018), fence, 0, 0, 0, g);
+      for (let xx = 0; xx < 2; xx += 0.23) w.mesh(railRod(v3((x + xx) * side, 0.2, z), v3((x + xx) * side, 1.28, z), 0.006), fence, 0, 0, 0, g);
     }
   }
   const gantries = [-48, -21, 20, 48];
   for (let x = 80; x < halfLength; x += 32) gantries.push(-x, x);
   gantries.sort((a, b) => a - b);
   for (const x of gantries) {
-    for (const z of [-4.6, 4.6]) w.mesh(rod(v3(x, -0.2, z), v3(x, 8.5, z), 0.115, 12, 0.085), w.lib.concrete(), 0, 0, 0, g);
-    for (const y of [7.75, 8.35]) w.mesh(rod(v3(x, y, -4.6), v3(x, y, 4.6), 0.043), fence, 0, 0, 0, g);
-    for (let z = -4.6; z < 4.5; z += 0.65) w.mesh(rod(v3(x, 7.75, z), v3(x, 8.35, z + 0.65), 0.022), fence, 0, 0, 0, g);
+    for (const z of [-4.6, 4.6]) w.mesh(railRod(v3(x, -0.2, z), v3(x, 8.5, z), 0.115, 12, 0.085), w.lib.concrete(), 0, 0, 0, g);
+    for (const y of [7.75, 8.35]) w.mesh(railRod(v3(x, y, -4.6), v3(x, y, 4.6), 0.043), fence, 0, 0, 0, g);
+    for (let z = -4.6; z < 4.5; z += 0.65) w.mesh(railRod(v3(x, 7.75, z), v3(x, 8.35, z + 0.65), 0.022), fence, 0, 0, 0, g);
     for (const z of [-1.82, 1.82]) {
-      w.mesh(rod(v3(x, 8.1, z), v3(x + 0.75, 5.75, z), 0.026), wire, 0, 0, 0, g);
+      w.mesh(railRod(v3(x, 8.1, z), v3(x + 0.75, 5.75, z), 0.026), wire, 0, 0, 0, g);
       for (let y = 7; y < 7.35; y += 0.07) w.mesh(new CylinderGeometry(0.065, 0.065, 0.03, 12), w.lib.plain(0xb7bbb1), x + 0.28, y, z, g);
     }
   }
   for (const z of [-1.82, 1.82]) {
-    w.mesh(rod(v3(-halfLength, 5.65, z), v3(halfLength, 5.65, z), 0.012), wire, 0, 0, 0, g);
+    w.mesh(railRod(v3(-halfLength, 5.65, z), v3(halfLength, 5.65, z), 0.012), wire, 0, 0, 0, g);
     const spans = [-halfLength, ...gantries, halfLength];
     for (let i = 1; i < spans.length; i++) {
       const a = spans[i - 1], b = spans[i];
       w.mesh(cable(v3(a, 7.3, z), v3(b, 7.3, z), 0.9, 0.016), wire, 0, 0, 0, g);
       for (let x = a + 3; x < b; x += 4.5) {
         const t = (x - a) / (b - a), y = 7.3 - 3.6 * t * (1 - t);
-        w.mesh(rod(v3(x, 5.65, z), v3(x, y, z), 0.006), wire, 0, 0, 0, g);
+        w.mesh(railRod(v3(x, 5.65, z), v3(x, y, z), 0.006), wire, 0, 0, 0, g);
       }
     }
   }

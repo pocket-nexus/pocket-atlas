@@ -16,6 +16,7 @@ mod bake;
 mod env;
 mod geometry;
 mod occlusion;
+mod palette;
 mod procedural;
 mod textures;
 
@@ -25,6 +26,7 @@ use gltf::khr_lights_punctual::Kind as LightType;
 use pocket3d_place as pc;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -75,6 +77,8 @@ struct Blobs {
     tex: Vec<u8>,
     geom: Vec<u8>,
     anim: Vec<u8>,
+    geom_ranges: HashMap<u64, Vec<pc::Range>>,
+    anim_ranges: HashMap<u64, Vec<pc::Range>>,
 }
 
 impl Blobs {
@@ -86,9 +90,26 @@ impl Blobs {
         buf.extend_from_slice(data);
         pc::Range { offset, size: data.len() as u32 }
     }
-    fn floats(buf: &mut Vec<u8>, data: &[f32]) -> pc::Range {
+    // Quantized draws separate their per-draw decode transform from buffer
+    // bytes, so repeated geometry (or animation) may share an aligned range.
+    // Hashes only find candidates: compare bytes to make collisions harmless.
+    fn intern(buf: &mut Vec<u8>, ranges: &mut HashMap<u64, Vec<pc::Range>>, data: &[u8]) -> pc::Range {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        data.hash(&mut h);
+        let entries = ranges.entry(h.finish()).or_default();
+        if let Some(r) = entries.iter().find(|r| &buf[r.offset as usize..(r.offset + r.size) as usize] == data) {
+            return r.clone();
+        }
+        let range = Self::push(buf, data, 16);
+        entries.push(range.clone());
+        range
+    }
+    fn geometry(&mut self, data: &[u8]) -> pc::Range {
+        Self::intern(&mut self.geom, &mut self.geom_ranges, data)
+    }
+    fn animation(&mut self, data: &[f32]) -> pc::Range {
         let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
-        Self::push(buf, &bytes, 16)
+        Self::intern(&mut self.anim, &mut self.anim_ranges, &bytes)
     }
 }
 
@@ -250,6 +271,7 @@ impl<'a> Cook<'a> {
             orm,
             emission,
             vertex_color: false,
+            vertex_pbr: false,
             interior: x.get("interior").and_then(|v| v.as_bool()).unwrap_or(false),
             fog: x.get("fog").and_then(|v| v.as_bool()).unwrap_or(true),
             wet,
@@ -448,9 +470,9 @@ fn accessor_f32(doc: &gltf::Document, buffers: &[gltf::buffer::Data], index: usi
 /// Stores one built draw's buffers and records it.
 #[allow(clippy::too_many_arguments)]
 fn push_draw(b: geometry::Built, material: u32, layout: pc::VertexLayout, node: Option<u32>, skin: Option<u32>, no_reflect: bool, blobs: &mut Blobs, draws: &mut Vec<pc::Draw>) {
-    let vertices = Blobs::push(&mut blobs.geom, &b.vertices, 16);
-    let indices = Blobs::push(&mut blobs.geom, &b.indices, 16);
-    let lods = b.lods.iter().map(|(idx, count, error)| pc::DrawLod { indices: Blobs::push(&mut blobs.geom, idx, 16), index_count: *count, error: *error }).collect();
+    let vertices = blobs.geometry(&b.vertices);
+    let indices = blobs.geometry(&b.indices);
+    let lods = b.lods.iter().map(|(idx, count, error)| pc::DrawLod { indices: blobs.geometry(idx), index_count: *count, error: *error }).collect();
     draws.push(pc::Draw {
         material,
         layout,
@@ -545,11 +567,17 @@ fn main() {
     let mut prims: Vec<Prim> = Vec::new();
     let mut stock: Vec<Stock> = Vec::new();
     let mut lights: Vec<(usize, Mat4, gltf::khr_lights_punctual::Light)> = Vec::new();
-    let mut stack: Vec<(gltf::Node, Mat4)> = scene.nodes().map(|n| (n, Mat4::IDENTITY)).collect();
+    let mut stack: Vec<(gltf::Node, Mat4, f32)> = scene.nodes().map(|n| (n, Mat4::IDENTITY, 1.0)).collect();
     let mut world_of: HashMap<usize, Mat4> = HashMap::new();
-    while let Some((node, pw)) = stack.pop() {
-        let w = pw * node_matrix(&node);
+    let mut scale_of: HashMap<usize, f32> = HashMap::new();
+    while let Some((node, pw, parent_scale)) = stack.pop() {
+        let local = node_matrix(&node);
+        let w = pw * local;
+        // Compose per-node magnification bounds: animation may rotate a
+        // child under non-uniform parent scale after this initial pose.
+        let metric_scale = parent_scale * geometry::error_scale(local);
         world_of.insert(node.index(), w);
+        scale_of.insert(node.index(), metric_scale);
         let is_moving = moving(node.index());
         if let Some(l) = node.light() {
             lights.push((node.index(), w, l));
@@ -614,10 +642,18 @@ fn main() {
             }
         }
         for c in node.children() {
-            stack.push((c, w));
+            stack.push((c, w, metric_scale));
         }
     }
     println!("walked scene: {} primitives, {} materials, {} textures ({} ms)", prims.len(), cook.materials.len(), cook.textures.len(), t0.elapsed().as_millis());
+
+    // Fold solid materials into a vertex PBR palette before static chunking
+    // and lighting bake. Keep named animated materials on their own path.
+    let material_animation: HashSet<String> = sx["tracks"]["materials"].as_array().into_iter().flatten()
+        .filter_map(|t| t["material"].as_str().map(str::to_owned)).collect();
+    let before = prims.len();
+    palette::batch(&mut prims, &mut cook.materials, &parent, &animated, &world_of, &material_animation);
+    println!("solid PBR palette: {before} → {} primitives", prims.len());
 
     // ---- node table for moving content (ancestors included for hierarchy)
     let mut node_ids: BTreeMap<usize, u32> = BTreeMap::new();
@@ -717,7 +753,7 @@ fn main() {
                 let rr = rc.as_ref().map(|k| sample4(k, time)).unwrap_or(Quat::from_array(r));
                 data.extend([tt.x, tt.y, tt.z, rr.x, rr.y, rr.z, rr.w]);
             }
-            Blobs::floats(&mut cook.blobs.anim, &data)
+            cook.blobs.animation(&data)
         });
         nodes.push(pc::Node {
             name: n.name().unwrap_or("").to_string(),
@@ -733,10 +769,15 @@ fn main() {
     let mut skins: Vec<pc::Skin> = Vec::new();
     let mut skin_ids: HashMap<usize, u32> = HashMap::new();
     for s in doc.skins() {
-        let r = s.reader(|b| Some(&buffers[b.index()]));
-        let ibm: Vec<f32> = r.read_inverse_bind_matrices().map(|m| m.flat_map(|c| c.into_iter().flatten()).collect()).unwrap_or_default();
         let joints: Vec<u32> = s.joints().map(|j| node_ids[&j.index()]).collect();
-        skins.push(pc::Skin { joints, inverse_bind: Blobs::floats(&mut cook.blobs.anim, &ibm) });
+        assert!((1..=24).contains(&joints.len()), "skin {} ({:?}) has {} joints; Vita supports 1..=24 per draw, split the source mesh into palettes", s.index(), s.name().unwrap_or(""), joints.len());
+        let r = s.reader(|b| Some(&buffers[b.index()]));
+        // glTF permits omitted inverse binds and defines them as identity.
+        let ibm: Vec<f32> = r.read_inverse_bind_matrices()
+            .map(|m| m.flat_map(|c| c.into_iter().flatten()).collect())
+            .unwrap_or_else(|| (0..joints.len()).flat_map(|_| Mat4::IDENTITY.to_cols_array()).collect());
+        assert_eq!(ibm.len(), joints.len() * 16, "skin {} inverse bind count does not match its joint palette", s.index());
+        skins.push(pc::Skin { joints, inverse_bind: cook.blobs.animation(&ibm) });
         skin_ids.insert(s.index(), (skins.len() - 1) as u32);
     }
 
@@ -761,6 +802,7 @@ fn main() {
             orm: None,
             emission: None,
             vertex_color: true,
+            vertex_pbr: false,
             interior: false,
             fog: true,
             wet: None,
@@ -1046,14 +1088,46 @@ fn main() {
     }
     let mats = cook.materials.clone();
     #[allow(clippy::too_many_arguments)]
-    let emit = |verts: &[Vertex], tris: &[[u32; 3]], locks: Option<&HashSet<[u32; 3]>>, material: u32, layout: pc::VertexLayout, node: Option<u32>, skin: Option<u32>, no_reflect: bool, blobs: &mut Blobs, draws: &mut Vec<pc::Draw>| {
-        // Whole thin parts may vanish at distance only from static lit surfaces
-        // without emission: signs and lamps stay, and people keep their limbs.
+    let emit = |verts: &[Vertex], tris: &[[u32; 3]], locks: Option<&HashSet<[u32; 3]>>, material: u32, layout: pc::VertexLayout, node: Option<u32>, skin: Option<u32>, metric_scale: f32, no_reflect: bool, blobs: &mut Blobs, draws: &mut Vec<pc::Draw>| {
+        // Whole thin parts may vanish at distance from rigid lit surfaces
+        // without emission. Animated rigid meshes use the same local-space
+        // error bound; signs and lamps stay, and skinned people keep limbs.
         let m = &mats[material as usize];
-        let drop_parts = locks.is_some() && m.kind == pc::Kind::Standard && m.emissive.iter().all(|&e| e <= 0.0) && m.emission.is_none();
-        for (v, t) in geometry::split(verts, tris) {
-            let locked: Vec<bool> = v.iter().map(|v| locks.is_some_and(|l| l.contains(&geometry::pos_bits(v.pos)))).collect();
-            let b = geometry::build(&v, &t, layout, geometry::lods(&v, &t, &locked, drop_parts));
+        let drop_parts = skin.is_none() && m.kind == pc::Kind::Standard && m.emissive.iter().all(|&e| e <= 0.0) && m.emission.is_none();
+        // The standard shader only consumes tangents for normal mapping and
+        // UVs for material maps. Authored primitives often retain both on
+        // plain metal/paint; remove those unused seams before simplification.
+        let mut source = verts.to_vec();
+        if m.kind == pc::Kind::Standard {
+            for v in &mut source {
+                if m.normal.is_none() { v.tangent = [1.0, 0.0, 0.0, 1.0]; }
+                if !m.vertex_pbr && m.albedo.is_none() && m.normal.is_none() && m.orm.is_none() && m.emission.is_none() { v.uv = Vec2::ZERO; }
+            }
+        }
+        let (mut verts, mut tris) = geometry::weld(&source, tris);
+        // Palette UVs encode reflectance, so protect their discontinuities
+        // as strongly as vertex colour instead of ordinary texture coords.
+        let uv_weight = if m.vertex_pbr { 0.5 } else { 0.02 };
+        // Rigid motion keeps detailed source meshes unbaked. Remove redundant
+        // tessellation within 4 mm (including normal/UV/colour error) before
+        // shipping them; emissive parts and skin weights remain untouched.
+        let mut base_error = 0.0;
+        if node.is_some() && drop_parts {
+            let locked = if m.vertex_pbr { geometry::palette_locks(&verts) } else { vec![false; verts.len()] };
+            if let Some((reduced, error)) = geometry::simplify(&verts, &tris, 0.4, 0.004 / metric_scale, &locked, uv_weight) {
+                (verts, tris) = geometry::weld(&verts, &reduced);
+                base_error = error;
+            }
+        }
+        let bounds: &[f32] = if node.is_some() { &[0.01, 0.025, 0.06, 0.25] } else { &[0.06, 0.25] };
+        let bounds: Vec<f32> = bounds.iter().map(|e| e / metric_scale).collect();
+        for (v, t) in geometry::split(&verts, &tris) {
+            let mut locked: Vec<bool> = v.iter().map(|v| locks.is_some_and(|l| l.contains(&geometry::pos_bits(v.pos)))).collect();
+            if m.vertex_pbr {
+                for (lock, seam) in locked.iter_mut().zip(geometry::palette_locks(&v)) { *lock |= seam; }
+            }
+            let levels = geometry::lods(&v, &t, layout, &locked, drop_parts, &bounds, uv_weight).into_iter().map(|(t, e)| (t, (e + base_error) * metric_scale)).collect();
+            let b = geometry::build(&v, &t, layout, levels);
             push_draw(b, material, layout, node, skin, no_reflect, blobs, draws);
         }
     };
@@ -1094,36 +1168,8 @@ fn main() {
         }
     };
     for ((material, _, no_reflect, baked), (verts, tris, locks)) in &static_buckets {
-        // Weld identical vertices inside the bucket.
-        let mut map: HashMap<[u32; 11], u32> = HashMap::new();
-        let mut uv: Vec<Vertex> = Vec::new();
-        let mut ut: Vec<[u32; 3]> = Vec::with_capacity(tris.len());
-        for t in tris {
-            let mut r = [0; 3];
-            for (k, &i) in t.iter().enumerate() {
-                let v = verts[i as usize];
-                let key = [
-                    v.pos.x.to_bits(),
-                    v.pos.y.to_bits(),
-                    v.pos.z.to_bits(),
-                    v.normal.x.to_bits(),
-                    v.normal.y.to_bits(),
-                    v.normal.z.to_bits(),
-                    v.uv.x.to_bits(),
-                    v.uv.y.to_bits(),
-                    u32::from_le_bytes(v.color),
-                    v.tangent[3].to_bits(),
-                    u32::from_le_bytes(v.light),
-                ];
-                r[k] = *map.entry(key).or_insert_with(|| {
-                    uv.push(v);
-                    (uv.len() - 1) as u32
-                });
-            }
-            ut.push(r);
-        }
         let layout = if *baked { pc::VertexLayout::Baked } else { pc::VertexLayout::Static };
-        emit(&uv, &ut, Some(locks), *material, layout, None, None, *no_reflect, &mut cook.blobs, &mut draws);
+        emit(verts, tris, Some(locks), *material, layout, None, None, 1.0, *no_reflect, &mut cook.blobs, &mut draws);
     }
     emit_stock(&mut cook.blobs, &mut draws);
     let static_draws = draws.len();
@@ -1134,7 +1180,7 @@ fn main() {
         let skin = p.skin.map(|s| skin_ids[&s]);
         let node = if skin.is_none() { node_ids.get(&p.mesh_node).copied() } else { None };
         let layout = if skin.is_some() { pc::VertexLayout::Skinned } else { pc::VertexLayout::Static };
-        emit(&p.verts, &p.tris, None, p.material, layout, node, skin, false, &mut cook.blobs, &mut draws);
+        emit(&p.verts, &p.tris, None, p.material, layout, node, skin, scale_of[&p.mesh_node], false, &mut cook.blobs, &mut draws);
     }
     let _ = &prims.iter().map(|p| p.world).count();
 
@@ -1152,7 +1198,7 @@ fn main() {
             for k in 0..n {
                 data.extend([p[k * 3], p[k * 3 + 1], p[k * 3 + 2], g[k]]);
             }
-            fog_tracks.push(pc::FogTrack { data: Blobs::floats(&mut cook.blobs.anim, &data) });
+            fog_tracks.push(pc::FogTrack { data: cook.blobs.animation(&data) });
             fog_track_of.insert(fi, (fog_tracks.len() - 1) as u32);
         }
     }
@@ -1181,7 +1227,7 @@ fn main() {
             if let Some(&mi) = cook.material_names.get(name) {
                 let base = vals.iter().cloned().fold(0.0f32, f32::max).max(1e-4);
                 let data: Vec<f32> = vals.iter().map(|v| v / base).collect();
-                material_tracks.push(pc::MaterialTrack { data: Blobs::floats(&mut cook.blobs.anim, &data) });
+                material_tracks.push(pc::MaterialTrack { data: cook.blobs.animation(&data) });
                 cook.materials[mi as usize].emissive_track = Some((material_tracks.len() - 1) as u32);
             }
         }
@@ -1242,6 +1288,11 @@ fn main() {
     let t_fx = Instant::now();
     let dump = std::env::var_os("POCKET_ATLAS_DUMP_EFFECTS").is_some();
     let out_dir = a.output.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let wet = cook.materials.iter().any(|m| m.wet.is_some());
+    let puddles = rain.active || wet || cook.materials.iter().any(|m| m.damp.is_some());
+    let glass = cook.materials.iter().any(|m| m.kind == pc::Kind::Glass);
+    let drops = cook.materials.iter().any(|m| m.kind == pc::Kind::Glass && m.drops > 0.0);
+    let night_clouds = sx["sky"]["model"] != "gradient-sun-cloudpanorama";
     let mut effect = |name: &str, img: textures::Rgba, format: pc::TexFormat, mips: u32, wrap: pc::Wrap| -> u32 {
         if dump {
             let bytes: Vec<u8> = img.px.iter().flat_map(|p| p.map(|c| (c.clamp(0.0, 1.0) * 255.0) as u8)).collect();
@@ -1267,13 +1318,18 @@ fn main() {
     };
     let ripple_grid = 4;
     let effects = pc::Effects {
-        puddles: Some(effect("fx-puddles", procedural::puddles(512), pc::TexFormat::Bc5, 12, pc::Wrap::Repeat)),
+        puddles: puddles.then(|| effect("fx-puddles", procedural::puddles(512), pc::TexFormat::Bc5, 12, pc::Wrap::Repeat)),
         // 16 frames of 256² over 4 drop cells; mips stop before frames bleed.
-        ripples: Some(effect("fx-ripples", procedural::ripples(256, ripple_grid, 4.0), pc::TexFormat::Bc5, 4, pc::Wrap::Repeat)),
+        ripples: wet.then(|| effect("fx-ripples", procedural::ripples(256, ripple_grid, 4.0), pc::TexFormat::Bc5, 4, pc::Wrap::Repeat)),
         ripple_grid,
         ripple_tile: 4.0 / 2.3,
-        beads: Some(effect("fx-beads", procedural::beads(1024), pc::TexFormat::Bc1, 12, pc::Wrap::Repeat)),
-        clouds: Some(effect("fx-clouds", procedural::clouds(512, 16.0), pc::TexFormat::Bc5, 12, pc::Wrap::Repeat)),
+        // Glass shaders always sample this slot. Dry glass needs a valid
+        // neutral texel, not the 1024-square animated rain lookup.
+        beads: glass.then(|| {
+            let img = if drops { procedural::beads(1024) } else { textures::Rgba { w: 4, h: 4, px: vec![[0.5, 0.5, 0.0, 1.0]; 16] } };
+            effect("fx-beads", img, pc::TexFormat::Bc1, 12, pc::Wrap::Repeat)
+        }),
+        clouds: night_clouds.then(|| effect("fx-clouds", procedural::clouds(512, 16.0), pc::TexFormat::Bc5, 12, pc::Wrap::Repeat)),
         cloud_cells: 16.0,
     };
     println!("effect textures in {} ms", t_fx.elapsed().as_millis());
@@ -1430,4 +1486,38 @@ fn main() {
     println!("{}", serde_json::to_string_pretty(&stats).unwrap());
     println!("wrote {} ({:.1} MiB)", a.output.display(), pack.len() as f64 / 1048576.0);
     let _ = Vec4::ZERO;
+}
+
+#[cfg(test)]
+mod blob_tests {
+    use super::*;
+
+    #[test]
+    fn identical_geometry_and_animation_share_aligned_ranges() {
+        let mut b = Blobs::default();
+        let first = b.geometry(&[1, 2, 3]);
+        let other = b.geometry(&[4, 5, 6]);
+        let same = b.geometry(&[1, 2, 3]);
+        assert_eq!((first.offset, first.size), (same.offset, same.size));
+        assert_eq!(other.offset, 16);
+        assert_eq!(b.geom.len(), 19);
+        assert_eq!(&b.geom[other.offset as usize..][..3], &[4, 5, 6]);
+        let a = b.animation(&[1.0, 2.0, 3.0]);
+        let c = b.animation(&[1.0, 2.0, 3.0]);
+        assert_eq!((a.offset, a.size), (c.offset, c.size));
+        assert_eq!(b.anim.len(), 12);
+        // Sharing must not cross the independent GEOM and ANIM sections.
+        assert_eq!(a.offset, 0);
+    }
+
+    #[test]
+    fn hash_collision_cannot_alias_different_buffer_contents() {
+        let mut buf = vec![1, 2, 3];
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        [4u8, 5, 6].as_slice().hash(&mut h);
+        let mut ranges = HashMap::from([(h.finish(), vec![pc::Range { offset: 0, size: 3 }])]);
+        let r = Blobs::intern(&mut buf, &mut ranges, &[4, 5, 6]);
+        assert_eq!(r.offset, 16);
+        assert_eq!(&buf[r.offset as usize..][..3], &[4, 5, 6]);
+    }
 }

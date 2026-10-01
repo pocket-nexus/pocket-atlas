@@ -63,7 +63,7 @@ export class DayStage extends PlaceStage<DayWorld, DayAudio> {
     await progress(0.04, "Preparing daylight materials");
     this.baker = new Baker(renderer);
     const lib = new DayLib(this.baker, quality); lib.bakeAll();
-    this.world = new DayWorld(lib, new Atlas(1024, { pad: 2 }), quality, 20160826);
+    this.world = new DayWorld(lib, new Atlas(1024, { pad: 2 }), quality, 20160826, this.ctx.params.geometry);
     await progress(0.16, "Growing clouds");
     this.clouds = bakeClouds(this.baker, s.sunDirection);
     await s.build(this.world, progress);

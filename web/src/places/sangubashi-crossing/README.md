@@ -85,9 +85,59 @@ bun scripts/export-place.ts --place sangubashi-crossing --seconds 64 \
   --base http://127.0.0.1:5198 --out ../.pocket-build/validation/sangubashi/export
 ```
 
-The shared `?export` hook produces glTF, the HDR environment and cloud
-panorama with the existing `scripts/export-place.ts` command. The current
-exporter captures instanced petals as a static snapshot; their per-instance
-motion is web-only. No `.place` cook, Vita shader compilation, device GPU
-profiling, deployment or physical screen acceptance was performed for this
-Three.js review. The PocketJS submodule and Vita transport are unchanged.
+## Offline Vita preparation
+
+The default web geometry remains the full reference. `geometry=handheld`
+selects the shared daytime geometry profile: the train retains all eight
+cars, 32 rotating wheelsets, cab, interior and equipment, with fewer radial
+segments and without hidden edges on thin plates. Its train geometry is
+102,376 triangles instead of 365,224. Foliage card density and railway hardware
+tessellation also scale down. Lighting and texture authoring quality remain
+independent of this geometry choice.
+
+Windborne petals use ordinary glTF skins with at most 24 joints per batch;
+260 petals take 11 draws. Their size is baked into the vertices and their
+translation/rotation tracks loop continuously over the same 64 seconds as
+the railway. This exports their motion through the existing animation path.
+
+With the web server above running, from the repository root:
+
+```sh
+(cd web && bun scripts/export-place.ts --place sangubashi-crossing \
+  --seconds 64 --geometry handheld --base http://127.0.0.1:5198)
+bun tools/atlas.ts cook --place sangubashi-crossing --tex 512
+bun web/scripts/place-budget.ts \
+  --in .pocket-build/places/sangubashi-crossing/sangubashi-crossing.place \
+  --out .pocket-build/validation/sangubashi/budget.json
+(cd web && bun scripts/export-atlas.ts --base http://127.0.0.1:5198)
+(cd web && bun scripts/preview-place.ts --place sangubashi-crossing \
+  --base http://127.0.0.1:5198)
+bun tools/atlas.ts cook-atlas
+bun tools/atlas.ts lint
+bun tools/atlas.ts build
+cargo test --workspace
+bun test web/scripts
+```
+
+The shared cooker adds rigid-motion LODs, merges solid PBR surfaces while
+retaining their vertex colour, roughness and metalness, and reuses identical
+geometry and animation storage. The native renderer gives moving rigid
+casters a separate shadow map while retaining the cached street shadows.
+Skinned particle bounds cover every joint, including the short final batch.
+
+The handheld export with a 512 px texture cap cooks to 39.03 MiB: 667 total
+draws, 416,849 LOD0 triangles, 299 animated nodes and 11 skins. The offline
+`vita30` step-0 scan samples 960 times at three camera positions for each of
+the six shots. It peaks at 358 main-pass draws, 234,799 triangles and 48,864
+moving triangles. These remain above the planning guides (250 / 130k / 30k);
+the counts are conservative, omit extra render passes and do not replace GPU
+profiling. Budget and frame-rate acceptance are still open.
+
+These are offline steps. `build` produces a Devkit runtime VPK/SELF; the place
+and atlas packs remain separate. A standalone `PKAT00001` package still needs
+the new shaders compiled by SceShaccCg on a free console. Host shader lint,
+cross-compilation and CPU budget scans do not establish device compilation,
+GPU time, frame rate or physical screen quality. Hardware deployment and
+acceptance are deliberately deferred while another agent uses the Vita.
+The existing native renderer has no audio path; the procedural railway sound
+remains a web feature. The PocketJS pin and Vita transport are unchanged.

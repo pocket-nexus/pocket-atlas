@@ -19,7 +19,7 @@ A pack connects the two: the web app exports a place as glTF 2.0 with `extras.po
 | Suga Shrine Stairs | `suga-shrine-stairs` | Yotsuya, Tokyo (the 男坂 stairs) | sun with a shadow map, sky occlusion baked into the vertices, alpha-tested foliage, daytime sky with a cloud panorama, ACES grade |
 | Radio Kaikan at Blue Hour | `akihabara-radio-kaikan` | Akihabara, Tokyo (秋葉原ラジオ会館, the 2014 building) | twilight sky (sun below the horizon), animated LED signage (flipbooks and scrolling strips), backlit window artwork, panel lights and lamps baked with sky occlusion, pedestrians and a passing train |
 | Kamakura-Kōkōmae Crossing | `kamakura-koko-mae-crossing` | Shichirigahama, Kamakura (鎌倉高校前1号踏切 on the Enoden) | open water (wave layers, Fresnel sky reflection, glitter path) to a 16 km horizon in FogExp2 haze, scrolling surf strips, flashing crossing lamps and gates driven by material and node tracks, a train, Route 134 traffic |
-| Sangubashi in Bloom | `sangubashi-crossing` | Yoyogi, Tokyo (参宮橋３号踏切) | spring foliage, drifting petals, a detailed commuter train, synchronised barriers and moving sunlight shadows; Three.js review |
+| Sangubashi in Bloom | `sangubashi-crossing` | Yoyogi, Tokyo (参宮橋３号踏切) | spring foliage, animated petals, an eight-car commuter train, synchronised barriers and moving sunlight shadows; offline Vita adaptation, device acceptance pending |
 
 Real places fall into a finite set of kinds; the registry names them (`PlaceKind` in `web/src/core/types.ts`): `night-street`, `daytime-slope`, `dusk-street`, `daytime-coast` and the Three.js `daytime-street` reference for the places built so far, and `night-slope`, `dusk-coast`, `night-coast`, `interior` and `rooftop` for the places still to come. Each first-party place brings its kind's rendering to the best quality the handheld holds, and the work goes into the shared renderer and cooker so later places of the same kind reuse it. Glass (`places/shared/glass.ts`) blends premultiplied on the web as on the device. The workflow and quality bar for making a place are in the `pocket-atlas-place` skill (`.claude/skills/pocket-atlas-place/`).
 
@@ -118,11 +118,21 @@ Commands that cook, sync or measure take `--place ID` (default `tokyo-konbini`).
 
 Static draws carry LOD1 (≤ 6 cm) and LOD2 (≤ 25 cm) index lists: meshoptimizer with only the vertices on chunk-cell cuts locked, and parts of plain lit surfaces narrower than a level's error (window bars, rails, curb pieces) removed at that level. A draw takes the coarsest level whose error projects under the step's pixel threshold; the mirror pass uses twice the threshold. Shelf stock switches to one card per item.
 
+Rigid moving draws also receive LODs, with additional 1 cm and 2.5 cm candidates for small mechanical details. Their non-emissive standard surfaces can drop subpixel parts; skinned meshes keep all their joint and weight seams and do not use this simplifier. Identical complete packed vertex records and identical geometry/animation byte ranges share storage. Unused standard-material UVs and tangents are canonicalized before welding. Rain lookup textures are generated only when the place uses them; dry glass gets a small neutral bead texture.
+
+Opaque solid standard materials without maps or special surface effects can share a `vertex_pbr` palette: sRGB vertex colour carries the albedo and UV carries each surface's roughness/metalness. Static geometry keeps its spatial chunks; fixed siblings in an animated hierarchy can share their parent's frame, keeping independent wheel or gate tracks intact. Sidedness, environment strength, depth state and other retained material fields remain batch boundaries. The renderer reads these PBR constants in full, distant and reflection variants.
+
+`bun web/scripts/place-budget.ts --in PACK.place --out REPORT.json` validates a cooked pack and estimates `vita30` step-0 main-pass geometry over the full animation loop at each shot's start, middle and end camera positions. Its draw and triangle counts are CPU planning evidence, not a GPU measurement or frame-rate claim.
+
 Variants that drop a material's ORM map (distant, LITE and mirror programs) scale roughness, metalness and occlusion by the map's per-channel means, stored in the pack.
 
 ## Daytime places
 
 A place exported with a directional light gets the sun per pixel: the static scene is drawn once from the sun into a 2048² shadow map (distance along the light packed into RGB), and lit materials compare four texels around each point and blend them by the sub-texel position. Only smooth or metallic materials (roughness under 0.6 or metalness over 0.3) evaluate the sun's highlight; draws beyond the detail distance skip the shadow lookup. The sun is not baked.
+
+Places with rigid moving opaque casters use a separate 512² shadow map, refreshed each frame with sun-frustum culling and shadow-texel LOD selection. Standard materials combine it with the cached static map; distant materials keep the moving lookup so a train's shadow remains visible across the crossing. Glass and skinned particles do not cast into this layer. This path has host lint/build coverage; its device shader compilation and GPU cost still require device acceptance.
+
+`shared/rigid-particles.ts` batches independent small rigid pieces into ordinary skins of at most 24 joints. The exporter records their position/rotation tracks; the runtime bounds the full joint set and uploads the shader's complete 24-joint uniform array. This keeps windborne petals animated without a place-specific particle renderer. Mesh sizes are baked into vertices, because the pack's node animation tracks carry translation and rotation, not scale.
 
 `extras.bake.skyOcclusion` in a place's export makes the cooker cast cosine-weighted rays (48 within 1.5 m for Suga Shrine Stairs, the web's N8AO radius) from every baked vertex against a BVH of the static triangles; the unblocked share scales the hemisphere and environment terms. Edges split for it only down to 1 m near where the camera goes, coarser with distance.
 
