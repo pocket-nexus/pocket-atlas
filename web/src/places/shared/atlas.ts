@@ -135,7 +135,13 @@ export class SkylineAtlas {
   private scale: number;
   /** Top contour: segments [x, y, width] covering [0, size) in x. */
   private sky: [number, number, number][];
-  private pad = 4;
+  /**
+   * Border around every cell, filled by extending the cell's edge pixels:
+   * a sign seen from afar samples a low mip level, and a black border (or
+   * the next cell) would bleed into it there — on the handheld, through
+   * BC1's 4×4 blocks, as dark squares that come and go with the mip level.
+   */
+  private pad = 16;
   private keyed = new Map<string, AtlasRect>();
   private used = 0;
 
@@ -201,12 +207,14 @@ export class SkylineAtlas {
   draw(w: number, h: number, paint: (g: Ctx, w: number, h: number) => void): AtlasRect {
     const cw = Math.max(8, Math.round(w * this.scale));
     const ch = Math.max(8, Math.round(h * this.scale));
-    const at = this.place(cw + this.pad, ch + this.pad);
-    if (!at) {
+    const p = this.pad;
+    const slot = this.place(cw + 2 * p, ch + 2 * p);
+    if (!slot) {
       console.warn(`skyline atlas full (${w}x${h}; ${Math.round(this.fill * 100)}% covered)`);
       return { u0: 0, v0: 0, u1: 0.001, v1: 0.001 };
     }
-    this.used += (cw + this.pad) * (ch + this.pad);
+    this.used += (cw + 2 * p) * (ch + 2 * p);
+    const at = { x: slot.x + p, y: slot.y + p };
     const g = this.g;
     g.save();
     g.translate(at.x, at.y);
@@ -215,12 +223,23 @@ export class SkylineAtlas {
     g.clip();
     paint(g, cw, ch);
     g.restore();
+    // Edge pixels stretched over the border: rows up and down, then columns
+    // (with the extended rows) left and right, which also fills the corners.
+    g.save();
+    g.imageSmoothingEnabled = false;
+    const c = g.canvas as CanvasImageSource;
+    const { x, y } = at;
+    g.drawImage(c, x, y, cw, 1, x, y - p, cw, p);
+    g.drawImage(c, x, y + ch - 1, cw, 1, x, y + ch, cw, p);
+    g.drawImage(c, x, y - p, 1, ch + 2 * p, x - p, y - p, p, ch + 2 * p);
+    g.drawImage(c, x + cw - 1, y - p, 1, ch + 2 * p, x + cw, y - p, p, ch + 2 * p);
+    g.restore();
     this.texture.needsUpdate = true;
     return {
-      u0: (at.x + 0.5) / this.size,
-      u1: (at.x + cw - 0.5) / this.size,
-      v1: 1 - (at.y + 0.5) / this.size,
-      v0: 1 - (at.y + ch - 0.5) / this.size,
+      u0: (x + 0.5) / this.size,
+      u1: (x + cw - 0.5) / this.size,
+      v1: 1 - (y + 0.5) / this.size,
+      v0: 1 - (y + ch - 0.5) / this.size,
     };
   }
 
