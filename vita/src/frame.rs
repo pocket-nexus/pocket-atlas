@@ -213,6 +213,7 @@ struct Mat {
     wet: [f32; 4],
     wet2: [f32; 4],
     uv_anim: Option<pc::UvAnim>,
+    water: Option<pc::Water>,
 }
 
 fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: bool) -> Mat {
@@ -227,6 +228,7 @@ fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: boo
         pc::Kind::Products => ("products_f.cg", false),
         pc::Kind::Tower => ("tower_f.cg", false),
         pc::Kind::Skyline => ("skyline_f.cg", false),
+        pc::Kind::Water => ("water_f.cg", false),
     };
     if let Some(t) = m.albedo {
         tex[0] = Some(t as usize);
@@ -270,6 +272,17 @@ fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: boo
             }
         }
     }
+    if m.kind == pc::Kind::Water {
+        if let Some(t) = m.normal {
+            tex[1] = Some(t as usize);
+        }
+        if sun {
+            defines.push("SUN");
+        }
+        if m.fog {
+            defines.push("FOG");
+        }
+    }
     if m.vertex_color && matches!(m.kind, pc::Kind::Standard | pc::Kind::Unlit) {
         defines.push("VERTEX_COLOR");
     }
@@ -307,7 +320,7 @@ fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: boo
     };
     let class = match m.kind {
         pc::Kind::Standard if m.wet.is_some() => 0,
-        pc::Kind::Standard => 1,
+        pc::Kind::Standard | pc::Kind::Water => 1,
         pc::Kind::Glass => 2,
         pc::Kind::InteriorWindow => 3,
         pc::Kind::Products => 4,
@@ -325,7 +338,7 @@ fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: boo
         depth_write: m.depth_write && !transparent,
         transparent,
         // Glass is thin and mostly transparent in a blurred mirror image.
-        reflect: !w.planar && !matches!(m.kind, pc::Kind::Tower | pc::Kind::Glass),
+        reflect: !w.planar && !matches!(m.kind, pc::Kind::Tower | pc::Kind::Glass | pc::Kind::Water),
         bias: m.polygon_offset.map(|p| (-p[0] as i32, -p[1] as i32)),
         tex,
         base,
@@ -343,6 +356,7 @@ fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: boo
         wet: [w.puddles, w.darken, w.roughness, w.ripple],
         wet2: [1.0 / w.puddle_scale.max(0.01), d.darken, d.roughness, d.streaks],
         uv_anim: m.uv_anim,
+        water: m.water,
     }
 }
 
@@ -872,10 +886,10 @@ impl Renderer {
     fn shadow_keys(&self, d: &crate::scene::DrawGpu) -> Option<(Key, Key, Layout)> {
         let m = &self.mats[d.material as usize];
         let v = variant(d);
-        if v == 1 || d.node.is_some() || m.transparent || m.class == 2 || m.class == 3 {
+        if v == 1 || d.node.is_some() || m.transparent || m.class == 2 || m.class == 3 || m.water.is_some() {
             return None;
         }
-        let vs = surface_key(v, !m.alpha_test, (false, false, false));
+        let vs = surface_key(v, !m.alpha_test, (false, false, false, false));
         let fs = Key::new("shadow_f.cg", if m.alpha_test { &["ALPHA_TEST"][..] } else { &[] });
         Some((vs, fs, [Layout::Static, Layout::Skinned, Layout::Baked][v]))
     }
@@ -1525,6 +1539,13 @@ impl Renderer {
             u.set(p, U::Ripple, &f.ripple);
             u.set(p, U::ReflOn, &[if self.settings.reflection && self.has_reflection { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0]);
             u.set(p, U::Haze, &f.skyline_haze);
+            if let Some(w) = &m.water {
+                // Offsets wrap: the wave texture repeats.
+                let layer = |l: &[f32; 3]| [l[0], 0.0, (f.time * l[1] * l[0]).fract(), (f.time * l[2] * l[0]).fract()];
+                let (a, b) = (layer(&w.waves[0]), layer(&w.waves[1]));
+                u.set(p, U::Wave, &[a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]]);
+                u.set(p, U::WaterK, &[w.body[0], w.body[1], w.body[2], w.distance_roughness]);
+            }
             if let Some(sp) = &self.sun {
                 u.set(p, U::SunDir, &sp.dir);
                 u.set(p, U::SunRad, &sp.rad);
@@ -1638,19 +1659,20 @@ fn variant(d: &crate::scene::DrawGpu) -> usize {
 /// UV: (tangent, vertex colour, clip position for the mirror lookup). The
 /// vertex program writes only these; unread varyings cost parameter-buffer
 /// bandwidth on the tiler.
-fn vs_needs(m: &Mat, tier: usize, mirror: bool) -> (bool, bool, bool) {
+fn vs_needs(m: &Mat, tier: usize, mirror: bool) -> (bool, bool, bool, bool) {
     let has = |d: &str| m.defines.contains(&d);
     match m.fs {
-        "standard_f.cg" => (has("NORMAL_MAP") && tier == 0 && !mirror, has("VERTEX_COLOR"), has("PLANAR") && !mirror),
-        "window_f.cg" | "skyline_f.cg" => (true, true, false),
-        "unlit_f.cg" | "products_f.cg" => (false, true, false),
-        _ => (false, false, false),
+        "standard_f.cg" => (has("NORMAL_MAP") && tier == 0 && !mirror, has("VERTEX_COLOR"), has("PLANAR") && !mirror, false),
+        "window_f.cg" | "skyline_f.cg" => (true, true, false, false),
+        "unlit_f.cg" | "products_f.cg" => (false, true, false, false),
+        "water_f.cg" => (false, false, false, true),
+        _ => (false, false, false, false),
     }
 }
 
 /// `flat`: profiling variant that outputs position and world only (pairs
 /// with debug_f.cg).
-fn surface_key(variant: usize, flat: bool, (tangent, color, screen): (bool, bool, bool)) -> Key {
+fn surface_key(variant: usize, flat: bool, (tangent, color, screen, waves): (bool, bool, bool, bool)) -> Key {
     let mut defs: Vec<&str> = match variant {
         1 => vec!["SKINNED", "MAX_BONES=24"],
         2 => vec!["BAKED"],
@@ -1659,7 +1681,7 @@ fn surface_key(variant: usize, flat: bool, (tangent, color, screen): (bool, bool
     if flat {
         defs.push("FLAT");
     } else {
-        for (on, d) in [(tangent, "TANGENT"), (color, "COLOR"), (screen, "SCREEN")] {
+        for (on, d) in [(tangent, "TANGENT"), (color, "COLOR"), (screen, "SCREEN"), (waves, "WAVES")] {
             if on {
                 defs.push(d);
             }

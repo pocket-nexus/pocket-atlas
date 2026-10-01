@@ -1,0 +1,63 @@
+// Open water: two layers of the wave normal map (coordinates on the world's
+// x/z plane from the vertex stage), the environment reflected by Fresnel,
+// the sun's highlight and the light the body scatters back, FogExp2. The
+// waves flatten with distance and their slope goes into the roughness, so the
+// far water shows the sun as a glitter path rather than a mirror line.
+// Writes HDR radiance and the eye distance (haze input) in alpha.
+//
+// Defines: SUN, FOG.
+
+#include "common.cgh"
+
+uniform sampler2D uNormalMap;
+uniform sampler2D uEnv;
+
+uniform float4 uPbr;     // roughness near the camera, -, wave slope scale, -
+uniform float4 uEnvK;    // environment intensity, -, -, -
+uniform float4 uWaterK;  // body colour (linear, × sky irradiance), roughness² per metre
+uniform float4 uEye;     // camera position, time (s)
+uniform float4 uFog;     // FogExp2 colour, density
+uniform float4 uHemiSky; // hemisphere irradiance from above
+#ifdef SUN
+uniform float4 uSunDir;  // direction towards the sun, -
+uniform float4 uSunRad;  // radiance (colour × intensity), -
+#endif
+
+half4 main(
+    float3 vWorld : TEXCOORD0,
+    float2 vUv : TEXCOORD3,
+    float2 vUv2 : TEXCOORD6) : COLOR
+{
+    float3 toEye = uEye.xyz - vWorld;
+    float dist = length(toEye);
+    float3 V = toEye / dist;
+    half2 n1 = tex2D(uNormalMap, vUv).rg * 2.0 - 1.0;
+    half2 n2 = tex2D(uNormalMap, vUv2).rg * 2.0 - 1.0;
+    float a2 = uPbr.x * uPbr.x + dist * uWaterK.w;
+    float calm = 1.0 / (1.0 + dist * uWaterK.w * 40.0);
+    float2 slope = (float2)(n1 + n2) * (uPbr.z * calm);
+    float3 N = normalize(float3(slope.x, 1.0, slope.y));
+    float dotNV = max(dot(N, V), 1e-3);
+    float F = 0.02 + 0.98 * exp2((-5.55473 * dotNV - 6.98316) * dotNV);
+    float3 R = reflect(-V, N);
+    R.y = abs(R.y);
+    float3 sky = tex2D(uEnv, octUv(R)).rgb * uEnvK.x;
+    float3 body = uWaterK.rgb * uHemiSky.rgb;
+    float3 color = lerp(body, sky, F);
+#ifdef SUN
+    {
+        float3 L = uSunDir.xyz;
+        float3 H = normalize(L + V);
+        float dotNL = saturate(dot(N, L));
+        float dotNH = saturate(dot(N, H));
+        float dotVH = saturate(dot(V, H));
+        float alpha = sqrt(a2);
+        float Fs = 0.02 + 0.98 * exp2((-5.55473 * dotVH - 6.98316) * dotVH);
+        color += uSunRad.rgb * (dotNL * Fs * V_GGX_SmithCorrelated(alpha, dotNL, dotNV) * D_GGX(alpha, dotNH));
+    }
+#endif
+#ifdef FOG
+    color = lerp(color, uFog.rgb, fogFactor(dist, uFog.w));
+#endif
+    return half4((half3)color, (half)dist);
+}

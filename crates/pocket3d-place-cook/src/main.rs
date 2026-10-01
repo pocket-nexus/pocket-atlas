@@ -180,6 +180,7 @@ impl<'a> Cook<'a> {
             Some("interiorWindow") => pc::Kind::InteriorWindow,
             Some("products") => pc::Kind::Products,
             Some("tower") => pc::Kind::Tower,
+            Some("water") => pc::Kind::Water,
             _ if m.unlit() => pc::Kind::Unlit,
             _ => pc::Kind::Standard,
         };
@@ -245,6 +246,17 @@ impl<'a> Cook<'a> {
             .and_then(|c| c.get("clearcoatFactor"))
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0) as f32;
+        let water = (kind == pc::Kind::Water).then(|| {
+            let layer = |i: usize, d: [f32; 3]| -> [f32; 3] {
+                let a = x.get("waves").and_then(|w| w.get(i)).and_then(|l| l.as_array());
+                a.map_or(d, |a| core::array::from_fn(|k| a.get(k).and_then(|v| v.as_f64()).map_or(d[k], |v| v as f32)))
+            };
+            pc::Water {
+                waves: [layer(0, [0.12, 0.35, 0.12]), layer(1, [0.31, -0.22, 0.27])],
+                body: x.get("body").map_or([0.01, 0.035, 0.045], |b| { let c = v3(b); [c[0], c[1], c[2]] }),
+                distance_roughness: f(&x, "distanceRoughness", 0.0004),
+            }
+        });
         let name = m.name().unwrap_or("material").to_string();
         let out = pc::Material {
             name: name.clone(),
@@ -274,6 +286,7 @@ impl<'a> Cook<'a> {
             polygon_offset: x.get("polygonOffset").and_then(|p| p.as_array()).map(|a| [a[0].as_f64().unwrap_or(0.0) as f32, a[1].as_f64().unwrap_or(0.0) as f32]),
             emissive_track: None,
             uv_anim,
+            water,
         };
         self.materials.push(out);
         let i = (self.materials.len() - 1) as u32;
@@ -790,6 +803,7 @@ fn main() {
             polygon_offset: None,
             emissive_track: None,
             uv_anim: None,
+            water: None,
         };
         cook.materials.push(mat);
         let mi = (cook.materials.len() - 1) as u32;

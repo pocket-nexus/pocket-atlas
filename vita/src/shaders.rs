@@ -38,6 +38,7 @@ pub const SOURCES: &[(&str, &str)] = &[
     ("globe_f.cg", include_str!("../shaders/globe_f.cg")),
     ("marker_v.cg", include_str!("../shaders/marker_v.cg")),
     ("marker_f.cg", include_str!("../shaders/marker_f.cg")),
+    ("water_f.cg", include_str!("../shaders/water_f.cg")),
     ("ui_v.cg", include_str!("../shaders/ui_v.cg")),
     ("text_v.cg", include_str!("../shaders/text_v.cg")),
     ("text_f.cg", include_str!("../shaders/text_f.cg")),

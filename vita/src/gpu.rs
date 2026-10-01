@@ -95,6 +95,8 @@ pub enum U {
     TwBelt,
     TwShape,
     TwShadow,
+    Wave,
+    WaterK,
     Count,
 }
 
@@ -107,6 +109,7 @@ const UNIFORM_NAMES: [&str; U::Count as usize] = [
     "uSunDir", "uSunRad", "uSunMat", "uShadowK", "uSkyDay", "uSkySun", "uSkyGlow", "uSkyDisc", "uCloudSun", "uCloudAmb", "uSunCurve",
     "uRect", "uLocal", "uTexRect", "uShape", "uFill", "uFill2", "uStroke", "uStrokeW",
     "uTwBand", "uTwBelt", "uTwShape", "uTwShadow",
+    "uWave", "uWaterK",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

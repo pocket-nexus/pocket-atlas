@@ -90,6 +90,9 @@ pub enum Kind {
     Tower,
     /// Distant skyline boxes (procedural windows; vertex colour = per-box info).
     Skyline,
+    /// Open water (sea, lake, river): `Material::water`, the normal map as
+    /// the wave texture, `roughness` near the camera.
+    Water,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,6 +158,22 @@ pub struct Material {
     /// Animated texture coordinates (LED signs, screens, tickers).
     #[serde(default)]
     pub uv_anim: Option<UvAnim>,
+    #[serde(default)]
+    pub water: Option<Water>,
+}
+
+/// Open water: two layers of the normal map laid on the world's x/z plane
+/// and scrolled, the environment reflected by Fresnel, the sun's highlight
+/// and light scattered out of the body.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Water {
+    /// Per layer: repeats per metre, scroll (m/s along x, along z).
+    pub waves: [[f32; 3]; 2],
+    /// Linear colour of the light the body scatters back, × sky irradiance.
+    pub body: [f32; 3],
+    /// Roughness² added per metre of distance: waves smaller than a pixel
+    /// widen the sun's reflection into a glitter path.
+    pub distance_roughness: f32,
 }
 
 /// A material's texture coordinates over time: a flipbook of `frames`
