@@ -66,7 +66,7 @@ pub fn cook(input: &Path, output: &Path) {
 
     let mut blob = Vec::new();
     let mut textures = Vec::new();
-    let mut push = |name: &str, role: pc::TexRole, format: pc::TexFormat, width: u32, height: u32, mips: u32, data: &[u8], wrap_s: pc::Wrap, alpha: bool| {
+    let mut push = |name: &str, role: pc::TexRole, format: pc::TexFormat, width: u32, height: u32, mips: u32, data: &[u8], wrap_s: pc::Wrap, alpha: bool| -> u32 {
         while blob.len() % 256 != 0 {
             blob.push(0);
         }
@@ -74,6 +74,7 @@ pub fn cook(input: &Path, output: &Path) {
         blob.extend_from_slice(data);
         println!("  {name:18} {format:?} {width}x{height} ×{mips}  {} KiB", data.len() / 1024);
         textures.push(pc::Texture { name: name.into(), role, format, width, height, mips, data: range, wrap_s, wrap_t: pc::Wrap::Clamp, has_alpha: alpha, mean: [0.0; 4] });
+        (textures.len() - 1) as u32
     };
 
     // Surface maps: equirectangular, wrapping in longitude.
@@ -131,6 +132,20 @@ pub fn cook(input: &Path, output: &Path) {
         grain: n("grain"),
     };
     let s = |p: &Value, k: &str| p[k].as_str().unwrap_or("").to_string();
+    // Preview cards (web/scripts/preview-place.ts) next to each place's export.
+    let places_dir = input.parent().and_then(|a| a.parent()).map(|b| b.join("places"));
+    let mut previews = std::collections::HashMap::new();
+    for p in places.as_array().expect("places.json") {
+        let id = s(p, "id");
+        let Some(path) = places_dir.as_ref().map(|d| d.join(&id).join("preview.png")) else { continue };
+        let Ok(img) = image::open(&path) else { continue };
+        let img = img.to_rgba8();
+        let src = textures::from_rgba8(img.width(), img.height(), img.as_raw(), pc::TexRole::Color);
+        let src = textures::resize(&src, 512, 256);
+        let e = textures::encode_as(&src, pc::TexRole::Color, pc::TexFormat::Bc1, 512, 6);
+        let t = push(&format!("preview:{id}"), pc::TexRole::Color, e.format, e.width, e.height, e.mips, &e.data, pc::Wrap::Clamp, false);
+        previews.insert(id, t);
+    }
     let places: Vec<AtlasPlace> = places
         .as_array()
         .expect("places.json")
@@ -148,6 +163,12 @@ pub fn cook(input: &Path, output: &Path) {
             weather: s(p, "weather"),
             accent: hex_linear(&s(p, "accent")),
             enterable: p["enterable"].as_bool().unwrap_or(false),
+            author: s(p, "author"),
+            kind: s(p, "kind"),
+            tags: p["tags"].as_array().map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect()).unwrap_or_default(),
+            summary: s(p, "summary"),
+            featured: p["featured"].as_bool().unwrap_or(false),
+            preview: previews.get(&s(p, "id")).copied(),
         })
         .collect();
     let meta = AtlasMeta { version: 1, places, textures, globe };
