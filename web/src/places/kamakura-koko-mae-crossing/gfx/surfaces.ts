@@ -34,7 +34,7 @@ Surface surface(vec2 uv) {
   float m = fbm(uv * 1.5 + 7.0, vec2(1.5), 3);
   vec3 w = worley(uv * 150.0, vec2(150.0));
   float pore = smoothstep(0.18, 0.02, w.x) * step(0.7, w.z);
-  vec3 col = vec3(0.46, 0.45, 0.43) * (0.82 + 0.32 * n) * (0.88 + 0.2 * m);
+  vec3 col = vec3(0.34, 0.333, 0.318) * (0.82 + 0.32 * n) * (0.88 + 0.2 * m);
   float streak = smoothstep(0.55, 0.9, fbm(vec2(uv.x * 16.0, uv.y * 1.0), vec2(16.0, 1.0), 4));
   col *= 1.0 - streak * 0.18;
   col *= 1.0 - pore * 0.45;
@@ -42,64 +42,125 @@ Surface surface(vec2 uv) {
 }`;
 
 /**
- * 2.4 m of rock-faced masonry retaining wall (間知石積み): split stones laid
- * in a diagonal pattern, dark grey-brown with salt bloom and plants low in
- * the joints.
+ * 2.4 m of random rubble masonry (雑割石積み), the retaining walls under the
+ * villas: dark grey andesite and brown tuff stones of 25–45 cm with domed,
+ * split faces, set in wide light-grey mortar; run-off streaks below the
+ * joints, salt bloom on the stone faces, moss low in the mortar.
  */
 export const RUBBLE = /* glsl */ `
 Surface surface(vec2 uv) {
-  vec2 q = uv + 0.04 * vec2(gnoise(uv * 6.0, vec2(6.0)), gnoise(uv * 6.0 + 4.1, vec2(6.0)));
-  vec3 w = worley(q * vec2(9.0, 10.0), vec2(9.0, 10.0));
+  vec2 q = uv + 0.035 * vec2(gnoise(uv * 6.0, vec2(6.0)), gnoise(uv * 6.0 + 4.1, vec2(6.0)));
+  vec3 w = worley(q * vec2(5.0, 8.0), vec2(5.0, 8.0));
   float edge = w.y - w.x;
-  float joint = 1.0 - smoothstep(0.01, 0.045, edge);
-  float face = sqrt(smoothstep(0.0, 0.45, edge));
-  float split = fbm(uv * 30.0, vec2(30.0), 5);
-  float pits = fbm(uv * 110.0, vec2(110.0), 3);
+  float jw = 0.025 + 0.035 * hash12(vec2(floor(w.z * 97.0), 3.0));
+  float gap = 1.0 - smoothstep(jw, jw + 0.05, edge);
+  // Chinking: small stones packed into the wider joints.
+  vec3 c = worley(uv * vec2(22.0, 30.0), vec2(22.0, 30.0));
+  float chink = gap * smoothstep(0.02, 0.12, c.y - c.x) * step(0.35, c.z);
+  float joint = gap * (1.0 - chink);
+  float face = smoothstep(0.02, 0.5, edge);
+  float dome = sqrt(clamp(edge * 2.0, 0.0, 1.0));
+  // Split faces: coarse facets, pitting and lichen, different per stone.
+  float facet = fbm(uv * 12.0 + w.z * 31.0, vec2(12.0), 4);
+  float split = fbm(uv * 34.0, vec2(34.0), 5);
+  float grain = fbm(uv * 120.0, vec2(120.0), 3);
   float tone = w.z;
-  vec3 stone = mix(vec3(0.11, 0.105, 0.1), vec3(0.21, 0.2, 0.185), smoothstep(0.1, 0.9, tone));
-  stone = mix(stone, vec3(0.2, 0.17, 0.135), step(0.85, tone) * 0.6);
-  stone *= 0.75 + 0.4 * split + 0.12 * pits;
-  float salt = smoothstep(0.62, 0.8, fbm(uv * 8.0 + 1.7, vec2(8.0), 5)) * face;
-  stone = mix(stone, vec3(0.42, 0.41, 0.38), salt * 0.3);
-  float weeds = smoothstep(0.5, 0.75, fbm(uv * 4.0 + 9.0, vec2(4.0), 5));
-  vec3 mortar = mix(vec3(0.09, 0.088, 0.083), vec3(0.06, 0.09, 0.035), weeds * 0.7);
+  vec3 stone = mix(vec3(0.07, 0.066, 0.06), vec3(0.17, 0.155, 0.13), smoothstep(0.1, 0.95, tone));
+  stone = mix(stone, vec3(0.2, 0.15, 0.1), step(0.78, tone) * 0.8);
+  stone = mix(stone, vec3(0.045, 0.045, 0.047), step(tone, 0.16) * 0.75);
+  stone *= 0.45 + 0.95 * facet + 0.3 * (split - 0.5) + 0.12 * grain;
+  // Weathered arrises: stone edges paler than the faces.
+  stone *= 1.0 + (1.0 - face) * 0.25;
+  float lichen = smoothstep(0.7, 0.85, fbm(uv * 16.0 + 3.3, vec2(16.0), 4)) * face;
+  stone = mix(stone, vec3(0.24, 0.24, 0.2), lichen * 0.45);
+  float streak = smoothstep(0.5, 0.85, fbm(vec2(uv.x * 22.0, uv.y * 1.0), vec2(22.0, 1.0), 4));
+  stone *= 1.0 - streak * 0.35;
+  vec3 chinkCol = mix(vec3(0.06, 0.058, 0.055), vec3(0.14, 0.13, 0.11), c.z) * (0.7 + 0.6 * grain);
+  vec3 mortar = vec3(0.17, 0.165, 0.155) * (0.75 + 0.4 * grain);
+  mortar = mix(mortar, mortar * 0.5, streak * 0.8);
+  float moss = smoothstep(0.58, 0.8, fbm(uv * 5.0 + 9.0, vec2(5.0), 4));
+  mortar = mix(mortar, vec3(0.045, 0.07, 0.025), moss * 0.65);
   vec3 col = mix(stone, mortar, joint);
-  float h = face * 0.9 + split * 0.25 + pits * 0.05 - joint * 0.3;
-  return S(col, h, mix(0.82, 0.95, joint), 1.0 - joint * 0.5 - (1.0 - face) * 0.15, 0.0);
+  col = mix(col, chinkCol, chink);
+  float h = dome * 0.6 + facet * 0.8 + split * 0.3 + grain * 0.06 - joint * 0.6 + chink * 0.2;
+  return S(col, h, mix(0.82, 0.95, joint), 1.0 - joint * 0.45 - (1.0 - face) * 0.15, 0.0);
 }`;
 
 /**
- * 1.8 m of beige split-face stone cladding (石積み調): courses of 0.12–0.3 m
- * with random lengths, recessed dark joints, warm sandstone tones.
+ * 1.8 m of split-face ashlar cladding (乱形石張り) on the villa bases and the
+ * garage: 0.3 m courses, 3–6 blocks a course, half the blocks split into two
+ * 0.15 m pieces; cream, tan, warm grey and pinkish sandstone, recessed joints.
  */
 export const STONE_CLAD = /* glsl */ `
 Surface surface(vec2 uv) {
-  float y = uv.y * 1.8;
-  float row = floor(y / 0.2);
-  float ry = fract(y / 0.2);
-  float shift = hash12(vec2(mod(row, 9.0), 3.0));
-  float x = uv.x * 1.8 / (0.35 + 0.3 * hash12(vec2(mod(row, 9.0), 7.0))) + shift * 4.0;
-  float cx = floor(x);
+  float y = uv.y * 6.0;
+  float row = floor(y);
+  float ry = fract(y);
+  float n = 3.0 + floor(hash12(vec2(row, 3.7)) * 4.0);
+  float x = uv.x * n + floor(hash12(vec2(row, 9.1)) * n) + 0.5 * hash12(vec2(row, 2.2));
+  float cx = mod(floor(x), n);
   float rx = fract(x);
-  float id = hash12(vec2(mod(cx, 16.0), mod(row, 9.0)));
-  vec2 e = vec2(min(rx, 1.0 - rx) * 0.4, min(ry, 1.0 - ry) * 0.2);
+  float id = hash12(vec2(cx + 0.37, row + 1.9));
+  float halves = step(0.55, id);
+  float sy = mix(ry, fract(ry * 2.0), halves);
+  float hh = mix(0.3, 0.15, halves);
+  float id2 = mix(id, hash12(vec2(cx + floor(ry * 2.0) * 7.1, row + 4.3)), halves);
+  float bw = 1.8 / n;
+  vec2 e = vec2(min(rx, 1.0 - rx) * bw, min(sy, 1.0 - sy) * hh);
   float d = min(e.x, e.y);
-  float joint = 1.0 - smoothstep(0.004, 0.012, d);
-  float bevel = smoothstep(0.0, 0.03, d);
-  float split = fbm(uv * 40.0, vec2(40.0), 5);
-  vec3 a = vec3(0.58, 0.5, 0.39);
-  vec3 b = vec3(0.45, 0.38, 0.3);
-  vec3 c = vec3(0.66, 0.6, 0.5);
-  vec3 col = id < 0.4 ? mix(a, b, id / 0.4) : mix(a, c, (id - 0.4) / 0.6);
-  col *= 0.82 + 0.3 * split;
-  col = mix(col, vec3(0.13, 0.12, 0.1), joint);
-  float h = bevel * 0.8 + split * 0.3 - joint * 0.3;
-  return S(col, h, 0.85, 1.0 - joint * 0.5, 0.0);
+  float joint = 1.0 - smoothstep(0.004, 0.011, d);
+  float bevel = smoothstep(0.0, 0.035, d);
+  float rough = fbm(uv * 40.0, vec2(40.0), 5);
+  float fine = fbm(uv * 160.0, vec2(160.0), 2);
+  vec3 cream = vec3(0.6, 0.53, 0.41);
+  vec3 tanc = vec3(0.47, 0.38, 0.28);
+  vec3 grey = vec3(0.46, 0.44, 0.4);
+  vec3 pink = vec3(0.58, 0.47, 0.4);
+  vec3 col = id2 < 0.35 ? mix(cream, tanc, id2 / 0.35) : (id2 < 0.7 ? mix(cream, grey, (id2 - 0.35) / 0.35) : mix(tanc, pink, (id2 - 0.7) / 0.3));
+  col *= 0.8 + 0.3 * rough + 0.08 * fine;
+  float stain = smoothstep(0.55, 0.9, fbm(vec2(uv.x * 10.0, uv.y * 1.0), vec2(10.0, 1.0), 4));
+  col *= 1.0 - stain * 0.18;
+  col = mix(col, vec3(0.12, 0.105, 0.09), joint);
+  float h = bevel * 0.65 + rough * 0.4 + fine * 0.05 - joint * 0.3;
+  return S(col, h, 0.88, 1.0 - joint * 0.55, 0.0);
 }`;
 
 /**
- * 1.13 m of decorative cast-block wall (化粧ブロック): 0.4 × 0.2 m blocks laid
- * on the diagonal, light grey with streaks (the walls on the park side). The
+ * 1.2 m of brown stacked ledgestone (積み石調) on the round-tower villa's
+ * columns: 75 mm courses of long thin stones, each set proud or back by a
+ * few centimetres, dark gaps; brown, umber and grey-brown.
+ */
+export const LEDGE = /* glsl */ `
+Surface surface(vec2 uv) {
+  float y = uv.y * 16.0;
+  float row = floor(y);
+  float ry = fract(y);
+  float n = 3.0 + floor(hash12(vec2(row, 1.3)) * 4.0);
+  float x = uv.x * n + floor(hash12(vec2(row, 5.7)) * n) + 0.5 * hash12(vec2(row, 8.8));
+  float cx = mod(floor(x), n);
+  float rx = fract(x);
+  float id = hash12(vec2(cx + 0.71, row + 3.3));
+  float bw = 1.2 / n;
+  vec2 e = vec2(min(rx, 1.0 - rx) * bw, min(ry, 1.0 - ry) * 0.075);
+  float d = min(e.x, e.y);
+  float gap = 1.0 - smoothstep(0.003, 0.009, d);
+  float proud = hash12(vec2(cx + 3.1, row + 0.6));
+  float rough = fbm(uv * vec2(60.0, 30.0), vec2(60.0, 30.0), 4);
+  vec3 a = vec3(0.2, 0.14, 0.095);
+  vec3 b = vec3(0.3, 0.24, 0.18);
+  vec3 c = vec3(0.24, 0.22, 0.2);
+  vec3 col = id < 0.5 ? mix(a, b, id * 2.0) : mix(b, c, (id - 0.5) * 2.0);
+  col *= 0.75 + 0.45 * rough;
+  col *= 0.85 + 0.25 * proud;
+  col = mix(col, vec3(0.02, 0.018, 0.016), gap);
+  float h = proud * 0.7 + smoothstep(0.0, 0.02, d) * 0.4 + rough * 0.3 - gap * 0.8;
+  return S(col, h, 0.86, 1.0 - gap * 0.75 - (1.0 - proud) * 0.12, 0.0);
+}`;
+
+/**
+ * 1.13 m of cast-block retaining wall (間知ブロック): 0.4 × 0.2 m faces laid on
+ * the diagonal, warm light grey with darker joints, rust and run-off streaks
+ * (the walls under the villas west of the slope and up the hill, p09). The
  * diagonal lattice repeats every 1.13 m (two blocks along, four courses up).
  */
 export const BLOCK = /* glsl */ `
@@ -110,14 +171,19 @@ Surface surface(vec2 uv) {
   g.x += mod(row, 2.0) * 0.5;
   vec2 f = fract(g);
   vec2 e = min(f, 1.0 - f) * vec2(0.4, 0.2);
-  float joint = 1.0 - smoothstep(0.004, 0.009, min(e.x, e.y));
+  float d = min(e.x, e.y);
+  float joint = 1.0 - smoothstep(0.005, 0.012, d);
+  float bevel = smoothstep(0.0, 0.03, d);
   float id = hash12(floor(g) * 0.37);
   float n = fbm(uv * 20.0, vec2(20.0), 5);
-  float streak = smoothstep(0.5, 0.9, fbm(vec2(uv.x * 12.0, uv.y * 1.0), vec2(12.0, 1.0), 4));
-  vec3 col = vec3(0.36, 0.355, 0.34) * (0.86 + 0.14 * id) * (0.86 + 0.24 * n);
-  col *= 1.0 - streak * 0.2;
-  col = mix(col, vec3(0.3, 0.3, 0.29), joint);
-  return S(col, n * 0.3 - joint * 0.5, 0.9, 1.0 - joint * 0.5, 0.0);
+  vec3 w = worley(uv * 90.0, vec2(90.0));
+  float pore = smoothstep(0.2, 0.04, w.x) * step(0.6, w.z);
+  float streak = smoothstep(0.48, 0.88, fbm(vec2(uv.x * 14.0, uv.y * 1.0), vec2(14.0, 1.0), 4));
+  vec3 col = vec3(0.4, 0.39, 0.365) * (0.84 + 0.16 * id) * (0.86 + 0.24 * n);
+  col *= 1.0 - streak * 0.28;
+  col *= 1.0 - pore * 0.3;
+  col = mix(col, vec3(0.16, 0.155, 0.145), joint);
+  return S(col, bevel * 0.6 + n * 0.25 - joint * 0.5 - pore * 0.2, 0.9, 1.0 - joint * 0.5, 0.0);
 }`;
 
 /** 2 m of track ballast: crushed grey-brown stone, rust-stained near the rails. */
@@ -149,39 +215,92 @@ Surface surface(vec2 uv) {
   return S(col, rip * 0.25 + n * 0.3 - print * 0.3, 0.95, 1.0, 0.0);
 }`;
 
-/** 3 m of sunny garden ground: grass in clumps over sandy soil. */
+/**
+ * 3 m of sunny grass (the bank above the slope road, the park lawn, villa
+ * gardens): blades in clumps, yellow-green in the sun, dry straw patches and
+ * a little sandy soil showing through.
+ */
 export const GROUND = /* glsl */ `
 Surface surface(vec2 uv) {
-  float n = fbm(uv * 8.0, vec2(8.0), 6);
-  float clumps = smoothstep(0.35, 0.65, fbm(uv * 3.0 + 2.0, vec2(3.0), 5));
-  float blade = vnoise(uv * vec2(400.0, 120.0), vec2(400.0, 120.0));
-  vec3 soil = mix(vec3(0.11, 0.095, 0.07), vec3(0.19, 0.165, 0.125), n);
-  vec3 grass = mix(vec3(0.04, 0.07, 0.025), vec3(0.11, 0.15, 0.05), blade) * (0.8 + 0.4 * n);
-  vec3 col = mix(soil, grass, clumps);
-  return S(col, n * 0.5 + clumps * blade * 0.4, 0.92, 0.75 + 0.25 * n, 0.0);
+  float n = fbm(uv * 6.0, vec2(6.0), 5);
+  float clump = fbm(uv * 20.0 + 3.0, vec2(20.0), 4);
+  vec3 w = worley(uv * 300.0, vec2(300.0));
+  vec3 w2 = worley(uv * 140.0 + 7.0, vec2(140.0));
+  float blade = smoothstep(0.55, 0.08, w.x);
+  float tuft = smoothstep(0.6, 0.15, w2.x) * step(0.45, w2.z);
+  vec3 green = mix(vec3(0.045, 0.085, 0.018), vec3(0.15, 0.22, 0.045), w.z);
+  vec3 col = mix(green * 0.45, green, blade);
+  col = mix(col, vec3(0.19, 0.25, 0.06), tuft * 0.45);
+  col = mix(col, vec3(0.2, 0.17, 0.08), smoothstep(0.6, 0.8, n) * 0.55);
+  col = mix(col, vec3(0.13, 0.11, 0.075), smoothstep(0.74, 0.88, clump) * 0.5);
+  col *= 0.85 + 0.3 * clump;
+  float h = blade * 0.5 + tuft * 0.4 + clump * 0.3;
+  return S(col, h, 0.9, 0.6 + 0.4 * blade, 0.0);
 }`;
 
-/** 1 m of sprayed stucco (吹付け): fine bumps; white, tinted per use. */
+/** 1 m of sprayed stucco (吹付け): fine bumps, faint run-off; white, tinted per use. */
 export const STUCCO = /* glsl */ `
 Surface surface(vec2 uv) {
   vec3 w = worley(uv * 90.0, vec2(90.0));
   float bump = smoothstep(0.55, 0.0, w.x);
   float n = fbm(uv * 12.0, vec2(12.0), 5);
-  float dirt = smoothstep(0.6, 0.9, fbm(vec2(uv.x * 8.0, uv.y * 1.0) + 3.0, vec2(8.0, 1.0), 4));
-  vec3 col = vec3(0.86, 0.85, 0.83) * (0.95 + 0.06 * n) * (1.0 - 0.12 * dirt);
-  return S(col, bump * 0.6 + n * 0.2, 0.86, 0.88 + 0.12 * bump, 0.0);
+  float dirt = smoothstep(0.58, 0.9, fbm(vec2(uv.x * 9.0, uv.y * 1.0) + 3.0, vec2(9.0, 1.0), 4));
+  vec3 col = vec3(0.84, 0.83, 0.81) * (0.95 + 0.06 * n) * (1.0 - 0.1 * dirt);
+  return S(col, bump * 0.6 + n * 0.2, 0.84, 0.9 + 0.1 * bump, 0.0);
 }`;
 
-/** 2 m of hedge and shrub mass seen from a distance: clustered leaves, dark gaps. */
+/**
+ * 2 m of clipped hedge face (トベラ / マサキ): small glossy leaves in layers,
+ * yellow-green new shoots on the outside, dark gaps into the interior.
+ */
 export const SHRUB = /* glsl */ `
 Surface surface(vec2 uv) {
-  vec3 w = worley(uv * 40.0, vec2(40.0));
-  vec3 w2 = worley(uv * 90.0 + 2.0, vec2(90.0));
-  float leaf = smoothstep(0.6, 0.15, w.x);
-  float leaf2 = smoothstep(0.55, 0.1, w2.x);
-  float n = fbm(uv * 5.0, vec2(5.0), 4);
-  vec3 col = mix(vec3(0.025, 0.045, 0.015), vec3(0.11, 0.17, 0.05), leaf * (0.6 + 0.4 * w.z));
-  col = mix(col, vec3(0.16, 0.22, 0.08), leaf2 * 0.35 * w2.z);
-  col *= 0.8 + 0.4 * n;
-  return S(col, leaf * 0.7 + leaf2 * 0.3, 0.75, 0.5 + 0.5 * leaf, 0.0);
+  vec3 w = worley(uv * 56.0, vec2(56.0));
+  vec3 w2 = worley(uv * 118.0 + 2.0, vec2(118.0));
+  float leaf = smoothstep(0.66, 0.18, w.x);
+  float rim = smoothstep(0.2, 0.45, w.x) * leaf;
+  float leaf2 = smoothstep(0.52, 0.12, w2.x) * step(0.42, w2.z);
+  float n = fbm(uv * 4.0, vec2(4.0), 4);
+  float gapN = smoothstep(0.62, 0.8, fbm(uv * 9.0 + 5.0, vec2(9.0), 4));
+  vec3 base = mix(vec3(0.04, 0.075, 0.016), vec3(0.13, 0.21, 0.045), w.z);
+  vec3 col = mix(vec3(0.008, 0.014, 0.005), base, leaf);
+  col = mix(col, vec3(0.2, 0.28, 0.06), leaf2 * 0.55);
+  col *= 1.0 - rim * 0.25;
+  col *= (0.8 + 0.35 * n) * (1.0 - gapN * 0.55);
+  float h = leaf * 0.8 + leaf2 * 0.45 - gapN * 0.6;
+  return S(col, h, 0.62 + 0.2 * (1.0 - leaf), 0.35 + 0.65 * leaf * (1.0 - gapN * 0.6), 0.0);
+}`;
+
+/**
+ * 4 m of the slope road's dry, sun-bleached asphalt (日坂): light grey
+ * aggregate worn proud of the binder, sand-coloured fines, voids, short
+ * hairline cracks and a dust film in the low spots. Wheel paths, kerb
+ * grime, repair patches and the long tar-sealed cracks are geometry and
+ * vertex colour on top (world/slope.ts), so this tile stays even.
+ */
+export const SLOPE_ASPHALT = /* glsl */ `
+Surface surface(vec2 uv) {
+  vec3 a = worley(uv * 300.0, vec2(300.0));
+  vec3 b = worley(uv * 760.0 + 1.3, vec2(760.0));
+  float big = fbm(uv * 3.0, vec2(3.0), 4);
+  float mid = fbm(uv * 16.0, vec2(16.0), 4);
+  float stone = smoothstep(0.62, 0.34, a.x) * step(0.2, a.z);
+  float dome = sqrt(clamp(1.0 - a.x * 1.7, 0.0, 1.0));
+  float fines = smoothstep(0.55, 0.22, b.x) * step(0.38, b.z);
+  float pit = smoothstep(0.7, 0.95, a.x) * step(a.z, 0.5) * (1.0 - fines);
+  vec3 binder = mix(vec3(0.07, 0.063, 0.052), vec3(0.1, 0.091, 0.076), mid);
+  vec3 stoneCol = mix(vec3(0.17, 0.16, 0.142), vec3(0.4, 0.38, 0.34), smoothstep(0.2, 1.0, a.z));
+  stoneCol = mix(stoneCol, vec3(0.25, 0.2, 0.155), step(0.88, a.z) * 0.8);
+  stoneCol = mix(stoneCol, vec3(0.085, 0.085, 0.085), step(a.z, 0.3) * 0.7);
+  vec3 col = mix(binder, stoneCol, stone * 0.9);
+  col = mix(col, vec3(0.22, 0.2, 0.17), fines * 0.45);
+  col *= 1.0 - pit * 0.45;
+  float dust = smoothstep(0.45, 0.75, big) * (1.0 - stone * 0.6);
+  col = mix(col, vec3(0.21, 0.195, 0.165), dust * 0.35);
+  col *= 0.93 + 0.12 * mid;
+  float crack = smoothstep(0.972, 0.996, ridged(uv * 5.0 + 2.0, vec2(5.0), 5)) * smoothstep(0.5, 0.72, fbm(uv * 2.0 + 7.0, vec2(2.0), 3));
+  col = mix(col, vec3(0.03, 0.028, 0.026), crack * 0.7);
+  float h = stone * dome * 0.6 + fines * 0.22 + mid * 0.12 - pit * 0.3 - crack * 0.7;
+  float r = 0.9 - stone * 0.08 - dust * 0.02;
+  return S(col, h, r, 1.0 - pit * 0.35 - crack * 0.5 - (1.0 - stone) * 0.12, 0.0);
 }`;

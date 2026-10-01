@@ -1,6 +1,7 @@
 import { BufferGeometry, Float32BufferAttribute, ShapeUtils, Vector2, Vector3, type Material } from "three";
 import type { KamakuraWorld } from "./context";
 import { BUILDINGS, ROADS } from "./data";
+import { BATTER, eastGround, eastGroundEdge, eastKerb, roadAt, terraceY, TRIANGLE, triangleLift, WALK, wallBase, wallTop } from "./ground";
 import { COAST, GROUND_POINTS, slopeEdges, slopeY, TRACK, TRACK_SPLIT } from "./layout";
 
 /**
@@ -97,7 +98,11 @@ function initControl(): void {
   }
 }
 
-/** Ground height of the hillside at (x, z) (inverse-distance weighted, softened). */
+/**
+ * Ground height of the hillside at (x, z): inverse-distance weighted and
+ * softened, then the measured east side of the slope road (villa terrace,
+ * planted triangle, junction apron; world/ground.ts).
+ */
 export function hillY(x: number, z: number): number {
   initControl();
   let sw = 0;
@@ -108,7 +113,43 @@ export function hillY(x: number, z: number): number {
     sw += w;
     sy += w * c.y;
   }
-  return sy / sw;
+  return footwayGround(x, z, eastGround(x, -z, sy / sw));
+}
+
+/** Track centreline z by x west of the crossing (the coast line's control points, piecewise linear). */
+const TRACK_WEST: [number, number][] = [
+  [-174.2, -11.7],
+  [-125.2, -9.9],
+  [-71.5, -7.2],
+  [-43.6, -5.9],
+  [-27.7, -4.2],
+  [0, 0],
+];
+
+/**
+ * The footway and station plaza west of the crossing (2.8–8 m north of the
+ * track) lie flat just under their paving (0.34 m); the hillside rises
+ * behind them.
+ */
+function footwayGround(x: number, z: number, y: number): number {
+  if (x > -4 || x < -178) return y;
+  let zt = TRACK_WEST[0][1];
+  for (let i = 1; i < TRACK_WEST.length; i++) {
+    const [xa, za] = TRACK_WEST[i - 1];
+    const [xb, zb] = TRACK_WEST[i];
+    if (x <= xb) {
+      zt = za + ((zb - za) * (x - xa)) / (xb - xa);
+      break;
+    }
+  }
+  const s = zt - z;
+  // Footway band 2.8–7.8 m north of the centreline (the station plaza to 12.6 m), blending out
+  // over 3 m beyond it.
+  const outer = x > -112 && x < -94 ? 12.6 : 7.8;
+  if (s < 2.6 || s > outer + 3.2) return y;
+  const t = s < outer ? 0 : Math.min(1, (s - outer) / 3.2);
+  const flat = Math.min(y, 0.3);
+  return flat + (y - flat) * (t * t * (3 - 2 * t));
 }
 
 /** Is (x, z) inside the polygon ring (x, z pairs)? */
@@ -130,11 +171,25 @@ function inside(ring: number[], x: number, z: number): boolean {
  * side road leaving the slope round the planted triangle and curving east.
  * PLATEAU's own polygon there also covers the slope road, so it is replaced.
  */
-const JUNCTION: number[] = [5.6, -33, 5.3, -43.5, 9, -44.5, 16, -41, 23, -36, 29, -31.5, 36, -25.5, 44, -23.2, 44, -19.6, 34, -20, 26, -21.5, 20.5, -25.5, 16.7, -28.4, 12, -31.2, 7, -32.8];
+/** The triangle's north edge along the side road (x, metres north). */
+const TRIANGLE_NORTH: [number, number][] = [
+  [6.6, 30.0],
+  [12, 28.4],
+  [16.7, 26.6],
+  [20.5, 25.0],
+  [22.5, 24.0],
+];
+
+const JUNCTION: number[] = [eastKerb(30.5) + 0.25, -30.5, eastKerb(36) + 0.25, -36, eastKerb(41) + 0.25, -41, eastKerb(48) + 0.25, -48, eastKerb(54) + 0.25, -54, 7.5, -53, 10, -47, 16, -41, 23, -36, 29, -31.5, 36, -25.5, 44, -23.2, 44, -19.6, 34, -20, 26, -21.5, 20.5, -25.0, 16.7, -26.6, 12, -28.4, 6.6, -30.0];
 
 /** PLATEAU roads on the hillside (the slope road, the crossing and the station footway are built separately). */
 export function hillRoads(): number[][] {
-  return [JUNCTION, ...ROADS.filter((ring) => {
+  return [JUNCTION, ...hillStreets()];
+}
+
+/** PLATEAU hillside streets other than the junction. */
+function hillStreets(): number[][] {
+  return [...ROADS.filter((ring) => {
     const n = ring.length / 2;
     let inCorridor = 0;
     let maxN = -Infinity;
@@ -174,7 +229,7 @@ export interface HillPatch {
 function patch(side: 1 | -1, aMax: number, bMax: number): { verts: Vector3[]; rows: number; cols: number; as: number[]; bs: number[] } {
   const edgeX = (north: number) => {
     const [w, e] = slopeEdges(north);
-    const x = side > 0 ? e : w;
+    const x = side > 0 ? (north < 62 ? eastGroundEdge(north) : e) : w;
     // Past the survey, the road bends north-west toward the school gate.
     return north > 190 ? x - (north - 190) * 0.35 : x;
   };
@@ -185,7 +240,12 @@ function patch(side: 1 | -1, aMax: number, bMax: number): { verts: Vector3[]; ro
   const c0 = coast(0);
   const road = (b: number) => new Vector3(edgeX(n0 + b), 0, -(n0 + b));
   const as = grid(aMax, 3);
-  const bs = grid(bMax, 3);
+  let bs = grid(bMax, 3);
+  if (side > 0) {
+    // Rows on either side of the terrace's north wall and the triangle, so the ground steps there.
+    const extra = [WALK.to - 0.2, WALK.to + 0.25, TRIANGLE.to].map((n) => n - n0);
+    bs = [...new Set([...bs, ...extra])].sort((a, b) => a - b);
+  }
   const verts: Vector3[] = [];
   for (const b of bs) {
     const r = road(b);
@@ -230,19 +290,26 @@ export function buildTerrain(w: KamakuraWorld): void {
     w.mesh(g, ground, 0, 0, 0, w.root, { cast: true });
   }
 
-  // Hillside roads, triangulated and subdivided to follow the ground.
-  const pos: number[] = [];
-  for (const ring of roads) {
-    const pts = [];
-    for (let i = 0; i < ring.length; i += 2) pts.push(new Vector2(ring[i], ring[i + 1]));
-    if (ShapeUtils.isClockWise(pts)) pts.reverse();
-    const tris = ShapeUtils.triangulateShape(pts, []);
-    for (const t of tris) subdivide(pts[t[0]], pts[t[1]], pts[t[2]], 3.5, pos);
+  // Hillside roads, triangulated and subdivided to follow the ground: the junction
+  // mouth is concrete (p01, lower left), the streets asphalt.
+  for (const [rings, mat] of [
+    [[JUNCTION], lib.paving()],
+    [roads.slice(1), asphalt],
+  ] as [number[][], Material][]) {
+    const pos: number[] = [];
+    for (const ring of rings) {
+      const pts = [];
+      for (let i = 0; i < ring.length; i += 2) pts.push(new Vector2(ring[i], ring[i + 1]));
+      if (ShapeUtils.isClockWise(pts)) pts.reverse();
+      const tris = ShapeUtils.triangulateShape(pts, []);
+      for (const t of tris) subdivide(pts[t[0]], pts[t[1]], pts[t[2]], 3.5, pos);
+    }
+    const g = new BufferGeometry();
+    g.setAttribute("position", new Float32BufferAttribute(pos, 3));
+    g.computeVertexNormals();
+    w.mesh(g, mat, 0, 0, 0, w.root, { cast: false });
   }
-  const g = new BufferGeometry();
-  g.setAttribute("position", new Float32BufferAttribute(pos, 3));
-  g.computeVertexNormals();
-  w.mesh(g, asphalt, 0, 0, 0, w.root, { cast: false });
+  villaWall(w);
 }
 
 /**
@@ -283,8 +350,8 @@ function edgeWalls(w: KamakuraWorld, side: 1 | -1, verts: Vector3[], cols: numbe
     if (n0 > 230) break;
     const tall = Math.max(p0.y - r0, p1.y - r1);
     if (tall < 0.25 && Math.min(p0.y - r0, p1.y - r1) > -0.25) continue;
-    // East: rock-faced walls under the villa, the planted triangle's kerb, the junction (no wall), block walls above it.
-    if (side > 0 && n0 > 32.5 && n1 < 44.5) continue;
+    // East below 60 m: the villa wall, the triangle and the apron are built in villaWall().
+    if (side > 0 && n0 < 60) continue;
     const mat = side > 0 ? (n1 < 26.5 || n0 > 44 ? rubble : n1 < 33 ? concrete : block) : n0 > 38 ? block : concrete;
     face(mat, p0, p1, Math.min(r0, p0.y), Math.min(r1, p1.y), outRoad);
   }
@@ -335,3 +402,109 @@ function subdivide(a: Vector2, b: Vector2, c: Vector2, max: number, out: number[
 }
 
 export { slopeY };
+
+/** Pushes a quad (a, b, c, d counter-clockwise seen from `out`) into a position list. */
+function quadOut(list: number[], a: Vector3, b: Vector3, c: Vector3, d: Vector3, out: Vector3): void {
+  const n = new Vector3().subVectors(b, a).cross(new Vector3().subVectors(c, a));
+  const tris = n.dot(out) >= 0 ? [a, b, c, a, c, d] : [a, c, b, a, d, c];
+  for (const p of tris) list.push(p.x, p.y, p.z);
+}
+
+/**
+ * The villa wall east of the slope road (p01–p03, p05): a battered rubble
+ * wall from the sidewalk to the terrace 4.1–4.5 m up, its concrete coping,
+ * the terrace's north wall toward the junction, and the planted triangle
+ * north of the garage: a lawn 1.2 m above the road behind a low rubble wall.
+ */
+function villaWall(w: KamakuraWorld): void {
+  const lib = w.lib;
+  const rub: number[] = [];
+  const cope: number[] = [];
+  const lawn: number[] = [];
+  const west = new Vector3(-1, 0.3, 0).normalize();
+  const ns: number[] = [];
+  for (let n = WALK.from; n < WALK.to; n += 1.0) ns.push(n);
+  ns.push(WALK.to);
+  const foot = (n: number) => new Vector3(wallBase(n), roadAt(n) + WALK.height - 0.02, -n);
+  const head = (n: number) => new Vector3(wallTop(n), terraceY(n), -n);
+  for (let i = 0; i < ns.length - 1; i++) {
+    const [n0, n1] = [ns[i], ns[i + 1]];
+    quadOut(rub, foot(n0), foot(n1), head(n1), head(n0), west);
+    // Coping: a 0.3 m concrete cap on the wall head.
+    const c0 = head(n0);
+    const c1 = head(n1);
+    const lift = (p: Vector3, dx: number, dy: number) => p.clone().add(new Vector3(dx, dy, 0));
+    quadOut(cope, lift(c0, -0.04, 0), lift(c1, -0.04, 0), lift(c1, -0.04, 0.14), lift(c0, -0.04, 0.14), new Vector3(-1, 0, 0));
+    quadOut(cope, lift(c0, -0.04, 0.14), lift(c1, -0.04, 0.14), lift(c1, 0.3, 0.14), lift(c0, 0.3, 0.14), new Vector3(0, 1, 0));
+  }
+  // South end, where the wall meets the track-side wall at the crossing.
+  {
+    const n = WALK.from;
+    const f = foot(n);
+    const h = head(n);
+    const south = new Vector3(0, 0, 1);
+    const g = h.clone().setY(f.y - 0.6);
+    quadOut(rub, f.clone().setY(f.y - 0.6), g, h, f, south);
+  }
+  // The terrace's north wall toward the junction, from the garage east (rubble, falling as the side road climbs).
+  const nN = WALK.to;
+  for (let x = wallTop(nN); x < 24; x += 1.5) {
+    const x1 = Math.min(24, x + 1.5);
+    const y0 = hillY(x, -(nN + 0.4)) - 0.15;
+    const y1 = hillY(x1, -(nN + 0.4)) - 0.15;
+    const t0 = Math.max(y0 + 0.2, terraceY(nN) - Math.max(0, x - 14) * 0.05);
+    const t1 = Math.max(y1 + 0.2, terraceY(nN) - Math.max(0, x1 - 14) * 0.05);
+    quadOut(rub, new Vector3(x, y0, -nN), new Vector3(x1, y1, -nN), new Vector3(x1, t1, -nN), new Vector3(x, t0, -nN), new Vector3(0, 0, -1));
+  }
+  // The planted triangle: a prism on the junction surface, its top 1.2 m over the slope road.
+  {
+    const ring: [number, number][] = [];
+    for (let n = TRIANGLE.from + 0.4; n <= TRIANGLE.to; n += 1.5) ring.push([eastKerb(n) + 0.3, n]);
+    ring.push([eastKerb(TRIANGLE.to) + 0.3, TRIANGLE.to]);
+    for (const p of TRIANGLE_NORTH) 
+      ring.push(p);
+    const top = (x: number, n: number) => roadAt(n) + triangleLift(n) + 0.03 * (x - eastKerb(n));
+    // Walls round the outside (skip the south side, against the terrace wall).
+    for (let i = 0; i < ring.length - 1; i++) {
+      const [xa, na] = ring[i];
+      const [xb, nb] = ring[i + 1];
+      // The ring runs north along the kerb, then east and south: the inside is on the right, so
+      // outward is the left of the direction of travel.
+      const out = new Vector3(na - nb, 0, xa - xb).normalize();
+      // From the kerb strip along the road, from the junction surface elsewhere.
+      const ya = xa < eastKerb(na) + 0.5 ? roadAt(na) + 0.1 : hillY(xa, -na) - 0.2;
+      const yb = xb < eastKerb(nb) + 0.5 ? roadAt(nb) + 0.1 : hillY(xb, -nb) - 0.2;
+      const ta = top(xa, na);
+      const tb = top(xb, nb);
+      if (Math.max(ta - ya, tb - yb) < 0.15) continue;
+      const lean = (p: Vector3, k: number) => p.clone().addScaledVector(out, -k * BATTER * 0.6);
+      quadOut(rub, new Vector3(xa, ya, -na), new Vector3(xb, yb, -nb), lean(new Vector3(xb, tb, -nb), tb - yb), lean(new Vector3(xa, ta, -na), ta - ya), out.clone().setY(0.2));
+    }
+    // Lawn top, fanned from the ring's centre and pulled in by the batter.
+    const cx = ring.reduce((a, p) => a + p[0], 0) / ring.length;
+    const cn = ring.reduce((a, p) => a + p[1], 0) / ring.length;
+    const close = [...ring, [wallTop(TRIANGLE.from + 0.4), TRIANGLE.from + 0.4] as [number, number]];
+    for (let i = 0; i < close.length; i++) {
+      const [xa, na] = close[i];
+      const [xb, nb] = close[(i + 1) % close.length];
+      const pull = (x: number, n: number) => {
+        const d = Math.hypot(x - cx, n - cn) || 1;
+        const k = Math.min(0.45, 0.3 * TRIANGLE.lift) / d;
+        return [x + (cx - x) * k, n + (cn - n) * k];
+      };
+      const [pa, qa] = pull(xa, na);
+      const [pb, qb] = pull(xb, nb);
+      quadOut(lawn, new Vector3(cx, top(cx, cn), -cn), new Vector3(pa, top(pa, qa), -qa), new Vector3(pb, top(pb, qb), -qb), new Vector3(cx, top(cx, cn), -cn), new Vector3(0, 1, 0));
+    }
+  }
+  for (const [list, mat] of [
+    [rub, lib.rubble()],
+    [cope, lib.concrete()],
+    [lawn, lib.ground()],
+  ] as [number[], Material][]) {
+    const g = new BufferGeometry();
+    g.setAttribute("position", new Float32BufferAttribute(list, 3));
+    g.computeVertexNormals();
+    w.mesh(g, mat, 0, 0, 0, w.root, { cast: true });
+  }
+}

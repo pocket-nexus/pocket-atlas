@@ -5,19 +5,23 @@
 // far water shows the sun as a glitter path rather than a mirror line.
 // Writes HDR radiance and the eye distance (haze input) in alpha.
 //
-// Defines: SUN, FOG.
+// Defines: SUN, FOG, SHALLOW (vertex colour red blends the body colour toward
+// the shallow colour over a sandy bottom).
 
 #include "common.cgh"
 
 uniform sampler2D uNormalMap;
 uniform sampler2D uEnv;
 
-uniform float4 uPbr;     // roughness near the camera, -, wave slope scale, -
+uniform float4 uPbr;     // roughness near the camera, wave-face slope toward the eye, wave slope scale, -
 uniform float4 uEnvK;    // environment intensity, -, -, -
 uniform float4 uWaterK;  // body colour (linear, × sky irradiance), roughness² per metre
 uniform float4 uEye;     // camera position, time (s)
 uniform float4 uFog;     // FogExp2 colour, density
 uniform float4 uHemiSky; // hemisphere irradiance from above
+#ifdef SHALLOW
+uniform float4 uWaterShallow; // body colour over sand (linear)
+#endif
 #ifdef SUN
 uniform float4 uSunDir;  // direction towards the sun, -
 uniform float4 uSunRad;  // radiance (colour × intensity), -
@@ -26,6 +30,9 @@ uniform float4 uSunRad;  // radiance (colour × intensity), -
 half4 main(
     float3 vWorld : TEXCOORD0,
     float2 vUv : TEXCOORD3,
+#ifdef SHALLOW
+    half4 vColor : COLOR0,
+#endif
     float2 vUv2 : TEXCOORD6) : COLOR
 {
     float3 toEye = uEye.xyz - vWorld;
@@ -36,13 +43,20 @@ half4 main(
     float a2 = uPbr.x * uPbr.x + dist * uWaterK.w;
     float calm = 1.0 / (1.0 + dist * uWaterK.w * 40.0);
     float2 slope = (float2)(n1 + n2) * (uPbr.z * calm);
+    // The faces toward the eye: the wave backs hide at grazing views.
+    slope += V.xz * (uPbr.y / max(length(V.xz), 1e-4));
     float3 N = normalize(float3(slope.x, 1.0, slope.y));
     float dotNV = max(dot(N, V), 1e-3);
     float F = 0.02 + 0.98 * exp2((-5.55473 * dotNV - 6.98316) * dotNV);
     float3 R = reflect(-V, N);
     R.y = abs(R.y);
     float3 sky = tex2D(uEnv, octUv(R)).rgb * uEnvK.x;
+#ifdef SHALLOW
+    float w = saturate((float)srgbToLinear(vColor.rgb).r);
+    float3 body = lerp(uWaterK.rgb, uWaterShallow.rgb, w) * uHemiSky.rgb;
+#else
     float3 body = uWaterK.rgb * uHemiSky.rgb;
+#endif
     float3 color = lerp(body, sky, F);
 #ifdef SUN
     {

@@ -92,7 +92,7 @@ export class CoastLib {
   bakeAll(): void {
     this.surf("asphalt", SURF.ASPHALT, 1024, 4, 2);
     this.surf("concrete", SURF.CONCRETE, 512, 2, 1.5);
-    this.surf("rubble", SURF.RUBBLE, 1024, 2.4, 3.2);
+    this.surf("rubble", SURF.RUBBLE, 512, 2.4, 3.2);
     this.surf("sand", SURF.SAND, 512, 6, 1.2);
   }
 
@@ -143,7 +143,7 @@ export class CoastLib {
 
   rubble(): MeshStandardMaterial {
     return this.memo("rubble", () => {
-      const m = withMaps(this.surf("rubble", SURF.RUBBLE, 1024, 2.4, 3.2), { normalScale: new Vector2(1.3, 1.3), aoMapIntensity: 1 });
+      const m = withMaps(this.surf("rubble", SURF.RUBBLE, 512, 2.4, 3.2), { normalScale: new Vector2(1.3, 1.3), aoMapIntensity: 1 });
       m.userData.worldUV = true;
       return m;
     });
@@ -184,6 +184,21 @@ export class CoastLib {
   ground(): MeshStandardMaterial {
     return this.memo("ground", () => {
       const m = withMaps(this.surf("ground", SURF.GROUND, 512, 3, 2.5));
+      m.userData.worldUV = true;
+      return m;
+    });
+  }
+
+  /**
+   * A baked surface material from a recipe in gfx/surfaces.ts, for builders
+   * that need one this class does not name (the slope road, ledgestone).
+   * UVs in metres; `vertexColors` multiplies the albedo (meshes that use it
+   * must stay out of batching, which drops colours).
+   */
+  baked(key: string, glsl: string, o: { size: number; tile: number; bump: number; normal?: number; ao?: number; vertexColors?: boolean }): MeshStandardMaterial {
+    return this.memo(key, () => {
+      const n = o.normal ?? 1;
+      const m = withMaps(this.surf(key, glsl, o.size, o.tile, o.bump), { normalScale: new Vector2(n, n), aoMapIntensity: o.ao ?? 0.85, vertexColors: o.vertexColors ?? false });
       m.userData.worldUV = true;
       return m;
     });

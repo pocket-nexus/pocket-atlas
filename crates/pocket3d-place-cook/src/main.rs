@@ -255,6 +255,8 @@ impl<'a> Cook<'a> {
                 waves: [layer(0, [0.12, 0.35, 0.12]), layer(1, [0.31, -0.22, 0.27])],
                 body: x.get("body").map_or([0.01, 0.035, 0.045], |b| { let c = v3(b); [c[0], c[1], c[2]] }),
                 distance_roughness: f(&x, "distanceRoughness", 0.0004),
+                shallow: x.get("shallow").filter(|v| v.is_array()).map(|v| { let c = v3(v); [c[0], c[1], c[2]] }),
+                mask: f(&x, "mask", 0.0),
             }
         });
         let name = m.name().unwrap_or("material").to_string();
@@ -1039,10 +1041,13 @@ fn main() {
         if p.moving || p.skin.is_some() {
             continue;
         }
+        // Open water is one draw however far it reaches: its cost is per
+        // pixel, and chunks of it only add draws.
+        let water = cook.materials[p.material as usize].kind == pc::Kind::Water;
         let cells: Vec<(i32, i32)> = p
             .tris
             .iter()
-            .map(|t| cell_of((p.verts[t[0] as usize].pos + p.verts[t[1] as usize].pos + p.verts[t[2] as usize].pos) / 3.0, a.cell))
+            .map(|t| if water { (i32::MIN / 2, 0) } else { cell_of((p.verts[t[0] as usize].pos + p.verts[t[1] as usize].pos + p.verts[t[2] as usize].pos) / 3.0, a.cell) })
             .collect();
         // Edges (by position, across attribute seams) whose triangles land in
         // different chunks.

@@ -1,10 +1,11 @@
 import { BoxGeometry, BufferGeometry, CylinderGeometry, Float32BufferAttribute, Vector3 } from "three";
 import type { AtlasRect } from "../../shared/atlas";
 import { merge } from "../../shared/shapes";
-import { marking, stationBoard, tactile } from "../gfx/art";
+import { stationBoard, tactile } from "../gfx/art";
 import { Bag, type KamakuraWorld } from "./context";
-import { ROAD_Y } from "./coast";
 import { CROSSING, PLATFORM, slopeEdges, slopeY, TRACK } from "./layout";
+import { Greenery } from "./plants";
+import { buildRoad } from "./road";
 import { hillY } from "./terrain";
 import { place, ribbon, stations, wallAlong } from "./util";
 
@@ -16,17 +17,6 @@ import { place, ribbon, stations, wallAlong } from "./util";
  * behind its clipped hedge; the footway west along the track to the station
  * and the station's single platform.
  */
-
-/** Grating along the east kerb: steel bars over a dark channel. */
-function grating(g: CanvasRenderingContext2D, cw: number, ch: number): void {
-  g.fillStyle = "#1c1b1a";
-  g.fillRect(0, 0, cw, ch);
-  g.fillStyle = "#5a5650";
-  for (let y = 0; y < ch; y += 6) g.fillRect(0, y, cw, 3);
-  g.fillStyle = "#3e3b37";
-  g.fillRect(0, 0, 3, ch);
-  g.fillRect(cw - 3, 0, 3, ch);
-}
 
 /** A horizontal quad at height y spanning x0..x1 and north n0..n1 (atlas-mapped). */
 function pad(x0: number, x1: number, n0: number, n1: number, y: (x: number, n: number) => number, cell?: AtlasRect): BufferGeometry {
@@ -46,147 +36,25 @@ function pad(x0: number, x1: number, n0: number, n1: number, y: (x: number, n: n
   return g;
 }
 
-/** Road height at (x, north): the survey profile across the whole width. */
-const roadY = (n: number) => slopeY(n) + ROAD_Y;
-
 export function buildSlope(w: KamakuraWorld): void {
   const lib = w.lib;
   const bag = new Bag();
-  const P = w.printed;
-  const asphalt = lib.asphalt();
-  const concrete = lib.concrete();
-  const white = w.draw("paint-white", 128, 128, marking("#e2e1da", 3));
-  const grate = w.draw("grating", 128, 512, grating);
+  const green = new Greenery(4417);
 
-  // ---- carriageway: rows across the road every 2 m (5 m higher up).
-  const deckN = -CROSSING.deck[0];
-  const ns: number[] = [];
-  for (let n = deckN; n < 206; n += n < 70 ? 2 : 5) ns.push(n);
-  ns.push(206);
-  const walkFrom = 3.2;
-  const walkTo = 22.5;
-  const pos: number[] = [];
-  const idx: number[] = [];
-  const cols = 4;
-  for (const n of ns) {
-    const [xw, xe] = slopeEdges(n);
-    const xs = n > walkFrom && n < walkTo ? xe - 1.05 : xe;
-    const xm = (xw + xs) / 2;
-    const crown = Math.min(0.06, (xs - xw) * 0.008);
-    for (const [x, dy] of [
-      [xw, 0],
-      [xm - 1, crown],
-      [xm + 1, crown],
-      [xs, 0],
-    ] as [number, number][])
-      pos.push(x, roadY(n) + dy, -n);
-  }
-  for (let j = 0; j < ns.length - 1; j++)
-    for (let i = 0; i < cols - 1; i++) {
-      const a = j * cols + i;
-      // x increasing, north increasing (−z): (a, a+1, a+cols) faces up.
-      idx.push(a, a + 1, a + cols, a + 1, a + cols + 1, a + cols);
-    }
-  const road = new BufferGeometry();
-  road.setAttribute("position", new Float32BufferAttribute(pos, 3));
-  road.setIndex(idx);
-  road.computeVertexNormals();
-  bag.add(asphalt, road);
-
-  // ---- the east sidewalk at the foot of the walls, with its kerb.
-  {
-    const sp: number[] = [];
-    const si: number[] = [];
-    const kp: number[] = [];
-    const kn: number[] = [];
-    let k = 0;
-    for (let n = walkFrom; n <= walkTo; n += 1.5) {
-      const [, xe] = slopeEdges(n);
-      const y = roadY(n) + 0.13;
-      sp.push(xe - 1.05, y, -n, xe, y, -n);
-      kp.push(xe - 1.05, roadY(n), -n, xe - 1.05, y, -n);
-      if (k > 0) {
-        const a = (k - 1) * 2;
-        si.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
-        kn.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
-      }
-      k++;
-    }
-    const walk = new BufferGeometry();
-    walk.setAttribute("position", new Float32BufferAttribute(sp, 3));
-    walk.setIndex(si);
-    walk.computeVertexNormals();
-    bag.add(asphalt, walk);
-    const kerb = new BufferGeometry();
-    kerb.setAttribute("position", new Float32BufferAttribute(kp, 3));
-    kerb.setIndex(kn);
-    kerb.computeVertexNormals();
-    bag.add(concrete, kerb);
-  }
-
-  // ---- drain grating along the east kerb, from the crossing to the camera's corner.
-  for (let n = 4; n < 60; n += 4) {
-    const n1 = Math.min(60, n + 4);
-    const [, e0] = slopeEdges(n);
-    const xe = (n > walkFrom && n < walkTo ? e0 - 1.05 : e0) - 0.02;
-    bag.add(P, pad(xe - 0.4, xe, n, n1, (_x, nn) => roadY(nn) + 0.012, grate), false);
-  }
-
-  // ---- markings: stop line for the southbound lane and the zebra above the crossing.
-  {
-    const [xw, xe] = slopeEdges(4.4);
-    const mid = (xw + xe) / 2 + 0.6;
-    bag.add(P, pad(mid, xe - 1.2, 4.1, 4.45, (_x, n) => roadY(n) + 0.075, white), false);
-    const [zw, ze] = slopeEdges(7.5);
-    for (let x = zw + 0.5; x < ze - 1.3; x += 0.9) bag.add(P, pad(x, x + 0.45, 5.7, 9.3, (_x, n) => roadY(n) + 0.075, white), false);
-  }
-
-  // ---- manhole covers and the turn arrow in the northbound lane (p01).
-  const manhole = w.draw("manhole", 128, 128, (g, cw, ch) => {
-    g.clearRect(0, 0, cw, ch);
-    g.fillStyle = "#3a3936";
-    g.beginPath();
-    g.arc(cw / 2, ch / 2, cw / 2 - 1, 0, Math.PI * 2);
-    g.fill();
-    g.strokeStyle = "#57554f";
-    g.lineWidth = 2;
-    for (let k = 1; k < 4; k++) {
-      g.beginPath();
-      g.arc(cw / 2, ch / 2, (cw / 2 - 1) * (k / 4), 0, Math.PI * 2);
-      g.stroke();
-    }
-  });
-  for (const [x, n] of [
-    [0.6, 6.6],
-    [0.9, 15.5],
-    [0.2, 33],
-  ]) bag.add(w.cut, pad(x - 0.35, x + 0.35, n - 0.35, n + 0.35, (_x, nn) => roadY(nn) + 0.075, manhole), false);
-  const arrow = w.draw("lane-arrow", 512, 128, (g, cw, ch) => {
-    g.clearRect(0, 0, cw, ch);
-    g.fillStyle = "#e2e1da";
-    g.fillRect(cw * 0.18, ch * 0.38, cw * 0.78, ch * 0.24);
-    g.beginPath();
-    g.moveTo(0, ch / 2);
-    g.lineTo(cw * 0.22, ch * 0.05);
-    g.lineTo(cw * 0.22, ch * 0.95);
-    g.closePath();
-    g.fill();
-  });
-  bag.add(w.cut, pad(-2.9, 0.1, 23.6, 24.6, (_x, nn) => roadY(nn) + 0.075, arrow), false);
+  // ---- carriageway, overlays, kerbs, sidewalks, grating, paint, manholes.
+  buildRoad(w, bag);
 
   // ---- the paved north-west corner and the green pedestrian strip's approach.
   bag.add(lib.paving(), pad(-12.5, CROSSING.strip[0] - 0.02, -CROSSING.deck[0], 9.5, () => 0.24));
-  // Kerb along the corner's road edge.
-  const kerb = new BoxGeometry(0.18, 0.2, 7.5);
-  bag.add(concrete, place(kerb, new Vector3(CROSSING.strip[0] - 0.1, 0.14, -5.6)));
 
   // ---- Koshigoe Rakko Park: clipped hedge along the road, lawn, shrubs, benches.
-  park(w, bag);
+  park(w, bag, green);
 
   // ---- footway west along the track to the station entrance, behind a pipe railing.
-  footway(w, bag);
+  footway(w, bag, green);
   station(w, bag);
 
+  green.emit(w, "park-plants");
   bag.emit(w);
 }
 
@@ -213,19 +81,73 @@ function hedge(path: Vector3[], width: number, height: number): BufferGeometry {
   return g;
 }
 
-function park(w: KamakuraWorld, bag: Bag): void {
+/**
+ * Koshigoe Rakko Park (腰越ラッコ公園, p01 right, p19): a low battered wall
+ * of grey blocks with a concrete coping between the west sidewalk and the
+ * lawn, a clipped hedge on it with rounded shrubs, the hedge along the
+ * track footway, and two benches facing the sea.
+ */
+function park(w: KamakuraWorld, bag: Bag, green: Greenery): void {
   const lib = w.lib;
   const shrub = lib.shrub();
-  // Clipped hedge along the park's road frontage (on a low kerb), and round its south side.
+  const r = green.r;
+  const face: number[] = [];
+  const cope: number[] = [];
   const front: Vector3[] = [];
-  for (let n = 9.6; n <= 24; n += 1.2) {
+  const quad = (list: number[], a: Vector3, b: Vector3, c: Vector3, d: Vector3, out: Vector3) => {
+    const n = new Vector3().subVectors(b, a).cross(new Vector3().subVectors(c, a));
+    for (const p of n.dot(out) >= 0 ? [a, b, c, a, c, d] : [a, c, b, a, d, c]) list.push(p.x, p.y, p.z);
+  };
+  const top = (n: number) => {
     const [xw] = slopeEdges(n);
-    front.push(new Vector3(xw - 0.65, slopeY(n) + 0.12, -n));
+    return Math.max(slopeY(n) + 0.62 - Math.max(0, 14 - n) * 0.035, hillY(xw - 1.0, -n) + 0.12);
+  };
+  for (let n = 9.5; n < 26; n += 1) {
+    const n1 = Math.min(26, n + 1);
+    const [a] = slopeEdges(n);
+    const [b] = slopeEdges(n1);
+    const ya = slopeY(n) + 0.12;
+    const yb = slopeY(n1) + 0.12;
+    const ta = top(n);
+    const tb = top(n1);
+    quad(face, new Vector3(a, ya, -n), new Vector3(b, yb, -n1), new Vector3(b - 0.14, tb, -n1), new Vector3(a - 0.14, ta, -n), new Vector3(1, 0.2, 0));
+    quad(cope, new Vector3(a - 0.12, ta, -n), new Vector3(b - 0.12, tb, -n1), new Vector3(b - 0.12, tb + 0.08, -n1), new Vector3(a - 0.12, ta + 0.08, -n), new Vector3(1, 0, 0));
+    quad(cope, new Vector3(a - 0.12, ta + 0.08, -n), new Vector3(b - 0.12, tb + 0.08, -n1), new Vector3(b - 0.42, tb + 0.08, -n1), new Vector3(a - 0.42, ta + 0.08, -n), new Vector3(0, 1, 0));
+    front.push(new Vector3(a - 0.95, ta + 0.04, -n));
   }
-  bag.add(shrub, hedge(front, 1.0, 1.0));
+  const geo = (list: number[]) => {
+    const g = new BufferGeometry();
+    g.setAttribute("position", new Float32BufferAttribute(list, 3));
+    g.computeVertexNormals();
+    return g;
+  };
+  bag.add(lib.block(), geo(face));
+  bag.add(lib.concrete(), geo(cope));
+  // Clipped hedge on the wall, its ragged outline in leaf cards, rounded shrubs standing out of it.
+  bag.add(shrub, hedge(front, 1.0, 0.85));
+  green.hedgeEdge(front, 1.0, 0.85);
+  for (let i = 0; i < front.length; i += 3) {
+    const p = front[i].clone().add(new Vector3(r.range(-0.6, 0.1), 0, r.range(-0.5, 0.5)));
+    green.shrub(p, r.range(0.7, 1.0), r.range(1.2, 1.7), r.chance(0.5) ? "shrub" : "box");
+  }
+  // The hedge along the footway on the park's south side.
   const south: Vector3[] = [];
   for (let x = -6.2; x >= -28; x -= 2) south.push(new Vector3(x, hillY(x, -9.8) + 0.05, -9.8 - (x + 6) * 0.06));
   bag.add(shrub, hedge(south, 0.9, 0.9));
+  green.hedgeEdge(south, 0.9, 0.9);
+  // The rounded bushes at the corner by the boards (p01 right edge).
+  for (const [x, n, rad, h] of [
+    [-6.4, 10.6, 1.1, 1.6],
+    [-8.6, 11.2, 1.0, 1.4],
+    [-12.5, 11.4, 0.9, 1.3],
+  ] as [number, number, number, number][])
+    green.shrub(new Vector3(x, hillY(x, -n), -n), rad, h, "shrub", 1.2);
+  // Lawn tufts.
+  for (let i = 0; i < 40; i++) {
+    const x = r.range(-27, -6.5);
+    const n = r.range(11.5, 24);
+    green.grass(new Vector3(x, hillY(x, -n), -n), r.range(0.18, 0.32), "grass");
+  }
   // Two benches facing the sea.
   for (const [x, n] of [
     [-14, 11.6],
@@ -238,11 +160,11 @@ function park(w: KamakuraWorld, bag: Bag): void {
   }
 }
 
-function footway(w: KamakuraWorld, bag: Bag): void {
+function footway(w: KamakuraWorld, bag: Bag, green: Greenery): void {
   const lib = w.lib;
   const galv = lib.paint("galv");
   const us = stations(-104, -7.2, 3, 3, 3);
-  bag.add(lib.paving(), ribbon(TRACK, us, [-6.9, -4.4], () => 0.34));
+  bag.add(lib.paving(), ribbon(TRACK, us, [-6.9, -3.75], () => 0.34));
   // Pipe railing along the track side (0.9 m), posts every 2 m.
   const rails: BufferGeometry[] = [];
   const p = new Vector3();
@@ -271,6 +193,7 @@ function footway(w: KamakuraWorld, bag: Bag): void {
     line.push(q.setY(hillY(q.x, q.z) + 0.05));
   }
   bag.add(lib.shrub(), hedge(line, 1.1, 1.2));
+  green.hedgeEdge(line, 1.1, 1.2, 0.6);
 }
 
 /**

@@ -119,9 +119,11 @@ export function batchStatic(root: Object3D): { before: number; after: number } {
   root.traverse((o) => {
     const m = o as Mesh;
     if (!m.isMesh || (m as unknown as { isInstancedMesh?: boolean }).isInstancedMesh) return;
-    if (m.userData.dynamic || Array.isArray(m.material)) return;
+    // `noBatch`: static, but its vertex colours must survive (batching keeps
+    // position, normal and UV only); `dynamic`: it moves.
+    if (m.userData.dynamic || m.userData.noBatch || Array.isArray(m.material)) return;
     let skip = false;
-    for (let p: Object3D | null = m.parent; p; p = p.parent) if (p.userData.dynamic) skip = true;
+    for (let p: Object3D | null = m.parent; p; p = p.parent) if (p.userData.dynamic || p.userData.noBatch) skip = true;
     if (skip) return;
     before++;
     const mat = m.material as Material;

@@ -17,12 +17,14 @@ import type { Baker } from "./bake";
  *   n_i   = tex(uv_i).rg · 2 − 1
  *   a2    = roughness² + d · distanceRoughness                       d = eye distance
  *   calm  = 1 / (1 + d · distanceRoughness · 40)
- *   slope = (n_1 + n_2) · normalScale · calm
+ *   slope = (n_1 + n_2) · normalScale · calm + mask · V.xz / |V.xz|
  *   N     = normalize(slope.x, 1, slope.y)
  *   F     = 0.02 + 0.98 · 2^((−5.55473 N·V − 6.98316) N·V)
  *   R     = reflect(−V, N),  R.y = |R.y|
  *   sky   = environment(R) · envMapIntensity · scene environment intensity
- *   body  = bodyColour · hemisphere sky (colour × intensity)
+ *   body  = mix(bodyColour, shallowColour, w) · hemisphere sky (colour × intensity)
+ *           w = vertex colour red (COLOR_0.r, 0 offshore … 1 over the sand
+ *           near the beach); w = 0 without a shallow colour
  *   L_o   = mix(body, sky, F) + sun · N·L · F(V·H) · D_GGX(√a2, N·H) · V_SmithGGXCorrelated(√a2, N·L, N·V)
  *
  * then FogExp2. No shadows. The pattern at texture coordinate u₀ sits at
@@ -38,7 +40,15 @@ import type { Baker } from "./bake";
  *   envMapIntensity    × the scene's environment intensity
  *   waves: [[repeatsPerMetre, scrollX, scrollZ], [...]]   scroll in m/s along world x and z
  *   body: [r, g, b]    linear colour of the light the body scatters back, × sky irradiance
+ *   shallow: [r, g, b] optional linear body colour over a sandy bottom, blended
+ *                      in by the vertex colour's red channel (COLOR_0.r, linear)
  *   distanceRoughness  α² added per metre of distance
+ *   mask               optional mean slope toward the eye (tan of the tilt; 0
+ *                      without): at a grazing view the wave faces turned to
+ *                      the viewer hide their backs, so the water reflects
+ *                      higher, bluer sky; unlike the waves it does not calm
+ *                      with distance, so the far sea stays darker than the
+ *                      horizon sky above it
  */
 
 export interface WaveLayer {
@@ -57,8 +67,12 @@ export interface WaterSpec {
   roughness: number;
   /** α² added per metre of eye distance. */
   distanceRoughness: number;
+  /** Mean slope toward the eye (masking of the wave backs at grazing views). */
+  mask?: number;
   /** Linear colour scattered out of the body, × the hemisphere sky colour. */
   body: Color;
+  /** Body colour over a sandy bottom, blended in by the vertex colour's red channel. */
+  shallow?: Color;
   envMapIntensity: number;
 }
 
@@ -171,6 +185,7 @@ export function createWater(spec: WaterSpec, waves: Texture): Water {
     normalMap: waves,
     normalScale: new Vector2(spec.slope, spec.slope),
     envMapIntensity: spec.envMapIntensity,
+    vertexColors: !!spec.shallow,
   });
   material.name = spec.name ?? "water";
   const layer = (l: WaveLayer): [number, number, number] => [l.repeatsPerMetre, l.scroll[0], l.scroll[1]];
@@ -178,14 +193,18 @@ export function createWater(spec: WaterSpec, waves: Texture): Water {
     kind: "water",
     waves: [layer(spec.waves[0]), layer(spec.waves[1])],
     body: spec.body.toArray(),
+    shallow: spec.shallow?.toArray(),
     distanceRoughness: spec.distanceRoughness,
+    mask: spec.mask,
   };
   const uWave = { value: [new Vector4(), new Vector4()] };
+  const shallow = spec.shallow ?? spec.body;
   const uniforms = {
     uWaveMap: { value: waves },
     uWave,
     uWaterK: { value: new Vector4(spec.body.r, spec.body.g, spec.body.b, spec.distanceRoughness) },
-    uWaterPbr: { value: new Vector4(spec.roughness, spec.slope, spec.envMapIntensity, 0) },
+    uWaterShallow: { value: new Vector4(shallow.r, shallow.g, shallow.b, 0) },
+    uWaterPbr: { value: new Vector4(spec.roughness, spec.slope, spec.envMapIntensity, spec.mask ?? 0) },
   };
   material.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, uniforms);
@@ -211,6 +230,7 @@ export function createWater(spec: WaterSpec, waves: Texture): Water {
         /* glsl */ `#include <common>
         uniform sampler2D uWaveMap;
         uniform vec4 uWaterK;
+        uniform vec4 uWaterShallow;
         uniform vec4 uWaterPbr;
         varying vec3 vWaterWorld;
         varying vec2 vWaterUv1;
@@ -231,7 +251,7 @@ export function createWater(spec: WaterSpec, waves: Texture): Water {
           vec2 n2 = texture2D(uWaveMap, vWaterUv2).rg * 2.0 - 1.0;
           float a2 = uWaterPbr.x * uWaterPbr.x + dist * uWaterK.w;
           float calm = 1.0 / (1.0 + dist * uWaterK.w * 40.0);
-          vec2 slope = (n1 + n2) * (uWaterPbr.y * calm);
+          vec2 slope = (n1 + n2) * (uWaterPbr.y * calm) + V.xz * (uWaterPbr.w / max(length(V.xz), 1e-4));
           vec3 N = normalize(vec3(slope.x, 1.0, slope.y));
           float dotNV = max(dot(N, V), 1e-3);
           float F = 0.02 + 0.98 * exp2((-5.55473 * dotNV - 6.98316) * dotNV);
@@ -245,7 +265,11 @@ export function createWater(spec: WaterSpec, waves: Texture): Water {
           #if NUM_HEMI_LIGHTS > 0
             hemi = hemisphereLights[0].skyColor;
           #endif
-          vec3 water = mix(uWaterK.rgb * hemi, sky, F);
+          vec3 bodyK = uWaterK.rgb;
+          #ifdef USE_COLOR
+            bodyK = mix(uWaterK.rgb, uWaterShallow.rgb, saturate(vColor.r));
+          #endif
+          vec3 water = mix(bodyK * hemi, sky, F);
           #if NUM_DIR_LIGHTS > 0
           {
             vec3 L = normalize((vec4(directionalLights[0].direction, 0.0) * viewMatrix).xyz);
@@ -263,7 +287,7 @@ export function createWater(spec: WaterSpec, waves: Texture): Water {
         #include <opaque_fragment>`,
       );
   };
-  material.customProgramCacheKey = () => "pocket-atlas-water-1";
+  material.customProgramCacheKey = () => "pocket-atlas-water-3";
   const fract = (v: number) => v - Math.floor(v);
   const set = (u: Vector4, l: WaveLayer, t: number) => u.set(l.repeatsPerMetre, 0, fract(t * l.scroll[0] * l.repeatsPerMetre), fract(t * l.scroll[1] * l.repeatsPerMetre));
   const update = (t: number) => {

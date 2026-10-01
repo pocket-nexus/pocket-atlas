@@ -150,9 +150,10 @@ export class KamakuraStage implements Stage {
     renderer.shadowMap.type = PCFShadowMap;
     renderer.shadowMap.autoUpdate = false;
 
-    // Sea haze: FogExp2 that leaves the land near the crossing clear and
-    // takes about two thirds of the light at the 15.8 km horizon.
-    this.scene.fog = new FogExp2(SKY.horizon.clone().multiplyScalar(0.97), 0.000072);
+    // Sea haze: FogExp2 that leaves the land near the crossing clear, takes a
+    // quarter of the light at Hayama (10 km), half at the 15.8 km horizon and
+    // three quarters at Jogashima (22 km).
+    this.scene.fog = new FogExp2(SKY.horizon.clone().multiplyScalar(0.97), 0.000052);
     this.scene.background = SKY.horizon.clone();
 
     await progress(0.04, "Mixing the asphalt");
@@ -163,8 +164,8 @@ export class KamakuraStage implements Stage {
     const world = (this.world = new KamakuraWorld(lib, atlas, quality, 20260725));
 
     await progress(0.14, "Growing summer cumulus");
-    // Scattered fair-weather cumulus: about a third of the cells that cover Yotsuya's sky.
-    this.clouds = bakeClouds(this.baker, this.sunDir, { coverage: 0.22 });
+    // Fair-weather cumulus over the hills and the far peninsulas, few over the bay.
+    this.clouds = bakeClouds(this.baker, this.sunDir, { coverage: 0.08, landCoverage: 0.24, size: quality.level === "high" || quality.level === "ultra" ? 2048 : 1024 });
 
     await progress(0.24, "Filling Sagami Bay");
     this.water = buildSea(world, this.baker);
@@ -264,7 +265,10 @@ export class KamakuraStage implements Stage {
     this.world.root.add(sun);
     // Hemisphere: the sky's average from above, sun-warmed asphalt and sand below.
     const skyAvg = skyColor(new Vector3(0, 1, 0)).multiplyScalar(0.35).add(skyColor(new Vector3(0, 0.25, 1).normalize()).multiplyScalar(0.65));
-    this.world.root.add(new HemisphereLight(skyAvg, 0x8a7f70, 0.62));
+    this.world.root.add(new HemisphereLight(skyAvg, 0x8f8270, 0.54));
+    // A bright, slightly hazy afternoon: a touch under unit exposure keeps the
+    // white villas and the cream train out of the shoulder of the ACES curve.
+    this.ctx.renderer.toneMappingExposure = 0.94;
   }
 
   /** Renders the finished place into a cube map once; PMREM makes it the IBL. */
@@ -283,7 +287,7 @@ export class KamakuraStage implements Stage {
     if (this.ctx.params.exporting) this.envCube = rt;
     else rt.dispose();
     this.scene.environment = this.env;
-    this.scene.environmentIntensity = 0.9;
+    this.scene.environmentIntensity = 0.85;
   }
 
   /** `window.pocketAtlasExport()` → glTF, sky probe and cloud panorama for the cooker. */
@@ -432,5 +436,6 @@ export class KamakuraStage implements Stage {
     this.sun?.shadow.map?.dispose();
     renderer.shadowMap.enabled = false;
     renderer.shadowMap.autoUpdate = true;
+    renderer.toneMappingExposure = 1;
   }
 }

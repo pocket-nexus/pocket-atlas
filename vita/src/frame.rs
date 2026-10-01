@@ -282,6 +282,9 @@ fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: boo
         if m.fog {
             defines.push("FOG");
         }
+        if m.water.is_some_and(|w| w.shallow.is_some()) && m.vertex_color {
+            defines.push("SHALLOW");
+        }
     }
     if m.vertex_color && matches!(m.kind, pc::Kind::Standard | pc::Kind::Unlit) {
         defines.push("VERTEX_COLOR");
@@ -345,7 +348,8 @@ fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: boo
         emissive,
         // uPbr.w: occlusion strength for the ORM map; without the map, the
         // occlusion itself (1 when the material has none).
-        pbr: [m.roughness, m.metalness, m.normal_scale, if orm_mean.is_some() { m.ao_strength } else { 1.0 }],
+        // Water: uPbr.y is the wave faces' slope toward the eye.
+        pbr: [m.roughness, m.water.map_or(m.metalness, |w| w.mask), m.normal_scale, if orm_mean.is_some() { m.ao_strength } else { 1.0 }],
         // Variants that drop the ORM map (LITE, FAR, mirror) scale by its
         // means instead: most materials keep metalness 1 and mask it there.
         pbr_flat: match orm_mean {
@@ -1545,6 +1549,9 @@ impl Renderer {
                 let (a, b) = (layer(&w.waves[0]), layer(&w.waves[1]));
                 u.set(p, U::Wave, &[a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]]);
                 u.set(p, U::WaterK, &[w.body[0], w.body[1], w.body[2], w.distance_roughness]);
+                if let Some(s) = w.shallow {
+                    u.set(p, U::WaterShallow, &[s[0], s[1], s[2], 0.0]);
+                }
             }
             if let Some(sp) = &self.sun {
                 u.set(p, U::SunDir, &sp.dir);
@@ -1665,7 +1672,7 @@ fn vs_needs(m: &Mat, tier: usize, mirror: bool) -> (bool, bool, bool, bool) {
         "standard_f.cg" => (has("NORMAL_MAP") && tier == 0 && !mirror, has("VERTEX_COLOR"), has("PLANAR") && !mirror, false),
         "window_f.cg" | "skyline_f.cg" => (true, true, false, false),
         "unlit_f.cg" | "products_f.cg" => (false, true, false, false),
-        "water_f.cg" => (false, false, false, true),
+        "water_f.cg" => (false, has("SHALLOW"), false, true),
         _ => (false, false, false, false),
     }
 }

@@ -1,4 +1,4 @@
-import { BoxGeometry, BufferGeometry, CylinderGeometry, Float32BufferAttribute, Vector3 } from "three";
+import { BoxGeometry, BufferGeometry, CylinderGeometry, Float32BufferAttribute, MeshStandardMaterial, Vector3 } from "three";
 import { merge } from "../../shared/shapes";
 import { crossingDeck, marking, spikeMat, tactile } from "../gfx/art";
 import { Bag, type KamakuraWorld } from "./context";
@@ -198,40 +198,128 @@ export function buildCoast(w: KamakuraWorld): void {
   }
 
   // ------------------------------------------------------------ sea wall
+  // The cantilevered Route 134 deck on steel pipe piles, faced with decorative
+  // concrete 8 m down to the sand (Kanagawa 2019). The face looks out to sea:
+  // no shot or walkable place sees it, so it stays plain concrete in long panels.
   const top = [SECTION.wallTop[0], SECTION.wallTop[1]];
   const usW = stations(C0, C1, 3, 10, 40);
-  // The wall-top walkway shares the road's material away from the crossing; its kerb and the
-  // decorative wall face (seen only from the beach side) stay concrete near the crossing.
   bag.add(asphalt, ribbon(COAST, usW, top, () => WALK_Y));
   const usNear = stations(-300, 320, 3, 10, 40);
   bag.add(concrete, wallAlong(COAST, usNear, top[0], () => ROAD_Y - 0.02, () => WALK_Y + 0.005, -1));
-  bag.add(concrete, wallAlong(COAST, usNear, top[1], () => beachY(top[1]) - 0.4, () => WALK_Y, 1));
+  bag.add(concrete, wallAlong(COAST, stations(-300, 320, 12, 24, 40), top[1], () => SECTION.sandTop - 0.4, () => WALK_Y, 1));
+  // Steps down to the beach from the junction: an opening in the fence and a
+  // straight flight along the wall face, descending west.
+  const STAIR: [number, number] = [-6.0, -3.6];
+  const flight = beachSteps(STAIR[0], top[1]);
+  bag.add(concrete, flight.steps);
+  bag.add(P, w.tint(flight.rail, "galv"));
   // Wall-top fence: galvanised posts every 2.5 m with three wire ropes, within 260 m.
-  const post = new CylinderGeometry(0.05, 0.05, 1.0, 6, 1, true);
-  const cap = new CylinderGeometry(0.0, 0.055, 0.05, 6);
+  // Four-sided posts and caps (12 triangles a post): from the road and the slope they read round.
+  const post = new CylinderGeometry(0.05, 0.05, 1.0, 4, 1, true).rotateY(Math.PI / 4);
+  const cap = new CylinderGeometry(0.0, 0.06, 0.06, 4, 1, true).rotateY(Math.PI / 4);
   const posts: BufferGeometry[] = [];
-  for (let u = -200; u <= 220; u += 2.5) {
+  const fenceU: number[] = [];
+  for (let u = -200; u <= 220; u += 2.5) if (u < STAIR[0] - 0.3 || u > STAIR[1] + 0.3) fenceU.push(u);
+  fenceU.push(STAIR[0] - 0.2, STAIR[1] + 0.2);
+  for (const u of fenceU) {
     COAST.offset(u, SECTION.wallFence, p);
     posts.push(place(post.clone(), new Vector3(p.x, WALK_Y + 0.5, p.z)));
     posts.push(place(cap.clone(), new Vector3(p.x, WALK_Y + 1.025, p.z)));
   }
   bag.add(P, w.tint(merge(posts), "galv"));
   for (const h of [0.45, 0.7, 0.92]) {
-    const us = stations(-200, 220, 5, 10, 20);
-    const s = SECTION.wallFence - 0.06;
-    // A thin vertical ribbon reads as a wire rope from either side.
-    bag.add(P, w.tint(wallAlong(COAST, us, s, () => WALK_Y + h - 0.012, () => WALK_Y + h + 0.012, 1), "dark"), false);
-    bag.add(P, w.tint(wallAlong(COAST, us, s, () => WALK_Y + h - 0.012, () => WALK_Y + h + 0.012, -1), "dark"), false);
+    for (const [a, b] of [
+      [-200, STAIR[0] - 0.2],
+      [STAIR[1] + 0.2, 220],
+    ]) {
+      const us = stations(a, b, 5, 10, 20);
+      const s = SECTION.wallFence - 0.06;
+      // A thin vertical ribbon reads as a wire rope from either side.
+      bag.add(P, w.tint(wallAlong(COAST, us, s, () => WALK_Y + h - 0.012, () => WALK_Y + h + 0.012, 1), "dark"), false);
+      bag.add(P, w.tint(wallAlong(COAST, us, s, () => WALK_Y + h - 0.012, () => WALK_Y + h + 0.012, -1), "dark"), false);
+    }
   }
 
   // ------------------------------------------------------------ beach
-  // Beach: few long triangles (each 32 m chunk near the crossing costs a draw per material).
+  // Shichirigahama: dark grey-beige sand, nearly flat from the wall foot
+  // (2.3 m T.P.) to the berm 50 m out, then the wet beach face down through
+  // the waterline (about 64 m) under the sea. Few long triangles: every 32 m
+  // chunk near the crossing a triangle lands in costs a draw per material.
   const sand = lib.sand();
-  // One sloping row from the wall foot (2.3 m T.P.) to below the water (waterline about 60 m out).
-  bag.add(sand, ribbon(COAST, [C0, -420, -140, 140, 420, 760, 1050, C1], [top[1], 95], (_u, s) => (s < 50 ? SECTION.sandTop : -12.2)));
+  // Shichirigahama's sand is dark: iron-rich volcanic grains, grey-beige even when dry.
+  sand.color.setRGB(0.74, 0.71, 0.67);
+  const us = [C0, 260, C1];
+  const berm = SECTION.sandTop - 0.9;
+  bag.add(sand, ribbon(COAST, us, [top[1], 50], (_u, s) => (s < 20 ? SECTION.sandTop : berm)));
+  bag.add(wetSand(sand), ribbon(COAST, us, [50, 92], (_u, s) => (s < 51 ? berm : berm - 4.2)));
 
   bag.emit(w);
 }
+
+/** The swash zone's sand: darker and glossy with the water left by each wave. */
+function wetSand(sand: MeshStandardMaterial): MeshStandardMaterial {
+  const m = sand.clone();
+  m.name = "sand-wet";
+  m.color.setRGB(0.62, 0.6, 0.58);
+  m.roughness = 0.42;
+  return m;
+}
+
+/**
+ * A flight of concrete steps against the sea wall's face from the wall top
+ * at `u0` down to the sand, descending west (−u), 1.5 m wide, with a
+ * galvanised handrail on its open side.
+ */
+function beachSteps(u0: number, face: number): { steps: BufferGeometry; rail: BufferGeometry } {
+  const drop = WALK_Y - SECTION.sandTop;
+  const n = Math.round(drop / 0.18);
+  const rise = drop / n;
+  const tread = 0.55;
+  const width = 1.5;
+  const s = face + width / 2;
+  const p = new Vector3();
+  const t = new Vector3();
+  const steps: BufferGeometry[] = [];
+  // The top landing in the fence opening, then one solid block per step down to the sand.
+  COAST.offset(u0 + 1.2, s, p);
+  COAST.tangent(u0 + 1.2, t);
+  const landing = new BoxGeometry(width, 0.3, 2.4);
+  steps.push(place(landing, p.clone().setY(WALK_Y - 0.15), Math.atan2(t.x, t.z)));
+  for (let k = 0; k < n; k++) {
+    const u = u0 - (k + 0.5) * tread;
+    const yTop = WALK_Y - (k + 1) * rise;
+    const h = yTop - (SECTION.sandTop - 0.3);
+    COAST.offset(u, s, p);
+    COAST.tangent(u, t);
+    steps.push(place(new BoxGeometry(width, h, tread + 0.01), p.clone().setY(yTop - h / 2), Math.atan2(t.x, t.z)));
+  }
+  // Handrail 0.85 m above the nosings on the open side, posts every 3 m.
+  const rail: BufferGeometry[] = [];
+  const sr = face + width - 0.08;
+  const nose = (u: number) => WALK_Y - Math.max(0, (u0 - u) / tread) * rise;
+  const uEnd = u0 - n * tread;
+  const a = COAST.offset(u0 + 2.4, sr, new Vector3()).setY(WALK_Y + 0.85);
+  const b = COAST.offset(u0, sr, new Vector3()).setY(WALK_Y + 0.85);
+  const c = COAST.offset(uEnd, sr, new Vector3()).setY(SECTION.sandTop + 0.85);
+  for (const [q0, q1] of [
+    [a, b],
+    [b, c],
+  ]) {
+    const d = new Vector3().subVectors(q1, q0);
+    const g = new CylinderGeometry(0.024, 0.024, d.length(), 6, 1, true);
+    g.rotateX(Math.PI / 2);
+    g.lookAt(d);
+    g.translate((q0.x + q1.x) / 2, (q0.y + q1.y) / 2, (q0.z + q1.z) / 2);
+    rail.push(g);
+  }
+  for (let u = u0 + 2.4; u >= uEnd; u -= 3) {
+    COAST.offset(u, sr, p);
+    const y = nose(Math.min(u, u0));
+    rail.push(place(new CylinderGeometry(0.024, 0.024, 0.85, 6, 1, true), p.clone().setY(y + 0.425)));
+  }
+  return { steps: merge(steps), rail: merge(rail) };
+}
+
 
 /** A thin diagonal paint stripe from a to b (atlas-mapped quad), at height y. */
 function diag(a: Vector3, b: Vector3, width: number, y: number, cell: { u0: number; v0: number; u1: number; v1: number }): BufferGeometry {

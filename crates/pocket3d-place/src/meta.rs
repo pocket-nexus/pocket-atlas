@@ -174,6 +174,15 @@ pub struct Water {
     /// Roughness² added per metre of distance: waves smaller than a pixel
     /// widen the sun's reflection into a glitter path.
     pub distance_roughness: f32,
+    /// Body colour over a sandy bottom, blended by the mesh's vertex colour
+    /// (red); the body colour alone without one.
+    #[serde(default)]
+    pub shallow: Option<[f32; 3]>,
+    /// Mean slope of the wave faces toward the eye (tan of the tilt): the
+    /// backs of the waves hide at grazing views, so far water reflects less
+    /// sky and reads darker than the horizon.
+    #[serde(default)]
+    pub mask: f32,
 }
 
 /// A material's texture coordinates over time: a flipbook of `frames`

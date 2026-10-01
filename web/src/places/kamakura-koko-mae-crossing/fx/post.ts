@@ -39,10 +39,10 @@ export function createCoastPost(renderer: WebGLRenderer, scene: Scene, camera: P
   const u = grade.uniforms;
   u.get("uGrain")!.value = 0.01;
   u.get("uVignette")!.value = 0.22;
-  (u.get("uLift")!.value as Vector3).set(0.02, 0.12, 0.28);
+  (u.get("uLift")!.value as Vector3).set(0.03, 0.08, 0.16);
   (u.get("uGain")!.value as Vector3).set(1.03, 1.0, 0.95);
   u.get("uSaturation")!.value = 1.12;
-  u.get("uContrast")!.value = 1.05;
+  u.get("uContrast")!.value = 1.08;
   const finals: Effect[] = [];
   if (quality.msaa === 0) finals.push(new SMAAEffect());
   finals.push(bloom, tone, grade);
