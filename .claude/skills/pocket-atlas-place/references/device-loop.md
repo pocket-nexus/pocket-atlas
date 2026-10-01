@@ -7,7 +7,7 @@
 - `sync` copies `vita/shaders` from the checkout you run it in: build and sync from the branch whose renderer the pack needs.
 - Enter a place with `bun tools/atlas.ts ctl '{"place":"<id>"}'` and wait for status `running <id>` with `pending 0` (first entries compile programs on the device).
 - **Captures**: `bun tools/atlas.ts capture --out <absolute path>` (relative paths land inside `vendor/pocketjs`); space captures ≥ 5 s apart — a burst dropped the USB link. A capture stalls the frame, so frame times read during a capture loop are not measurements.
-- Pin a view for comparisons: `ctl {"renderProfile":"vita30","time":25,"view":{pos,target,fov},"settings":{"step":0,"hold":true,"hud":false}}` with each shot's halfway view (mid of `from`/`to` in `scene.glb`'s camera shots).
+- Pin a view for comparisons: `ctl {"renderProfile":"vita30","time":25,"view":{pos,target,fov},"settings":{"step":0,"hold":true,"hud":false}}` with each shot's halfway view (mid of `from`/`to` in `scene.glb`'s camera shots). To read one shot as the rig frames it, send `{"shot":k,"time":T}` (the shot by index, the loop frozen) and read `main.draws`/`main.tris` from `status`; each message without `time` or `view` releases them.
 - **Measure**: `shots --place <id> --seconds <≥ 6 × shot length>` (rig + governor: the verdict), `profile --place <id> --shot <Name> --time <t>` (serialized GPU per pass: the headroom), `sweep` (frame time per step). The place must be running before `profile`.
 - `vpk` packs only the programs in this session's `gxp/manifest.txt`: visit the atlas and every place in one session first, wait for `pending 0`.
 - Compare device and web numerically at the same view (sea, sky, lit and shaded road) before blaming the renderer; they matched within 1–3/255 for Kamakura.

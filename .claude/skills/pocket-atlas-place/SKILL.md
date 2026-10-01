@@ -32,7 +32,7 @@ A place is one real spot, recreated faithfully enough that someone who has stood
 - **Clutter that makes the place**: wires with catenary sag (keep them ≥ ~0.3 device pixel wide from the nearest shot), poles with hardware, signs with legible text, kerbs, drains, manholes, worn paint.
 - **Light**: shade is the photos' value and hue — a soft grey-blue, never saturated blue. The probe and hemisphere fill must not be the sky's zenith colour; give the ground bounce its weight. The cooker bakes this light into vertices, so the web light balance is what the device gets.
 - **Motion**: the loop is seamless; moving content (trains, cars, gates, signs, surf) is modelled with the same care as the static scene.
-- **Budget** per shot on the Vita: ≤ 250 draws and ≤ 130k triangles after LOD, moving geometry ≤ 30k triangles, a pack under ~48 MB, 30.0 fps at step 0 under `shots`, serialized GPU ≤ ~25 ms under `profile` (headroom for the passing train or taxi).
+- **Budget** per shot on the Vita: 30.0 fps at step 0 under `shots` and serialized GPU ≤ ~25 ms under `profile` (headroom for the passing train or taxi) are the verdict. Guides for planning: about 250 draws and 130k triangles after LOD (Kamakura's Platform view, 263 draws and 141k triangles, takes 20.9 ms), moving geometry ≤ 30k triangles, a pack no larger than the konbini's 50.6 MiB.
 
 ## Export annotations
 
