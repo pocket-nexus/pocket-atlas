@@ -237,9 +237,16 @@ class Materials {
       }
       const hdr = b.color.clone();
       const peak = Math.max(hdr.r, hdr.g, hdr.b, 1e-6);
+      // Animated signs (shared/signs.ts) export frame 0: their mesh UVs address
+      // it, and the live UV offset is motion the annotation carries.
+      let map = this.tex.convert(b.map);
+      if (pc.kind === "sign" && map && (map.offset.x !== 0 || map.offset.y !== 0)) {
+        map = map.clone();
+        map.offset.set(0, 0);
+      }
       const out = new MeshBasicMaterial({
         color: peak > 1 ? hdr.clone().multiplyScalar(1 / peak) : hdr,
-        map: this.tex.convert(b.map),
+        map,
         vertexColors: b.vertexColors,
         ...common,
       });

@@ -1,8 +1,9 @@
 # Pocket Atlas — web reference
 
 A standalone three.js app: a night-side globe where you pick a place, a
-rain-soaked Tokyo backstreet with a 24-hour konbini, and the stairs of Suga
-Shrine in Yotsuya on a summer afternoon. It does not use any PocketJS runtime, build tooling or packages — it is
+rain-soaked Tokyo backstreet with a 24-hour konbini, the stairs of Suga
+Shrine in Yotsuya on a summer afternoon, and the street in front of
+Akihabara Radio Kaikan at blue hour. It does not use any PocketJS runtime, build tooling or packages — it is
 a plain Vite + TypeScript project with its own lockfile.
 
 Every asset is generated at load time: Earth textures are rasterised from
@@ -41,6 +42,7 @@ Requires WebGL 2. Tested in Chrome on Apple silicon (ANGLE / Metal).
 | `?shot` | capture mode: no UI, no intro, muted |
 | `?cam=Konbini\|Puddles\|Vending\|Crossing\|Inside\|Wires` | start at a named shot (konbini) |
 | `?cam=Stairs\|Rails\|Below\|Lane\|Canopy` | start at a named shot (Suga Shrine Stairs) |
+| `?cam=Arrival\|Facade\|Band\|Vista\|Corner\|Clock` | start at a named shot (Radio Kaikan at Blue Hour) |
 | `?view=px,py,pz,tx,ty,tz[,fov]` | explicit camera (with `?shot`) |
 | `?t=12.5` | simulation clock when the stage appears (with `?shot`, captures are reproducible) |
 | `?stats` | frame time and draw-call readout |
@@ -150,6 +152,45 @@ bun scripts/shot.ts "/?shot&stats&q=high&cam=Puddles#/place/tokyo-konbini" out.p
 - **Finish.** N8AO, a bloom above luminance 1.6, ACES tone mapping and the
   shared grade (`fx/post.ts`, `places/shared/grade.ts`).
 
+## How Radio Kaikan at Blue Hour is put together
+
+- **Site.** The origin is Radio Kaikan's NE corner at sidewalk level, +X
+  east and −Z north; the 24 m north facade lies on z = 0 and the 48.6 m
+  footprint runs to z = 48.6 (OpenStreetMap way 47127856). The one-way
+  street runs along X: sidewalks of interlocking pavers on both sides,
+  6.8 m of asphalt 12 cm lower, building lines 18.9 m apart, zebra
+  crossings east of the corner and at the station exit, and Chuo-dori across
+  the west end (`world/layout.ts`). Neighbours take their OSM footprints:
+  the finance building, Sofmap AKIBA 駅前館 and namco to the east, the
+  pachinko hall and the Chuo-dori corner to the west, Gamers and atre 1
+  opposite, LAOX and Onoden closing the vista.
+- **Radio Kaikan.** Ten floors to GL+44.2 m and the penthouse to 46.5 m:
+  the recessed ground floor under a soffit with downlights (The AKiBa gift
+  shop, the entrance with the MIZUHO ATM and AKIHABARA RADIOKAIKAN signs,
+  C-labo, the B1 beer hall stairs), the yellow LED band at 2F with channel
+  letters (世界の / ラジオ会館 with the two green dakuten balls / 秋葉原) and
+  the LED screen, eight ribbon floors with backlit window artwork over
+  white spandrels, the floodlit billboard over 3F–4F, and the west strip of
+  horizontal louvres lit from behind (`world/kaikan.ts`).
+- **Signs.** Lightboxes, posters and shop interiors are drawn into two
+  skyline-packed canvas atlases (`SkylineAtlas`) and channel letters into an
+  alpha-tested one. The LED band (32 frames of bar patterns), the screen
+  (16 frames of a generic advert loop), the pachinko hall's red ticker and
+  the green message board are animated signs (`places/shared/signs.ts`).
+  Lettering uses the real shop names in their colours; no logo artwork is
+  traced and no characters appear.
+- **Light.** The sun is 5° below the horizon at azimuth 262°, down the
+  street; the sky dome is the twilight model (`places/shared/sky.ts`), a
+  hemisphere light takes its averaged colour, and a cube capture of the
+  street lights the reflections. Lantern lamp posts, panel lights in front of
+  every lit sign and shopfront, and the soffit's spot lights do the rest.
+- **Life.** Eleven pedestrians on the rig of Rainy Night Konbini walk the
+  street (closed to vehicles 16:00–19:00) and wait by the entrance and the
+  pole clock; a ten-car Sobu Line local crosses the bridge north of the
+  street in the first 20 s of every 40 s.
+- **Finish.** N8AO, a bloom above luminance 1.0, AgX tone mapping and the
+  shared grade with cool shadows and warm highlights (`fx/post.ts`).
+
 ## Layout
 
 ```
@@ -159,8 +200,8 @@ src/
   globe/       the globe stage
   places/
     registry.ts          every place on the globe (which ones are enterable)
-    shared/              GPU baker, geometry and canvas helpers, atlas, camera rig,
-                         grade, and export.ts (glTF + extras.pocketAtlas for the
+    shared/              GPU baker, geometry and canvas helpers, atlases, camera rig,
+                         grade, animated signs, twilight sky, and export.ts (glTF + extras.pocketAtlas for the
                          cooker, driven by scripts/export-place.ts)
     tokyo-konbini/       Rainy Night Konbini
       gfx/       materials, wet/glass/interior shaders, reflection, canvas art
@@ -170,4 +211,9 @@ src/
       gfx/       daylight surfaces and materials, quad builder
       fx/        daylight post-processing
       world/     site plan, terrain, stairs, houses, props, tree, far field, sky
+    akihabara-radio-kaikan/  Radio Kaikan at Blue Hour
+      gfx/       street surfaces, palette-snapped materials, sign and poster art
+      fx/        dusk post-processing
+      world/     site plan, ground, Radio Kaikan, facade toolkit, neighbours,
+                 props, people, viaduct and towers
 ```
