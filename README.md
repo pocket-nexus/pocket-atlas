@@ -80,6 +80,8 @@ This is a fixed-function adaptation: it does not reproduce Vita's HDR/PBR shader
 
 On the connected PSP (333 MHz CPU, 166 MHz bus, PSPLINK, 2026-10-01), five 30-frame windows per fixed halfway camera at t=10 with rain and reflections enabled measured: Konbini 19.9 fps, Puddles 15.0, Vending 15.0, Crossing 20.0, Inside 20.0, Wires 30.0. These are fixed-view measurements, not a claim that the live sequence or every free-camera position sustains 30 fps. The pack is 15.38 MiB with 68,206 triangles across the whole place, 38 textures, 111 animated nodes and 16 skinned chunks. PSP support remains a first port with performance and visual quality below the Vita renderer.
 
+`psp/Psp.toml` embeds the 144×80 Pocket Atlas icon and a 480×272 PSP scene capture as the XMB background. Artwork sources and regeneration instructions live in `psp/assets/`.
+
 ## Vita
 
 Requirements: VitaSDK at `~/vitasdk`, `cargo-vita`, Rust `nightly-2026-05-28` with `rust-src`, a Vita with HENkaku/Ensō and **Pocket Devkit** installed (build it with `bun tools/vita.ts devkit --release` in `vendor/pocketjs`; see its `docs/VITA-USB.md`), and `ur0:data/libshacccg.suprx` (extracted from Sony's PSM Runtime, for example with ShaRKBR33D) on the development console. Packaged builds carry compiled programs and do not need the compiler.
