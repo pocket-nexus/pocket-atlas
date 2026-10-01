@@ -5,6 +5,8 @@
 //
 // Defines: SKINNED, MAX_BONES, BAKED; which varyings the fragment program
 // reads beyond world position, normal and UV: TANGENT, COLOR, SCREEN.
+// WAVES (water): the UV and a second set are the world's x/z plane in two
+// wave layers (repeats per metre, scroll offset) instead of the mesh UV.
 // VERTEX_LIGHTS=n: diffuse irradiance from n lights per vertex (moving and
 // skinned meshes are dense enough), in the baked lighting varying.
 // FLAT (profiling) writes position and world only.
@@ -36,6 +38,10 @@ void main(
     uniform float4 uDequant[2],
     uniform float4x4 uViewProj,
     uniform float4 uUv,
+#ifdef WAVES
+    uniform float4 uWave[2], // repeats per metre, -, offset
+    out float2 oUv2 : TEXCOORD6,
+#endif
     out float4 oPosition : POSITION,
 #ifndef FLAT
     out half3 oNormal : TEXCOORD1,
@@ -81,7 +87,12 @@ void main(
     oWorld = world;
 #ifndef FLAT
     oNormal = (half3)normalize(n);
+#ifdef WAVES
+    oUv = world.xz * uWave[0].x + uWave[0].zw;
+    oUv2 = world.xz * uWave[1].x + uWave[1].zw;
+#else
     oUv = aUv * uUv.xy + uUv.zw;
+#endif
 #ifdef TANGENT
     oTangent = half4((half3)normalize(t), (half)aTangent.w);
 #endif

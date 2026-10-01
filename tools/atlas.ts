@@ -123,6 +123,34 @@ const PLACE_DIR = `${PLACES_DIR}/${PLACE}`;
 const PACK = `${PLACE_DIR}/${PLACE}.place`;
 /** The globe and place list (`cook-atlas`, from web/scripts/export-atlas.ts). */
 const ATLAS_PACK = resolve(ROOT, ".pocket-build/atlas/atlas.pack");
+const FONTS = resolve(ROOT, ".pocket-build/fonts");
+const NOTO_REVISION = "f8d157532fbfaeda587e826d4cd5b21a49186f7c";
+/** SHA-256 of the Noto Sans CJK JP faces at NOTO_REVISION. */
+const NOTO_SHA256: Record<string, string> = {
+  "NotoSansCJKjp-Medium.otf": "dd523e580e3413c480b2d701bf64e534c20f8419e3cfb6a44c2bdcd8d2a6c052",
+  "NotoSansCJKjp-Bold.otf": "e53dcb0dcb2922e45d01aae1ebd2f382bb81d4229b18b6b883bd170678af1f76",
+};
+
+/**
+ * The interface font's faces: Inter Regular/Bold from PocketJS, Noto Sans CJK
+ * JP Medium/Bold (OFL) fetched once into `.pocket-build/fonts` and checked.
+ */
+async function fontFaces(): Promise<string[]> {
+  mkdirSync(FONTS, { recursive: true });
+  const cjk: string[] = [];
+  for (const [name, sha] of Object.entries(NOTO_SHA256)) {
+    const path = `${FONTS}/${name}`;
+    if (!existsSync(path)) {
+      const r = await fetch(`https://raw.githubusercontent.com/notofonts/noto-cjk/${NOTO_REVISION}/Sans/OTF/Japanese/${name}`);
+      if (!r.ok) throw new Error(`${name}: ${r.status}`);
+      writeFileSync(path, new Uint8Array(await r.arrayBuffer()));
+    }
+    if (createHash("sha256").update(readFileSync(path)).digest("hex") !== sha) throw new Error(`${path}: checksum mismatch`);
+    cjk.push(path);
+  }
+  const inter = `${POCKETJS}/assets/fonts`;
+  return ["--latin", `${inter}/Inter-Regular.ttf`, "--latin-bold", `${inter}/Inter-Bold.ttf`, "--cjk", cjk[0]!, "--cjk-bold", cjk[1]!];
+}
 
 /** Every cooked place pack: [id, path]. */
 function cookedPlaces(): [string, string][] {
@@ -184,8 +212,8 @@ async function lint(): Promise<void> {
     ...["STREAK", "SPLASH", "DRIP", "STEAM", "BEACON"].map((d): [string, string[]] => ["fx_v.cg", [d]]),
     ...["STREAK", "SPLASH", "STEAM", "BEACON"].map((d): [string, string[]] => ["fx_f.cg", [d]]),
     ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "SUN_SPEC", "ALBEDO_MAP", "NORMAL_MAP", "ORM_MAP", "FOG"]], ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "ALPHA_TEST", "ALBEDO_MAP", "EMISSION_MAP", "FOG"]],
-    ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "FAR", "ALBEDO_MAP", "FOG"]], ["shadow_f.cg", []], ["shadow_f.cg", ["ALPHA_TEST"]], ["fill_f.cg", []], ["sky_day_f.cg", []],
-    ["globe_v.cg", []], ["globe_f.cg", []], ["marker_v.cg", []], ["marker_f.cg", []], ["surface_v.cg", ["FLAT"]], ["surface_v.cg", ["BAKED", "FLAT"]],
+    ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "FAR", "ALBEDO_MAP", "FOG"]], ["shadow_f.cg", []], ["shadow_f.cg", ["ALPHA_TEST"]], ["fill_f.cg", []], ["sky_day_f.cg", []], ["sky_day_f.cg", ["TWILIGHT"]],
+    ["globe_v.cg", []], ["globe_f.cg", []], ["marker_v.cg", []], ["marker_f.cg", []], ["ui_v.cg", []], ["ui_f.cg", []], ["ui_f.cg", ["TEX"]], ["text_v.cg", []], ["text_f.cg", []], ["surface_v.cg", ["WAVES"]], ["water_f.cg", ["SUN", "FOG"]], ["water_f.cg", []], ["water_f.cg", ["SUN", "FOG", "SHALLOW"]], ["surface_v.cg", ["WAVES", "COLOR"]], ["surface_v.cg", ["FLAT"]], ["surface_v.cg", ["BAKED", "FLAT"]],
     ["post_v.cg", []], ["post_v.cg", ["GRAIN"]], ["haze_f.cg", ["HAZE_LIGHTS=2"]], ["haze_f.cg", ["HAZE_LIGHTS=6"]], ["prefilter_f.cg", []], ["down_f.cg", []], ["up_f.cg", []], ["composite_f.cg", []], ["composite_f.cg", ["HAZE", "BLOOM"]], ["blit_f.cg", []],
   ];
   const tmp = resolve(ROOT, ".pocket-build/atlas/lint");
@@ -453,7 +481,8 @@ else if (command === "ctl") {
 } else if (command === "cook") {
   await $`cargo run --release -p pocket3d-place-cook -- --in ${PLACE_DIR}`.cwd(ROOT);
 } else if (command === "cook-atlas") {
-  await $`cargo run --release -p pocket3d-place-cook -- atlas --in ${resolve(ROOT, ".pocket-build/atlas/globe")} --out ${ATLAS_PACK}`.cwd(ROOT);
+  const faces = await fontFaces();
+  await $`cargo run --release -p pocket3d-place-cook -- atlas --in ${resolve(ROOT, ".pocket-build/atlas/globe")} --out ${ATLAS_PACK} ${faces}`.cwd(ROOT);
 } else if (command === "capture") {
   const out = value("--out", resolve(ROOT, `.pocket-build/validation/captures/${new Date().toISOString().replace(/[:.]/g, "-")}.png`));
   await dev("capture", "--out", out);

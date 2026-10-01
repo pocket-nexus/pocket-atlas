@@ -1,10 +1,8 @@
-import { Vector3 } from "three";
-
 /**
  * Site plan of the Suga Shrine men's stairway (須賀神社 男坂), Yotsuya.
  * Metres, y up. The top nosing of the flight sits at the origin and the
  * stairs descend along −Z; looking down the stairs (−Z) faces a bearing of
- * about 33° (NNE). The world is not rotated to north: `bearing()` converts.
+ * about 33° (NNE). The world is not rotated to north: `bearing(az, el, BEARING)` (shared/geo.ts) converts.
  *
  *                    +Z  (shrine plateau, 29.4 m above sea level)
  *        shrine/torii ░░ street along x ░░░░░░░░░░░░
@@ -77,13 +75,6 @@ export function roadX(z: number): number {
 
 /** Looking down the stairs (−Z) faces this bearing (degrees clockwise from north). */
 export const BEARING = 33;
-
-/** Unit vector for a compass bearing and elevation (degrees), in world axes. */
-export function bearing(azimuth: number, elevation = 0): Vector3 {
-  const a = ((azimuth - BEARING) * Math.PI) / 180;
-  const e = (elevation * Math.PI) / 180;
-  return new Vector3(Math.sin(a) * Math.cos(e), Math.sin(e), -Math.cos(a) * Math.cos(e));
-}
 
 /** Summer afternoon, about 15:30 JST in late July. */
 export const SUN = { azimuth: 255, elevation: 35 };

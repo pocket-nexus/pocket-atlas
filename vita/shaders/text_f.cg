@@ -1,0 +1,9 @@
+// Glyph coverage × the text colour (premultiplied).
+
+uniform float4 uFill;
+uniform sampler2D uSource;
+
+half4 main(float2 vUv : TEXCOORD0) : COLOR
+{
+    return (half4)(uFill * tex2D(uSource, vUv).r);
+}

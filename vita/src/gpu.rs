@@ -83,6 +83,21 @@ pub enum U {
     CloudSun,
     CloudAmb,
     SunCurve,
+    Rect,
+    Local,
+    TexRect,
+    Shape,
+    Fill,
+    Fill2,
+    Stroke,
+    StrokeW,
+    TwBand,
+    TwBelt,
+    TwShape,
+    TwShadow,
+    Wave,
+    WaterK,
+    WaterShallow,
     Count,
 }
 
@@ -93,6 +108,9 @@ const UNIFORM_NAMES: [&str; U::Count as usize] = [
     "uOpacity", "uBoxMin", "uBoxMax", "uTexel", "uThreshold", "uBloomK", "uGrade",
     "uCurtain", "uGrainK", "uEarthRot", "uSun", "uGlobeK", "uGlobeK2", "uCloudOff", "uMarker", "uMarkerCol", "uMarkerK",
     "uSunDir", "uSunRad", "uSunMat", "uShadowK", "uSkyDay", "uSkySun", "uSkyGlow", "uSkyDisc", "uCloudSun", "uCloudAmb", "uSunCurve",
+    "uRect", "uLocal", "uTexRect", "uShape", "uFill", "uFill2", "uStroke", "uStrokeW",
+    "uTwBand", "uTwBelt", "uTwShape", "uTwShadow",
+    "uWave", "uWaterK", "uWaterShallow",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,7 +136,6 @@ pub enum S {
     Mask,
     Grain,
     Lights,
-    SunTrans,
     Inscatter,
     Transmit,
     Shadow,
@@ -127,7 +144,7 @@ pub enum S {
 
 const SAMPLER_NAMES: [&str; S::Count as usize] = [
     "uAlbedo", "uNormalMap", "uOrm", "uEmission", "uEnv", "uPuddles", "uRipples", "uReflSharp", "uReflBlur", "uBeads", "uClouds",
-    "uScene", "uHazeTex", "uBloom", "uSource", "uSupport", "uLut", "uMask", "uGrain", "uLights", "uSunTrans", "uInscatter", "uTransmit", "uShadow",
+    "uScene", "uHazeTex", "uBloom", "uSource", "uSupport", "uLut", "uMask", "uGrain", "uLights", "uInscatter", "uTransmit", "uShadow",
 ];
 
 pub type Param = *const g::SceGxmProgramParameter;
@@ -177,6 +194,8 @@ pub enum Layout {
     Pos2,
     /// Atlas globe: position f32×3, uv f32×2 (20 bytes).
     Globe,
+    /// Interface text: position f32×2 (display pixels), uv f32×2 (16 bytes).
+    Text,
 }
 
 impl Layout {
@@ -203,6 +222,7 @@ impl Layout {
             Layout::Fx => (&[("aSeed", 0, U16N, 4), ("aCorner", 8, F32, 2), ("aA", 16, F32, 3), ("aB", 28, F32, 3)], 40),
             Layout::Pos2 => (&[("aPosition", 0, F32, 2)], 8),
             Layout::Globe => (&[("aPosition", 0, F32, 3), ("aUv", 12, F32, 2)], 20),
+            Layout::Text => (&[("aPosition", 0, F32, 2), ("aUv", 8, F32, 2)], 16),
         }
     }
 }
@@ -252,7 +272,8 @@ impl Drop for Pipeline {
 pub enum Slot {
     Pending,
     Ready(Arc<Program>),
-    Failed(String),
+    /// Compiling or patching failed (the message is in `Gpu::errors`).
+    Failed,
 }
 
 pub struct Gpu {
@@ -349,9 +370,8 @@ impl Gpu {
                     let slot = match unsafe { Program::new(self.patcher, &gxp, hash) } {
                         Ok(p) => Slot::Ready(Arc::new(p)),
                         Err(e) => {
-                            let msg = format!("{}: {e}", key.label());
-                            self.errors.push(msg.clone());
-                            Slot::Failed(msg)
+                            self.errors.push(format!("{}: {e}", key.label()));
+                            Slot::Failed
                         }
                     };
                     self.programs.insert(key, slot);
@@ -359,10 +379,10 @@ impl Gpu {
                 }
                 Event::Failed { key, error } => {
                     self.errors.retain(|e| !e.starts_with(&key.label()));
-                    self.errors.push(error.clone());
+                    self.errors.push(error);
                     // Keep a working older program if there is one.
                     if !matches!(self.programs.get(&key), Some(Slot::Ready(_))) {
-                        self.programs.insert(key, Slot::Failed(error));
+                        self.programs.insert(key, Slot::Failed);
                     }
                 }
             }
@@ -475,4 +495,27 @@ pub unsafe fn bind(ctx: *mut g::SceGxmContext, p: &Pipeline, s: S, tex: *const g
     if unit != u32::MAX && !tex.is_null() {
         g::sceGxmSetFragmentTexture(ctx, unit, tex);
     }
+}
+
+/// An 8-bit single-channel tiled texture (32×32 tiles) over `px`.
+pub(crate) unsafe fn tiled_u8(px: *mut u8, w: usize, h: usize, linear: bool, repeat: bool) -> Result<g::SceGxmTexture, String> {
+    let mut t: g::SceGxmTexture = core::mem::zeroed();
+    // GXM spells swizzles in ABGR order: U8_R111 puts the texel in alpha and
+    // reads 1 in red. RRRR puts it in every channel, as the shaders read `.r`.
+    let r = g::sceGxmTextureInitTiled(&mut t, px.cast(), g::SceGxmTextureFormat_SCE_GXM_TEXTURE_FORMAT_U8_RRRR, w as u32, h as u32, 0);
+    if r < 0 {
+        return Err(format!("tiled texture {w}x{h} 0x{:08x}", r as u32));
+    }
+    let f = if linear { g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_LINEAR } else { g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_POINT };
+    g::sceGxmTextureSetMinFilter(&mut t, f);
+    g::sceGxmTextureSetMagFilter(&mut t, f);
+    let a = if repeat { g::SceGxmTextureAddrMode_SCE_GXM_TEXTURE_ADDR_REPEAT } else { g::SceGxmTextureAddrMode_SCE_GXM_TEXTURE_ADDR_CLAMP };
+    g::sceGxmTextureSetUAddrMode(&mut t, a);
+    g::sceGxmTextureSetVAddrMode(&mut t, a);
+    Ok(t)
+}
+
+/// Byte offset of texel (x, y) in a tiled 8-bit texture `w` texels wide.
+pub(crate) fn tiled_at(x: usize, y: usize, w: usize) -> usize {
+    ((y / 32) * (w / 32) + x / 32) * 1024 + (y % 32) * 32 + x % 32
 }

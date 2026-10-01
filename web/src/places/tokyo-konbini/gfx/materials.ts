@@ -10,7 +10,7 @@ import {
 import type { Quality } from "../../../core/quality";
 import type { Baker, SurfaceMaps } from "../../shared/bake";
 import { makeRainGlass } from "./glass";
-import { makeInteriorWindows } from "./interior";
+import { makeInteriorWindows } from "../../shared/interior";
 import * as SURF from "./surfaces";
 import { makeDamp, makeWet, type WetShared } from "./wet";
 
@@ -290,7 +290,7 @@ export class MaterialLib {
 
   /** Apartment/office glazing with parallax rooms behind it (see interior.ts). */
   interiorWindows(): MeshStandardMaterial {
-    return this.memo("interior-windows", () => makeInteriorWindows(this.wet, 1.25));
+    return this.memo("interior-windows", () => makeInteriorWindows(this.wet.uTime, 1.25));
   }
 
   /** Clear vinyl (umbrellas, bus-stop panels). */

@@ -1,6 +1,5 @@
 import { MeshStandardMaterial, type PlaneGeometry, type BufferAttribute } from "three";
-import { GLSL_NOISE } from "../../shared/glsl";
-import type { WetShared } from "./wet";
+import { GLSL_NOISE } from "./glsl";
 
 /**
  * Window UVs carry two things: fract(uv) is the position across the pane,
@@ -144,13 +143,14 @@ const FRAG_EMISSIVE = /* glsl */ `
 
 /**
  * Apartment and office windows with parallax rooms. The material keeps its
- * glass specular (env + lights) and replaces emission with the traced room.
+ * glass specular (env + lights) and replaces emission with the traced room;
+ * `time` (seconds) flickers the television rooms.
  */
-export function makeInteriorWindows(shared: WetShared, intensity = 1.4): MeshStandardMaterial {
+export function makeInteriorWindows(time: { value: number }, intensity = 1.4): MeshStandardMaterial {
   const m = new MeshStandardMaterial({ color: 0x06080a, roughness: 0.06, metalness: 0, envMapIntensity: 1.1 });
   const local = { uIntensity: { value: intensity } };
   m.onBeforeCompile = (shader) => {
-    shader.uniforms.uTime = shared.uTime;
+    shader.uniforms.uTime = time;
     Object.assign(shader.uniforms, local);
     shader.vertexShader = shader.vertexShader
       .replace("#include <common>", `#include <common>\n${VERT_PARS}`)
