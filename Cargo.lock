@@ -307,7 +307,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pocket3d-city"
+name = "pocket3d-place"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -315,7 +315,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pocket3d-city-cook"
+name = "pocket3d-place-cook"
 version = "0.1.0"
 dependencies = [
  "glam",
@@ -323,7 +323,7 @@ dependencies = [
  "half",
  "image",
  "meshopt",
- "pocket3d-city",
+ "pocket3d-place",
  "rayon",
  "serde_json",
  "texpresso",

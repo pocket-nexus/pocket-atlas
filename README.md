@@ -1,22 +1,34 @@
-# Pocket City
+# Pocket Atlas
 
-A rain-soaked Tokyo backstreet with a 24-hour konbini, picked from a night-side globe. The scene exists twice:
+A world map of places people remember. A place is a small, self-contained 3D scene of one real spot — a street corner, a stairway, a café — pinned to its location on a shared globe. People will publish their own places (publicly or privately) and download other people's places to visit them.
 
-- **`web/`** is the reference renderer: a standalone three.js + Vite app with no PocketJS dependency. Every asset is generated at load time.
-- **`vita/`** renders the same scene on a PS Vita with its own GXM pipeline: custom Cg programs compiled on the device by SceShaccCg, 4× MSAA HDR targets, a planar street reflection, lit rain haze, bloom and AgX tone mapping.
+This repository holds the first-party places, the pipeline that turns a place into a pack for a handheld GPU, and the PS Vita renderer. Publishing and downloading are not built yet; the current work is distributing places at the highest image quality the PS Vita can hold at 30 fps.
 
-The two are connected by a pack: the web app exports the scene as glTF 2.0 with `extras.pocketCity`, and the cooker (`crates/pocket3d-city-cook`) turns it into a `.pcity` pack for the handheld GPU.
+Every place exists twice:
+
+- **`web/`** is the reference renderer: a standalone three.js + Vite app with no PocketJS dependency, with a night-side globe to pick a place. Every asset is generated at load time.
+- **`vita/`** renders the same place on a PS Vita with its own GXM pipeline: Cg programs compiled on the device by SceShaccCg, 4× MSAA HDR targets and the effect set the place needs.
+
+A pack connects the two: the web app exports a place as glTF 2.0 with `extras.pocketAtlas`, and the cooker (`crates/pocket3d-place-cook`) turns it into a `.place` pack for the handheld GPU.
+
+## Places
+
+| Place | Id | Where | Rendering it drives |
+| --- | --- | --- | --- |
+| Rainy Night Konbini | `tokyo-konbini` | Tokyo backstreet | wet ground with a planar reflection, rain, lit haze, interior-mapped windows, baked vertex lighting, moving lights |
+
+Real places fall into a finite set of kinds: night streets, daytime residential slopes, interiors, waterfronts, parks. Each first-party place brings its kind's rendering to the best quality the handheld holds, and the work goes into the shared renderer and cooker so later places of the same kind reuse it.
 
 ## Layout
 
 | Path | Contents |
 | --- | --- |
-| `web/` | three.js reference scene, globe, export script (`scripts/export-city.ts`) |
-| `crates/pocket3d-city` | `.pcity` pack format: META JSON + texture, geometry and animation blobs |
-| `crates/pocket3d-city-cook` | glTF → pack: BC1/BC3/BC5 textures with mips, quantized vertices, baked vertex lighting, low-poly shelf stock, octahedral environment, effect textures |
+| `web/` | three.js reference places, globe, export script (`scripts/export-place.ts`) |
+| `crates/pocket3d-place` | `.place` pack format: META JSON + texture, geometry and animation blobs |
+| `crates/pocket3d-place-cook` | glTF → pack: BC1/BC3/BC5 textures with mips, quantized vertices, baked vertex lighting, low-poly shelf stock, octahedral environment, effect textures |
 | `crates/pocket3d-gxm` | GXM layer: GXP registration and patching, own shader patcher, render targets, texture upload, runtime SceShaccCg |
 | `vita/` | Vita app: pack loader, frame renderer, Cg programs (`vita/shaders`), LiveArea art |
-| `tools/city.ts` | cook, build, deploy over USB, status/capture/profile, standalone VPK |
+| `tools/atlas.ts` | cook, build, deploy over USB, status/capture/profile, standalone VPK |
 | `vendor/pocketjs` | PocketJS: Vita dev host and wired debug transport |
 
 ## Web
@@ -35,26 +47,26 @@ Requirements: VitaSDK at `~/vitasdk`, `cargo-vita`, Rust `nightly-2026-05-28` wi
 
 ```sh
 git submodule update --init
-# 1. Export the scene (dev server running) and cook it
+# 1. Export a place (dev server running) and cook it
 (cd web && bun run dev) &
-(cd web && bun scripts/export-city.ts --seconds 20)  # → .pocket-build/city/tokyo/scene.glb (the device loops the 20 s of traffic)
-bun tools/city.ts cook                        # → .pocket-build/city/tokyo/tokyo.pcity
+(cd web && bun scripts/export-place.ts --place tokyo-konbini --seconds 20)  # → .pocket-build/places/tokyo-konbini/scene.glb (the device loops the 20 s of traffic)
+bun tools/atlas.ts cook --place tokyo-konbini  # → .pocket-build/places/tokyo-konbini/tokyo-konbini.place
 
 # 2. Development loop on a console running Pocket Devkit (PocketJS apps/devkit)
-bun tools/city.ts serve &                     # USB host
-bun tools/city.ts native                      # sync pack + shaders, build, run in Devkit's native slot
-bun tools/city.ts status                      # renderer telemetry under `engine`
-bun tools/city.ts profile --shot Konbini      # GPU time per scene
-bun tools/city.ts sweep                       # frame time per shot × quality step
-bun tools/city.ts capture                     # → .pocket-build/validation/captures/
+bun tools/atlas.ts serve &                    # USB host
+bun tools/atlas.ts native                     # sync pack + shaders, build, run in Devkit's native slot
+bun tools/atlas.ts status                     # renderer telemetry under `engine`
+bun tools/atlas.ts profile --shot Konbini     # GPU time per scene
+bun tools/atlas.ts sweep                      # frame time per shot × quality step
+bun tools/atlas.ts capture                    # → .pocket-build/validation/captures/
 
-# 3. Standalone package (title PKCT00001)
-bun tools/city.ts vpk                         # → dist/vita/pocket-city-PKCT00001.vpk
+# 3. Standalone package (title PKAT00001)
+bun tools/atlas.ts vpk                        # → dist/vita/pocket-atlas-PKAT00001.vpk
 ```
 
-Shader sources in `vita/shaders` hot-reload: `bun tools/city.ts sync` copies them to the USB share and the device recompiles the programs whose expanded source changed. Compiled programs are cached on the share by content hash; `vpk` packages the ones listed in the device's `gxp/manifest.txt`.
+Commands that cook, sync or measure take `--place ID` (default `tokyo-konbini`). Shader sources in `vita/shaders` hot-reload: `bun tools/atlas.ts sync` copies them to the USB share and the device recompiles the programs whose expanded source changed. Compiled programs are cached on the share by content hash; `vpk` packages the ones listed in the device's `gxp/manifest.txt`.
 
-`bun tools/city.ts ctl '{"renderProfile":"vita30","view":…,"time":…,"settings":{…}}'` steers the camera and the renderer. Naming a profile resets its switches and governor; `settings` then overrides them: `reflection`, `haze`, `bloom`, `rain`, `msaa`, `maxLights`, `fx`, `skip`, `flat`, `hud`, `profile` (serialized GPU timing), `step` and `hold` (pin a quality step), and the step or profile values `detailM`, `lodPixels`, `cullSize`, `hazeSize`, `hazeLights`, `bloomFull`, `reflSize`, `streaks`, `steam`, `detailMaps`, `vertexLights`.
+`bun tools/atlas.ts ctl '{"renderProfile":"vita30","view":…,"time":…,"settings":{…}}'` steers the camera and the renderer. Naming a profile resets its switches and governor; `settings` then overrides them: `reflection`, `haze`, `bloom`, `rain`, `msaa`, `maxLights`, `fx`, `skip`, `flat`, `hud`, `profile` (serialized GPU timing), `step` and `hold` (pin a quality step), and the step or profile values `detailM`, `lodPixels`, `cullSize`, `hazeSize`, `hazeLights`, `bloomFull`, `reflSize`, `streaks`, `steam`, `detailMaps`, `vertexLights`.
 
 ## Render profiles
 
@@ -77,7 +89,7 @@ Variants that drop a material's ORM map (distant, LITE and mirror programs) scal
 
 ## Status on hardware
 
-Measured on a PS Vita 2000 (CPU 444 MHz, GPU 222 MHz) in Pocket Devkit, `vita30`, 4× MSAA, 480×272 composited and scaled to 960×544. `bun tools/city.ts sweep --time T` pins each step for each shot's halfway view:
+Rainy Night Konbini, measured on a PS Vita 2000 (CPU 444 MHz, GPU 222 MHz) in Pocket Devkit, `vita30`, 4× MSAA, 480×272 composited and scaled to 960×544. `bun tools/atlas.ts sweep --time T` pins each step for each shot's halfway view:
 
 | Shot | t = 100 s: step 0 | t = 72 s (taxi passing): first step at 33.3 ms |
 | --- | --- | --- |
@@ -88,7 +100,7 @@ Measured on a PS Vita 2000 (CPU 444 MHz, GPU 222 MHz) in Pocket Devkit, `vita30`
 | Inside | 33.4 ms | step 0 |
 | Wires | 33.4 ms | step 0 |
 
-With the camera rig and governor running (`bun tools/city.ts shots --seconds 130`), every shot averages 29.5–30.0 fps; the longest smoothed frame is 36.8 ms, while the taxi passes Konbini. Serialized GPU time at step 0 (t = 100 s) runs from 31.2 ms (Wires) to 40.7 ms (Puddles): main pass 16–23 ms, haze 5.6 ms, bloom 3.8 ms, composite 2.2 ms, reflection 3.1 ms, display scale 1.2 ms.
+With the camera rig and governor running (`bun tools/atlas.ts shots --seconds 130`), every shot averages 29.5–30.0 fps; the longest smoothed frame is 36.8 ms, while the taxi passes Konbini. Serialized GPU time at step 0 (t = 100 s) runs from 31.2 ms (Wires) to 40.7 ms (Puddles): main pass 16–23 ms, haze 5.6 ms, bloom 3.8 ms, composite 2.2 ms, reflection 3.1 ms, display scale 1.2 ms.
 
 ## License
 

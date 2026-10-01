@@ -3,7 +3,7 @@
 //! cinematic after 40 s without input.
 
 use glam::{Mat4, Vec3};
-use pocket3d_city as pc;
+use pocket3d_place as pc;
 
 pub struct View {
     pub pos: Vec3,

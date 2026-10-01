@@ -1,9 +1,9 @@
-//! Pocket City on PS Vita: the Tokyo rain scene on the programmable GXM
-//! renderer (pocket3d-gxm).
+//! Pocket Atlas on PS Vita: places rendered on the programmable GXM renderer
+//! (pocket3d-gxm).
 //!
 //! Development loop over the wired debug transport: the pack and shader
-//! sources are read from the USB share (`host0:city/`), shaders compile on
-//! the device and hot-reload when their source changes, `host0:city/control.json`
+//! sources are read from the USB share (`host0:atlas/`), shaders compile on
+//! the device and hot-reload when their source changes, `host0:atlas/control.json`
 //! steers camera and renderer settings, and status receipts report timings
 //! and draw statistics under `engine`.
 #![recursion_limit = "256"]
@@ -41,9 +41,9 @@ pub static _newlib_heap_size_user: u32 = 96 * 1024 * 1024;
 /// Development builds read the pack from the USB share first; packaged
 /// builds carry it in the VPK.
 const PACKS: &[&str] = if cfg!(feature = "usb-debug") {
-    &["host0:city/tokyo.pcity", "ux0:data/pocket-city/tokyo.pcity", "app0:tokyo.pcity"]
+    &["host0:atlas/places/tokyo-konbini.place", "ux0:data/pocket-atlas/places/tokyo-konbini.place", "app0:places/tokyo-konbini.place"]
 } else {
-    &["app0:tokyo.pcity", "ux0:data/pocket-city/tokyo.pcity"]
+    &["app0:places/tokyo-konbini.place", "ux0:data/pocket-atlas/places/tokyo-konbini.place"]
 };
 
 extern "C" {
@@ -83,7 +83,7 @@ unsafe fn text(font: *mut g::vita2d_pgf, x: i32, y: i32, color: u32, scale: f32,
 
 unsafe fn loading_frame(font: *mut g::vita2d_pgf, lines: &[String], dev: &dev::Host) {
     graphics::begin_frame(0xff0a_0806);
-    text(font, 40, 60, 0xffff_ffff, 1.2, "POCKET CITY  /  TOKYO");
+    text(font, 40, 60, 0xffff_ffff, 1.2, "POCKET ATLAS  /  RAINY NIGHT KONBINI, TOKYO");
     for (i, l) in lines.iter().enumerate() {
         text(font, 40, 110 + i as i32 * 26, 0xffc8_c8c8, 0.9, l);
     }
@@ -91,7 +91,7 @@ unsafe fn loading_frame(font: *mut g::vita2d_pgf, lines: &[String], dev: &dev::H
     graphics::present();
 }
 
-/// Copies `host0:city/outbox/<name>` to `ux0:data/pocket-city/<name>` (a
+/// Copies `host0:atlas/outbox/<name>` to `ux0:data/pocket-atlas/<name>` (a
 /// packaged build to install from VitaShell) and records the result next to
 /// the source as `<name>.done`.
 fn fetch(name: &str) {
@@ -99,27 +99,27 @@ fn fetch(name: &str) {
         if name.is_empty() || name.contains(['/', '\\', ':']) || name.contains("..") {
             return Err(format!("refusing file name {name:?}"));
         }
-        let _ = std::fs::create_dir_all("ux0:data/pocket-city");
-        let mut src = std::fs::File::open(format!("host0:city/outbox/{name}")).map_err(|e| e.to_string())?;
-        let to = format!("ux0:data/pocket-city/{name}");
+        let _ = std::fs::create_dir_all("ux0:data/pocket-atlas");
+        let mut src = std::fs::File::open(format!("host0:atlas/outbox/{name}")).map_err(|e| e.to_string())?;
+        let to = format!("ux0:data/pocket-atlas/{name}");
         let mut dst = std::fs::File::create(&to).map_err(|e| format!("{to}: {e}"))?;
         std::io::copy(&mut src, &mut dst).map_err(|e| e.to_string())
     })();
     let text = match result {
-        Ok(n) => format!("ok {n} ux0:data/pocket-city/{name}"),
+        Ok(n) => format!("ok {n} ux0:data/pocket-atlas/{name}"),
         Err(e) => format!("error {e}"),
     };
-    let _ = hostfs::write(&format!("host0:city/outbox/{name}.done"), text.as_bytes());
+    let _ = hostfs::write(&format!("host0:atlas/outbox/{name}.done"), text.as_bytes());
 }
 
-/// Remote control: `host0:city/control.json`, polled off the render thread.
+/// Remote control: `host0:atlas/control.json`, polled off the render thread.
 fn control_watcher() -> mpsc::Receiver<Value> {
     let (tx, rx) = mpsc::channel();
-    let _ = std::thread::Builder::new().name("city-control".into()).stack_size(256 * 1024).spawn(move || {
+    let _ = std::thread::Builder::new().name("atlas-control".into()).stack_size(256 * 1024).spawn(move || {
         let mut last = Vec::new();
         loop {
             std::thread::sleep(Duration::from_millis(400));
-            if let Some(bytes) = hostfs::read("host0:city/control.json", 64 * 1024) {
+            if let Some(bytes) = hostfs::read("host0:atlas/control.json", 64 * 1024) {
                 if bytes != last {
                     last = bytes.clone();
                     if let Ok(v) = serde_json::from_slice::<Value>(&bytes) {
@@ -217,7 +217,7 @@ fn apply_control(v: &Value, rig: &mut Rig, r: &mut Renderer, ctl: &mut Control, 
 fn main() {
     unsafe {
         if let Err(error) = graphics::init_with_pool(2 * 1024 * 1024) {
-            pocketjs_vita::vita_log(format_args!("city: graphics {error}"));
+            pocketjs_vita::vita_log(format_args!("atlas: graphics {error}"));
             return;
         }
         let clocks = set_clocks();
@@ -231,7 +231,7 @@ fn main() {
         let mut gpu = match Gpu::new(live) {
             Ok(g) => g,
             Err(e) => {
-                pocketjs_vita::vita_log(format_args!("city: shader patcher {e}"));
+                pocketjs_vita::vita_log(format_args!("atlas: shader patcher {e}"));
                 return;
             }
         };
@@ -258,14 +258,14 @@ fn main() {
             }
         }
         let Some((mut scene, pack_path)) = scene else {
-            let msg = if load_error.is_empty() { "no city pack found (host0:city/tokyo.pcity)".to_string() } else { load_error };
+            let msg = if load_error.is_empty() { "no place pack found (host0:atlas/places/tokyo-konbini.place)".to_string() } else { load_error };
             // Keep counting frames: the host accepts a native replacement once
             // the new build reports frame > 1, error screen or not.
             let mut frame = 0u32;
             loop {
                 dev.engine = json!({"stage": "error", "error": msg});
-                dev.publish(frame, "city");
-                loading_frame(font, &[msg.clone(), "Sync the pack with: bun tools/city.ts sync".into()], &dev);
+                dev.publish(frame, "atlas");
+                loading_frame(font, &[msg.clone(), "Sync the pack with: bun tools/atlas.ts sync".into()], &dev);
                 let (_, action) = dev.menu.input(input::read().buttons);
                 serve(&mut dev, frame, action);
                 frame = frame.wrapping_add(1);
@@ -277,7 +277,7 @@ fn main() {
                 let mut frame = 0u32;
                 loop {
                     dev.engine = json!({"stage": "error", "error": e});
-                    dev.publish(frame, "city");
+                    dev.publish(frame, "atlas");
                     loading_frame(font, &[format!("renderer: {e}")], &dev);
                     let (_, action) = dev.menu.input(input::read().buttons);
                     serve(&mut dev, frame, action);
@@ -338,19 +338,19 @@ fn main() {
                 }
                 dev.engine = json!({"stage": "compiling", "pending": pending, "compiled": gpu.compiled, "compileMs": gpu.compile_ms,
                     "compiler": format!("{:?}", gpu.compiler), "errors": gpu.errors});
-                dev.publish(frame_no, "city");
+                dev.publish(frame_no, "atlas");
                 loading_frame(font, &lines, &dev);
                 serve(&mut dev, frame_no, action);
                 frame_no = frame_no.wrapping_add(1);
                 continue;
             }
             compiling_since = None;
-            // The programs this build uses, for packaging (`city.ts vpk`):
+            // The programs this build uses, for packaging (`atlas.ts vpk`):
             // rewritten after a hot reload or when a program is first needed.
             let state = (gpu.generation, gpu.programs.len());
             if live && manifest_state != state && gpu.pending() == 0 {
                 manifest_state = state;
-                let _ = hostfs::write("host0:city/gxp/manifest.txt", gpu.manifest().as_bytes());
+                let _ = hostfs::write("host0:atlas/gxp/manifest.txt", gpu.manifest().as_bytes());
             }
 
             // ------------------------------------------------------ update
@@ -469,7 +469,7 @@ fn main() {
                 "cpuPasses": renderer.timeline.cpu.iter().map(|(n, rec, end)| json!([n, rec, end])).collect::<Vec<_>>(),
                 "heavy": heavy,
             });
-            dev.publish(frame_no, "city");
+            dev.publish(frame_no, "atlas");
             serve(&mut dev, frame_no, action);
             frame_no = frame_no.wrapping_add(1);
         }
@@ -484,7 +484,7 @@ unsafe fn serve(dev: &mut dev::Host, frame: u32, action: Action) {
         _ => None,
     });
     match op {
-        Some(Op::Status) => request.take().unwrap().finish(Ok(dev.status(frame, "city"))),
+        Some(Op::Status) => request.take().unwrap().finish(Ok(dev.status(frame, "atlas"))),
         Some(Op::Menu) => {
             dev.menu.visible = !dev.menu.visible;
             request.take().unwrap().finish(Ok(json!({"menu": dev.menu.visible})));
@@ -504,7 +504,7 @@ unsafe fn serve(dev: &mut dev::Host, frame: u32, action: Action) {
         }
         Some(Op::Push | Op::Reload | Op::Reset) => {
             if let Some(request) = request.take() {
-                request.finish(Err("Pocket City has no JS guest; use native".into()));
+                request.finish(Err("Pocket Atlas has no JS guest; use native".into()));
             }
         }
         None => {}

@@ -109,7 +109,7 @@ kbd {
   opacity: 1;
 }
 
-.pc-globe-ui.is-visible .pc-city-list,
+.pc-globe-ui.is-visible .pc-place-list,
 .pc-globe-ui.is-visible .pc-brand {
   pointer-events: auto;
 }
@@ -169,7 +169,7 @@ kbd {
   }
 }
 
-.pc-city-list {
+.pc-place-list {
   position: absolute;
   top: clamp(20px, 4vh, 44px);
   right: clamp(16px, 2.6vw, 40px);
@@ -185,7 +185,7 @@ kbd {
   overflow: hidden;
 }
 
-.pc-city-list-head {
+.pc-place-list-head {
   display: flex;
   justify-content: space-between;
   padding: 16px 18px 12px;
@@ -197,7 +197,7 @@ kbd {
   border-bottom: 1px solid var(--line);
 }
 
-.pc-city-scroll {
+.pc-place-scroll {
   overflow-y: auto;
   padding: 8px;
   scrollbar-width: thin;
@@ -517,20 +517,20 @@ kbd {
   text-shadow: 0 1px 12px rgba(0, 0, 0, 0.7);
 }
 
-.pc-hud-city {
+.pc-hud-place {
   display: flex;
   gap: 10px;
   align-items: baseline;
 }
 
-.pc-hud-city b {
+.pc-hud-place b {
   font-size: 22px;
   font-weight: 300;
   letter-spacing: 0.24em;
   text-transform: uppercase;
 }
 
-.pc-hud-city span {
+.pc-hud-place span {
   font-size: 16px;
   color: var(--ink-dim);
 }
@@ -637,7 +637,7 @@ kbd {
 }
 
 @media (max-width: 760px) {
-  .pc-city-list {
+  .pc-place-list {
     top: auto;
     left: 12px;
     right: 12px;

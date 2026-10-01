@@ -12,7 +12,7 @@ import {
   Vector3,
   type Camera,
 } from "three";
-import type { CityDef } from "../core/types";
+import type { PlaceDef } from "../core/types";
 import { latLonToVec } from "./geo";
 
 const LIFT = 0.0016;
@@ -171,15 +171,15 @@ void main() {
 }`;
 
 export interface MarkerHit {
-  city: CityDef;
+  place: PlaceDef;
   x: number;
   y: number;
   dist: number;
 }
 
 /**
- * All city markers as three instanced draws (dots, ground rings, beams). Per
- * city hover / visibility live in an instanced attribute that is eased on the CPU.
+ * All place markers as three instanced draws (dots, ground rings, beams). Per
+ * place hover / visibility live in an instanced attribute that is eased on the CPU.
  */
 export class Markers {
   readonly group = new Group();
@@ -195,21 +195,21 @@ export class Markers {
   private dirs: Vector3[];
   private geos: InstancedBufferGeometry[] = [];
 
-  constructor(readonly cities: CityDef[]) {
-    const n = cities.length;
+  constructor(readonly places: PlaceDef[]) {
+    const n = places.length;
     this.hover = new Float32Array(n);
     this.vis = new Float32Array(n).fill(1);
-    this.dirs = cities.map((c) => latLonToVec(c.lat, c.lon));
+    this.dirs = places.map((c) => latLonToVec(c.lat, c.lon));
     const dir = new Float32Array(n * 3);
     const col = new Float32Array(n * 3);
     const st = new Float32Array(n * 4);
     const c = new Color();
-    cities.forEach((city, i) => {
+    places.forEach((place, i) => {
       this.dirs[i].toArray(dir, i * 3);
-      c.set(city.accent);
+      c.set(place.accent);
       col.set([c.r, c.g, c.b], i * 3);
-      st.set([city.status === "live" ? 1 : 0, 0, i * 1.37, 1], i * 4);
-      if (city.status === "live") this.liveIdx.push(i);
+      st.set([place.status === "live" ? 1 : 0, 0, i * 1.37, 1], i * 4);
+      if (place.status === "live") this.liveIdx.push(i);
     });
     this.state = new InstancedBufferAttribute(st, 4);
     this.state.setUsage(DynamicDrawUsage);
@@ -244,7 +244,7 @@ export class Markers {
     const ringMesh = new Mesh(make(n, { iDir: dirAttr, iColor: colAttr, iState: this.state }), this.ringMat);
     const dotMesh = new Mesh(make(n, { iDir: dirAttr, iColor: colAttr, iState: this.state }), this.dotMat);
 
-    // Beams only for enterable cities.
+    // Beams only for enterable places.
     const ln = this.liveIdx.length;
     const bDir = new Float32Array(ln * 3);
     const bCol = new Float32Array(ln * 3);
@@ -269,13 +269,13 @@ export class Markers {
   }
 
   /** Targets are eased toward; `hovered` = index or -1. */
-  update(dt: number, time: number, hovered: number, pxPerUnit: number, dive: number, diveCity: number): void {
+  update(dt: number, time: number, hovered: number, pxPerUnit: number, dive: number, divePlace: number): void {
     const k = 1 - Math.exp(-dt * 10);
     const arr = this.state.array as Float32Array;
-    for (let i = 0; i < this.cities.length; i++) {
+    for (let i = 0; i < this.places.length; i++) {
       this.hover[i] += ((i === hovered ? 1 : 0) - this.hover[i]) * k;
       // While diving, everything except the destination fades out.
-      const vTarget = dive > 0 && i !== diveCity ? 0 : 1;
+      const vTarget = dive > 0 && i !== divePlace ? 0 : 1;
       this.vis[i] += (vTarget - this.vis[i]) * k;
       arr[i * 4 + 1] = this.hover[i];
       arr[i * 4 + 3] = this.vis[i];
@@ -294,19 +294,19 @@ export class Markers {
     }
   }
 
-  /** World position of city `i` on the surface (the group's parent carries the globe rotation). */
+  /** World position of place `i` on the surface (the group's parent carries the globe rotation). */
   worldPos(i: number, out: Vector3): Vector3 {
     return out.copy(this.dirs[i]).applyMatrix4(this.group.matrixWorld);
   }
 
   /**
-   * Nearest visible marker to a pointer, in CSS pixels. Cities over the limb
+   * Nearest visible marker to a pointer, in CSS pixels. Places over the limb
    * (facing away from the camera) are not pickable.
    */
   pick(camera: Camera, cx: number, cy: number, w: number, h: number, radiusPx: number): MarkerHit | null {
     let best: MarkerHit | null = null;
     const camPos = camera.position;
-    for (let i = 0; i < this.cities.length; i++) {
+    for (let i = 0; i < this.places.length; i++) {
       const p = this.worldPos(i, this.tmp);
       const facing = (p.x * (camPos.x - p.x) + p.y * (camPos.y - p.y) + p.z * (camPos.z - p.z)) / camPos.distanceTo(p);
       if (facing < 0.12 || this.vis[i] < 0.5) continue;
@@ -314,13 +314,13 @@ export class Markers {
       const x = (p.x * 0.5 + 0.5) * w;
       const y = (-p.y * 0.5 + 0.5) * h;
       const d = Math.hypot(x - cx, y - cy);
-      const r = this.cities[i].status === "live" ? radiusPx * 1.35 : radiusPx;
-      if (d < r && (!best || d < best.dist)) best = { city: this.cities[i], x, y, dist: d };
+      const r = this.places[i].status === "live" ? radiusPx * 1.35 : radiusPx;
+      if (d < r && (!best || d < best.dist)) best = { place: this.places[i], x, y, dist: d };
     }
     return best;
   }
 
-  /** Screen position of a city if it is on the visible hemisphere. */
+  /** Screen position of a place if it is on the visible hemisphere. */
   screenPos(i: number, camera: Camera, w: number, h: number): { x: number; y: number } | null {
     const p = this.worldPos(i, this.tmp);
     const camPos = camera.position;

@@ -7,8 +7,8 @@
 use std::ffi::{c_char, CStr};
 
 const TARGET: &str = "ur0:data/libshacccg.suprx";
-const EXPORT: &str = "host0:city/psm/libshacccg.suprx.ext";
-const IMPORT: &str = "host0:city/psm/libshacccg.suprx";
+const EXPORT: &str = "host0:atlas/psm/libshacccg.suprx.ext";
+const IMPORT: &str = "host0:atlas/psm/libshacccg.suprx";
 
 extern "C" {
     fn sceAppMgrGameDataMount(app: *const c_char, patch: *const c_char, rif: *const c_char, mount_point: *mut c_char) -> i32;
@@ -71,10 +71,10 @@ pub fn step() -> String {
         if let Some(bytes) = found {
             let r = crate::hostfs::write(EXPORT, &bytes);
             log.push(format!("export: {r:?}"));
-            let _ = crate::hostfs::write("host0:city/psm/extract.log", log.join("\n").as_bytes());
+            let _ = crate::hostfs::write("host0:atlas/psm/extract.log", log.join("\n").as_bytes());
             return format!("exported {} bytes to {EXPORT}", bytes.len());
         }
     }
-    let _ = crate::hostfs::write("host0:city/psm/extract.log", log.join("\n").as_bytes());
+    let _ = crate::hostfs::write("host0:atlas/psm/extract.log", log.join("\n").as_bytes());
     format!("extract failed: {}", log.join(" | "))
 }

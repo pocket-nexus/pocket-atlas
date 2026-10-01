@@ -1,5 +1,5 @@
-import { CITIES, localTime } from "../cities/registry";
-import type { CityDef } from "../core/types";
+import { PLACES, localTime } from "../places/registry";
+import type { PlaceDef } from "../core/types";
 import { QUALITY_LEVELS, type QualityLevel } from "../core/quality";
 
 type Handler<T = void> = (value: T) => void;
@@ -22,14 +22,14 @@ export interface GlobeHandlers {
   onSelect: Handler<string>;
 }
 
-export interface CityHandlers {
+export interface PlaceHandlers {
   onBack: Handler;
   onCinematic: Handler;
   onShot: Handler<string>;
 }
 
 /**
- * All DOM chrome over the canvas: globe picker, loading screen, city HUD and
+ * All DOM chrome over the canvas: globe picker, loading screen, place HUD and
  * the shared system controls. Stages drive it; it never touches WebGL.
  */
 export class Overlay {
@@ -49,9 +49,9 @@ export class Overlay {
   private clockTimer = 0;
   private toastTimer = 0;
   private globeHandlers: GlobeHandlers | null = null;
-  private cityHandlers: CityHandlers | null = null;
+  private placeHandlers: PlaceHandlers | null = null;
   private hudClock: HTMLElement | null = null;
-  private hudCity: CityDef | null = null;
+  private hudPlace: PlaceDef | null = null;
   private muteBtn = el("button", "pc-chip");
   private qualityBtn = el("button", "pc-chip");
   private hidden = false;
@@ -81,34 +81,34 @@ export class Overlay {
       "pc-brand",
       `<div class="pc-brand-mark"><span></span></div>
        <div>
-         <h1>Pocket&nbsp;City</h1>
+         <h1>Pocket&nbsp;Atlas</h1>
          <p>Pick a place on the night side of the planet. Step inside.</p>
        </div>`,
     );
-    const list = el("nav", "pc-city-list");
-    const head = el("div", "pc-city-list-head", `<span>Destinations</span><span>${CITIES.filter((c) => c.status === "live").length} / ${CITIES.length} open</span>`);
+    const list = el("nav", "pc-place-list");
+    const head = el("div", "pc-place-list-head", `<span>Places</span><span>${PLACES.filter((c) => c.status === "live").length} / ${PLACES.length} open</span>`);
     list.append(head);
-    const scroller = el("div", "pc-city-scroll");
-    const ordered = [...CITIES].sort((a, b) => Number(b.status === "live") - Number(a.status === "live"));
-    for (const city of ordered) {
-      const card = el("button", `pc-card ${city.status === "live" ? "is-live" : "is-soon"}`);
-      card.style.setProperty("--accent", city.accent);
+    const scroller = el("div", "pc-place-scroll");
+    const ordered = [...PLACES].sort((a, b) => Number(b.status === "live") - Number(a.status === "live"));
+    for (const place of ordered) {
+      const card = el("button", `pc-card ${place.status === "live" ? "is-live" : "is-soon"}`);
+      card.style.setProperty("--accent", place.accent);
       card.innerHTML = `
         <div class="pc-card-row">
-          <span class="pc-card-name">${city.name}</span>
-          <span class="pc-card-native">${city.native}</span>
-          <span class="pc-card-time" data-clock="${city.id}">${localTime(city)}</span>
+          <span class="pc-card-name">${place.locality}</span>
+          <span class="pc-card-native">${place.localityNative}</span>
+          <span class="pc-card-time" data-clock="${place.id}">${localTime(place)}</span>
         </div>
-        <div class="pc-card-scene">${city.scene}</div>
+        <div class="pc-card-scene">${place.name}</div>
         <div class="pc-card-meta">
           <span class="pc-dot"></span>
-          <span>${city.status === "live" ? "Open now · enter" : "Under construction"}</span>
-          <span class="pc-card-weather">${city.weather}</span>
+          <span>${place.status === "live" ? "Open now · enter" : "Under construction"}</span>
+          <span class="pc-card-weather">${place.weather}</span>
         </div>`;
-      card.addEventListener("pointerenter", () => this.globeHandlers?.onHover(city.id));
+      card.addEventListener("pointerenter", () => this.globeHandlers?.onHover(place.id));
       card.addEventListener("pointerleave", () => this.globeHandlers?.onHover(null));
-      card.addEventListener("click", () => this.globeHandlers?.onSelect(city.id));
-      this.cards.set(city.id, card);
+      card.addEventListener("click", () => this.globeHandlers?.onSelect(place.id));
+      this.cards.set(place.id, card);
       scroller.append(card);
     }
     list.append(scroller);
@@ -133,16 +133,16 @@ export class Overlay {
     if (id) this.cards.get(id)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
 
-  showTooltip(city: CityDef, x: number, y: number): void {
+  showTooltip(place: PlaceDef, x: number, y: number): void {
     const t = this.tooltip;
-    if (t.dataset.city !== city.id) {
-      t.dataset.city = city.id;
-      t.style.setProperty("--accent", city.accent);
+    if (t.dataset.place !== place.id) {
+      t.dataset.place = place.id;
+      t.style.setProperty("--accent", place.accent);
       t.innerHTML = `
-        <div class="pc-tt-top"><b>${city.name}</b><span>${city.native}</span></div>
-        <div class="pc-tt-scene">${city.scene}<i>${city.sceneNative}</i></div>
-        <div class="pc-tt-meta"><span>${localTime(city)} local</span><span>${city.weather}</span></div>
-        <div class="pc-tt-cta">${city.status === "live" ? "Click to enter ↵" : "Coming soon"}</div>`;
+        <div class="pc-tt-top"><b>${place.locality}</b><span>${place.localityNative}</span></div>
+        <div class="pc-tt-scene">${place.name}<i>${place.native}</i></div>
+        <div class="pc-tt-meta"><span>${localTime(place)} local</span><span>${place.weather}</span></div>
+        <div class="pc-tt-cta">${place.status === "live" ? "Click to enter ↵" : "Coming soon"}</div>`;
     }
     t.style.transform = `translate3d(${Math.round(x + 18)}px, ${Math.round(y - 12)}px, 0)`;
     t.classList.add("is-visible");
@@ -150,7 +150,7 @@ export class Overlay {
 
   hideTooltip(): void {
     this.tooltip.classList.remove("is-visible");
-    delete this.tooltip.dataset.city;
+    delete this.tooltip.dataset.place;
   }
 
   // -------------------------------------------------------------- loading
@@ -163,12 +163,12 @@ export class Overlay {
     this.loading.append(el("div", "pc-loading-native"), el("div", "pc-loading-title"), el("div", "pc-loading-sub"), bar, foot);
   }
 
-  showLoading(city: CityDef): void {
+  showLoading(place: PlaceDef): void {
     const [native, title, sub] = Array.from(this.loading.children) as HTMLElement[];
-    native.textContent = city.native;
-    title.textContent = `${city.name} — ${city.scene}`;
-    sub.textContent = city.sceneNative;
-    this.loading.style.setProperty("--accent", city.accent);
+    native.textContent = place.localityNative;
+    title.textContent = `${place.locality} — ${place.name}`;
+    sub.textContent = place.native;
+    this.loading.style.setProperty("--accent", place.accent);
     this.loadBar.style.transform = "scaleX(0)";
     this.loadLabel.textContent = "Preparing";
     this.loadPct.textContent = "0%";
@@ -189,27 +189,27 @@ export class Overlay {
 
   // ------------------------------------------------------------------ HUD
 
-  showCity(city: CityDef, handlers: CityHandlers, shots: string[]): void {
-    this.cityHandlers = handlers;
-    this.hudCity = city;
-    this.hud.style.setProperty("--accent", city.accent);
+  showPlace(place: PlaceDef, handlers: PlaceHandlers, shots: string[]): void {
+    this.placeHandlers = handlers;
+    this.hudPlace = place;
+    this.hud.style.setProperty("--accent", place.accent);
     this.hud.innerHTML = `
       <button class="pc-back" type="button" aria-label="Back to globe"><span>←</span> Globe</button>
       <div class="pc-hud-loc">
-        <div class="pc-hud-city"><b>${city.name}</b><span>${city.native}</span></div>
-        <div class="pc-hud-scene">${city.scene} · ${city.sceneNative}</div>
-        <div class="pc-hud-meta"><span class="pc-hud-clock"></span><span>${city.weather}</span></div>
+        <div class="pc-hud-place"><b>${place.locality}</b><span>${place.localityNative}</span></div>
+        <div class="pc-hud-scene">${place.name} · ${place.native}</div>
+        <div class="pc-hud-meta"><span class="pc-hud-clock"></span><span>${place.weather}</span></div>
       </div>
       <div class="pc-hud-shots"></div>
       <footer class="pc-hint"><span><kbd>Drag</kbd> look</span><span><kbd>Scroll</kbd> dolly</span><span><kbd>C</kbd> cinematic</span><span><kbd>H</kbd> hide UI</span></footer>`;
-    this.hud.querySelector(".pc-back")!.addEventListener("click", () => this.cityHandlers?.onBack());
+    this.hud.querySelector(".pc-back")!.addEventListener("click", () => this.placeHandlers?.onBack());
     const shotsEl = this.hud.querySelector(".pc-hud-shots")!;
     const cine = el("button", "pc-chip is-accent", "Cinematic");
-    cine.addEventListener("click", () => this.cityHandlers?.onCinematic());
+    cine.addEventListener("click", () => this.placeHandlers?.onCinematic());
     shotsEl.append(cine);
     for (const s of shots) {
       const b = el("button", "pc-chip", s);
-      b.addEventListener("click", () => this.cityHandlers?.onShot(s));
+      b.addEventListener("click", () => this.placeHandlers?.onShot(s));
       shotsEl.append(b);
     }
     this.hudClock = this.hud.querySelector(".pc-hud-clock");
@@ -221,9 +221,9 @@ export class Overlay {
     this.hud.querySelector(".pc-hud-shots .is-accent")?.classList.toggle("is-on", on);
   }
 
-  hideCity(): void {
-    this.cityHandlers = null;
-    this.hudCity = null;
+  hidePlace(): void {
+    this.placeHandlers = null;
+    this.hudPlace = null;
     this.hud.classList.remove("is-visible");
   }
 
@@ -282,10 +282,10 @@ export class Overlay {
   private tickClocks(): void {
     const now = new Date();
     for (const node of this.root.querySelectorAll<HTMLElement>("[data-clock]")) {
-      const city = CITIES.find((c) => c.id === node.dataset.clock);
-      if (city) node.textContent = localTime(city, now);
+      const place = PLACES.find((c) => c.id === node.dataset.clock);
+      if (place) node.textContent = localTime(place, now);
     }
-    if (this.hudClock && this.hudCity) this.hudClock.textContent = `${localTime(this.hudCity, now)} local`;
+    if (this.hudClock && this.hudPlace) this.hudClock.textContent = `${localTime(this.hudPlace, now)} local`;
   }
 
   dispose(): void {

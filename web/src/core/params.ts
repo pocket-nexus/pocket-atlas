@@ -5,9 +5,9 @@ import type { QualityLevel } from "./quality";
  *   ?q=low|medium|high|ultra   force a quality preset
  *   ?shot                      capture mode: no UI, no intro, fixed clock
  *   ?t=12.5                    start the simulation clock at this time (s)
- *   ?cam=hero|street|door|...  start a city at a named camera shot
+ *   ?cam=hero|street|door|...  start a place at a named camera shot
  *   ?stats                     frame-time readout
- *   #/city/<id>                deep-link straight into a city
+ *   #/place/<id>               deep-link straight into a place
  */
 export interface Params {
   quality: QualityLevel | null;
@@ -18,7 +18,7 @@ export interface Params {
   mute: boolean;
   /** Explicit camera: px,py,pz,tx,ty,tz[,fov] (debug captures). */
   view: number[] | null;
-  /** Build the scene for the Vita cooker and expose `window.pocketCityExport`. */
+  /** Build the scene for the Vita cooker and expose `window.pocketAtlasExport`. */
   exporting: boolean;
 }
 
@@ -40,7 +40,7 @@ export function readParams(): Params {
   };
 }
 
-export function cityFromHash(): string | null {
-  const m = /^#\/city\/([a-z0-9-]+)/.exec(location.hash);
+export function placeFromHash(): string | null {
+  const m = /^#\/place\/([a-z0-9-]+)/.exec(location.hash);
   return m ? m[1] : null;
 }

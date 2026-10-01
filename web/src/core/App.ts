@@ -1,16 +1,16 @@
 import { NoToneMapping, SRGBColorSpace, Timer, WebGLRenderer } from "three";
-import { cityById } from "../cities/registry";
+import { placeById } from "../places/registry";
 import { AudioEngine } from "./audio";
-import { cityFromHash, type Params } from "./params";
+import { placeFromHash, type Params } from "./params";
 import { detectQuality, makeQuality, type Quality, type QualityLevel } from "./quality";
-import type { CityDef, Navigator, Progress, Stage, StageContext } from "./types";
+import type { PlaceDef, Navigator, Progress, Stage, StageContext } from "./types";
 import { Overlay } from "../ui/overlay";
 
 const nextFrame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
 
 /**
  * Owns the WebGL renderer, the frame loop, and the one active Stage. The globe
- * is built once and parked while a city is open so "back" is instant; cities
+ * is built once and parked while a place is open so "back" is instant; places
  * are built on entry and disposed on exit.
  */
 export class App implements Navigator {
@@ -29,7 +29,7 @@ export class App implements Navigator {
   private time: number;
   private frames = 0;
   private statAccum = 0;
-  private currentCity: CityDef | null = null;
+  private currentPlace: PlaceDef | null = null;
 
   constructor(canvas: HTMLCanvasElement, ui: HTMLElement, params: Params) {
     this.canvas = canvas;
@@ -99,22 +99,22 @@ export class App implements Navigator {
       this.pendingRoute = true;
       return;
     }
-    const id = cityFromHash();
-    const city = id ? cityById(id) : undefined;
-    if (city?.status === "live" && city.load) {
-      if (this.currentCity?.id !== city.id) await this.enterCity(city);
-    } else if (!this.stage || this.currentCity) {
+    const id = placeFromHash();
+    const place = id ? placeById(id) : undefined;
+    if (place?.status === "live" && place.load) {
+      if (this.currentPlace?.id !== place.id) await this.enterPlace(place);
+    } else if (!this.stage || this.currentPlace) {
       await this.enterGlobe();
     }
   }
 
   /** Public entry used by the globe once its fly-in finishes. */
-  openCity(city: CityDef): void {
-    if (location.hash !== `#/city/${city.id}`) location.hash = `#/city/${city.id}`;
+  openPlace(place: PlaceDef): void {
+    if (location.hash !== `#/place/${place.id}`) location.hash = `#/place/${place.id}`;
     else void this.route();
   }
 
-  closeCity(): void {
+  closePlace(): void {
     history.pushState(null, "", location.pathname + location.search);
     void this.route();
   }
@@ -123,7 +123,7 @@ export class App implements Navigator {
     if (this.busy) return;
     this.busy = true;
     try {
-      const fromCity = !!this.currentCity;
+      const fromPlace = !!this.currentPlace;
       if (this.stage) {
         await this.overlay.fadeTo(1, 700);
         this.swapOut();
@@ -132,9 +132,9 @@ export class App implements Navigator {
         const { createGlobeStage } = await import("../globe/GlobeStage");
         this.globe = await createGlobeStage(this.context, this);
       }
-      this.currentCity = null;
+      this.currentPlace = null;
       this.show(this.globe);
-      await this.overlay.fadeTo(0, fromCity ? 900 : 1600);
+      await this.overlay.fadeTo(0, fromPlace ? 900 : 1600);
     } finally {
       this.busy = false;
       this.flushRoute();
@@ -147,11 +147,11 @@ export class App implements Navigator {
     void this.route();
   }
 
-  private async enterCity(city: CityDef): Promise<void> {
-    if (this.busy || !city.load) return;
+  private async enterPlace(place: PlaceDef): Promise<void> {
+    if (this.busy || !place.load) return;
     this.busy = true;
     try {
-      this.overlay.showLoading(city);
+      this.overlay.showLoading(place);
       await nextFrame();
       await this.overlay.fadeTo(0, 0);
       const progress: Progress = async (f, label) => {
@@ -159,13 +159,13 @@ export class App implements Navigator {
         await nextFrame();
       };
       await progress(0.02, "Fetching scene");
-      const mod = await city.load();
-      const stage = await mod.createStage(this.context, city, async (f, label) => progress(0.04 + f * 0.86, label));
+      const mod = await place.load();
+      const stage = await mod.createStage(this.context, place, async (f, label) => progress(0.04 + f * 0.86, label));
       await progress(0.92, "Compiling shaders");
       await this.renderer.compileAsync(stage.scene, stage.camera);
       await progress(1, "Ready");
       this.swapOut();
-      this.currentCity = city;
+      this.currentPlace = place;
       this.show(stage);
       // Two frames so the first expensive frame is behind the curtain.
       await nextFrame();
@@ -173,10 +173,10 @@ export class App implements Navigator {
       await this.overlay.hideLoading();
     } catch (err) {
       console.error(err);
-      this.overlay.toast(`Could not open ${city.name}: ${(err as Error).message}`);
+      this.overlay.toast(`Could not open ${place.name}: ${(err as Error).message}`);
       await this.overlay.hideLoading();
       this.busy = false;
-      this.currentCity = null;
+      this.currentPlace = null;
       history.replaceState(null, "", location.pathname + location.search);
       this.pendingRoute = false;
       await this.enterGlobe();
