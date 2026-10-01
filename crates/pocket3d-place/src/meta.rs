@@ -90,6 +90,9 @@ pub enum Kind {
     Tower,
     /// Distant skyline boxes (procedural windows; vertex colour = per-box info).
     Skyline,
+    /// Open water (sea, lake, river): `Material::water`, the normal map as
+    /// the wave texture, `roughness` near the camera.
+    Water,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,6 +158,31 @@ pub struct Material {
     /// Animated texture coordinates (LED signs, screens, tickers).
     #[serde(default)]
     pub uv_anim: Option<UvAnim>,
+    #[serde(default)]
+    pub water: Option<Water>,
+}
+
+/// Open water: two layers of the normal map laid on the world's x/z plane
+/// and scrolled, the environment reflected by Fresnel, the sun's highlight
+/// and light scattered out of the body.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Water {
+    /// Per layer: repeats per metre, scroll (m/s along x, along z).
+    pub waves: [[f32; 3]; 2],
+    /// Linear colour of the light the body scatters back, × sky irradiance.
+    pub body: Vec3,
+    /// Roughness² added per metre of distance: waves smaller than a pixel
+    /// widen the sun's reflection into a glitter path.
+    pub distance_roughness: f32,
+    /// Body colour over a sandy bottom, blended by the mesh's vertex colour
+    /// (red); the body colour alone without one.
+    #[serde(default)]
+    pub shallow: Option<Vec3>,
+    /// Mean slope of the wave faces toward the eye (tan of the tilt): the
+    /// backs of the waves hide at grazing views, so far water reflects less
+    /// sky and reads darker than the horizon.
+    #[serde(default)]
+    pub mask: f32,
 }
 
 /// A material's texture coordinates over time: a flipbook of `frames`
@@ -184,9 +212,31 @@ impl UvAnim {
             let (cw, ch) = (1.0 / cols as f32, 1.0 / rows as f32);
             uv = [uv[0] * cw, uv[1] * ch, uv[2] * cw + (f % cols) as f32 * cw, uv[3] * ch + (f / cols) as f32 * ch];
         }
-        uv[2] += (time * self.scroll[0]).fract();
-        uv[3] += (time * self.scroll[1]).fract();
+        uv[2] += (time * self.scroll[0]).rem_euclid(1.0);
+        uv[3] += (time * self.scroll[1]).rem_euclid(1.0);
         uv
+    }
+}
+
+#[cfg(test)]
+mod uv_anim_tests {
+    use super::UvAnim;
+
+    #[test]
+    fn flipbook_then_scroll() {
+        let a = UvAnim { cols: 4, rows: 2, frames: 8, fps: 2.0, scroll: [0.0, -0.25], phase: 0.0 };
+        // t = 2.6 s → frame 5: column 1, row 1 of a 4 × 2 grid.
+        let uv = a.apply([1.0, 1.0, 0.0, 0.0], 2.6);
+        assert_eq!([uv[0], uv[1]], [0.25, 0.5]);
+        assert!((uv[2] - 0.25).abs() < 1e-6);
+        // Scroll −0.25/s × 2.6 s wraps to +0.35, added after the cell offset.
+        assert!((uv[3] - (0.5 + 0.35)).abs() < 1e-5, "{}", uv[3]);
+    }
+
+    #[test]
+    fn phase_shifts_the_clock() {
+        let a = UvAnim { cols: 2, rows: 1, frames: 2, fps: 1.0, scroll: [0.0, 0.0], phase: 1.0 };
+        assert_eq!(a.apply([1.0, 1.0, 0.0, 0.0], 0.0)[2], 0.5);
     }
 }
 
@@ -420,14 +470,35 @@ pub struct DaySky {
 /// the sun, and the sky scaled by `1 − strength · e^(−|h|/height) · ((1−a)/2)^power`.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Twilight {
-    pub band: Vec3,
-    /// height, sun bias, sun power
-    pub band_shape: [f32; 3],
-    pub belt: Vec3,
-    /// elevation, width, power
-    pub belt_shape: [f32; 3],
-    /// strength, height, power
-    pub shadow: [f32; 3],
+    pub band: TwilightBand,
+    pub belt: TwilightBelt,
+    pub shadow: TwilightShadow,
+}
+
+/// The afterglow along the horizon, strongest toward the sun's azimuth.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TwilightBand {
+    pub color: Vec3,
+    pub height: f32,
+    pub sun_bias: f32,
+    pub sun_power: f32,
+}
+
+/// The anti-twilight arch opposite the sun.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TwilightBelt {
+    pub color: Vec3,
+    pub elevation: f32,
+    pub width: f32,
+    pub power: f32,
+}
+
+/// The Earth's shadow under the arch.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TwilightShadow {
+    pub strength: f32,
+    pub height: f32,
+    pub power: f32,
 }
 
 // -------------------------------------------------------------------- post

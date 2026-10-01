@@ -1,6 +1,6 @@
 import { Bone, BoxGeometry, Color, Euler, Float32BufferAttribute, Group, Matrix4, Quaternion, Skeleton, SkinnedMesh, Sphere, Vector3, type BufferGeometry, type Texture } from "three";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
-import { flip } from "../props/util";
+import { flip } from "../shapes";
 import { chain, gauss, grid, loft, shell, skin, smooth, type Influence, type Sec, type SkinFn } from "./shape";
 import type { Wear } from "./wear";
 

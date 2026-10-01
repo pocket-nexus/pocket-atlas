@@ -512,6 +512,12 @@ export async function exportPlace(input: ExportInput): Promise<ExportOutput> {
   }));
   const fogTracks = rec.fogs.map((s, i) => ({ s, i })).filter(({ s }) => s.moved).map(({ s, i }) => ({ fog: i, position: s.pos.map((v) => round(v, 1e3)), gain: s.gain.map((v) => round(v, 1e3)) }));
   const materialTracks = [...rec.mats].filter(([, s]) => s.moved).map(([m, s]) => ({ material: materials.convert(m).name, emissiveIntensity: s.values.map((v) => round(v, 1e3)) }));
+  // The cooker scales a tracked material's emission by the track divided by
+  // its peak, so the exported material carries the peak (a lamp that is dark
+  // in the rest pose would otherwise export without emission).
+  for (const [m, s] of rec.mats) {
+    if (s.moved) (materials.convert(m) as MeshStandardMaterial).emissiveIntensity = Math.max(...s.values);
+  }
 
   const common: CommonMeta = {
     version: 1,

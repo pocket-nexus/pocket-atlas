@@ -1,9 +1,10 @@
 import { BoxGeometry, CircleGeometry, Color, CylinderGeometry, PlaneGeometry, SphereGeometry, type Object3D } from "three";
 import { Rng } from "../../../core/random";
-import { LATIN } from "../../shared/canvas";
+import { fitText, HEAVY, LATIN, squeezeText } from "../../shared/canvas";
 import { box } from "../../shared/geo";
 import { frameUV, Sign, signTexture } from "../../shared/signs";
-import { BAND_TEXT, bandBars, fitText, HEAVY, paintAbstract, paintBillboard, paintBlueLetters, paintInterior, paintLightbox, paintPanorama, paintRadioLetters, paintTenant, screenFrames, squeezeText, type TenantPoster } from "../gfx/art";
+import { BAND_TEXT, bandBars, paintAbstract, paintBillboard, paintBlueLetters, paintInterior, paintLightbox, paintPanorama, paintRadioLetters, paintTenant, screenFrames, type TenantPoster } from "../gfx/art";
+import { LEVEL } from "../gfx/materials";
 import type { AkibaWorld } from "./context";
 import { KAIKAN } from "./layout";
 import { cellPlane, rect, spot, v } from "./util";
@@ -20,8 +21,8 @@ import { cellPlane, rect, spot, v } from "./util";
  *          │ 5F amiami │ artwork         │      │
  *     18.1 │ 4F K-BOOKS├─ billboard ─────┤      │
  *          │ 3F tenants│  (3F–4F)        │      │
- *      9.8 ├───────────┴─────────────────┤      │
- *          │ 世界の ラジオ会館 秋葉原 (LED) │screen│ 2F: yellow LED band, LED screen
+ *      9.8 ├───────────┴──────┬──────────┤      │
+ *          │ yellow LED band  │ screen   │      │ 2F: 世界の ラジオ会館 秋葉原 LED band, LED screen
  *     4.55 ├── soffit with downlights ───┴──────┤
  *          │col│ gift shop │entrance│ C-labo │B1│ ground floor, recessed 1.35 m
  *        0 └───┴───────────┴────────┴────────┴──┘
@@ -44,11 +45,7 @@ const BAYS = 15;
 /** Local → world for this building (180° about y at the NE corner). */
 const toWorld = (x: number, y: number, z: number) => v(-x, y, -z);
 
-export interface Kaikan {
-  root: Object3D;
-}
-
-export function buildKaikan(w: AkibaWorld): Kaikan {
+export function buildKaikan(w: AkibaWorld): void {
   const root = w.group(0, 0, 0, Math.PI);
   root.name = "radio-kaikan";
   const lib = w.lib;
@@ -71,12 +68,11 @@ export function buildKaikan(w: AkibaWorld): Kaikan {
   screen(w, root);
   billboard(w, root);
   groundFloor(w, root, white, alu);
-  return { root };
 }
 
 // -------------------------------------------------------------- 3F–10F
 
-/** Window artwork per floor: [x0, x1, cell, u-range of the cell]. */
+/** The ribbon floors: spandrels, mullions and the backlit artwork behind every pane. */
 function ribbonFloors(w: AkibaWorld, root: Object3D): void {
   const lib = w.lib;
   const white = lib.panel([1.02, 1.02, 1.0]);
@@ -85,9 +81,9 @@ function ribbonFloors(w: AkibaWorld, root: Object3D): void {
   const winH = KAIKAN.floorH - SPANDREL - 0.05;
   const yWin = (k: number) => KAIKAN.f3 + k * KAIKAN.floorH + SPANDREL;
 
-  // 5F–10F: one artwork behind every pane of six floors; each floor's
-  // windows sample their true height in it, so it reads continuous behind
-  // the spandrels.
+  // 5F–10F: one artwork behind the panes of six floors (on 5F west of the
+  // amiami poster); each floor's windows sample their true height in it, so
+  // it reads continuous behind the spandrels.
   const artBottom = yWin(2);
   const artTop = yWin(7) + winH;
   const pano = w.drawArt("kaikan-panorama", 1600, 1720, (g, cw, ch) => paintPanorama(g, cw, ch));
@@ -212,7 +208,7 @@ function band(w: AkibaWorld, root: Object3D): void {
   const sh = 1.05;
   w.mesh(cellPlane(BAND_TEXT.sekai.w * bw, sh, sekai), w.cutoutBright, (BAND_TEXT.sekai.x + BAND_TEXT.sekai.w / 2) * bw, yRadio + 0.15, zl, root);
   w.mesh(cellPlane(BAND_TEXT.akiba.w * bw, sh * 0.92, akiba), w.cutoutBright, (BAND_TEXT.akiba.x + BAND_TEXT.akiba.w / 2) * bw, yRadio - 0.05, zl, root);
-  // Letter returns (the channel depth) as a dark strip under each word.
+  // The dakuten of ラジオ as green LED balls standing off the letters.
   const green = lib.glow(0x2ee86a, 2.6);
   const ball = new SphereGeometry(0.2, 14, 10);
   for (const [fx, fy] of dakuten) {
@@ -222,7 +218,6 @@ function band(w: AkibaWorld, root: Object3D): void {
   }
   // The band throws yellow light over the sidewalk and the street.
   rect(w, 0xffd76a, 2.6, bw, bh, toWorld(bw / 2, BAND.y0 + bh / 2, zf + 0.3), toWorld(bw / 2, BAND.y0 + bh / 2 - 0.6, zf + 6));
-  w.update((_dt, t) => sign.update(t));
 }
 
 // ------------------------------------------------------------- screen
@@ -240,7 +235,7 @@ function screen(w: AkibaWorld, root: Object3D): void {
   const sw = SCREEN.x1 - SCREEN.x0;
   const sh = SCREEN.y1 - SCREEN.y0;
   w.mesh(frameUV(new PlaneGeometry(sw, sh), 4, 4), sign.material, (SCREEN.x0 + SCREEN.x1) / 2, (SCREEN.y0 + SCREEN.y1) / 2, 0.705, root);
-  // Sponsor strip under the picture.
+  // Name strip under the picture.
   const strip = w.draw("kaikan-screen-strip", 640, 40, (g, cw, ch) => {
     g.fillStyle = "#e9ecef";
     g.fillRect(0, 0, cw, ch);
@@ -252,7 +247,6 @@ function screen(w: AkibaWorld, root: Object3D): void {
   });
   w.mesh(cellPlane(sw * 0.7, 0.12, strip), w.dim, (SCREEN.x0 + SCREEN.x1) / 2, fy0 + 0.1, 0.71, root);
   rect(w, 0xd8e0ff, 1.6, sw, sh, toWorld((SCREEN.x0 + SCREEN.x1) / 2, (SCREEN.y0 + SCREEN.y1) / 2, 0.8), toWorld((SCREEN.x0 + SCREEN.x1) / 2, (SCREEN.y0 + SCREEN.y1) / 2 - 0.6, 6));
-  w.update((_dt, t) => sign.update(t));
 }
 
 // ----------------------------------------------------------- billboard
@@ -262,9 +256,9 @@ function billboard(w: AkibaWorld, root: Object3D): void {
   const bw = BB.x1 - BB.x0;
   const bh = BB.y1 - BB.y0;
   const art = w.drawArt("kaikan-billboard", 1600, Math.round((1600 * bh) / bw), (g, cw, ch) => paintBillboard(g, cw, ch));
-  const floodlit = lib.lit(w.art.texture, 0.95, "art-flood");
+  const floodlit = lib.lit(w.art.texture, LEVEL.flood, "art-flood");
   w.mesh(cellPlane(bw, bh, art), floodlit, (BB.x0 + BB.x1) / 2, (BB.y0 + BB.y1) / 2, 0.66, root);
-  // Tubular frame, stand-offs to the facade, and the flood lamps on the top rail.
+  // Box-section frame, stand-offs to the facade, and the flood lamps on the top rail.
   const steel = lib.plain(0x9aa0a6, 0.45, 0.7);
   const cx = (BB.x0 + BB.x1) / 2;
   const cy = (BB.y0 + BB.y1) / 2;
@@ -339,8 +333,8 @@ function groundFloor(w: AkibaWorld, root: Object3D, white: ReturnType<AkibaWorld
   });
   w.mesh(cellPlane(1.05, 1.6, adboard), w.sign, 22.8, 1.6, 0.06, root);
 
-  // Plinth strip and the shopfront sill.
-  w.mesh(box(W, 0.1, 0.3), lib.granite([0.7, 0.7, 0.7]), W / 2, 0.05, FRONT + 0.15, root);
+  // Granite plinth strip along the shopfront.
+  w.mesh(box(W, 0.1, 0.3), lib.granite(), W / 2, 0.05, FRONT + 0.15, root);
 
   // ------------------------------------------------ gift shop (The AKiBa)
   shopBay(w, root, 1.0, 8.6, "gift", r.int(1, 99));
@@ -372,7 +366,7 @@ function groundFloor(w: AkibaWorld, root: Object3D, white: ReturnType<AkibaWorld
   shopBay(w, root, 14.2, 19.0, "cards", 7);
   const clabo = w.draw("clabo-sign", 760, 150, (g, cw, ch) => paintLightbox(g, cw, ch, { text: "C-labo", sub: "CARD GAME SHOP", bg: "#ffffff", fg: "#e0262c", font: LATIN, border: "#e0262c" }));
   w.mesh(cellPlane(2.6, 0.5, clabo), w.sign, 16.6, 3.95, FRONT + 0.1, root);
-  // Card posters pasted inside the glass.
+  // Card posters on the shop window (street side of the glass).
   for (let i = 0; i < 4; i++) {
     const p = w.draw(`clabo-poster-${i}`, 300, 420, (g, cw, ch) => {
       paintAbstract(g, cw, ch, 300 + i);
@@ -407,15 +401,15 @@ function groundFloor(w: AkibaWorld, root: Object3D, white: ReturnType<AkibaWorld
   rect(w, 0xf4f0ff, 1.1, 4.6, 3.0, toWorld(16.6, 1.8, FRONT + 0.2), toWorld(16.6, 1.0, 8));
 }
 
-/** Glazed bay with a lit interior (card, side returns, floor, ceiling). */
+/** Shop bay with a lit interior (card, side returns, floor, ceiling) behind glass; a stair bay (`stairs`) is open, without glass. */
 function shopBay(w: AkibaWorld, root: Object3D, x0: number, x1: number, kind: "gift" | "lobby" | "cards" | "arcade", seed: number, stairs = false): void {
   const lib = w.lib;
   const bw = x1 - x0;
   const depth = stairs ? 3.2 : 4.4;
   const zb = FRONT - depth;
   const h = SOFFIT - 0.15;
-  const inside = w.draw(`interior-${kind}-${seed}`, Math.min(1024, Math.round(bw * 110)), 400, (g, cw, ch) => paintInterior(g, cw, ch, stairs ? "arcade" : kind, seed));
-  w.mesh(cellPlane(bw, h, inside), lib.lit(w.atlas.texture, stairs ? 0.7 : 1.25, "atlas-interior", { fog: false }), (x0 + x1) / 2, h / 2, zb, root);
+  const inside = w.drawArt(`interior-${kind}-${seed}`, Math.min(1024, Math.round(bw * 110)), 400, (g, cw, ch) => paintInterior(g, cw, ch, stairs ? "arcade" : kind, seed));
+  w.mesh(cellPlane(bw, h, inside), w.interior, (x0 + x1) / 2, h / 2, zb, root);
   const glowCol = kind === "gift" ? 0xffe2b8 : kind === "lobby" ? 0xf2f6ff : 0xf0f2ff;
   for (const sx of [x0 + 0.02, x1 - 0.02]) {
     const side = new PlaneGeometry(depth, h);

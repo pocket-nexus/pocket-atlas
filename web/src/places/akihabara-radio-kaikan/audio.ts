@@ -1,15 +1,19 @@
 import { Vector3, type PerspectiveCamera } from "three";
 import type { AudioEngine } from "../../core/audio";
+import { SOBU_TRAIN } from "./world/far";
 
 /** Where the sounds come from: the Sobu Line bridge north of the street, and the Radio Kaikan entrance. */
 const BRIDGE = new Vector3(-10, 16, -40);
+/** The rumble starts as the train's nose reaches the bridge over the street (it peaks 3.5–6 s later). */
+const TRAIN_SOUND_AT = (BRIDGE.x - SOBU_TRAIN.start) / ((SOBU_TRAIN.end - SOBU_TRAIN.start) / SOBU_TRAIN.run);
 const ENTRANCE = new Vector3(-11, 2, 0);
 
 /**
  * Procedural Akihabara at dusk with the street closed to traffic: a crowd
  * murmur, footsteps, the city's low hum and Chuo-dori's traffic, a shop
- * jingle near the entrance, and a Sobu Line train crossing the bridge every
- * half minute or so. All synthesised; the train and the jingle pan with the camera.
+ * jingle near the entrance, and the Sobu Line train crossing the bridge,
+ * timed on the place clock with the train in world/far.ts (every 40 s). All
+ * synthesised; the train and the jingle pan with the camera.
  */
 export class AkibaAudio {
   private engine: AudioEngine;
@@ -18,7 +22,8 @@ export class AkibaAudio {
   private jinglePan: StereoPannerNode | null = null;
   private sources: AudioScheduledSourceNode[] = [];
   private cancelPending: (() => void) | null = null;
-  private nextTrain = 6;
+  /** Train period of the last rumble, so each crossing sounds once. */
+  private trainCycle: number | null = null;
   private nextNote = 0;
   private step = 0;
 
@@ -143,7 +148,7 @@ export class AkibaAudio {
     o.stop(t0 + len + 0.05);
   }
 
-  update(dt: number, camera: PerspectiveCamera): void {
+  update(dt: number, time: number, camera: PerspectiveCamera): void {
     const ctx = this.engine.ctx;
     if (!ctx || !this.out || !this.jingle || !this.jinglePan) return;
     const e = camera.matrixWorld.elements;
@@ -152,11 +157,9 @@ export class AkibaAudio {
       const dz = p.z - camera.position.z;
       return Math.max(-0.9, Math.min(0.9, (dx * e[0] + dz * e[2]) / Math.max(1, Math.hypot(dx, dz))));
     };
-    this.nextTrain -= dt;
-    if (this.nextTrain <= 0) {
-      this.train(panTo(BRIDGE) * 0.5 + 0.4);
-      this.nextTrain = 24 + Math.random() * 18;
-    }
+    const cycle = Math.floor((time - TRAIN_SOUND_AT) / SOBU_TRAIN.period);
+    if (this.trainCycle !== null && cycle !== this.trainCycle) this.train(panTo(BRIDGE) * 0.5 + 0.4);
+    this.trainCycle = cycle;
     this.nextNote -= dt;
     if (this.nextNote <= 0) {
       const tune = [659, 784, 880, 784, 659, 587, 659, 0, 523, 587, 659, 784, 659, 0, 0, 0];
@@ -191,5 +194,6 @@ export class AkibaAudio {
     this.out = null;
     this.jingle = null;
     this.jinglePan = null;
+    this.trainCycle = null;
   }
 }

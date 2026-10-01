@@ -1,23 +1,10 @@
-import { BufferAttribute, Color, Object3D, PlaneGeometry, PointLight, RectAreaLight, SpotLight, Vector3, type BufferGeometry } from "three";
-import type { AtlasRect } from "../../shared/atlas";
+import { Color, Object3D, PlaneGeometry, PointLight, RectAreaLight, SpotLight, Vector3 } from "three";
+import { mapUV, type AtlasRect } from "../../shared/atlas";
 import type { AkibaWorld } from "./context";
 
 /** Plane (facing +z) whose UVs sample the sub-rectangle [a, b] × [c, d] (fractions, v up) of an atlas cell. */
 export function cellPlane(w: number, h: number, r: AtlasRect, a = 0, b = 1, c = 0, d = 1): PlaneGeometry {
-  const g = new PlaneGeometry(w, h);
-  const uv = g.getAttribute("uv") as BufferAttribute;
-  for (let i = 0; i < uv.count; i++) {
-    const u = a + uv.getX(i) * (b - a);
-    const v = c + uv.getY(i) * (d - c);
-    uv.setXY(i, r.u0 + u * (r.u1 - r.u0), r.v0 + v * (r.v1 - r.v0));
-  }
-  return g;
-}
-
-/** Rotates a geometry to face −Z (toward the street from a south-side facade) about its own origin. */
-export function facingNorth(g: BufferGeometry): BufferGeometry {
-  g.rotateY(Math.PI);
-  return g;
+  return mapUV(new PlaneGeometry(w, h), r, [a, c, b, d]) as PlaneGeometry;
 }
 
 /**

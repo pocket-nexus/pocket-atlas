@@ -11,22 +11,7 @@ pub struct Rgba {
     pub px: Vec<[f32; 4]>,
 }
 
-fn srgb_to_linear(c: f32) -> f32 {
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-fn linear_to_srgb(c: f32) -> f32 {
-    let c = c.clamp(0.0, 1.0);
-    if c <= 0.0031308 {
-        c * 12.92
-    } else {
-        1.055 * c.powf(1.0 / 2.4) - 0.055
-    }
-}
+use pocket3d_place::color::{decode as srgb_to_linear, encode as linear_to_srgb};
 
 /// Decodes 8-bit RGBA into floats; colour roles are converted to linear.
 pub fn from_rgba8(w: u32, h: u32, data: &[u8], role: TexRole) -> Rgba {
@@ -216,5 +201,18 @@ fn compress(level: &Rgba, role: TexRole, format: TexFormat) -> Vec<u8> {
         }
         TexFormat::Rgba8 => bytes,
         TexFormat::Rgba16f => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flipbook_mips_stop_at_four_texel_cells() {
+        let src = Rgba { w: 512, h: 1024, px: vec![[1.0; 4]; 512 * 1024] };
+        // 32 cells of 512×32: levels 32, 16, 8, 4.
+        assert_eq!(encode_cells(&src, TexRole::Color, 1024, false, (1, 32)).mips, 4);
+        assert!(encode_cells(&src, TexRole::Color, 1024, false, (1, 1)).mips > 4);
     }
 }

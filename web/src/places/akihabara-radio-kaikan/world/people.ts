@@ -1,14 +1,14 @@
 import { Vector3, type Object3D } from "three";
 import { box } from "../../shared/geo";
-import type { MaterialLib } from "../../tokyo-konbini/gfx/materials";
-import { phone } from "../../tokyo-konbini/world/people/gear";
-import { stand, walk, wander, type Gait } from "../../tokyo-konbini/world/people/motion";
-import { Figure, type Build, type Look } from "../../tokyo-konbini/world/people/rig";
-import { Wear } from "../../tokyo-konbini/world/people/wear";
+import { phone } from "../../shared/people/gear";
+import { stand, walk, wander, type Gait } from "../../shared/people/motion";
+import { patrol } from "../../shared/people/paths";
+import { Figure, type Build, type Look } from "../../shared/people/rig";
+import { Wear } from "../../shared/people/wear";
 import type { AkibaWorld } from "./context";
 
 /*
- * Generic pedestrians on the procedural rig of Rainy Night Konbini (one
+ * Generic pedestrians on the shared procedural rig (one
  * skeleton, vertex-coloured skinned meshes per roughness class). The street
  * is closed to vehicles 16:00–19:00, so people walk down the middle of the
  * carriageway as well as on the sidewalks; two wait by the entrance, one
@@ -17,7 +17,6 @@ import type { AkibaWorld } from "./context";
 
 const _a = new Vector3();
 const _b = new Vector3();
-const _c = new Vector3();
 const _pole = new Vector3();
 
 type Outfit = [Build, Look];
@@ -41,48 +40,11 @@ function outfit(i: number): Outfit {
   return list[i % list.length];
 }
 
-/** A loop along x on two lanes with U-turns beyond both ends. */
-function patrol(a: number, b: number, l0: number, l1: number) {
-  const r = (l0 - l1) / 2;
-  const ar = Math.abs(r);
-  const qc = (l0 + l1) / 2;
-  const run = b - a;
-  const turn = Math.PI * ar;
-  const length = 2 * run + 2 * turn;
-  return {
-    length,
-    at(d: number, out: Vector3): number {
-      d = ((d % length) + length) % length;
-      if (d < run) {
-        out.set(a + d, 0, l0);
-        return Math.atan2(1, 0);
-      }
-      d -= run;
-      if (d < turn) {
-        const p = d / ar;
-        out.set(b + ar * Math.sin(p), 0, qc + r * Math.cos(p));
-        return Math.atan2(ar * Math.cos(p), -r * Math.sin(p));
-      }
-      d -= turn;
-      if (d < run) {
-        out.set(b - d, 0, l1);
-        return Math.atan2(-1, 0);
-      }
-      d -= run;
-      const p = d / ar;
-      out.set(a - ar * Math.sin(p), 0, qc - r * Math.cos(p));
-      return Math.atan2(-ar * Math.cos(p), r * Math.sin(p));
-    },
-  };
-}
-
 export function buildPeople(w: AkibaWorld): void {
-  if (new URLSearchParams(location.search).has("nopeople")) return;
   const root = w.group();
   root.name = "people";
   root.userData.dynamic = true;
-  // The rig's wardrobe asks only for plain PBR materials outdoors.
-  const wear = new Wear(w.lib as unknown as MaterialLib, false);
+  const wear = new Wear(w.lib, false);
   const backpack = w.lib.plain(0x1a1c20, 0.6);
   const strap = w.lib.plain(0x101114, 0.6);
 
@@ -102,7 +64,7 @@ export function buildPeople(w: AkibaWorld): void {
     const f = new Figure(build, look, wear);
     root.add(f.root);
     const s = f.d.s;
-    const path = patrol(x0, x1, l0, l1);
+    const path = patrol("x", x0, x1, l0, l1);
     const gait: Gait = { stride: 1.12 * s, lift: 0.1, arm: 0.2, lean: 0.04, look: 0.1 };
     const pack = i % 3 === 0;
     if (pack) {
@@ -172,5 +134,4 @@ export function buildPeople(w: AkibaWorld): void {
       }
     });
   }
-  void _c;
 }

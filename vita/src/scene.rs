@@ -107,9 +107,32 @@ pub(crate) struct Seq {
     scratch: Vec<u8>,
 }
 
+/// A section of a pack's table by tag.
+pub(crate) fn find(sections: &[pc::Section], tag: [u8; 4]) -> Result<pc::Section, String> {
+    sections.iter().find(|s| s.tag == tag).copied().ok_or(format!("missing section {}", String::from_utf8_lossy(&tag)))
+}
+
 impl Seq {
     pub(crate) fn open(path: &str) -> Result<Self, String> {
         Ok(Self { path: path.into(), f: File::open(path).map_err(|e| format!("{path}: {e}"))?, pos: 0, scratch: vec![0; 64 * 1024] })
+    }
+
+    /// The section table of a pack container (place or atlas pack, by magic).
+    pub(crate) fn sections(&mut self, magic: [u8; 4]) -> Result<Vec<pc::Section>, String> {
+        let mut head = [0u8; 16];
+        self.read_at(0, &mut head)?;
+        let count = u32::from_le_bytes(head[8..12].try_into().unwrap()) as usize;
+        let mut table = vec![0u8; 16 + count * 16];
+        table[..16].copy_from_slice(&head);
+        self.read_at(16, &mut table[16..])?;
+        pc::Pack::parse_header_as(&table, magic).map_err(|e| format!("{}: {e}", self.path))
+    }
+
+    /// One section's bytes.
+    pub(crate) fn section(&mut self, s: &pc::Section) -> Result<Vec<u8>, String> {
+        let mut bytes = vec![0u8; s.size as usize];
+        self.read_at(s.offset as u64, &mut bytes)?;
+        Ok(bytes)
     }
 
     pub(crate) fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
@@ -158,18 +181,10 @@ impl Scene {
     unsafe fn load_in(path: &str, mut progress: impl FnMut(usize, usize, &str), vram: &mut Arena, main: &mut Arena) -> Result<Self, String> {
         let t0 = std::time::Instant::now();
         let mut f = Seq::open(path)?;
-        let mut head = [0u8; 16];
-        f.read_at(0, &mut head)?;
-        let count = u32::from_le_bytes(head[8..12].try_into().unwrap()) as usize;
-        let mut table = vec![0u8; 16 + count * 16];
-        table[..16].copy_from_slice(&head);
-        f.read_at(16, &mut table[16..])?;
-        let pack = pc::Pack::parse_header(&table).map_err(|e| e.to_string())?;
-        let find = |tag: [u8; 4]| pack.iter().find(|s| s.tag == tag).copied().ok_or(format!("missing {}", String::from_utf8_lossy(&tag)));
-        let (s_meta, s_tex, s_geom, s_anim) = (find(pc::TAG_META)?, find(pc::TAG_TEXTURES)?, find(pc::TAG_GEOMETRY)?, find(pc::TAG_ANIMATION)?);
+        let pack = f.sections(pc::MAGIC)?;
+        let (s_meta, s_tex, s_geom, s_anim) = (find(&pack, pc::TAG_META)?, find(&pack, pc::TAG_TEXTURES)?, find(&pack, pc::TAG_GEOMETRY)?, find(&pack, pc::TAG_ANIMATION)?);
 
-        let mut meta_bytes = vec![0u8; s_meta.size as usize];
-        f.read_at(s_meta.offset as u64, &mut meta_bytes)?;
+        let meta_bytes = f.section(&s_meta)?;
         let meta: pc::Meta = serde_json::from_slice(&meta_bytes).map_err(|e| format!("META: {e}"))?;
         drop(meta_bytes);
         let total = meta.textures.len() + 3;

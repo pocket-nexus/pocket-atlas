@@ -1,7 +1,8 @@
 import { Color, CylinderGeometry, PlaneGeometry } from "three";
-import { canvas, JP_SANS, LATIN } from "../../shared/canvas";
+import { canvas, fitText, HEAVY, JP_SANS, LATIN, squeezeText } from "../../shared/canvas";
 import { frameUV, Sign, signTexture } from "../../shared/signs";
-import { fitText, HEAVY, paintAbstract, paintBanner, squeezeText } from "../gfx/art";
+import { paintAbstract, paintBanner } from "../gfx/art";
+import { LEVEL } from "../gfx/materials";
 import type { AkibaWorld } from "./context";
 import { Facade } from "./facade";
 import { CHUO, STREET } from "./layout";
@@ -43,7 +44,7 @@ function finance(w: AkibaWorld): void {
   const H = 25.6;
   f.body(wall, H, 11.6, { ground: 4.2, shopDepth: 2.6 });
   f.shopfront(0.15, 3.25, 3.4, "shop", 41, { fascia: { text: "アクセスチケット", sub: "秋葉原店", bg: "#ffffff", fg: "#1f3f9a" }, fasciaH: 0.7, depth: 2.6 });
-  f.windows({ x0: 0.3, x1: 3.1, y0: 4.6, floorH: 3.3, floors: 6, winH: 1.5, bays: 1, winW: 1.8, frame: lib.plain(0x3a3c3f, 0.4, 0.6), intensity: 1.0 });
+  f.windows({ x0: 0.3, x1: 3.1, y0: 4.6, floorH: 3.3, floors: 6, winH: 1.5, bays: 1, winW: 1.8, frame: lib.plain(0x3a3c3f, 0.4, 0.6) });
   // Consumer-finance signs stacked up the front, and the blade signs on the corner.
   f.panelSign(0.25, 3.15, 20.5, 24.6, { text: "アイフル", bg: "#e8202a", fg: "#ffffff", vertical: true }, { intensity: "sign" });
   f.panelSign(0.4, 3.0, 15.4, 17.0, { text: "アコム", bg: "#d8141c", fg: "#ffffff" }, { intensity: "sign" });
@@ -68,7 +69,7 @@ function sofmap(w: AkibaWorld): void {
   for (let k = 0; k < 5; k++) {
     const y0 = 4.6 + k * 4.2;
     // Lit sales floor behind the bay.
-    const inner = w.draw(`sofmap-floor-${k % 2}`, 1024, 160, (g, cw, ch) => {
+    const inner = w.drawArt(`sofmap-floor-${k % 2}`, 1024, 160, (g, cw, ch) => {
       const bg = g.createLinearGradient(0, 0, 0, ch);
       bg.addColorStop(0, "#ffffff");
       bg.addColorStop(1, "#c8d0dc");
@@ -83,7 +84,7 @@ function sofmap(w: AkibaWorld): void {
         g.fillRect(i * (cw / 9) + 20, ch * 0.03, cw / 14, ch * 0.05);
       }
     });
-    w.mesh(cellPlane(W - 0.8, 2.6, inner), lib.lit(w.atlas.texture, 1.35, "atlas-interior", { fog: false }), W / 2, y0 + 1.95, -0.8, f.g);
+    w.mesh(cellPlane(W - 0.8, 2.6, inner), w.interior, W / 2, y0 + 1.95, -0.8, f.g);
     // Curved glazing: a 150° sweep of a 1.25 m radius, axis along the facade.
     const bay = new CylinderGeometry(1.25, 1.25, W - 0.6, 20, 1, true, -Math.PI * 0.42, Math.PI * 0.84);
     bay.rotateZ(Math.PI / 2);
@@ -170,10 +171,9 @@ function pachinko(w: AkibaWorld): void {
   const ticker = w.addSign(new Sign("pachinko-ticker", signTexture(tick.c, { repeat: true }), new Color(2.6, 2.2, 2.0), { scroll: [0.08, 0] }));
   w.mesh(frameUV(new PlaneGeometry(W - 0.6, 0.42), 1, 1), ticker.material, W / 2, 3.95, 0.18, f.g);
   f.box(lib.plain(0x18181a, 0.5), 0.25, W - 0.25, 3.7, 4.2, -0.1, 0.16);
-  w.update((_dt, t) => ticker.update(t));
   // Upper facade: a giant print (abstract) and the sign tower on top.
   const print = w.drawArt("pachinko-print", 600, 1020, (g, cw, ch) => paintAbstract(g, cw, ch, 404, ["#14121e", "#e8406a", "#ffd23f", "#3ad8ff"]));
-  w.mesh(cellPlane(W - 0.6, 13.5, print), w.lib.lit(w.art.texture, 0.7, "art-flood"), W / 2, 4.6 + 13.5 / 2 + 0.3, 0.12, f.g);
+  w.mesh(cellPlane(W - 0.6, 13.5, print), w.lib.lit(w.art.texture, LEVEL.flood, "art-flood"), W / 2, 4.6 + 13.5 / 2 + 0.3, 0.12, f.g);
   // Sign tower: white box, PACHINKO & SLOT band, the red ESPACE panel, エスパス.
   f.box(white, -0.3, W + 0.3, H, H + 11, -3.5, 0.3);
   f.panelSign(-0.2, W + 0.2, H + 9.3, H + 10.8, { text: "PACHINKO & SLOT", bg: "#141414", fg: "#ffd200", font: LATIN }, { z: 0.45, intensity: "bright" });
@@ -197,7 +197,7 @@ function ledTower(w: AkibaWorld): void {
   f.body(wall, H, 16, { ground: 4.2, shopDepth: 3.2 });
   f.shopfront(0.3, W - 0.3, 3.5, "cards", 53, { fascia: { text: "トレカ・ホビー", bg: "#1a1a1a", fg: "#ffe14d" }, fasciaH: 0.6, depth: 3.2 });
   const print = w.drawArt("led-tower-print", 420, 1500, (g, cw, ch) => paintAbstract(g, cw, ch, 515, ["#1c1030", "#5b2bd8", "#ff4fb0", "#3ae0ff"]));
-  w.mesh(cellPlane(W - 1.8, 22, print), w.lib.lit(w.art.texture, 0.75, "art-flood"), (W - 1.4) / 2, 5.2 + 11, 0.1, f.g);
+  w.mesh(cellPlane(W - 1.8, 22, print), w.lib.lit(w.art.texture, LEVEL.flood, "art-flood"), (W - 1.4) / 2, 5.2 + 11, 0.1, f.g);
   // Green LED message board running down the west edge (scrolls upward).
   const msg = canvas(64, 1024);
   msg.g.fillStyle = "#031006";
@@ -214,7 +214,6 @@ function ledTower(w: AkibaWorld): void {
   const board = w.addSign(new Sign("led-tower-board", signTexture(msg.c, { repeat: true }), new Color(1.6, 2.6, 1.7), { scroll: [0, 0.035] }));
   f.box(lib.plain(0x111111, 0.5), W - 1.15, W - 0.15, 5.0, 26.2, -0.1, 0.5);
   w.mesh(frameUV(new PlaneGeometry(0.85, 21), 1, 1), board.material, W - 0.65, 15.6, 0.51, f.g);
-  w.update((_dt, t) => board.update(t));
   f.roof(wall, H, 16);
 }
 
@@ -227,7 +226,7 @@ function cornerSouth(w: AkibaWorld): void {
   f.body(wall, H, 16.3, { ground: 4.4, shopDepth: 4 });
   f.shopfront(0.3, 9.5, 3.7, "arcade", 63, { fascia: { text: "GAME SPOT", sub: "アミューズメント", bg: "#1b1b5e", fg: "#ffe14d", font: LATIN }, fasciaH: 0.6, color: 0xffd0e8, depth: 4 });
   f.shopfront(9.7, W - 0.3, 3.7, "shop", 65, { fascia: { text: "ドラッグストア", bg: "#ffffff", fg: "#0a8a3a" }, fasciaH: 0.6, depth: 3 });
-  f.windows({ x0: 0.4, x1: W - 0.4, y0: 4.4, floorH: 3.4, floors: 8, winH: 1.7, bays: 5, frame: lib.plain(0x4a4c4f, 0.4, 0.6), intensity: 1.15 });
+  f.windows({ x0: 0.4, x1: W - 0.4, y0: 4.4, floorH: 3.4, floors: 8, winH: 1.7, bays: 5, frame: lib.plain(0x4a4c4f, 0.4, 0.6) });
   // A big floodlit print over the upper floors on the street side, blade signs.
   const print = w.drawArt("corner-south-print", 1000, 700, (g, cw, ch) => {
     paintAbstract(g, cw, ch, 717, ["#0d1b3a", "#1e7bff", "#ffe14d", "#ffffff"]);
@@ -238,7 +237,7 @@ function cornerSouth(w: AkibaWorld): void {
     g.fillStyle = "#ffe14d";
     fitText(g, "GAME & HOBBY", cw * 0.5, ch * 0.66, cw * 0.7, ch * 0.12, LATIN);
   });
-  w.mesh(cellPlane(9.5, 6.6, print), w.lib.lit(w.art.texture, 0.95, "art-flood"), 5.2, 18.5, 0.35, f.g);
+  w.mesh(cellPlane(9.5, 6.6, print), w.lib.lit(w.art.texture, LEVEL.flood, "art-flood"), 5.2, 18.5, 0.35, f.g);
   f.box(lib.plain(0x777b80, 0.45, 0.6), 0.4, 10.0, 15.1, 15.2, 0, 0.4);
   f.bladeSign(W - 0.3, 6, 5, { text: "カラオケ", bg: "#e8332a", fg: "#ffffff" }, { width: 0.8 });
   f.bladeSign(W - 0.3, 11.5, 5.5, { text: "メイドカフェ", bg: "#ff8ad0", fg: "#ffffff" }, { width: 0.8 });
@@ -376,7 +375,7 @@ function vista(w: AkibaWorld): void {
     const H = 40;
     f.body(white, H, 30, { ground: 5.2, shopDepth: 3.5 });
     f.shopfront(0.4, W - 0.4, 4.2, "gift", 113, { fascia: { text: "LAOX", sub: "Home Electronics Store", bg: "#ffffff", fg: "#1d47c8", font: LATIN }, fasciaH: 0.9, depth: 3.5, light: 0, color: 0xffe8cc });
-    f.windows({ x0: 0.5, x1: W - 3.4, y0: 5.4, floorH: 3.8, floors: 8, winH: 2.4, bays: 3, ribbon: true, frame: lib.plain(0xbfc3c6, 0.35, 0.8), intensity: 1.3 });
+    f.windows({ x0: 0.5, x1: W - 3.4, y0: 5.4, floorH: 3.8, floors: 8, winH: 2.4, bays: 3, ribbon: true, frame: lib.plain(0xbfc3c6, 0.35, 0.8) });
     const v = w.draw("laox-vertical", 160, 1024, (g, cw, ch) => {
       g.fillStyle = "#ffffff";
       g.fillRect(0, 0, cw, ch);
@@ -430,13 +429,15 @@ function vista(w: AkibaWorld): void {
     f.panelSign(16, 25.5, H - 4, H - 0.6, { text: "パソコン館", bg: "#1d47c8", fg: "#ffffff" }, { z: 0.4, intensity: "sign" });
     f.roof(wall, H, 12);
   }
-  for (const [z0, len, H, seed] of [[-38.6, 20, 34, 131], [-59, 20, 28, 133], [47, 20, 30, 135], [67, 18, 26, 137]] as const) {
+  // One fascia and blade-sign variant per building, in loop order.
+  const vista = [[-38.6, 20, 34, 131], [-59, 20, 28, 133], [47, 20, 30, 135], [67, 18, 26, 137]] as const;
+  for (const [i, [z0, len, H, seed]] of vista.entries()) {
     const f = new Facade(w, X, z0, Math.PI / 2, len, seed, `vista-${seed}`);
     const wall = lib.tile([0.72, 0.7, 0.68]);
     f.body(wall, H, 14, { ground: 4.9, shopDepth: 2.5 });
-    f.shopfront(0.4, len - 0.4, 4.0, "shop", seed + 1, { light: 0, depth: 2.5, fascia: { text: ["免税", "ゲーム", "電気街", "カメラ"][seed % 4], bg: ["#d81e2a", "#1a1a1a", "#1d47c8", "#ffd21a"][seed % 4], fg: seed % 4 === 3 ? "#1a1a1a" : "#ffffff" }, fasciaH: 0.8 });
+    f.shopfront(0.4, len - 0.4, 4.0, "shop", seed + 1, { light: 0, depth: 2.5, fascia: { text: ["免税", "ゲーム", "電気街", "カメラ"][i], bg: ["#d81e2a", "#1a1a1a", "#1d47c8", "#ffd21a"][i], fg: i === 3 ? "#1a1a1a" : "#ffffff" }, fasciaH: 0.8 });
     f.windows({ x0: 0.5, x1: len - 0.5, y0: 5.0, floorH: 3.4, floors: Math.floor((H - 6) / 3.4), winH: 1.8, bays: 5, frame: lib.plain(0x4a4c4f, 0.4, 0.6) });
-    f.bladeSign(len * 0.5, 6, 9, { text: ["ゲームセンター", "中古ゲーム", "アニメグッズ", "家電量販"][seed % 4], bg: ["#ff3a8a", "#1a5ab8", "#ff9a1a", "#0a8a3a"][seed % 4], fg: "#ffffff" }, { width: 1.0 });
+    f.bladeSign(len * 0.5, 6, 9, { text: ["ゲームセンター", "中古ゲーム", "アニメグッズ", "家電量販"][i], bg: ["#ff3a8a", "#1a5ab8", "#ff9a1a", "#0a8a3a"][i], fg: "#ffffff" }, { width: 1.0 });
     f.roof(wall, H, 14);
   }
 }
@@ -444,13 +445,14 @@ function vista(w: AkibaWorld): void {
 /** Chuo-dori's east frontage north and south of the street mouth (seen up and down the avenue). */
 function chuoEast(w: AkibaWorld): void {
   const lib = w.lib;
-  for (const [z0, len, H, seed] of [[-44, 20, 26, 141], [-70, 14, 30, 143], [16, 22, 33, 145], [40, 16, 24, 147]] as const) {
+  const east = [[-44, 20, 26, 141], [-70, 14, 30, 143], [16, 22, 33, 145], [40, 16, 24, 147]] as const;
+  for (const [i, [z0, len, H, seed]] of east.entries()) {
     const f = new Facade(w, CHUO.lineEast - 0.5, z0, -Math.PI / 2, len, seed, `chuo-east-${seed}`);
     const wall = lib.tile([0.66, 0.66, 0.68]);
     f.body(wall, H, 14, { ground: 4.9, shopDepth: 2.5 });
     f.shopfront(0.4, len - 0.4, 4.0, "arcade", seed + 1, { light: 0, depth: 2.5 });
     f.windows({ x0: 0.5, x1: len - 0.5, y0: 5.0, floorH: 3.4, floors: Math.floor((H - 6) / 3.4), winH: 1.8, bays: 5, frame: lib.plain(0x4a4c4f, 0.4, 0.6) });
-    f.bladeSign(0.4, 6, 8, { text: ["アニメ", "フィギュア", "カード", "同人誌"][seed % 4], bg: ["#e8332a", "#1a5ab8", "#ffd21a", "#7a3cff"][seed % 4], fg: seed % 4 === 2 ? "#1a1a1a" : "#ffffff" }, { width: 0.9 });
+    f.bladeSign(0.4, 6, 8, { text: ["アニメ", "フィギュア", "カード", "同人誌"][i], bg: ["#e8332a", "#1a5ab8", "#ffd21a", "#7a3cff"][i], fg: i === 2 ? "#1a1a1a" : "#ffffff" }, { width: 0.9 });
     f.roof(wall, H, 14);
   }
 }

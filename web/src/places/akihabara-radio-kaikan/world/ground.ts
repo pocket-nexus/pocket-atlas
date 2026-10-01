@@ -22,7 +22,7 @@ export function buildGround(w: AkibaWorld): void {
   const lib = w.lib;
   const pav = lib.pavers();
   const asp = lib.asphalt();
-  const kerb = lib.granite([0.85, 0.85, 0.83]);
+  const kerb = lib.granite();
   const S = STREET;
 
   // Carriageway of this street and of Chuo-dori (one surface, same level).

@@ -5,7 +5,11 @@
  *
  *   bun scripts/preview-place.ts [--place ID] [--wait 15000]
  *
- * Without --place, every enterable place with a preview shot.
+ * Without --place, every enterable place with a preview shot. The clock
+ * starts at t = 25 s when the stage appears, however long loading took, and
+ * the card is taken 1 s later (after the loading screen's fade), so it shows
+ * the place at t ≈ 26 s. `--wait` bounds how long the loading screen may
+ * take to appear.
  */
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -27,9 +31,11 @@ const browser = await chromium.launch({ channel: "chrome", headless: true, args:
 for (const p of places) {
   const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
   page.on("pageerror", (e) => console.log(`[${p.id}] ${e.message}`));
-  // Halfway through the shot's move, at a fixed clock, so cards are reproducible.
+  // At the shot's end framing and a fixed clock, so cards are reproducible.
   await page.goto(`${base}/?shot&q=ultra&cam=${encodeURIComponent(p.preview!)}&t=25#/place/${p.id}`, { waitUntil: "load" });
-  await page.waitForTimeout(wait);
+  await page.waitForFunction(() => document.querySelector(".pc-loading")?.classList.contains("is-visible"), null, { timeout: wait }).catch(() => {});
+  await page.waitForFunction(() => !document.querySelector(".pc-loading")?.classList.contains("is-visible"), null, { timeout: 240_000 });
+  await page.waitForTimeout(1000);
   const out = resolve(join(import.meta.dir, `../../.pocket-build/places/${p.id}`));
   mkdirSync(out, { recursive: true });
   await page.screenshot({ path: join(out, "preview.png") });

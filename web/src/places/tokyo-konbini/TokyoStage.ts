@@ -138,7 +138,8 @@ export class TokyoStage implements Stage {
     this.wet.uPuddleTex.value = bakePuddles(this.baker);
     const lib = new MaterialLib(this.baker, this.wet, quality);
     lib.bakeAll();
-    const atlas = new Atlas(quality.textureSize >= 2048 ? 4096 : 2048);
+    // 4 px between cells (2 px of extruded border each): the atlas is nearly full at 4096.
+    const atlas = new Atlas(quality.textureSize >= 2048 ? 4096 : 2048, { pad: 2 });
     const world = (this.world = new World(lib, atlas, quality, 20240929));
 
     await progress(0.2, "Laying the street");
@@ -237,6 +238,7 @@ export class TokyoStage implements Stage {
           version: c.version,
           units: c.units,
           up: c.up,
+          kind: this.place.kind,
           fog: c.fog,
           haze: { ...haze, dryBox: { min: [...SHOP_BOX.min], max: [...SHOP_BOX.max] } },
           hemisphere: c.hemisphere,

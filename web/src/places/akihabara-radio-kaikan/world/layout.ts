@@ -33,14 +33,11 @@ export const KAIKAN = {
   /** Parapet top of the main volume and the top of the penthouse levels (GL+46.5 m). */
   roof: 44.2,
   top: 46.5,
-  /** Floor levels: ground floor, the 2F sign band, then 3F–10F ribbon floors. */
-  ground: 4.9,
-  floor2: 4.9,
+  /** Storey height of the 3F–10F ribbon floors. */
   floorH: 4.2,
   /** 3F floor level. */
   f3: 9.8,
-  /** West louvre strip (full height) and the ribbon-window span east of it. */
-  louvre: { x0: -24, x1: -19.6 },
+  /** Ribbon-window span; the louvre strip fills the facade west of it. */
   ribbon: { x0: -19.6, x1: 0 },
   /** 2F LED sign band (yellow, ribbed) and the LED screen west of it. */
   band: { x0: -13.9, x1: 0, y0: 4.75, y1: 8.55, depth: 0.45 },
@@ -60,8 +57,7 @@ export const STREET = {
   southKerb: -5.8,
   northKerb: -12.6,
   northLine: -18.9,
-  /** West end: Chuo-dori's east kerb; east end: the station plaza. */
-  west: -63.5,
+  /** East end of the street: the station plaza. */
   east: 36,
 };
 export const ROAD_Y = -0.12;
@@ -84,13 +80,6 @@ export const VIEW = {
   frontal: new Vector3(-8.95, 1.6, -15.7),
   clock: new Vector3(16.0, 0, -15.7),
 };
-
-/** Unit vector for a compass bearing and elevation (degrees) in world axes (−Z = north). */
-export function bearing(azimuth: number, elevation = 0): Vector3 {
-  const a = (azimuth * Math.PI) / 180;
-  const e = (elevation * Math.PI) / 180;
-  return new Vector3(Math.sin(a) * Math.cos(e), Math.sin(e), -Math.cos(a) * Math.cos(e));
-}
 
 /**
  * Blue hour in mid-October, about 17:35 JST: the sun sits 5° below the

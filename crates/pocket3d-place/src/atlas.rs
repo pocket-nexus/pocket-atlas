@@ -9,11 +9,32 @@
 //! on the device from `albedo` (water in alpha), `normals` (elevation in
 //! alpha), `lights` and `clouds`; `sun_transmittance` is the sunlight table
 //! (x: cosine of the sun zenith angle, y: square root of height).
+//!
+//! The interface font travels in the same pack: [`FontMeta`] in `META` and
+//! its 8-bit coverage atlas in the `FONT` section (top row first).
 
 use crate::meta::Texture;
 use serde::{Deserialize, Serialize};
 
 pub const MAGIC: [u8; 4] = *b"ATLS";
+pub const TAG_FONT: [u8; 4] = *b"FONT";
+
+/// Interface text styles, (name, em size px, bold); the index is the style
+/// a glyph belongs to and what the handheld's `ui::T` names.
+pub const STYLES: [(&str, f32, bool); 8] = [
+    ("caption", 15.0, false),
+    ("label", 13.0, true),
+    ("body", 17.0, false),
+    ("strong", 17.0, true),
+    ("title", 21.0, true),
+    ("heading", 27.0, true),
+    ("brand", 34.0, true),
+    ("small", 15.0, true),
+];
+
+/// Characters the interface writes beyond ASCII and Latin-1 (button
+/// glyphs, punctuation, units).
+pub const UI_EXTRA: &str = "·•…“”‘’–—×★☆‹›°±²³½→←↑↓⇄✓△□○";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AtlasMeta {
@@ -21,6 +42,43 @@ pub struct AtlasMeta {
     pub places: Vec<AtlasPlace>,
     pub textures: Vec<Texture>,
     pub globe: Globe,
+    #[serde(default)]
+    pub font: Option<FontMeta>,
+}
+
+/// The baked interface font: glyphs of every [`STYLES`] entry in one
+/// coverage atlas (`FONT`, `width` × `height` bytes).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct FontMeta {
+    pub width: u32,
+    pub height: u32,
+    pub styles: Vec<FontStyle>,
+    pub glyphs: Vec<Glyph>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct FontStyle {
+    pub name: String,
+    pub px: f32,
+    pub bold: bool,
+    pub ascent: f32,
+    pub descent: f32,
+    pub line: f32,
+}
+
+/// One glyph: its cell in the atlas, the cell's offset from the pen on the
+/// baseline (y down) and the advance.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct Glyph {
+    pub style: u8,
+    pub cp: u32,
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+    pub left: i16,
+    pub top: i16,
+    pub advance: f32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

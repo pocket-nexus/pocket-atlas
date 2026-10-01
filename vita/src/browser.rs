@@ -1,20 +1,19 @@
 //! The place browser beside the globe: lists of places as postcards with
 //! their baked previews. Four lists switch with L and R: Featured, Explore
 //! (nearest the point the globe faces, re-sorted while the stick spins it),
-//! Saved (△ on a card; kept in `ux0:data/pocket-atlas/saved.json`) and
+//! Saved (△ on a card; kept in `saved.json` in the data folder) and
 //! Search (□ opens the system keyboard; words match name, native name,
 //! locality, country, tags, kind and author). The focused card opens into a
 //! postcard and the globe turns to it; the others stay one-line rows.
 
 use pocket3d_place::atlas::AtlasPlace;
-use pocketjs_vita::input::Pad;
 use serde_json::json;
 
 use crate::atlas::Atlas;
 use crate::gpu::Gpu;
 use crate::ui::{accent, drawable, rgb, Button, Style, Ui, T};
 
-const SAVED_PATH: &str = "ux0:data/pocket-atlas/saved.json";
+const SAVED: &str = "saved.json";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tab {
@@ -58,9 +57,8 @@ const THUMB_W: f32 = 100.0;
 const ROW_H: f32 = 64.0;
 const CARD_H: f32 = IMG_W * 0.5 + 96.0;
 const GAP: f32 = 6.0;
-/// Previews are 16:9 frames stored in 2:1 textures; a 2:1 card shows the
-/// middle 16:9 ÷ 2:1 of their height.
-const CROP: [f32; 4] = [0.0, 0.0556, 1.0, 0.9444];
+/// Preview cards are cooked at the card's 2:1.
+const CROP: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 
 /// The system keyboard (SceImeDialog) for the search query.
 struct Ime {
@@ -133,15 +131,16 @@ pub struct Browser {
     pub saved: Vec<String>,
     pub query: String,
     /// Animated state: list scroll (px), per-place card opening (0..1),
-    /// tab underline (x, width), list fade-in after a change.
+    /// tab underline (x, width) easing toward the current tab's label (set
+    /// where the labels are measured, in `draw`), list fade-in after a change.
     scroll: f32,
     open: Vec<f32>,
     underline: (f32, f32),
+    underline_goal: (f32, f32),
     fade: f32,
     toast: Option<(String, f32)>,
     explore_from: (f32, f32),
     ime: Ime,
-    time: f32,
 }
 
 fn unit(lat: f32, lon: f32) -> [f32; 3] {
@@ -182,9 +181,7 @@ fn score(p: &AtlasPlace, words: &[String]) -> Option<u32> {
 
 impl Browser {
     pub fn new() -> Self {
-        let saved = std::fs::read(SAVED_PATH)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        let saved = crate::paths::read_json(SAVED)
             .and_then(|v| v["saved"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()))
             .unwrap_or_default();
         Self {
@@ -197,11 +194,11 @@ impl Browser {
             scroll: 0.0,
             open: Vec::new(),
             underline: (0.0, 0.0),
+            underline_goal: (0.0, 0.0),
             fade: 0.0,
             toast: None,
             explore_from: (0.0, 0.0),
             ime: Ime::new(),
-            time: 0.0,
         }
     }
 
@@ -239,8 +236,7 @@ impl Browser {
     }
 
     fn write_saved(&self) {
-        let _ = std::fs::create_dir_all("ux0:data/pocket-atlas");
-        let _ = std::fs::write(SAVED_PATH, json!({ "saved": self.saved }).to_string());
+        crate::paths::write_json(SAVED, &json!({ "saved": self.saved }));
     }
 
     pub fn toggle_saved(&mut self, atlas: &mut Atlas, id: &str) {
@@ -308,8 +304,7 @@ impl Browser {
     fn focus_changed(&mut self, atlas: &mut Atlas, turn: bool) {
         let f = self.list.get(self.focus).copied();
         self.focus_id = f.map(|i| atlas.meta.places[i].id.clone()).or(self.focus_id.take());
-        atlas.highlight = f;
-        atlas.listed = (0..atlas.meta.places.len()).map(|i| self.list.contains(&i)).collect();
+        atlas.mark(f, &self.list);
         if turn {
             if let Some(i) = f {
                 atlas.turn_to(i);
@@ -347,9 +342,11 @@ impl Browser {
     }
 
     /// Input and animation for one frame. `spun`: the stick turned the globe.
-    pub unsafe fn update(&mut self, atlas: &mut Atlas, dt: f32, _pad: &Pad, pressed: u32, spun: bool) -> Option<Action> {
+    pub unsafe fn update(&mut self, atlas: &mut Atlas, dt: f32, pressed: u32, spun: bool) -> Option<Action> {
         use vitasdk_sys::*;
-        self.time += dt;
+        let e = 1.0 - (-dt * 12.0).exp();
+        self.underline.0 += (self.underline_goal.0 - self.underline.0) * e;
+        self.underline.1 += (self.underline_goal.1 - self.underline.1) * e;
         if let Some((_, t)) = &mut self.toast {
             *t -= dt;
         }
@@ -397,17 +394,17 @@ impl Browser {
         if pressed & SCE_CTRL_SQUARE != 0 {
             self.open_search();
         }
-        let focused = self.list.get(self.focus).map(|&i| atlas.meta.places[i].clone());
-        if let Some(p) = &focused {
-            if pressed & SCE_CTRL_TRIANGLE != 0 {
-                self.toggle_saved(atlas, &p.id);
+        let Some(&i) = self.list.get(self.focus) else { return None };
+        if pressed & SCE_CTRL_TRIANGLE != 0 {
+            let id = atlas.meta.places[i].id.clone();
+            self.toggle_saved(atlas, &id);
+        }
+        if pressed & (SCE_CTRL_CROSS | SCE_CTRL_CIRCLE) != 0 {
+            let p = &atlas.meta.places[i];
+            if p.enterable {
+                return Some(Action::Enter(p.id.clone()));
             }
-            if pressed & (SCE_CTRL_CROSS | SCE_CTRL_CIRCLE) != 0 {
-                if p.enterable {
-                    return Some(Action::Enter(p.id.clone()));
-                }
-                self.toast(format!("{} is coming soon", p.name));
-            }
+            self.toast(format!("{} is coming soon", p.name));
         }
         None
     }
@@ -501,13 +498,10 @@ impl Browser {
             let on = *t == self.tab;
             ui.text(gpu, (cx - tw * 0.5).round(), ty, if on { white(1.0) } else { grey(0.62) }, T::Label, label);
             if on {
-                let goal = (cx - tw * 0.5, tw);
+                self.underline_goal = (cx - tw * 0.5, tw);
                 if self.underline.1 == 0.0 {
-                    self.underline = goal;
+                    self.underline = self.underline_goal;
                 }
-                let e = 0.35;
-                self.underline.0 += (goal.0 - self.underline.0) * e;
-                self.underline.1 += (goal.1 - self.underline.1) * e;
             }
         }
         ui.rect(gpu, self.underline.0, ty + 8.0, self.underline.1, 3.0, &Style::fill(1.5, focus_accent));

@@ -1,11 +1,13 @@
-import { Vector3, type Object3D } from "three";
+import { RepeatWrapping, Vector3, type Object3D, type Texture } from "three";
+import { canvas, toTexture } from "../../shared/canvas";
+import { basket, briefcase, closedUmbrella, magazine, magazineTexture, openUmbrella, phone } from "../../shared/people/gear";
+import { pulse, stand, walk, wander, type Gait } from "../../shared/people/motion";
+import { patrol } from "../../shared/people/paths";
+import { Figure } from "../../shared/people/rig";
+import { smooth } from "../../shared/people/shape";
+import { Wear } from "../../shared/people/wear";
 import type { World } from "./context";
 import { L } from "./layout";
-import { basket, briefcase, closedUmbrella, magazine, magazineTexture, openUmbrella, phone } from "./people/gear";
-import { pulse, stand, walk, wander, type Gait } from "./people/motion";
-import { Figure } from "./people/rig";
-import { smooth } from "./people/shape";
-import { uniformStripes, Wear } from "./people/wear";
 
 /*
  * People: a reader at the magazine rack, the clerk at the register and a
@@ -32,6 +34,21 @@ function place(f: Figure, parent: Object3D, x: number, z: number, ry: number): F
 /** Root-space position of a point in `o`'s local frame (matrices must be current). */
 function rootPoint(f: Figure, o: Object3D, x: number, y: number, z: number, out: Vector3): Vector3 {
   return f.root.worldToLocal(o.localToWorld(out.set(x, y, z)));
+}
+
+/** Vertical pinstripes in the shop's blue and green on white (u is meters around the body). */
+function uniformStripes(): Texture {
+  const { c, g } = canvas(64, 4);
+  g.fillStyle = "#eef2f4";
+  g.fillRect(0, 0, 64, 4);
+  g.fillStyle = "#2f6fc0";
+  g.fillRect(6, 0, 9, 4);
+  g.fillStyle = "#1c9a78";
+  g.fillRect(38, 0, 5, 4);
+  const t = toTexture(c, true, 4);
+  t.wrapS = t.wrapT = RepeatWrapping;
+  t.repeat.set(1 / 0.03, 1);
+  return t;
 }
 
 /** The cast: build and outfit per figure (materials from the indoor or outdoor wardrobe). */
@@ -131,7 +148,6 @@ const LOOKS = {
 };
 
 export function buildPeople(w: World): void {
-  if (new URLSearchParams(location.search).has("nopeople")) return; // TEMP A/B
   const root = w.group();
   root.name = "people";
   root.userData.dynamic = true;
@@ -143,20 +159,6 @@ export function buildPeople(w: World): void {
   waiter(w, root, outside);
   southWalker(w, root, outside);
   crossWalker(w, root, outside);
-  if (new URLSearchParams(location.search).has("lineup")) lineup(w, root, inside, outside);
-}
-
-// TEMP: shape inspection lineup (remove before handing off).
-function lineup(w: World, parent: Object3D, wi: Wear, wo: Wear): void {
-  const keys = ["reader", "clerk", "shopper", "waiter", "south", "cross"] as const;
-  const figs = keys.map((k, i) => place(LOOKS[k](i < 3 ? wi : wo), parent, -3.4 + i * 1.36, 1.4, 0));
-  w.update((_dt, t) => {
-    figs.forEach((f, i) => {
-      stand(f, { feet: [new Vector3(0.1, 0.075 * f.d.s, 0.02), new Vector3(-0.1, 0.075 * f.d.s, -0.02)], toe: [0.12, -0.12], weight: 0.4, lean: 0.02, twist: 0, breath: t, yaw: (i % 2) * 0.6, pitch: 0.1 });
-      f.swing(0, 0.05, -0.03, 0.2, 0.1);
-      f.swing(1, -0.05, -0.03, 0.2, 0.1);
-    });
-  });
 }
 
 // ================================================================== inside
@@ -301,58 +303,6 @@ function waiter(w: World, parent: Object3D, wr: Wear): void {
     f.aim(0, umb.position);
     ph.getWorldPosition(glow.position);
   });
-}
-
-interface Path {
-  length: number;
-  /** Writes the position at distance d along the loop; returns the heading (rotation.y). */
-  at(d: number, out: Vector3): number;
-}
-
-/**
- * Back-and-forth beat along one axis: out on lane l0, a tight U-turn beyond
- * `b`, back on lane l1, U-turn beyond `a`. `swerve` offsets the lane (e.g. to
- * pass parked bicycles).
- */
-function patrol(axis: "x" | "z", a: number, b: number, l0: number, l1: number, swerve: (s: number) => number = () => 0): Path {
-  const r = (l0 - l1) / 2;
-  const ar = Math.abs(r);
-  const qc = (l0 + l1) / 2;
-  const run = b - a;
-  const turn = Math.PI * ar;
-  const length = 2 * run + 2 * turn;
-  const put = (s: number, q: number, ds: number, dq: number, out: Vector3) => {
-    if (axis === "x") {
-      out.set(s, 0, q);
-      return Math.atan2(ds, dq);
-    }
-    out.set(q, 0, s);
-    return Math.atan2(dq, ds);
-  };
-  const slope = (s: number) => (swerve(s + 0.05) - swerve(s - 0.05)) / 0.1;
-  return {
-    length,
-    at(d, out) {
-      d = ((d % length) + length) % length;
-      if (d < run) {
-        const s = a + d;
-        return put(s, l0 + swerve(s), 1, slope(s), out);
-      }
-      d -= run;
-      if (d < turn) {
-        const p = d / ar;
-        return put(b + ar * Math.sin(p), qc + r * Math.cos(p), ar * Math.cos(p), -r * Math.sin(p), out);
-      }
-      d -= turn;
-      if (d < run) {
-        const s = b - d;
-        return put(s, l1 + swerve(s), -1, -slope(s), out);
-      }
-      d -= run;
-      const p = d / ar;
-      return put(a - ar * Math.sin(p), qc - r * Math.cos(p), -ar * Math.cos(p), r * Math.sin(p), out);
-    },
-  };
 }
 
 /** Man in a long coat under a clear vinyl umbrella, walking the south edge of the main street. */
