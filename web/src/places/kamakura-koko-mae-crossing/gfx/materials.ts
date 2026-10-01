@@ -183,7 +183,7 @@ export class CoastLib {
 
   ground(): MeshStandardMaterial {
     return this.memo("ground", () => {
-      const m = withMaps(this.surf("ground", SURF.GROUND, 512, 3, 2.5));
+      const m = withMaps(this.surf("ground", SURF.GROUND, 1024, 4, 2.2), { normalScale: new Vector2(1.2, 1.2) });
       m.userData.worldUV = true;
       return m;
     });

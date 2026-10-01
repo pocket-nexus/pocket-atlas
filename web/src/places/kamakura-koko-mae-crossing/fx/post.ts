@@ -29,7 +29,8 @@ export function createCoastPost(renderer: WebGLRenderer, scene: Scene, camera: P
     ao.configuration.intensity = 2.6;
     ao.configuration.gammaCorrection = false;
     ao.configuration.halfRes = quality.level !== "ultra";
-    ao.configuration.color = new Color(0.02, 0.03, 0.06);
+    // Neutral: contact shadows darken the paint and asphalt without tinting them.
+    ao.configuration.color = new Color(0, 0, 0);
     composer.addPass(ao);
   }
 
@@ -39,7 +40,7 @@ export function createCoastPost(renderer: WebGLRenderer, scene: Scene, camera: P
   const u = grade.uniforms;
   u.get("uGrain")!.value = 0.01;
   u.get("uVignette")!.value = 0.22;
-  (u.get("uLift")!.value as Vector3).set(0.03, 0.08, 0.16);
+  (u.get("uLift")!.value as Vector3).set(0.04, 0.05, 0.07);
   (u.get("uGain")!.value as Vector3).set(1.03, 1.0, 0.95);
   u.get("uSaturation")!.value = 1.12;
   u.get("uContrast")!.value = 1.08;

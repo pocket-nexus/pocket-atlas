@@ -6,6 +6,7 @@ import { merge } from "../../shared/shapes";
 import { bakeWaveNormals, createWater, foamMaterial, type Water } from "../../shared/water";
 import type { KamakuraWorld } from "./context";
 import { COAST, LOOP, SEA_Y } from "./layout";
+import { DAYLIGHT } from "./sky";
 
 /**
  * Sagami Bay: one water surface from under the beach to past the horizon
@@ -17,6 +18,12 @@ import { COAST, LOOP, SEA_Y } from "./layout";
  * from turquoise over the sand to the bay's teal-blue. Surf breaks on the bar
  * 40–135 m out (s ≈ 100–195) and again at the beach face.
  */
+
+/** Linear colour ÷ the hemisphere sky's irradiance (colour × intensity). */
+const perSky = (r: number, g: number, b: number) => {
+  const { hemiSky: s, hemiIntensity: k } = DAYLIGHT;
+  return new Color(r / (s.r * k), g / (s.g * k), b / (s.b * k));
+};
 
 /** The bay's water in late July: swell from the south-south-west, an onshore wind chop. */
 export const WATER = {
@@ -33,10 +40,12 @@ export const WATER = {
   // Wave faces turned to the viewer (about 8°): the far sea reflects the bluer
   // sky 15–20° up and stays darker than the horizon haze above it.
   mask: 0.14,
+  // The body colours multiply the hemisphere sky (DAYLIGHT, colour ×
+  // intensity), so they are the scattered colours divided by it.
   /** Teal-blue of the open bay. */
-  body: new Color(0.02, 0.58, 0.5),
+  body: perSky(0.00194, 0.1084, 0.2207),
   /** Turquoise over the sand of the shelf off the beach. */
-  shallow: new Color(0.1, 1.0, 0.56),
+  shallow: perSky(0.0097, 0.187, 0.2472),
   envMapIntensity: 0.72,
 };
 

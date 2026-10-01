@@ -216,26 +216,66 @@ Surface surface(vec2 uv) {
 }`;
 
 /**
- * 3 m of sunny grass (the bank above the slope road, the park lawn, villa
- * gardens): blades in clumps, yellow-green in the sun, dry straw patches and
- * a little sandy soil showing through.
+ * 4 m of summer lawn (野芝 / 高麗芝: the park, the villa gardens, the bank
+ * above the slope road): three layers of blades, each cell of a grid
+ * holding one tapered blade at a random angle (3–6 cm, finer and coarser
+ * grasses), over thatch and soil; lusher dark patches, sun-bleached straw
+ * patches and clover in a 1–2 m pattern. Blade tips stand highest, so the
+ * normal map gives the lawn its grain.
  */
 export const GROUND = /* glsl */ `
+float blades(vec2 uv, float n, float seed, out float tone) {
+  vec2 p = uv * n;
+  vec2 ip = floor(p);
+  float best = 0.0;
+  tone = 0.5;
+  for (int j = -1; j <= 1; j++) {
+    for (int i = -1; i <= 1; i++) {
+      vec2 c = ip + vec2(float(i), float(j));
+      vec2 cw = mod(c, vec2(n));
+      vec3 h = hash32(cw + seed);
+      vec2 o = c + h.xy;
+      float a = h.z * 6.2831853;
+      vec2 d = vec2(cos(a), sin(a));
+      float len = 0.9 + 0.9 * hash12(cw * 1.37 + seed);
+      vec2 q = p - o;
+      float t = clamp(dot(q, d) / len, 0.0, 1.0);
+      float dist = length(q - d * (t * len));
+      float wdt = 0.16 * (1.0 - 0.7 * t);
+      float b = (1.0 - smoothstep(wdt * 0.45, wdt, dist)) * (0.55 + 0.45 * t);
+      if (b > best) {
+        best = b;
+        tone = hash12(cw + seed + 3.3);
+      }
+    }
+  }
+  return best;
+}
 Surface surface(vec2 uv) {
-  float n = fbm(uv * 6.0, vec2(6.0), 5);
-  float clump = fbm(uv * 20.0 + 3.0, vec2(20.0), 4);
-  vec3 w = worley(uv * 300.0, vec2(300.0));
-  vec3 w2 = worley(uv * 140.0 + 7.0, vec2(140.0));
-  float blade = smoothstep(0.55, 0.08, w.x);
-  float tuft = smoothstep(0.6, 0.15, w2.x) * step(0.45, w2.z);
-  vec3 green = mix(vec3(0.045, 0.085, 0.018), vec3(0.15, 0.22, 0.045), w.z);
-  vec3 col = mix(green * 0.45, green, blade);
-  col = mix(col, vec3(0.19, 0.25, 0.06), tuft * 0.45);
-  col = mix(col, vec3(0.2, 0.17, 0.08), smoothstep(0.6, 0.8, n) * 0.55);
-  col = mix(col, vec3(0.13, 0.11, 0.075), smoothstep(0.74, 0.88, clump) * 0.5);
-  col *= 0.85 + 0.3 * clump;
-  float h = blade * 0.5 + tuft * 0.4 + clump * 0.3;
-  return S(col, h, 0.9, 0.6 + 0.4 * blade, 0.0);
+  float t1;
+  float t2;
+  float t3;
+  float b1 = blades(uv, 110.0, 1.0, t1);
+  float b2 = blades(fract(uv + vec2(0.37, 0.71)), 150.0, 7.0, t2);
+  float b3 = blades(fract(uv + vec2(0.13, 0.29)), 64.0, 13.0, t3);
+  float macro = fbm(uv * 3.0, vec2(3.0), 4);
+  float patchy = fbm(uv * 7.0 + 2.0, vec2(7.0), 4);
+  float dry = smoothstep(0.58, 0.8, fbm(uv * 4.0 + 9.0, vec2(4.0), 4));
+  float clover = smoothstep(0.64, 0.8, fbm(uv * 10.0 + 5.0, vec2(10.0), 3));
+  vec3 under = mix(vec3(0.045, 0.05, 0.02), vec3(0.09, 0.09, 0.04), smoothstep(0.3, 0.7, patchy));
+  vec3 g1 = mix(vec3(0.065, 0.13, 0.025), vec3(0.16, 0.26, 0.05), t1);
+  vec3 g2 = mix(vec3(0.09, 0.16, 0.03), vec3(0.2, 0.29, 0.06), t2);
+  vec3 g3 = mix(vec3(0.05, 0.1, 0.022), vec3(0.12, 0.2, 0.04), t3);
+  vec3 col = under;
+  col = mix(col, g3, b3);
+  col = mix(col, g1, b1);
+  col = mix(col, g2, b2 * 0.9);
+  col *= mix(0.74, 1.12, macro);
+  col = mix(col, col * vec3(1.3, 1.08, 0.55) + vec3(0.035, 0.026, 0.004), dry * 0.45);
+  col = mix(col, vec3(0.045, 0.1, 0.03), clover * 0.35);
+  float cover = max(max(b1, b2), b3);
+  float h = cover * 0.7 + b2 * 0.2 + macro * 0.25;
+  return S(col, h, 0.86 + 0.08 * (1.0 - cover), 0.42 + 0.58 * cover, 0.0);
 }`;
 
 /** 1 m of sprayed stucco (吹付け): fine bumps, faint run-off; white, tinted per use. */
@@ -250,25 +290,27 @@ Surface surface(vec2 uv) {
 }`;
 
 /**
- * 2 m of clipped hedge face (トベラ / マサキ): small glossy leaves in layers,
- * yellow-green new shoots on the outside, dark gaps into the interior.
+ * 2 m of clipped hedge face (トベラ / マサキ): 2 cm glossy leaves in two
+ * layers, gathered into 15–20 cm clumps (lighter, standing proud) with dark
+ * gaps into the interior, yellow-green new shoots on the outside.
  */
 export const SHRUB = /* glsl */ `
 Surface surface(vec2 uv) {
-  vec3 w = worley(uv * 56.0, vec2(56.0));
-  vec3 w2 = worley(uv * 118.0 + 2.0, vec2(118.0));
-  float leaf = smoothstep(0.66, 0.18, w.x);
-  float rim = smoothstep(0.2, 0.45, w.x) * leaf;
-  float leaf2 = smoothstep(0.52, 0.12, w2.x) * step(0.42, w2.z);
+  vec3 w = worley(uv * 86.0, vec2(86.0));
+  vec3 w2 = worley(uv * 170.0 + 2.0, vec2(170.0));
+  float leaf = smoothstep(0.7, 0.2, w.x);
+  float rim = smoothstep(0.22, 0.48, w.x) * leaf;
+  float leaf2 = smoothstep(0.55, 0.12, w2.x) * step(0.4, w2.z);
   float n = fbm(uv * 4.0, vec2(4.0), 4);
-  float gapN = smoothstep(0.62, 0.8, fbm(uv * 9.0 + 5.0, vec2(9.0), 4));
-  vec3 base = mix(vec3(0.04, 0.075, 0.016), vec3(0.13, 0.21, 0.045), w.z);
-  vec3 col = mix(vec3(0.008, 0.014, 0.005), base, leaf);
-  col = mix(col, vec3(0.2, 0.28, 0.06), leaf2 * 0.55);
-  col *= 1.0 - rim * 0.25;
-  col *= (0.8 + 0.35 * n) * (1.0 - gapN * 0.55);
-  float h = leaf * 0.8 + leaf2 * 0.45 - gapN * 0.6;
-  return S(col, h, 0.62 + 0.2 * (1.0 - leaf), 0.35 + 0.65 * leaf * (1.0 - gapN * 0.6), 0.0);
+  float clumps = fbm(uv * 11.0 + 1.7, vec2(11.0), 4);
+  float gapN = smoothstep(0.6, 0.78, fbm(uv * 9.0 + 5.0, vec2(9.0), 4));
+  vec3 base = mix(vec3(0.035, 0.068, 0.014), vec3(0.12, 0.2, 0.042), w.z);
+  vec3 col = mix(vec3(0.007, 0.012, 0.004), base, leaf);
+  col = mix(col, vec3(0.19, 0.27, 0.06), leaf2 * 0.55);
+  col *= 1.0 - rim * 0.3;
+  col *= (0.62 + 0.55 * clumps) * (0.85 + 0.3 * n) * (1.0 - gapN * 0.6);
+  float h = leaf * 0.7 + leaf2 * 0.4 + clumps * 0.6 - gapN * 0.6;
+  return S(col, h, 0.6 + 0.2 * (1.0 - leaf), 0.3 + 0.7 * leaf * (1.0 - gapN * 0.6) * (0.6 + 0.4 * clumps), 0.0);
 }`;
 
 /**

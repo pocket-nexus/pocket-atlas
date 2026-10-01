@@ -33,7 +33,7 @@ export class Greenery {
     this.pos.push(p.x, p.y, p.z);
     this.nor.push(n.x, n.y, n.z);
     this.uv.push(u, v);
-    this.col.push(c[0], c[1], c[2]);
+    this.col.push(Math.min(1, c[0]), Math.min(1, c[1]), Math.min(1, c[2]));
     return this.pos.length / 3 - 1;
   }
 
@@ -131,8 +131,8 @@ export class Greenery {
   /** Cycas revoluta: a short scaly trunk and a rosette of stiff arching fronds. */
   cycad(at: Vector3, size = 1): void {
     const r = this.r;
-    const h = r.range(0.25, 0.7) * size;
-    this.trunk([at.clone().setY(at.y - 0.1), at.clone().setY(at.y + h)], 0.2 * size, 0.17 * size, LEAF.cycadBark, this.tint(0.8, 1), 6);
+    const h = r.range(0.2, 0.5) * size;
+    this.trunk([at.clone().setY(at.y - 0.1), at.clone().setY(at.y + h * 0.6), at.clone().setY(at.y + h)], 0.15 * size, 0.12 * size, LEAF.cycadBark, this.tint(0.95, 1.0, 1), 8);
     const top = at.clone().setY(at.y + h);
     const n = r.int(16, 22);
     const tint = this.tint(0.82, 1.0);
@@ -154,43 +154,67 @@ export class Greenery {
     }
     this.trunk(pts, 0.16, 0.12, LEAF.palmBark, this.tint(0.85, 1), 7);
     const top = pts[4];
-    const n = r.int(20, 26);
+    // Fans about 1.1 m across on 0.6 m petioles (Trachycarpus), a dense round crown.
+    const n = r.int(28, 34);
     for (let k = 0; k < n; k++) {
       const az = (k / n) * Math.PI * 2 * 1.618 + r.range(-0.2, 0.2);
-      const elev = r.range(-0.15, 1.25);
-      const len = r.range(2.0, 2.5);
+      const elev = r.range(-0.2, 1.3);
+      const len = r.range(1.25, 1.55);
       this.frond(top, az, elev, len, len, 0.25 + (1.25 - elev) * 0.18, r.range(0.12, 0.3), LEAF.fan, this.tint(0.82, 1), 3);
     }
     // Skirt: dead fronds hanging against the trunk below the crown.
     for (let k = 0; k < 7; k++) {
       const az = (k / 7) * Math.PI * 2 + r.range(-0.3, 0.3);
-      this.frond(top.clone().setY(top.y - 0.25), az, r.range(-1.45, -1.2), r.range(1.3, 1.7), 1.4, 0, 0.15, LEAF.fan, [0.62, 0.46, 0.26], 3);
+      this.frond(top.clone().setY(top.y - 0.2), az, r.range(-1.45, -1.2), r.range(1.0, 1.3), 1.1, 0, 0.15, LEAF.fan, [0.62, 0.46, 0.26], 3);
     }
   }
 
   /**
-   * A broadleaf shrub (or a small-leaved one): cards scattered through an
-   * ellipsoid, each facing out and up, shaded with the ellipsoid's normal.
+   * A shrub (broadleaf トベラ, or small-leaved ツツジ / ツゲ for "box"): a dark
+   * core of crossed cards that stops the eye at the interior, then clumps of
+   * small cards on an ellipsoid's surface, five or six cards to a clump, so
+   * the outline is lumpy. Cards face out and up, shaded with the
+   * ellipsoid's normal, lighter toward the top and darker toward the core
+   * (vertex colour).
    */
   shrub(at: Vector3, radius: number, height: number, kind: "shrub" | "box" = "shrub", density = 1): void {
     const r = this.r;
-    const cell = LEAF[kind];
-    const c = at.clone().setY(at.y + height * 0.55);
-    const R = new Vector3(radius, height * 0.55, radius);
-    // Cards of about 0.6 m, enough to cover the ellipsoid's surface about twice over.
-    const area = 4 * Math.PI * Math.pow((radius * radius * radius * height * 0.55) ** (1 / 3), 2);
-    const size = Math.min(0.75, 0.35 + Math.min(radius, height) * 0.3);
-    const count = Math.max(6, Math.round(((area * 1.6) / (size * size)) * density));
-    const tint = this.tint(0.8, 1.0);
-    for (let i = 0; i < count; i++) {
-      const d = new Vector3(r.range(-1, 1), r.range(-0.6, 1), r.range(-1, 1));
-      if (d.lengthSq() > 1) d.normalize();
-      d.multiplyScalar(Math.pow(r.next(), 0.25));
-      const p = c.clone().add(d.clone().multiply(R).multiplyScalar(0.85));
+    const c = at.clone().setY(at.y + height * 0.52);
+    const R = new Vector3(radius, height * 0.52, radius);
+    const base = this.tint(0.82, 1.0);
+    const shade = (k: number, y: number): [number, number, number] => {
+      const lift = 0.72 + 0.36 * Math.min(1, Math.max(0, (y - at.y) / height));
+      return [base[0] * k * lift, base[1] * k * lift, base[2] * k * lift];
+    };
+    // Core: two upright cards across each other and one flat, inside the clumps.
+    const spin = r.range(0, Math.PI);
+    for (let k = 0; k < 2; k++) {
+      const a = spin + (k * Math.PI) / 2;
+      const n = new Vector3(Math.sin(a), 0, Math.cos(a));
+      this.card(c.clone().setY(c.y - height * 0.06), n, 0, radius * 1.45, height * 0.85, LEAF.core, shade(0.95, c.y), UP);
+    }
+    this.card(c.clone().setY(c.y + height * 0.1), UP, r.range(0, Math.PI), radius * 1.4, radius * 1.4, LEAF.core, shade(1, c.y), UP);
+    // Clumps over the surface, fewer underneath.
+    const area = 4 * Math.PI * Math.pow((radius * radius * radius * height * 0.52) ** (1 / 3), 2);
+    const size = Math.min(0.55, 0.3 + Math.min(radius, height) * 0.14) * (kind === "box" ? 0.85 : 1);
+    const clumps = Math.max(5, Math.round(((area * 0.75) / (size * size * 5)) * density * 1.9));
+    const cells = kind === "box" ? [LEAF.small, LEAF.small, LEAF.box] : [LEAF.shrub, LEAF.shrub2, LEAF.shrub];
+    for (let i = 0; i < clumps; i++) {
+      const d = new Vector3(r.range(-1, 1), r.range(-0.45, 1), r.range(-1, 1));
+      if (d.lengthSq() < 0.05) d.set(0, 1, 0);
+      d.normalize();
+      const hub = c.clone().add(d.clone().multiply(R).multiplyScalar(0.86));
       const out = d.clone().divide(R).normalize();
-      const n = out.clone().multiplyScalar(0.6).add(new Vector3(r.range(-0.5, 0.5), r.range(0.1, 0.8), r.range(-0.5, 0.5))).normalize();
-      const s = size * r.range(0.8, 1.2);
-      this.card(p, n, r.range(0, Math.PI * 2), s, s, cell, tint, n.clone().multiplyScalar(0.35).addScaledVector(out, 0.65).normalize());
+      const per = r.int(4, 6);
+      for (let k = 0; k < per; k++) {
+        const j = new Vector3(r.range(-1, 1), r.range(-0.7, 0.7), r.range(-1, 1)).multiplyScalar(size * 0.45);
+        const p = hub.clone().add(j).addScaledVector(out, r.range(-0.12, 0.08));
+        const n = out.clone().multiplyScalar(0.65).add(new Vector3(r.range(-0.45, 0.45), r.range(0.15, 0.7), r.range(-0.45, 0.45))).normalize();
+        const s = size * r.range(0.8, 1.15);
+        // Cards nearer the core sit in its shade.
+        const depth = p.clone().sub(c).divide(R).length();
+        this.card(p, n, r.range(0, Math.PI * 2), s, s, r.pick(cells), shade(0.8 + 0.25 * Math.min(1, depth), p.y), n.clone().multiplyScalar(0.3).addScaledVector(out, 0.7).normalize());
+      }
     }
   }
 
@@ -199,7 +223,7 @@ export class Greenery {
     const r = this.r;
     const cell = LEAF[kind];
     const w = kind === "tall" ? h * 0.55 : h;
-    const tint = this.tint(0.82, 1.0, r.range(0, 1));
+    const tint = kind === "tall" ? this.tint(0.82, 1.0, r.range(0, 1)) : this.tint(0.55, 0.75, r.range(0, 0.6));
     const spin = r.range(0, Math.PI);
     for (let k = 0; k < 2; k++) {
       const a = spin + (k * Math.PI) / 2;
@@ -212,10 +236,12 @@ export class Greenery {
 
   /**
    * The ragged outline of a clipped hedge running along `path` (ground
-   * points), `width` × `height`: leaf mats along both top edges and the
-   * crown, tilted outward, so the box reads as clipped foliage.
+   * points), `width` × `height`: leaf mats 2 cm proud of the upper band of
+   * both faces, facing out, and mats lying flat on and just above the
+   * crown, which break its outline. Nothing is tilted toward the path, so a
+   * view along the hedge sees the mats edge-on instead of as slivers.
    */
-  hedgeEdge(path: Vector3[], width: number, height: number, spacing = 0.4): void {
+  hedgeEdge(path: Vector3[], width: number, height: number, spacing = 0.3): void {
     const r = this.r;
     const tint = this.tint(0.8, 0.95);
     for (let i = 0; i < path.length - 1; i++) {
@@ -226,21 +252,21 @@ export class Greenery {
       const side = new Vector3(-t.z, 0, t.x);
       for (let s = 0; s < len; s += spacing * r.range(0.7, 1.3)) {
         const p = a.clone().lerp(b, s / len);
-        // Mats on both faces near the top and on the shoulders, a few on the crown: flush with the
-        // box and 3–6 cm proud of it, so the outline breaks up without reading as balls.
         for (const k of [-1, 1]) {
           const face = side.clone().multiplyScalar(k);
-          const out = face.clone().multiplyScalar(0.9).addScaledVector(UP, r.range(0.1, 0.45)).normalize();
-          const c = p.clone().addScaledVector(face, width / 2 + r.range(0.03, 0.06)).setY(p.y + height - r.range(0.12, 0.35));
-          this.card(c, out, r.range(0, Math.PI * 2), r.range(0.32, 0.45), r.range(0.32, 0.45), LEAF.hedge, tint, out);
-          const sh = face.clone().multiplyScalar(0.6).addScaledVector(UP, 0.8).normalize();
-          const c2 = p.clone().addScaledVector(face, width / 2 - 0.05).setY(p.y + height - 0.02);
-          this.card(c2, sh, r.range(0, Math.PI * 2), r.range(0.3, 0.42), r.range(0.3, 0.42), LEAF.hedge, tint, sh);
+          const n = face.clone().addScaledVector(UP, r.range(0.05, 0.2)).normalize();
+          // On the face's upper band, its top edge level with the crown; shaded like the face, a
+          // little darker, so mats seen edge-on along the path do not flash.
+          const mh = r.range(0.2, 0.28);
+          const c = p.clone().addScaledVector(face, width / 2 + r.range(0.015, 0.03)).setY(p.y + height * 0.9 - mh / 2 + 0.03);
+          this.card(c, n, r.range(-0.25, 0.25), r.range(0.3, 0.42), mh, LEAF.hedge, [tint[0] * 0.85, tint[1] * 0.85, tint[2] * 0.85], face);
         }
-        if (r.chance(0.35)) {
-          const c = p.clone().addScaledVector(side, r.range(-0.2, 0.2) * width).setY(p.y + height + 0.03);
-          const n = UP.clone().addScaledVector(side, r.range(-0.3, 0.3)).normalize();
-          this.card(c, n, r.range(0, Math.PI * 2), r.range(0.3, 0.45), r.range(0.3, 0.45), LEAF.hedge, tint, UP);
+        if (r.chance(0.6)) {
+          // On the crown, following its fall to the shoulders (slope.ts lofts the top 10 % lower there).
+          const lat = r.range(-0.3, 0.3);
+          const c = p.clone().addScaledVector(side, lat * width).setY(p.y + height * (1 - 0.2 * Math.abs(lat)) + 0.015);
+          const n = UP.clone().addScaledVector(side, lat * 0.6).normalize();
+          this.card(c, n, r.range(0, Math.PI * 2), r.range(0.24, 0.34), r.range(0.24, 0.34), LEAF.hedge, [tint[0] * 0.95, tint[1] * 0.95, tint[2] * 0.95], n);
         }
       }
     }
@@ -259,6 +285,7 @@ export class Greenery {
     const m = w.mesh(g, foliageMaterial(w.lib), 0, 0, 0, w.root, { cast: true });
     m.userData.noBatch = true;
     m.name = name;
+    console.info(`[kamakura:plants] ${name}: ${this.triangles} triangles`);
     return m;
   }
 }

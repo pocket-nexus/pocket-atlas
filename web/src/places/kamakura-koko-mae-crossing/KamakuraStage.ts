@@ -10,6 +10,7 @@ import {
   PerspectiveCamera,
   PMREMGenerator,
   Scene,
+  type ShaderMaterial,
   Vector3,
   WebGLCubeRenderTarget,
   type Texture,
@@ -32,7 +33,7 @@ import { bearing, COAST, GEO, LOOP, PLATFORM, SUN, VIEW } from "./world/layout";
 import { buildPeople } from "./world/people";
 import { buildProps } from "./world/props";
 import { buildSea, WATER } from "./world/sea";
-import { bakeClouds, buildSky, SKY, skyColor } from "./world/sky";
+import { bakeClouds, buildSky, DAYLIGHT, SKY } from "./world/sky";
 import { buildSlope } from "./world/slope";
 import { buildTerrain, hillY } from "./world/terrain";
 import { buildTraffic } from "./world/traffic";
@@ -229,7 +230,7 @@ export class KamakuraStage implements Stage {
    */
   private addLights(): void {
     const q = this.ctx.quality;
-    const sun = (this.sun = new DirectionalLight(0xfff0da, 10.0));
+    const sun = (this.sun = new DirectionalLight(DAYLIGHT.sunColor, DAYLIGHT.sunIntensity));
     sun.name = "sun";
     const center = new Vector3(0, 2, -22);
     sun.position.copy(center).addScaledVector(this.sunDir, 160);
@@ -263,12 +264,11 @@ export class KamakuraStage implements Stage {
     cam.far = -lo.z + 5;
     cam.updateProjectionMatrix();
     this.world.root.add(sun);
-    // Hemisphere: the sky's average from above, sun-warmed asphalt and sand below.
-    const skyAvg = skyColor(new Vector3(0, 1, 0)).multiplyScalar(0.35).add(skyColor(new Vector3(0, 0.25, 1).normalize()).multiplyScalar(0.65));
-    this.world.root.add(new HemisphereLight(skyAvg, 0x8f8270, 0.54));
+    // Hemisphere: grey-blue sky fill from above, sunlit asphalt and sand below.
+    this.world.root.add(new HemisphereLight(DAYLIGHT.hemiSky, DAYLIGHT.hemiGround, DAYLIGHT.hemiIntensity));
     // A bright, slightly hazy afternoon: a touch under unit exposure keeps the
     // white villas and the cream train out of the shoulder of the ACES curve.
-    this.ctx.renderer.toneMappingExposure = 0.94;
+    this.ctx.renderer.toneMappingExposure = DAYLIGHT.exposure;
   }
 
   /** Renders the finished place into a cube map once; PMREM makes it the IBL. */
@@ -279,7 +279,11 @@ export class KamakuraStage implements Stage {
     cube.position.set(...this.envPosition);
     this.scene.add(cube);
     renderer.shadowMap.needsUpdate = true;
+    // The probe sees a less saturated upper sky (see DAYLIGHT); the dome keeps its own.
+    const probe = (this.sky.sky.material as ShaderMaterial).uniforms.uProbe;
+    probe.value = DAYLIGHT.probeSky;
     cube.update(renderer, this.scene);
+    probe.value = 0;
     this.scene.remove(cube);
     const pmrem = new PMREMGenerator(renderer);
     this.env = pmrem.fromCubemap(rt.texture).texture;
@@ -287,7 +291,7 @@ export class KamakuraStage implements Stage {
     if (this.ctx.params.exporting) this.envCube = rt;
     else rt.dispose();
     this.scene.environment = this.env;
-    this.scene.environmentIntensity = 0.85;
+    this.scene.environmentIntensity = DAYLIGHT.environmentIntensity;
   }
 
   /** `window.pocketAtlasExport()` → glTF, sky probe and cloud panorama for the cooker. */

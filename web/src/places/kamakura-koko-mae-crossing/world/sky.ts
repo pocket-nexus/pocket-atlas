@@ -41,6 +41,34 @@ export const SKY = {
   fadeElevation: 0.03,
 };
 
+/**
+ * The afternoon's light balance (July, 15:20, sun 40° up in the west). The
+ * cooker bakes the hemisphere, the probe and sky occlusion into the
+ * handheld's vertices and lights the sun per pixel, so these numbers set the
+ * device's balance too.
+ *
+ * Shade in the photos is a soft grey-blue at about two thirds of the sunlit
+ * value (asphalt #5f6873 beside #a49e93): sky light plus the bounce off
+ * sunlit asphalt, walls and the hill, through a camera's tone curve. The
+ * dome's zenith (0.035, 0.2, 0.78) reproduces the photographed sky, but as
+ * the probe's light it filled the shaded road with blue at three times red
+ * (#2d446a on screen). So the probe is captured with the sky above 17° moved
+ * toward its luminance grey (`probeSky` of the way above 49°; the band the
+ * sea reflects keeps its colour), and the hemisphere carries most of the
+ * fill: a grey-blue sky (0.56 of the sun's irradiance on level ground) and
+ * the bounce of sunlit asphalt below.
+ */
+export const DAYLIGHT = {
+  sunColor: 0xffecd4,
+  sunIntensity: 6.2,
+  hemiSky: new Color(0.58, 0.67, 0.84),
+  hemiGround: new Color(0.62, 0.53, 0.4),
+  hemiIntensity: 2.9,
+  environmentIntensity: 0.85,
+  probeSky: 0.8,
+  exposure: 0.94,
+};
+
 const CLOUD_BAKE = /* glsl */ `
 uniform vec3 uSun;
 uniform float uSeaCover;
@@ -284,6 +312,7 @@ uniform float uDrift;
 uniform float uTime;
 uniform float uHalfRows;
 uniform sampler2D uClouds;
+uniform float uProbe;
 varying vec3 vDir;
 #define PI 3.14159265
 void main() {
@@ -291,6 +320,9 @@ void main() {
   float h = d.y;
   vec3 col = mix(uHorizon, uZenith, pow(clamp(h, 0.0, 1.0) + 1e-5, uPower));
   col = h < 0.0 ? mix(uHorizon, uGround, clamp(-h * 6.0, 0.0, 1.0)) : col;
+  // Light-probe capture only: the sky above 17° moves toward its luminance
+  // grey (all of uProbe above 49°); the band the sea reflects is unchanged.
+  col = mix(col, vec3(dot(col, vec3(0.2126, 0.7152, 0.0722))), uProbe * smoothstep(0.3, 0.75, h));
   float mu = dot(d, uSunDir);
   col += uSun * uGlow * (0.35 * pow(max(mu, 0.0), 6.0) + pow(max(mu, 0.0), 48.0));
   col += uSun * uDisc * smoothstep(0.99995, 0.99999, mu);
@@ -329,6 +361,7 @@ export function buildSky(w: KamakuraWorld, sunDir: Vector3, clouds: Texture): { 
       uTime: { value: 0 },
       uHalfRows: { value: size / 2 },
       uClouds: { value: clouds },
+      uProbe: { value: 0 },
     },
     vertexShader: VERT,
     fragmentShader: FRAG,

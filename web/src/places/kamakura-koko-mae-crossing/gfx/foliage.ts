@@ -7,15 +7,18 @@ import type { CoastLib } from "./materials";
  * Leaf atlas for the gardens, the park and the grass banks: one 1024² canvas
  * drawn leaf by leaf, cut out by alpha test (BC3 on the handheld). Cells:
  *
- *   fan      fan-palm leaf (シュロ): a pleated fan of 44 segments with split, drooping tips
- *   shrub    broadleaf spray (トベラ): obovate glossy leaves in whorls at twig ends
+ *   fan      fan-palm leaf (シュロ): a pleated fan of 52 segments with split, drooping tips
  *   cycad    cycad frond (ソテツ): a rachis with stiff needle leaflets swept forward
  *   tall     tall grass (ススキ / チガヤ): long arching blades from one root
- *   hedge    clipped-hedge leaf mat for the hedges' ragged outline
- *   grass    short lawn-edge tuft
+ *   shrub    broadleaf clump (トベラ): five or six rosettes of 4–6 cm glossy leaves at twig ends, gaps between
+ *   shrub2   the same with pale new growth on top
+ *   small    small-leaved clump (ツツジ / ツゲ): sub-clusters of 1.5–2.5 cm leaves
+ *   core     a shrub's shaded interior: dense dark leaves, ragged edge
+ *   hedge    clipped-hedge leaf mat (small leaves) for the hedges' ragged outline
+ *   grass    short lawn-edge tuft of thin blades
  *   palmBark fibrous palm trunk (opaque)
  *   cycadBark scaled cycad trunk (opaque)
- *   box      small-leaved shrub (ツツジ / ツゲ) clump, darker
+ *   box      small-leaved shrub clump, darker
  */
 export interface Cell {
   u0: number;
@@ -29,7 +32,10 @@ const px = (x: number, y: number, w: number, h: number): Cell => ({ u0: x / SIZE
 
 export const LEAF = {
   fan: px(0, 0, 512, 512),
-  shrub: px(512, 0, 512, 512),
+  shrub: px(512, 0, 256, 256),
+  shrub2: px(768, 0, 256, 256),
+  small: px(512, 256, 256, 256),
+  core: px(768, 256, 256, 256),
   cycad: px(0, 512, 256, 512),
   tall: px(256, 512, 256, 512),
   hedge: px(512, 512, 256, 256),
@@ -101,22 +107,26 @@ function fanPalm(g: Ctx, r: Rng): void {
   g.moveTo(cx, 508);
   g.lineTo(cx, hy + 6);
   g.stroke();
-  const n = 52;
+  const n = 48;
   for (let i = 0; i < n; i++) {
     const t = i / (n - 1);
-    // Fan spans 240° centred on up; outer segments droop.
+    // Fan spans 240° centred on up; outer segments droop. Each segment is a narrow pleated
+    // blade split from its neighbours over the outer half, so light shows between them.
     const a = (-120 + t * 240) * (Math.PI / 180) + r.range(-0.02, 0.02);
     const edge = Math.abs(t - 0.5) * 2;
     const len = r.range(215, 250) * (1 - edge * 0.1);
     const droop = (t < 0.5 ? -1 : 1) * (0.25 + edge * 0.5) + r.range(-0.1, 0.1);
-    const light = 26 + r.range(-4, 6) + (1 - edge) * 6;
-    blade(g, cx, hy, a, len * 0.78, 19, droop * 0.5, hsl(r.range(86, 96), r.range(34, 44), light - 2));
-    // Pleat highlight.
-    blade(g, cx, hy, a + 0.012, len * 0.7, 3, droop * 0.5, hsl(84, 30, light + 14, 0.6));
+    const light = 27 + r.range(-4, 6) + (1 - edge) * 6;
+    const hue = r.range(84, 96);
+    // Joined base (a solid inner disc) and the free outer segment.
+    blade(g, cx, hy, a, len * 0.42, 22, droop * 0.15, hsl(hue, r.range(34, 44), light - 3));
+    blade(g, cx, hy, a, len * 0.8, 11, droop * 0.5, hsl(hue, r.range(34, 44), light - 1));
+    // Pleat highlight down the segment's midrib.
+    blade(g, cx, hy, a + 0.01, len * 0.72, 2.5, droop * 0.5, hsl(84, 30, light + 15, 0.6));
     // Split tip: two thin drooping ends past the fan's rim.
-    const ex = cx + Math.sin(a) * len * 0.74;
-    const ey = hy - Math.cos(a) * len * 0.74;
-    for (const s of [-0.12, 0.12]) blade(g, ex, ey, a + s + droop * 0.4, len * 0.3, 4, droop * 0.9, hsl(r.range(80, 92), 36, light - 2));
+    const ex = cx + Math.sin(a) * len * 0.76;
+    const ey = hy - Math.cos(a) * len * 0.76;
+    for (const sp of [-0.14, 0.14]) blade(g, ex, ey, a + sp + droop * 0.4, len * 0.26, 3.5, droop * 0.9, hsl(r.range(80, 92), 36, light - 3));
   }
   // Hastula: the dark crease at the fan's centre.
   g.fillStyle = "#3a4520";
@@ -125,39 +135,71 @@ function fanPalm(g: Ctx, r: Rng): void {
   g.fill();
 }
 
-function shrubSpray(g: Ctx, r: Rng, ox: number, oy: number, size: number, count: number, h: number, l: number, leafLen: [number, number]): void {
+/**
+ * A clump of rosettes: `n` twig tips packed into a rounded, lumpy patch of
+ * the cell, each a whorl of leaves radiating from the tip, lit from above
+ * (upper leaves lighter, a darker back layer), with small gaps between
+ * rosettes so the card's outline breaks up.
+ */
+function clump(g: Ctx, r: Rng, ox: number, oy: number, size: number, o: { n: number; leaves: [number, number]; len: [number, number]; h: number; s: number; l: number; fresh?: number; glossy?: boolean }): void {
   const cx = ox + size / 2;
   const cy = oy + size / 2;
-  const R = size * 0.44;
-  // Twigs from the lower middle, ending in whorls of leaves.
-  const tips: [number, number][] = [];
   g.lineCap = "round";
-  for (let i = 0; i < 9; i++) {
-    const a = -Math.PI / 2 + (i - 4) * 0.33 + r.range(-0.12, 0.12);
-    const d = R * r.range(0.55, 0.95);
-    const tx = cx + Math.cos(a) * d;
-    const ty = cy + 20 + Math.sin(a) * d;
-    g.strokeStyle = "#4a3a2a";
-    g.lineWidth = r.range(2, 4) * (size / 512);
-    g.beginPath();
-    g.moveTo(cx, oy + size - 12);
-    g.quadraticCurveTo((cx + tx) / 2 + r.range(-20, 20), (oy + size + ty) / 2, tx, ty);
-    g.stroke();
-    tips.push([tx, ty]);
+  // Tips: a few lobes (sub-clumps), rosettes packed round each.
+  const lobes: [number, number, number][] = [];
+  for (let k = 0; k < 5; k++) {
+    const a = (k / 5) * Math.PI * 2 + r.range(-0.4, 0.4);
+    const d = size * r.range(0.14, 0.25);
+    lobes.push([cx + Math.cos(a) * d, cy + Math.sin(a) * d * 0.9, size * r.range(0.15, 0.21)]);
   }
-  for (let i = 0; i < count; i++) {
-    // Most leaves sit on the outer shell, so the spray reads as a rounded mass.
+  const tips: [number, number, number, number][] = [];
+  for (let k = 0; k < o.n; k++) {
+    const [lx, ly, lr] = lobes[k % lobes.length];
     const a = r.range(0, Math.PI * 2);
-    const d = R * Math.pow(r.next(), 0.45);
-    const [tx, ty] = tips[i % tips.length];
-    const x = r.chance(0.55) ? tx + r.range(-R * 0.25, R * 0.25) : cx + Math.cos(a) * d;
-    const y = r.chance(0.55) ? ty + r.range(-R * 0.25, R * 0.25) : cy + Math.sin(a) * d * 0.92;
-    if (Math.hypot(x - cx, y - cy) > R * 1.05) continue;
+    const d = Math.sqrt(r.next()) * lr;
+    tips.push([lx + Math.cos(a) * d, ly + Math.sin(a) * d, r.range(0.8, 1.15), r.range(-8, 6)]);
+  }
+  // Short twigs into each rosette, mostly hidden by the leaves.
+  for (const [tx, ty] of tips) {
+    g.strokeStyle = "#3e3226";
+    g.lineWidth = 1.4 * (size / 256);
+    g.beginPath();
+    g.moveTo(tx + (cx - tx) * 0.35, ty + (cy + size * 0.2 - ty) * 0.35);
+    g.lineTo(tx, ty);
+    g.stroke();
+  }
+  // Back leaves first (darker, deeper), then the front ones; upper rosettes lighter.
+  for (const pass of [0, 1]) {
+    for (const [tx, ty, sc, dl] of tips) {
+      const count = r.int(o.leaves[0], o.leaves[1]);
+      const high = 1 - (ty - oy) / size;
+      for (let i = 0; i < count; i++) {
+        const a = (i / count) * Math.PI * 2 + r.range(-0.3, 0.3);
+        const up = 0.5 - 0.5 * Math.sin(a);
+        g.save();
+        g.translate(tx + r.range(-2, 2), ty + r.range(-2, 2));
+        g.rotate(a + Math.PI / 2);
+        const fresh = o.fresh && pass && up > 0.5 && high > 0.45 && r.chance(o.fresh);
+        // Each rosette its own light (some in a neighbour's shade), the back layer darker.
+        const l = o.l + dl + (pass ? 0 : -11) + up * 6 + high * 5 + r.range(-4, 4);
+        leaf(g, r.range(o.len[0], o.len[1]) * sc * (pass ? 1 : 1.1), fresh ? o.h - 14 : o.h + r.range(-6, 6), fresh ? o.s + 12 : o.s + r.range(-5, 5), fresh ? l + 12 : l, o.glossy ?? true);
+        g.restore();
+      }
+    }
+  }
+}
+
+/** A shrub's shaded interior: dense leaves filling the cell to a ragged edge, dark. */
+function coreMat(g: Ctx, r: Rng, ox: number, oy: number, size: number): void {
+  const cx = ox + size / 2;
+  const cy = oy + size / 2;
+  for (let i = 0; i < 900; i++) {
+    const a = r.range(0, Math.PI * 2);
+    const d = Math.pow(r.next(), 0.6) * size * 0.46;
     g.save();
-    g.translate(x, y);
-    g.rotate(Math.atan2(y - cy, x - cx) + Math.PI / 2 + r.range(-0.9, 0.9));
-    const up = 1 - (y - (cy - R)) / (2 * R);
-    leaf(g, r.range(leafLen[0], leafLen[1]), h + r.range(-6, 6), r.range(30, 42), l + r.range(-6, 6) + up * 6, true);
+    g.translate(cx + Math.cos(a) * d, cy + Math.sin(a) * d);
+    g.rotate(r.range(0, Math.PI * 2));
+    leaf(g, r.range(12, 20), r.range(90, 104), r.range(38, 50), r.range(15, 22), false);
     g.restore();
   }
 }
@@ -230,10 +272,14 @@ function hedgeMat(g: Ctx, r: Rng, ox: number, oy: number, size: number, h: numbe
 }
 
 function grassTuft(g: Ctx, r: Rng): void {
-  for (let i = 0; i < 90; i++) {
-    const x = 896 + r.range(-90, 90);
-    const a = r.range(-0.5, 0.5) + (x - 896) / 300;
-    blade(g, x, 764, a, r.range(60, 220), r.range(4, 7), a * r.range(0.5, 1.5), hsl(r.range(68, 95), r.range(35, 50), r.range(30, 48)));
+  for (let i = 0; i < 150; i++) {
+    const x = 896 + r.range(-80, 80);
+    const a = r.range(-0.45, 0.45) + (x - 896) / 320;
+    blade(g, x, 764, a, r.range(50, 210), r.range(2.2, 4), a * r.range(0.5, 1.6), hsl(r.range(66, 96), r.range(34, 52), r.range(24, 46)));
+  }
+  for (let i = 0; i < 14; i++) {
+    const a = r.range(-0.7, 0.7);
+    blade(g, 896 + r.range(-60, 60), 764, a, r.range(60, 160), 2.5, a * 1.4, hsl(48, 30, r.range(50, 62)));
   }
 }
 
@@ -260,14 +306,14 @@ function palmBark(g: Ctx, r: Rng): void {
 
 function cycadBark(g: Ctx, r: Rng): void {
   const [x0, y0, w, h] = [644, 772, 120, 248];
-  g.fillStyle = "#3a352c";
+  g.fillStyle = "#4a3e31";
   g.fillRect(x0 - 4, y0 - 4, w + 8, h + 8);
   // Diamond leaf-base scales.
   for (let row = 0; row < 22; row++)
     for (let col = 0; col < 9; col++) {
       const x = x0 + col * 14 + (row % 2) * 7;
       const y = y0 + row * 12;
-      g.fillStyle = hsl(r.range(30, 40), r.range(10, 20), r.range(20, 32));
+      g.fillStyle = hsl(r.range(26, 38), r.range(16, 28), r.range(26, 40));
       g.beginPath();
       g.moveTo(x, y - 6);
       g.lineTo(x + 7, y);
@@ -297,14 +343,17 @@ export function leafAtlas(lib: CoastLib): Texture {
     g.restore();
   };
   clip(LEAF.fan, () => fanPalm(g, r));
-  clip(LEAF.shrub, () => shrubSpray(g, r, 512, 0, 512, 560, 100, 22, [30, 52]));
+  clip(LEAF.shrub, () => clump(g, r, 512, 0, 256, { n: 32, leaves: [7, 10], len: [15, 22], h: 95, s: 46, l: 30 }));
+  clip(LEAF.shrub2, () => clump(g, r, 768, 0, 256, { n: 30, leaves: [7, 10], len: [15, 22], h: 92, s: 48, l: 31, fresh: 0.35 }));
+  clip(LEAF.small, () => clump(g, r, 512, 256, 256, { n: 60, leaves: [9, 13], len: [7, 11], h: 98, s: 42, l: 27, glossy: false }));
+  clip(LEAF.core, () => coreMat(g, r, 768, 256, 256));
   clip(LEAF.cycad, () => cycadFrond(g, r));
   clip(LEAF.tall, () => tallGrass(g, r));
-  clip(LEAF.hedge, () => hedgeMat(g, r, 512, 512, 256, 84, 24, [11, 18], 1500, false));
+  clip(LEAF.hedge, () => hedgeMat(g, r, 512, 512, 256, 92, 24, [7, 12], 2600, false));
   clip(LEAF.grass, () => grassTuft(g, r));
   clip(LEAF.palmBark, () => palmBark(g, r));
   clip(LEAF.cycadBark, () => cycadBark(g, r));
-  clip(LEAF.box, () => hedgeMat(g, r, 768, 768, 256, 100, 22, [10, 16], 1100, true));
+  clip(LEAF.box, () => hedgeMat(g, r, 768, 768, 256, 100, 24, [8, 13], 1700, true));
   const atlas = toTexture(c);
   atlas.name = "kamakura-leaves";
   atlases.set(lib, atlas);
