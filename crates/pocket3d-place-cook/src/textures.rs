@@ -149,14 +149,20 @@ pub struct Encoded {
     pub data: Vec<u8>,
 }
 
-/// Picks the block format for a role and encodes the full mip chain.
-pub fn encode(src: &Rgba, role: TexRole, cap: u32, alpha: bool) -> Encoded {
+/// Encodes a texture in its role's block format (BC5 normals, BC3 with
+/// alpha, BC1 otherwise). A texture split into `cells` (columns, rows) — a
+/// flipbook — stops its mip chain while a cell is still 4 texels or more
+/// across, so filtering does not mix neighbouring frames.
+pub fn encode_cells(src: &Rgba, role: TexRole, cap: u32, alpha: bool, cells: (u32, u32)) -> Encoded {
     let format = match role {
         TexRole::Normal => TexFormat::Bc5,
         _ if alpha => TexFormat::Bc3,
         _ => TexFormat::Bc1,
     };
-    encode_as(src, role, format, cap, 12)
+    let (w, h) = pow2_fit(src.w, src.h, cap);
+    let cell = (w / cells.0.max(1)).min(h / cells.1.max(1)).max(1);
+    let max_mips = if cells == (1, 1) { 12 } else { (31 - cell.leading_zeros()).saturating_sub(1).max(1) };
+    encode_as(src, role, format, cap, max_mips)
 }
 
 /// Encodes `src` in `format` with at most `max_mips` levels (down to 4×4).

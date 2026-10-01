@@ -2,6 +2,9 @@
 // gradient, the sun's glow and disc, and a cloud panorama: two 180° halves of
 // azimuth side by side in v, rows by the square root of elevation (R opacity,
 // G sunlit, B skylit; the cooker stores its rows so that v runs as on the web).
+// TWILIGHT (sun below the horizon): the afterglow band along the horizon
+// toward the sun, the anti-twilight arch opposite it and the Earth's shadow
+// under the arch (web `places/shared/sky.ts`).
 
 #define PI 3.14159265
 
@@ -15,6 +18,12 @@ uniform float4 uSkyGlow;  // sun colour × glow, wide glow weight
 uniform float4 uSkyDisc;  // sun colour × disc, disc cos outer
 uniform float4 uCloudSun; // sunlit cloud colour, wide glow exponent
 uniform float4 uCloudAmb; // skylit cloud colour, disc cos inner
+#ifdef TWILIGHT
+uniform float4 uTwBand;   // band colour, band height
+uniform float4 uTwBelt;   // belt colour, belt elevation
+uniform float4 uTwShape;  // band sun bias, band sun power, belt width, belt power
+uniform float4 uTwShadow; // shadow strength, height, power, -
+#endif
 
 float4 main(float3 vRay : TEXCOORD0) : COLOR
 {
@@ -26,6 +35,20 @@ float4 main(float3 vRay : TEXCOORD0) : COLOR
     float mu = max(dot(d, uSkySun.xyz), 0.0);
     col += uSkyGlow.rgb * (uSkyGlow.w * pow(mu, uCloudSun.w) + pow(mu, uSkyDay.w));
     col += uSkyDisc.rgb * smoothstep(uSkyDisc.w, uCloudAmb.w, mu);
+#ifdef TWILIGHT
+    {
+        float2 dh = normalize(d.xz + float2(1e-5, 1e-5));
+        float2 sh = normalize(uSkySun.xz + float2(1e-5, 1e-5));
+        float a = clamp(dot(dh, sh), -1.0, 1.0);
+        float hp = abs(h);
+        float toward = max((a + 1.0) * 0.5, 0.0);
+        float away = max((1.0 - a) * 0.5, 0.0);
+        col += uTwBand.rgb * (exp(-hp / uTwBand.w) * lerp(1.0, pow(toward + 1e-6, uTwShape.y), uTwShape.x));
+        float bz = (h - uTwBelt.w) / uTwShape.z;
+        col += uTwBelt.rgb * (exp(-bz * bz) * pow(away + 1e-6, uTwShape.w));
+        col *= 1.0 - uTwShadow.x * exp(-hp / uTwShadow.y) * pow(away + 1e-6, uTwShadow.z);
+    }
+#endif
     if (h > 0.0 && uSkyDay.z > 0.5) {
         float a01 = frac(atan2(d.x, -d.z) / (2.0 * PI) + uSkyDay.x);
         float halfIndex = floor(a01 * 2.0);

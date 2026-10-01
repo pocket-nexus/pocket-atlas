@@ -112,10 +112,10 @@ A material annotated `kind: "sign"` cooks as an unlit HDR surface. `frames`, `co
 
 ## Dusk places
 
-A `dusk-street` place is lit by its signs after sunset. Two annotations in its export carry what the cooker does not yet turn into pack data; it cooks them as plain unlit materials and the daytime sky, so the pack loads on the current renderer:
+A `dusk-street` place is lit by its signs after sunset:
 
-- **Animated signs** (`places/shared/signs.ts`): an unlit material with `extras.pocketAtlas.kind = "sign"`, its HDR `color`, and either a flipbook (`frames`, `cols`, `rows`, `fps`) or a `scroll` in UV units per second, plus `phase` (seconds). Mesh UVs address frame 0's cell in glTF UV space (v down), so frame f at place time t is ⌊(t + phase) · fps⌋ mod frames, offset by (f mod cols, ⌊f / cols⌋) / (cols, rows); a scrolling sign adds fract(scroll · (t + phase)) with repeat wrapping.
-- **Twilight sky** (`places/shared/sky.ts`): the `gradient-sun-cloudpanorama` sky with the sun below the horizon, no disc, no cloud panorama, and a `twilight` object: an afterglow `band` along the horizon weighted toward the sun's azimuth, the pink anti-twilight `belt` opposite the sun, and the Earth's `shadow` under it. The formulas are in the file header.
+- **Animated signs** (`places/shared/signs.ts`, the Signage section above): `kind: "sign"` with a flipbook or a scroll, and `phase` (seconds added to the place's clock). Mesh UVs address frame 0's cell in glTF UV space (v down). The cooker stops a flipbook texture's mip chain while a cell is still 4 texels across, so filtering does not mix frames (the Radio Kaikan band's 32 px cells keep 4 levels).
+- **Twilight sky** (`places/shared/sky.ts`): the `gradient-sun-cloudpanorama` sky with the sun below the horizon, no disc, no cloud panorama, and a `twilight` object: an afterglow `band` along the horizon weighted toward the sun's azimuth, the pink anti-twilight `belt` opposite the sun, and the Earth's `shadow` under it. The formulas are in the file header; `sky_day_f.cg` evaluates them under `TWILIGHT` (`DaySky::twilight` in the pack).
 
 Radio Kaikan at Blue Hour bakes 25 panel lights (signs, the LED band and screen, shopfronts) and 22 point and spot lights (lantern lamps, soffit downlights, under the Sobu Line bridge) into the vertices, with `bake.skyOcclusion` (48 rays within 6 m) so the street canyon darkens toward the ground; lamp pools split edges down to 0.45 m.
 

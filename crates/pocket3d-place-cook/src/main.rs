@@ -109,7 +109,8 @@ struct Cook<'a> {
 }
 
 impl<'a> Cook<'a> {
-    fn texture(&mut self, tex: gltf::Texture, role: pc::TexRole, alpha_wanted: bool, cap: u32) -> u32 {
+    /// `cells`: a flipbook's (columns, rows), (1, 1) otherwise.
+    fn texture(&mut self, tex: gltf::Texture, role: pc::TexRole, alpha_wanted: bool, cap: u32, cells: (u32, u32)) -> u32 {
         let image = tex.source().index();
         let key = (image, role as u8, alpha_wanted);
         if let Some(&i) = self.tex_keys.get(&key) {
@@ -134,7 +135,7 @@ impl<'a> Cook<'a> {
         let mean = mean.map(|m| (m / texels / 255.0) as f32);
         let src = textures::from_rgba8(img.width, img.height, &rgba, role);
         let cap = if img.width.max(img.height) >= 4096 { cap.max(2048) } else { cap };
-        let enc = textures::encode(&src, role, cap, has_alpha);
+        let enc = textures::encode_cells(&src, role, cap, has_alpha, cells);
         let data = Blobs::push(&mut self.blobs.tex, &enc.data, 4096);
         let wrap = |m: gltf::texture::WrappingMode| match m {
             gltf::texture::WrappingMode::Repeat => pc::Wrap::Repeat,
@@ -188,11 +189,28 @@ impl<'a> Cook<'a> {
         };
         let alpha_test = if m.alpha_mode() == gltf::material::AlphaMode::Mask { m.alpha_cutoff().unwrap_or(0.5) } else { 0.0 };
         let wants_alpha = blend != pc::Blend::Opaque || alpha_test > 0.0;
+        let uv_anim = {
+            let n = |k: &str, d: f64| x.get(k).and_then(|v| v.as_f64()).unwrap_or(d);
+            let frames = n("frames", 1.0).max(1.0) as u32;
+            let scroll = x.get("scroll").map(|v| {
+                let a = v.as_array().map(|a| a.iter().map(|x| x.as_f64().unwrap_or(0.0) as f32).collect::<Vec<_>>()).unwrap_or_default();
+                [a.first().copied().unwrap_or(0.0), a.get(1).copied().unwrap_or(0.0)]
+            });
+            (frames > 1 || scroll.is_some_and(|s| s != [0.0, 0.0])).then(|| pc::UvAnim {
+                cols: n("cols", frames as f64).max(1.0) as u32,
+                rows: n("rows", 1.0).max(1.0) as u32,
+                frames,
+                fps: n("fps", 8.0) as f32,
+                scroll: scroll.unwrap_or([0.0, 0.0]),
+                phase: n("phase", 0.0) as f32,
+            })
+        };
         let cap = self.tex_cap;
-        let albedo = pbr.base_color_texture().map(|t| self.texture(t.texture(), pc::TexRole::Color, wants_alpha, cap));
-        let normal = m.normal_texture().map(|t| self.texture(t.texture(), pc::TexRole::Normal, false, cap));
-        let orm = pbr.metallic_roughness_texture().map(|t| self.texture(t.texture(), pc::TexRole::Orm, false, cap));
-        let emission = m.emissive_texture().map(|t| self.texture(t.texture(), pc::TexRole::Color, false, cap));
+        let cells = uv_anim.filter(|a| a.frames > 1).map_or((1, 1), |a| (a.cols, a.rows));
+        let albedo = pbr.base_color_texture().map(|t| self.texture(t.texture(), pc::TexRole::Color, wants_alpha, cap, cells));
+        let normal = m.normal_texture().map(|t| self.texture(t.texture(), pc::TexRole::Normal, false, cap, (1, 1)));
+        let orm = pbr.metallic_roughness_texture().map(|t| self.texture(t.texture(), pc::TexRole::Orm, false, cap, (1, 1)));
+        let emission = m.emissive_texture().map(|t| self.texture(t.texture(), pc::TexRole::Color, false, cap, cells));
         let strength = m.emissive_strength().unwrap_or(1.0);
         let e = m.emissive_factor();
         let mut color = pbr.base_color_factor();
@@ -226,21 +244,6 @@ impl<'a> Cook<'a> {
             .and_then(|c| c.get("clearcoatFactor"))
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0) as f32;
-        let uv_anim = {
-            let n = |k: &str, d: f64| x.get(k).and_then(|v| v.as_f64()).unwrap_or(d);
-            let frames = n("frames", 1.0).max(1.0) as u32;
-            let scroll = x.get("scroll").map(|v| {
-                let a = v.as_array().map(|a| a.iter().map(|x| x.as_f64().unwrap_or(0.0) as f32).collect::<Vec<_>>()).unwrap_or_default();
-                [a.first().copied().unwrap_or(0.0), a.get(1).copied().unwrap_or(0.0)]
-            });
-            (frames > 1 || scroll.is_some_and(|s| s != [0.0, 0.0])).then(|| pc::UvAnim {
-                cols: n("cols", frames as f64).max(1.0) as u32,
-                rows: n("rows", 1.0).max(1.0) as u32,
-                frames,
-                fps: n("fps", 8.0) as f32,
-                scroll: scroll.unwrap_or([0.0, 0.0]),
-            })
-        };
         let name = m.name().unwrap_or("material").to_string();
         let out = pc::Material {
             name: name.clone(),
@@ -1371,6 +1374,17 @@ fn main() {
             cloud_ambient: v3(&cl["ambientColor"]),
             fade_elevation: f(cl, "fadeElevation", 0.04),
             drift: f(cl, "driftTurnsPerSecond", 0.0),
+            twilight: sky_day["twilight"].is_object().then(|| {
+                let t = &sky_day["twilight"];
+                let (b, l, sh) = (&t["band"], &t["belt"], &t["shadow"]);
+                pc::Twilight {
+                    band: v3(&b["color"]).into(),
+                    band_shape: [f(b, "height", 0.075), f(b, "sunBias", 0.85), f(b, "sunPower", 2.2)],
+                    belt: v3(&l["color"]).into(),
+                    belt_shape: [f(l, "elevation", 0.14), f(l, "width", 0.09), f(l, "power", 1.5)],
+                    shadow: [f(sh, "strength", 0.0), f(sh, "height", 0.07), f(sh, "power", 1.6)],
+                }
+            }),
         }
     });
     let px = &sx["post"];
