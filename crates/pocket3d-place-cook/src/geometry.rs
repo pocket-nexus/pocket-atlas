@@ -270,17 +270,18 @@ fn part_widths(verts: &[Vertex], tris: &[[u32; 3]]) -> Vec<f32> {
         .collect()
 }
 
-/// LOD1 (≤ 6 cm off) and LOD2 (≤ 25 cm off), nested so each level only
-/// removes triangles: with `drop_parts`, parts narrower than the level's
-/// error go (window bars, rails, small boxes, which no edge collapse can
-/// reduce), then the rest simplifies to 40 % of the level above. A level is kept when it has
-/// at most two thirds of the triangles of the level above (a draw may have
-/// only the coarse one).
-pub fn lods(verts: &[Vertex], tris: &[[u32; 3]], locked: &[bool], drop_parts: bool) -> Vec<(Vec<[u32; 3]>, f32)> {
+/// Reduced levels at most `bounds` metres off (LOD1 ≤ 6 cm and LOD2 ≤ 25 cm
+/// near the middle of a place, coarser for far chunks), nested so each
+/// level only removes triangles: with `drop_parts`, parts narrower than the
+/// level's error go (window bars, rails, small boxes, which no edge collapse
+/// can reduce), then the rest simplifies to 40 % of the level above. A level
+/// is kept when it has at most two thirds of the triangles of the level
+/// above (a draw may have only the coarse one).
+pub fn lods(verts: &[Vertex], tris: &[[u32; 3]], locked: &[bool], drop_parts: bool, bounds: &[f32]) -> Vec<(Vec<[u32; 3]>, f32)> {
     let widths = if drop_parts { part_widths(verts, tris) } else { vec![f32::MAX; verts.len()] };
     let mut out: Vec<(Vec<[u32; 3]>, f32)> = Vec::new();
     let (mut prev, mut prev_err) = (tris.to_vec(), 0.0f32);
-    for bound in [0.06f32, 0.25] {
+    for &bound in bounds {
         let kept: Vec<[u32; 3]> = prev.iter().filter(|t| widths[t[0] as usize] > bound).copied().collect();
         let mut err = if kept.len() < prev.len() { bound } else { prev_err };
         let level = match simplify(verts, &kept, 0.4, bound - prev_err, locked) {
@@ -308,6 +309,41 @@ pub fn lods(verts: &[Vertex], tris: &[[u32; 3]], locked: &[bool], drop_parts: bo
 /// Position bits, for matching vertices across attribute seams and chunks.
 pub fn pos_bits(p: Vec3) -> [u32; 3] {
     [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()]
+}
+
+/// How unevenly a triangle's texture mapping spreads texels: log2 of the
+/// ratio of the texel densities (texels per metre) along the mapping's two
+/// principal directions, and the triangle's area (m²). `texels` scales UV
+/// to texels (the texture's size). None for degenerate triangles or
+/// mappings (a constant UV).
+pub fn texel_anisotropy(p: [Vec3; 3], uv: [Vec2; 3], texels: Vec2) -> Option<(f32, f32)> {
+    let (e1, e2) = (p[1] - p[0], p[2] - p[0]);
+    let n = e1.cross(e2);
+    let area = n.length() * 0.5;
+    if area < 1e-8 {
+        return None;
+    }
+    // The triangle in its own plane: e1 along x.
+    let t1 = e1.normalize();
+    let t2 = n.normalize().cross(t1);
+    let (ax, bx, by) = (e1.length(), e2.dot(t1), e2.dot(t2));
+    let (d1, d2) = ((uv[1] - uv[0]) * texels, (uv[2] - uv[0]) * texels);
+    // J · [a b] = [d1 d2] with a = (ax, 0), b = (bx, by).
+    let det = ax * by;
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    let c0 = d1 / ax;
+    let c1 = (d2 - c0 * bx) / by;
+    // Singular values of J = [c0 c1]: σ1² + σ2² = f, σ1 σ2 = g.
+    let f = c0.length_squared() + c1.length_squared();
+    let g = (c0.x * c1.y - c1.x * c0.y).abs();
+    let disc = (f * f * 0.25 - g * g).max(0.0).sqrt();
+    let (s1, s2) = ((f * 0.5 + disc).sqrt(), (f * 0.5 - disc).max(0.0).sqrt());
+    if s1 < 1e-6 || s2 < 1e-6 * s1 {
+        return None;
+    }
+    Some(((s1 / s2).log2(), area))
 }
 
 pub fn split(verts: &[Vertex], tris: &[[u32; 3]]) -> Vec<(Vec<Vertex>, Vec<[u32; 3]>)> {

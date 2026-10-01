@@ -1,6 +1,7 @@
 // HDR colour × texture × vertex colour, no lighting (signs, screens, lamps).
 //
-// Defines: ALBEDO_MAP, VERTEX_COLOR, FOG, ALPHA_TEST, BLEND (alpha-blended:
+// Defines: ALBEDO_MAP, VERTEX_COLOR, FOG, VISTA (the vista haze from the
+// vertex stage in place of the fog), ALPHA_TEST, BLEND (alpha-blended:
 // opacity in alpha instead of the eye distance), REFLECTION.
 
 #include "common.cgh"
@@ -14,6 +15,9 @@ uniform float4 uFog;
 float4 main(
     float3 vWorld : TEXCOORD0,
     float2 vUv : TEXCOORD3,
+#ifdef VISTA
+    half4 vHaze : TEXCOORD7,
+#endif
     half4 vColor : COLOR0) : COLOR
 {
     float4 c = uBase;
@@ -28,7 +32,9 @@ float4 main(
     if (c.a < uEmissive.w) discard;
 #endif
     float dist = length(uEye.xyz - vWorld);
-#ifdef FOG
+#if defined(VISTA)
+    c.rgb = c.rgb * vHaze.a + vHaze.rgb;
+#elif defined(FOG)
     c.rgb = lerp(c.rgb, uFog.rgb, fogFactor(dist, uFog.w));
 #endif
 #if defined(BLEND)

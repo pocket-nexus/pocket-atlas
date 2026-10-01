@@ -1,0 +1,48 @@
+// Vista haze (`dusk-vista` places; web places/shared/haze.ts), per vertex.
+// Extinction ρ0 up to the inversion top H, ρ0 · e^(−(y − H)/s) above; with G
+// its antiderivative, the optical depth to a point d metres away is
+// d · (G(y_p) − G(y_e)) / (y_p − y_e) and T = e^(−τ). A surface keeps
+// c · T + inscatter · (1 − T) with inscatter = gain · (base + w · sun) +
+// glow · ρ(y_p)/ρ0, base and sun the two parts of the sky on the horizon
+// toward the point (gradient horizon and belt; glow lobes and afterglow
+// band, both under the Earth's shadow) and w = band + (1 − band) · (1 − T),
+// so far terrain meets the sky's horizon in every azimuth. Additive
+// surfaces and lights take c · T. The horizon depends only on the azimuth
+// to the sun: the renderer tabulates both parts (`VistaHaze::sky_tables`)
+// at sqrt((1 − a)/2) = k/16, a the azimuth cosine, which spaces the knots
+// finest toward the afterglow.
+
+uniform float4 uVista;           // ρ0, H, 1 / (s · ln 2), ρ0 · s
+uniform float4 uVistaEye;        // eye y, G(y_e), ρ(y_e), -
+uniform float4 uVistaSun;        // horizontal direction toward the sun (x, z), -, -
+uniform float4 uVistaGlow;       // city glow in the haze layer (linear), band
+uniform float4 uVistaSky[17];    // gain × the horizon's base part at the knots
+uniform float4 uVistaSunSky[17]; // gain × the horizon's sun side at the knots
+
+// T toward the world point p at distance d; rho = ρ(y_p) / ρ0.
+float vistaTransmittance(float3 p, float d, out float rho)
+{
+    float above = p.y - uVista.y;
+    rho = exp2(-max(above, 0.0) * uVista.z);
+    float G = above > 0.0 ? uVista.x * uVista.y + uVista.w * (1.0 - rho) : uVista.x * p.y;
+    float dy = p.y - uVistaEye.x;
+    float tau = abs(dy) < 0.01 ? d * uVistaEye.z : d * (G - uVistaEye.y) / dy;
+    return exp2(-max(tau, 0.0) * 1.442695);
+}
+
+// (inscatter · (1 − T), T) toward the world point p.
+half4 vistaHaze(float3 p, float3 eye)
+{
+    float3 v = p - eye;
+    float d = length(v);
+    float rho;
+    float T = vistaTransmittance(p, d, rho);
+    float2 h = v.xz * rsqrt(max(dot(v.xz, v.xz), 1e-8));
+    float u = sqrt(saturate(0.5 - 0.5 * dot(h, uVistaSun.xy))) * 16.0;
+    float i = min(floor(u), 15.0);
+    int k = (int)i;
+    float f = u - i;
+    float w = uVistaGlow.w + (1.0 - uVistaGlow.w) * (1.0 - T);
+    float3 sky = lerp(uVistaSky[k].rgb, uVistaSky[k + 1].rgb, f) + w * lerp(uVistaSunSky[k].rgb, uVistaSunSky[k + 1].rgb, f);
+    return half4((half3)((sky + uVistaGlow.rgb * rho) * (1.0 - T)), (half)T);
+}

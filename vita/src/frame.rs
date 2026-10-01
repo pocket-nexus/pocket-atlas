@@ -74,6 +74,10 @@ pub struct Settings {
     pub detail_m: Option<f32>,
     pub lod_pixels: Option<f32>,
     pub cull_size: Option<f32>,
+    /// Light fields (measurements): overrides of every field's sprite range
+    /// (pixels of a 272-pixel-high frame).
+    pub field_min: Option<f32>,
+    pub field_max: Option<f32>,
 }
 
 impl Settings {
@@ -105,6 +109,8 @@ impl Settings {
             detail_m: None,
             lod_pixels: None,
             cull_size: None,
+            field_min: None,
+            field_max: None,
         }
     }
 }
@@ -121,6 +127,9 @@ pub struct PassStats {
     /// without baked lighting.
     pub lights: [u32; 3],
     pub unbaked: u32,
+    /// Light-field draws and the lights they drew.
+    pub fields: u32,
+    pub points: u32,
 }
 
 /// GPU time per scene, for profiling (`profile` control setting). Each scene
@@ -136,6 +145,8 @@ pub struct Timeline {
     /// sceGxmEndScene (GPU backpressure shows up in both).
     pub cpu: Vec<(&'static str, f32, f32)>,
     mark: std::time::Instant,
+    /// When the frame's first scene was handed to the GPU.
+    pub first_kick: Option<std::time::Instant>,
 }
 
 impl Timeline {
@@ -150,7 +161,7 @@ impl Timeline {
                 g::SceGxmNotification { address, value: 0 }
             })
             .collect();
-        Self { slots, value: 0, on: false, passes: Vec::new(), cpu: Vec::new(), mark: std::time::Instant::now() }
+        Self { slots, value: 0, on: false, passes: Vec::new(), cpu: Vec::new(), mark: std::time::Instant::now(), first_kick: None }
     }
 
     /// Ends the open scene on `ctx` (drawn into `target`) and, when
@@ -163,6 +174,7 @@ impl Timeline {
             // CPU time recording the scene, then inside sceGxmEndScene.
             let t = std::time::Instant::now();
             target.end(ctx, None);
+            self.first_kick.get_or_insert(t);
             let record = t.duration_since(self.mark).as_secs_f32() * 1000.0;
             self.cpu.push((name, record, t.elapsed().as_secs_f32() * 1000.0));
             self.mark = std::time::Instant::now();
@@ -181,8 +193,9 @@ impl Timeline {
 
 #[derive(Default)]
 pub struct Stats {
-    /// Main-pass triangles per material index (profiling).
+    /// Main-pass triangles and draws per material index (profiling).
     pub by_material: Vec<u32>,
+    pub draws_by_material: Vec<u32>,
     pub reflection: PassStats,
     pub main: PassStats,
     pub fx_quads: u32,
@@ -215,9 +228,14 @@ struct Mat {
     wet2: [f32; 4],
     uv_anim: Option<pc::UvAnim>,
     water: Option<pc::Water>,
+    /// Light fields: sprite range and gain, and whether the vista haze
+    /// dims them.
+    field: Option<pc::LightField>,
+    vista: bool,
 }
 
-fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: bool) -> Mat {
+/// `vista`: the place has the vista haze, which replaces the fog.
+fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: bool, vista: bool) -> Mat {
     let orm_mean = if m.kind == pc::Kind::Standard { m.orm.map(|t| textures[t as usize].mean) } else { None };
     let mut defines: Vec<&'static str> = Vec::new();
     let mut tex = [None; 4];
@@ -230,6 +248,7 @@ fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: boo
         pc::Kind::Tower => ("tower_f.cg", false),
         pc::Kind::Skyline => ("skyline_f.cg", false),
         pc::Kind::Water => ("water_f.cg", false),
+        pc::Kind::Lights => ("lights_f.cg", false),
     };
     if let Some(t) = m.albedo {
         tex[0] = Some(t as usize);
@@ -291,10 +310,10 @@ fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: boo
         defines.push("ALPHA_TEST");
     }
     if m.fog && !m.interior && matches!(m.kind, pc::Kind::Standard | pc::Kind::Unlit | pc::Kind::Glass | pc::Kind::InteriorWindow | pc::Kind::Water) {
-        defines.push("FOG");
+        defines.push(if vista { "VISTA" } else { "FOG" });
     }
     let blend = match (m.kind, m.blend) {
-        (pc::Kind::Tower, _) => BlendMode::Additive,
+        (pc::Kind::Tower | pc::Kind::Lights, _) => BlendMode::Additive,
         (pc::Kind::Glass, _) => BlendMode::Premultiplied,
         (_, pc::Blend::Opaque) => BlendMode::Opaque,
         (_, pc::Blend::Alpha) => BlendMode::Alpha,
@@ -316,7 +335,11 @@ fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: boo
         _ => m.color,
     };
     let emissive = match m.kind {
-        pc::Kind::InteriorWindow => [m.emissive[0], 0.0, 0.0, 0.0],
+        // Room intensity, then the tint (white without one).
+        pc::Kind::InteriorWindow => {
+            let t = m.tint.unwrap_or([1.0; 3]);
+            [m.emissive[0], t[0], t[1], t[2]]
+        }
         _ => [m.emissive[0], m.emissive[1], m.emissive[2], m.alpha_test],
     };
     let class = match m.kind {
@@ -327,6 +350,7 @@ fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: boo
         pc::Kind::Products => 4,
         pc::Kind::Unlit => 5,
         pc::Kind::Tower | pc::Kind::Skyline => 6,
+        pc::Kind::Lights => 8,
     };
     Mat {
         kind: m.kind,
@@ -340,7 +364,7 @@ fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: boo
         depth_write: m.depth_write && !transparent,
         transparent,
         // Glass is thin and mostly transparent in a blurred mirror image.
-        reflect: !w.planar && !matches!(m.kind, pc::Kind::Tower | pc::Kind::Glass | pc::Kind::Water),
+        reflect: !w.planar && !matches!(m.kind, pc::Kind::Tower | pc::Kind::Glass | pc::Kind::Water | pc::Kind::Lights),
         bias: m.polygon_offset.map(|p| (-p[0] as i32, -p[1] as i32)),
         tex,
         base,
@@ -360,6 +384,8 @@ fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: boo
         wet2: [1.0 / w.puddle_scale.max(0.01), d.darken, d.roughness, d.streaks],
         uv_anim: m.uv_anim,
         water: m.water,
+        field: m.lights,
+        vista: vista && m.fog,
     }
 }
 
@@ -486,6 +512,47 @@ pub struct Renderer {
     day_sky: bool,
     /// The day sky carries twilight terms (`TWILIGHT`).
     twilight: bool,
+    /// The vista haze's constant uniforms, when the place has it.
+    vista: Option<VistaConsts>,
+    /// 0, 1, 2, …: the index list every light-field draw shares.
+    field_ib: *const u16,
+    has_fields: bool,
+}
+
+/// `vista.cgh` uniforms that hold for the whole place.
+struct VistaConsts {
+    /// ρ0, H, 1 / (s · ln 2), ρ0 · s.
+    k: [f32; 4],
+    /// Horizontal direction toward the sun.
+    sun: [f32; 4],
+    /// Glow, band.
+    glow: [f32; 4],
+    /// `gain` × the horizon's base part and sun side at the tables' knots.
+    sky: [f32; 4 * pc::VistaHaze::SKY_KNOTS],
+    sun_sky: [f32; 4 * pc::VistaHaze::SKY_KNOTS],
+}
+
+impl VistaConsts {
+    fn new(haze: &pc::VistaHaze, scene: &Scene) -> Self {
+        let a = &scene.meta.atmosphere;
+        let day = scene.meta.day_sky.as_ref();
+        let (base, side) = haze.sky_tables(day, a.sky_horizon);
+        let (mut sky, mut sun_sky) = ([0.0; 4 * pc::VistaHaze::SKY_KNOTS], [0.0; 4 * pc::VistaHaze::SKY_KNOTS]);
+        for k in 0..pc::VistaHaze::SKY_KNOTS {
+            sky[k * 4..k * 4 + 3].copy_from_slice(&base[k]);
+            sun_sky[k * 4..k * 4 + 3].copy_from_slice(&side[k]);
+        }
+        let s = day.map_or([0.0, 0.0, -1.0], |d| d.sun_direction);
+        let h = glam::Vec2::new(s[0], s[2]).normalize_or(glam::Vec2::new(0.0, -1.0));
+        let s = haze.scale.max(1e-3);
+        Self {
+            k: [haze.density, haze.inversion, 1.0 / (s * core::f32::consts::LN_2), haze.density * s],
+            sun: [h.x, h.y, 0.0, 0.0],
+            glow: [haze.glow[0], haze.glow[1], haze.glow[2], haze.band],
+            sky,
+            sun_sky,
+        }
+    }
 }
 
 /// The sun's shadow map: the static scene rendered once from the sun, its
@@ -679,11 +746,24 @@ impl Renderer {
         let beacons = fx_quads(&mut mem, beacons.len(), [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]], |i| ([0.0; 4], beacons[i], [0.0; 3]))?;
 
         let env_scene = scene.meta.atmosphere.environment_strength;
-        let has_sun = scene.meta.sun.is_some();
-        let mats: Vec<Mat> = scene.meta.materials.iter().map(|m| material(m, env_scene, &scene.meta.textures, has_sun)).collect();
-        let sun = match &scene.meta.sun {
+        // A sun below the horizon (blue hour) lights nothing directly.
+        let lit_sun = scene.meta.sun.as_ref().filter(|s| s.direction[1] > 0.0);
+        let has_sun = lit_sun.is_some();
+        let vista = scene.meta.vista_haze.as_ref().map(|h| VistaConsts::new(h, scene));
+        let mats: Vec<Mat> = scene.meta.materials.iter().map(|m| material(m, env_scene, &scene.meta.textures, has_sun, vista.is_some())).collect();
+        let sun = match lit_sun {
             Some(s) => Some(SunPass::new(&mut vram, &mut mem, s)?),
             None => None,
+        };
+        let has_fields = scene.draws.iter().any(|d| d.lights);
+        let field_ib = if has_fields {
+            let ib = mem.alloc(pc::LightPoint::PER_DRAW * 2, 16)?.cast::<u16>();
+            for i in 0..pc::LightPoint::PER_DRAW {
+                *ib.add(i) = i as u16;
+            }
+            ib as *const u16
+        } else {
+            core::ptr::null()
         };
         let has_rain = scene.meta.rain.active;
         let has_reflection = has_planar;
@@ -735,6 +815,9 @@ impl Renderer {
             has_reflection,
             day_sky: scene.meta.day_sky.is_some(),
             twilight: scene.meta.day_sky.as_ref().is_some_and(|d| d.twilight.is_some()),
+            vista,
+            field_ib,
+            has_fields,
         })
     }
 
@@ -762,6 +845,12 @@ impl Renderer {
     pub fn warm(&self, gpu: &mut Gpu, scene: &Scene) {
         let mut seen = std::collections::BTreeSet::new();
         for d in &scene.draws {
+            if d.lights {
+                let (vs, fs) = self.field_keys(d.material);
+                gpu.want(&vs);
+                gpu.want(&fs);
+                continue;
+            }
             seen.insert((variant(d), d.material));
         }
         for (v, mi) in seen {
@@ -813,6 +902,73 @@ impl Renderer {
         }
         if self.day_sky {
             gpu.want(&self.sky_key());
+        }
+    }
+
+    /// A light field's programs: the point sprite, dimmed by the vista haze
+    /// when the place has it.
+    fn field_keys(&self, material: u32) -> (Key, Key) {
+        let vs = if self.mats[material as usize].vista { Key::new("lights_v.cg", &["VISTA"]) } else { Key::new("lights_v.cg", &[]) };
+        (vs, Key::new("lights_f.cg", &[]))
+    }
+
+    /// The light fields: one point sprite per light (`lights_v.cg`), added
+    /// to the scene, depth-tested against it without writing depth. The
+    /// POINT_01UV polygon mode generates the sprite coordinate the fragment
+    /// program reads (POINTCOORD). `target_h` is the scene target's height
+    /// in pixels (the sprites' unit).
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn light_fields(&mut self, ctx: *mut g::SceGxmContext, gpu: &mut Gpu, scene: &Scene, f: &FrameConsts, planes: &[Vec4; 5], msaa: u32, target_h: f32, st: &mut PassStats) {
+        if !self.has_fields || self.settings.skip & 0x100 != 0 {
+            return;
+        }
+        let mut state = false;
+        for d in scene.draws.iter().filter(|d| d.lights) {
+            let Some(field) = self.mats[d.material as usize].field else { continue };
+            if !camera::visible(planes, d.min, d.max) {
+                st.culled += 1;
+                continue;
+            }
+            let (vs, fs) = self.field_keys(d.material);
+            let key = PipeKey { vs, fs, layout: Layout::Lights, blend: BlendMode::Additive, output: Out::Half4, msaa };
+            let Some(p) = gpu.pipeline(&key).map(|p| p as *const Pipeline) else {
+                st.missing += 1;
+                continue;
+            };
+            let p = &*p;
+            if !state {
+                g::sceGxmSetFrontDepthFunc(ctx, g::SceGxmDepthFunc_SCE_GXM_DEPTH_FUNC_GREATER_EQUAL);
+                g::sceGxmSetFrontDepthWriteEnable(ctx, g::SceGxmDepthWriteMode_SCE_GXM_DEPTH_WRITE_DISABLED);
+                g::sceGxmSetFrontDepthBias(ctx, 0, 0);
+                g::sceGxmSetCullMode(ctx, g::SceGxmCullMode_SCE_GXM_CULL_NONE);
+                g::sceGxmSetFrontPolygonMode(ctx, g::SceGxmPolygonMode_SCE_GXM_POLYGON_MODE_POINT_01UV);
+                state = true;
+            }
+            self.use_pipeline(ctx, p);
+            // The range is in pixels of a 272-pixel-high frame. Under 2
+            // pixels a sprite's samples at pixel centres no longer add up to
+            // its area: the light would flicker as it moves.
+            let k = target_h / 272.0;
+            let min = (self.settings.field_min.unwrap_or(field.min_pixels) * k).max(2.0);
+            let max = (self.settings.field_max.unwrap_or(field.max_pixels) * k).max(min);
+            let t = f.eye[3].rem_euclid(field.period);
+            let u = Uniforms::reserve(ctx, p);
+            u.set(p, U::Dequant, &d.dequant);
+            u.set(p, U::ViewProj, &f.vp);
+            u.set(p, U::Eye, &f.eye);
+            u.set(p, U::Field, &[target_h / f.tan_half, min, max, field.gain]);
+            u.set(p, U::FieldT, &[t / field.period, (t * 4.0).fract() * core::f32::consts::TAU, field.depth_pull * 0.001, 0.0]);
+            if let Some(v) = &self.vista {
+                u.set(p, U::Vista, &v.k);
+                u.set(p, U::VistaEye, &f.vista_eye);
+            }
+            g::sceGxmSetVertexStream(ctx, 0, d.vb.cast());
+            g::sceGxmDraw(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_POINTS, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, self.field_ib.cast(), d.count.min(pc::LightPoint::PER_DRAW as u32));
+            st.fields += 1;
+            st.points += d.count;
+        }
+        if state {
+            g::sceGxmSetFrontPolygonMode(ctx, g::SceGxmPolygonMode_SCE_GXM_POLYGON_MODE_TRIANGLE_FILL);
         }
     }
 
@@ -951,9 +1107,27 @@ impl Renderer {
         step
     }
 
-    /// Resolution level in use: the fixed setting, or the governor's step.
+    /// Resolution level in use: the fixed setting, or the governor's (a
+    /// boost level above step 0, or the step's).
     pub fn level(&self) -> usize {
-        if (self.settings.scale as usize) < SCALES.len() { self.settings.scale as usize } else { self.step().level }
+        if (self.settings.scale as usize) < SCALES.len() { self.settings.scale as usize } else { self.governor.level(self.profile) }
+    }
+
+    /// Feeds the governor a frame (see `Governor::feedback`); a boost level
+    /// whose targets do not fit in video memory becomes the cap.
+    ///
+    /// # Safety
+    /// Render thread, outside any scene.
+    pub unsafe fn feedback(&mut self, frame_ms: f32, gpu_ms: Option<f32>, raw_ms: f32) {
+        let p = self.profile;
+        let free = (self.settings.scale as usize) >= SCALES.len();
+        if self.governor.feedback(p, frame_ms, gpu_ms, raw_ms, free) {
+            let level = self.governor.level(p);
+            if self.ensure_level(level).is_err() {
+                self.governor.boost -= 1;
+                self.governor.boost_cap = self.governor.boost;
+            }
+        }
     }
 
     /// Switches profile: settings back to the profile's, governor to its
@@ -1008,6 +1182,7 @@ impl Renderer {
         self.timeline.passes.clear();
         self.timeline.cpu.clear();
         self.timeline.mark = t0;
+        self.timeline.first_kick = None;
 
         let aspect = W as f32 / H as f32;
         let proj = camera::projection(view.fov_y, aspect, 0.1);
@@ -1066,6 +1241,10 @@ impl Renderer {
         if self.settings.skip & 0x80 == 0 {
             self.sky(ctx, gpu, &frame, Out::Half4, msaa);
         }
+        // Lights in front of the opaque scene and the sky; glass and other
+        // blended surfaces drawn after them cover them.
+        let target_h = self.main_t(mi).height as f32;
+        self.light_fields(ctx, gpu, scene, &frame, &planes, msaa, target_h, &mut st);
         self.draw_meshes(ctx, gpu, scene, &frame, &planes, false, true, &mut st);
         if self.settings.rain && self.has_rain {
             self.particles(ctx, gpu, scene, &frame, rain);
@@ -1121,8 +1300,23 @@ impl Renderer {
             let a = &self.main_t(mi).texture as *const _;
             // Without haze buffers the prefilter's haze input is weighted out.
             let b = self.hazes.get(hi).map_or(a, |t| &t.texture as *const _);
-            let texel = [1.0 / self.main_t(mi).width as f32, 1.0 / self.main_t(mi).height as f32, 0.0, 0.0];
-            self.post(ctx, gpu, &mut *pre, "prefilter_f.cg", &[(S::Scene, a), (S::HazeTex, b)], &[(U::Texel, texel), (U::Threshold, [self.post.bloom_threshold, self.post.bloom_smoothing, haze_w, 0.0])], &frame)?;
+            // Places with light fields threshold each scene pixel (PER_PIXEL):
+            // at a 2×2 block per output pixel the taps sit on pixel centres,
+            // at larger blocks they average 2×2 each.
+            let ratio = self.main_t(mi).width as f32 / (*pre).width as f32;
+            let texel = [1.0 / self.main_t(mi).width as f32, 1.0 / self.main_t(mi).height as f32, if ratio <= 2.0 { 0.5 } else { 1.0 }, 0.0];
+            let fs = if self.has_fields { Key::new("prefilter_f.cg", &["PER_PIXEL"]) } else { Key::new("prefilter_f.cg", &[]) };
+            self.post_keyed(
+                ctx,
+                gpu,
+                &mut *pre,
+                key_v("post_v.cg", &[]),
+                fs,
+                &[(S::Scene, a), (S::HazeTex, b)],
+                &[(U::Texel, texel), (U::Threshold, [self.post.bloom_threshold, self.post.bloom_smoothing, haze_w, 0.0])],
+                &[],
+                &frame,
+            )?;
             let (d8, d16) = (&mut self.down[0] as *mut Target, &mut self.down[1] as *mut Target);
             let (u8_, u4) = (&mut self.up[0] as *mut Target, &mut self.up[1] as *mut Target);
             // (source, destination, support for upsamples)
@@ -1327,7 +1521,7 @@ impl Renderer {
         order.clear();
         for (i, d) in scene.draws.iter().enumerate() {
             let m = &self.mats[d.material as usize];
-            if m.transparent != transparent || self.settings.skip & (1 << m.class) != 0 {
+            if d.lights || m.transparent != transparent || self.settings.skip & (1 << m.class) != 0 {
                 continue;
             }
             if mirror && (!m.reflect || d.no_reflect || d.max.y < 0.05) {
@@ -1481,6 +1675,14 @@ impl Renderer {
             u.set(p, U::Ripple, &f.ripple);
             u.set(p, U::ReflOn, &[if self.settings.reflection && self.has_reflection { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0]);
             u.set(p, U::Haze, &f.skyline_haze);
+            if let Some(v) = &self.vista {
+                u.set(p, U::Vista, &v.k);
+                u.set(p, U::VistaEye, &f.vista_eye);
+                u.set(p, U::VistaSun, &v.sun);
+                u.set(p, U::VistaGlow, &v.glow);
+                u.set(p, U::VistaSky, &v.sky);
+                u.set(p, U::VistaSunSky, &v.sun_sky);
+            }
             if let Some(w) = &m.water {
                 // Offsets wrap: the wave texture repeats.
                 let t = f.eye[3];
@@ -1535,8 +1737,10 @@ impl Renderer {
             if !mirror {
                 if self.stats.by_material.len() <= mi {
                     self.stats.by_material.resize(mi + 1, 0);
+                    self.stats.draws_by_material.resize(mi + 1, 0);
                 }
                 self.stats.by_material[mi] += count / 3;
+                self.stats.draws_by_material[mi] += 1;
             }
         }
         g::sceGxmSetFrontDepthBias(ctx, 0, 0);
@@ -1612,17 +1816,20 @@ struct VsNeeds {
     screen: bool,
     /// World-plane wave coordinates instead of the mesh UV (water).
     waves: bool,
+    /// The vista haze (inscatter, transmittance).
+    vista: bool,
 }
 
 fn vs_needs(m: &Mat, tier: usize, mirror: bool) -> VsNeeds {
     let has = |d: &str| m.defines.contains(&d);
-    match m.kind {
-        pc::Kind::Standard => VsNeeds { tangent: has("NORMAL_MAP") && tier == 0 && !mirror, color: has("VERTEX_COLOR"), screen: has("PLANAR") && !mirror, waves: false },
+    let n = match m.kind {
+        pc::Kind::Standard => VsNeeds { tangent: has("NORMAL_MAP") && tier == 0 && !mirror, color: has("VERTEX_COLOR"), screen: has("PLANAR") && !mirror, ..VsNeeds::default() },
         pc::Kind::InteriorWindow | pc::Kind::Skyline => VsNeeds { tangent: true, color: true, ..VsNeeds::default() },
         pc::Kind::Unlit | pc::Kind::Products => VsNeeds { color: true, ..VsNeeds::default() },
         pc::Kind::Water => VsNeeds { color: has("SHALLOW"), waves: true, ..VsNeeds::default() },
-        pc::Kind::Glass | pc::Kind::Tower => VsNeeds::default(),
-    }
+        pc::Kind::Glass | pc::Kind::Tower | pc::Kind::Lights => VsNeeds::default(),
+    };
+    VsNeeds { vista: has("VISTA"), ..n }
 }
 
 /// `flat`: profiling variant that outputs position and world only (pairs
@@ -1636,7 +1843,7 @@ fn surface_key(variant: usize, flat: bool, n: VsNeeds) -> Key {
     if flat {
         defs.push("FLAT");
     } else {
-        for (on, d) in [(n.tangent, "TANGENT"), (n.color, "COLOR"), (n.screen, "SCREEN"), (n.waves, "WAVES")] {
+        for (on, d) in [(n.tangent, "TANGENT"), (n.color, "COLOR"), (n.screen, "SCREEN"), (n.waves, "WAVES"), (n.vista, "VISTA")] {
             if on {
                 defs.push(d);
             }
@@ -1685,6 +1892,7 @@ fn fixed_keys() -> Vec<Key> {
         Key::new("haze_f.cg", &["HAZE_LIGHTS=4"]),
         Key::new("haze_f.cg", &["HAZE_LIGHTS=6"]),
         Key::new("prefilter_f.cg", &[]),
+        Key::new("prefilter_f.cg", &["PER_PIXEL"]),
         Key::new("down_f.cg", &[]),
         Key::new("up_f.cg", &[]),
         Key::new("post_v.cg", &["GRAIN"]),
@@ -1822,6 +2030,10 @@ struct FrameConsts {
     horizon: [f32; 4],
     glow: [f32; 4],
     pixel: f32,
+    /// tan(fovY / 2).
+    tan_half: f32,
+    /// `uVistaEye` (the vista haze at the eye's height).
+    vista_eye: [f32; 4],
     env: *const g::SceGxmTexture,
     puddles: *const g::SceGxmTexture,
     ripples: *const g::SceGxmTexture,
@@ -1944,12 +2156,15 @@ impl FrameConsts {
             },
             day: scene.meta.day_sky.as_ref().map(|d| {
                 let sc = |k: f32| [d.sun_color[0] * k, d.sun_color[1] * k, d.sun_color[2] * k];
-                let g = sc(d.glow);
+                // The program weighs the tight lobe by 1: its weight moves
+                // into the colour and divides the wide lobe's.
+                let (tw, te) = if d.glow_tight[0] > 0.0 { (d.glow_tight[0], d.glow_tight[1]) } else { (1.0, 1.0e4) };
+                let g = sc(d.glow * tw);
                 let c = sc(d.disc);
                 DaySkyConsts {
-                    day: [(time * d.drift).fract(), d.fade_elevation.max(1e-3), d.clouds.is_some() as u32 as f32, d.glow_tight[1]],
+                    day: [(time * d.drift).fract(), d.fade_elevation.max(1e-3), d.clouds.is_some() as u32 as f32, te],
                     sun: [d.sun_direction[0], d.sun_direction[1], d.sun_direction[2], 0.0],
-                    glow: [g[0], g[1], g[2], d.glow_wide[0]],
+                    glow: [g[0], g[1], g[2], d.glow_wide[0] / tw],
                     disc: [c[0], c[1], c[2], d.disc_cos_outer],
                     cloud_sun: [d.cloud_sun[0], d.cloud_sun[1], d.cloud_sun[2], d.glow_wide[1]],
                     cloud_amb: [d.cloud_ambient[0], d.cloud_ambient[1], d.cloud_ambient[2], d.disc_cos_inner],
@@ -1965,6 +2180,8 @@ impl FrameConsts {
                 }
             }),
             pixel: 2.0 * ty / H as f32,
+            tan_half: ty,
+            vista_eye: scene.meta.vista_haze.as_ref().map_or([0.0; 4], |h| [view.pos.y, h.column(view.pos.y), h.density * h.relative_density(view.pos.y), 0.0]),
             env: tex(a.environment),
             puddles: tex(fx_meta.puddles),
             ripples: tex(fx_meta.ripples),

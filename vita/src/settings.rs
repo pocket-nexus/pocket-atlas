@@ -81,6 +81,7 @@ impl Prefs {
         match self.step {
             Some(k) => {
                 r.governor.step = k.min(r.profile.steps.len() - 1);
+                r.governor.boost = 0;
                 r.governor.hold = true;
             }
             None => r.governor.hold = false,

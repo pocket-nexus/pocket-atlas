@@ -6,7 +6,8 @@
 //
 // Defines: LIGHTS (0..4), ALBEDO_MAP, NORMAL_MAP, ORM_MAP, EMISSION_MAP,
 // VERTEX_COLOR, ALPHA_TEST, BLEND (alpha-blended), WET, PLANAR, DAMP,
-// CLEARCOAT, INTERIOR, FOG,
+// CLEARCOAT, INTERIOR, FOG, VISTA (the vista haze from the vertex stage
+// in place of the fog),
 // REFLECTION (mirror pass: cheaper film, no planar lookup), BAKED (static
 // diffuse lighting from the vertices; LIGHTS then counts moving lights only),
 // VERTEX_LIGHTS (lights evaluated per vertex, added to the irradiance),
@@ -120,6 +121,9 @@ half4 main(
 #ifdef VERTEX_COLOR
     half4 vColor : COLOR0,
 #endif
+#ifdef VISTA
+    half4 vHaze : TEXCOORD7,
+#endif
     float2 vUv : TEXCOORD3) : COLOR
 {
     // World positions, texture coordinates and distances stay float; the
@@ -161,7 +165,9 @@ half4 main(
         half2 dfg = DFGApprox(rough, saturate(V.y));
         half3 sky = (half3)uHemiSky.rgb * (half)uEnvK.x;
         half3 color = vLight * a.rgb + lerp(sky, refl, w) * ((half)0.04 * dfg.x + dfg.y) + (half3)uEmissive.rgb;
-#ifdef FOG
+#if defined(VISTA)
+        color = color * vHaze.a + vHaze.rgb;
+#elif defined(FOG)
         color = lerp(color, (half3)uFog.rgb, (half)fogFactor(dist, uFog.w));
 #endif
 #ifdef BLEND
@@ -376,7 +382,9 @@ half4 main(
 #endif
     color += emission;
 
-#if defined(FOG) && !defined(INTERIOR)
+#if defined(VISTA) && !defined(INTERIOR)
+    color = color * vHaze.a + vHaze.rgb;
+#elif defined(FOG) && !defined(INTERIOR)
     color = lerp(color, (half3)uFog.rgb, (half)fogFactor(dist, uFog.w));
 #endif
 #if defined(BLEND)
