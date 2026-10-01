@@ -1,0 +1,58 @@
+; Two authored wave layers, world-space scroll and a grazing sky reflection.
+; Geometry remains the same fully consumed 24-byte layout as other surfaces.
+.constf constants(0.0, 1.0, 0.00392156862745, 0.02)
+.fvec projection[4]
+.fvec model[3]
+.fvec tint
+.fvec waves0
+.fvec waves1
+.fvec water_eye
+.fvec water_sky
+.fvec water_params
+.in inpos v0
+.in intex v1
+.in inclr v2
+.out outpos position
+.out outtex texcoord0
+.out outtex2 texcoord1
+.out outclr color
+.entry main
+.proc main
+    dp4 r1.x, model[0], inpos
+    dp4 r1.y, model[1], inpos
+    dp4 r1.z, model[2], inpos
+    mov r1.w, constants.y
+    dp4 outpos.x, projection[0], r1
+    dp4 outpos.y, projection[1], r1
+    dp4 outpos.z, projection[2], r1
+    dp4 outpos.w, projection[3], r1
+    mul r2.xy, waves0.xx, r1.xz
+    add r2.xy, waves0.yz, r2.xy
+    mov r2.zw, constants.xy
+    mov outtex, r2
+    mul r3.xy, waves1.xx, r1.xz
+    add r3.xy, waves1.yz, r3.xy
+    mov r3.zw, constants.xy
+    mov outtex2, r3
+    add r4.xyz, water_eye.xyz, -r1.xyz
+    dp3 r4.w, r4, r4
+    rsq r4.w, r4.w
+    mul r4.y, r4.y, r4.w
+    max r4.y, r4.y, -r4.y
+    add r4.y, water_params.x, r4.y
+    min r4.y, constants.y, r4.y
+    add r4.y, constants.y, -r4.y
+    mul r4.z, r4.y, r4.y
+    mul r4.z, r4.z, r4.z
+    mul r4.y, r4.z, r4.y
+    add r4.y, constants.w, r4.y
+    min r4.y, constants.y, r4.y
+    mul r5, constants.zzzz, inclr
+    add r6.xyz, water_sky.xyz, -r5.xyz
+    mul r6.xyz, r6.xyz, r4.yyy
+    add r5.xyz, r5.xyz, r6.xyz
+    mul r5.xyz, tint.xyz, r5.xyz
+    mov r5.w, constants.y
+    mov outclr, r5
+    end
+.end

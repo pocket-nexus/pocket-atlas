@@ -16,6 +16,7 @@ mod bake;
 mod env;
 mod geometry;
 mod occlusion;
+mod pica;
 mod procedural;
 mod textures;
 
@@ -473,6 +474,17 @@ fn push_draw(b: geometry::Built, material: u32, layout: pc::VertexLayout, node: 
 }
 
 fn main() {
+    let cli: Vec<String> = std::env::args().collect();
+    if let Some(i) = cli.iter().position(|a| a == "--pica-from") {
+        let get = |k: &str| cli.iter().position(|a| a == k).and_then(|i| cli.get(i + 1));
+        pica::cook(
+            std::path::Path::new(cli.get(i + 1).expect("--pica-from PATH")),
+            std::path::Path::new(get("--out").expect("--out PATH")),
+            get("--tex").and_then(|s| s.parse().ok()).unwrap_or(256),
+        );
+        return;
+    }
+
     if std::env::args().nth(1).as_deref() == Some("atlas") {
         let argv: Vec<String> = std::env::args().collect();
         let get = |k: &str| argv.iter().position(|x| x == k).and_then(|i| argv.get(i + 1)).cloned();
