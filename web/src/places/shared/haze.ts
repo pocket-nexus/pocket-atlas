@@ -26,13 +26,18 @@ import type { SkySpec } from "./sky";
  * the point's horizontal direction to the sun's, mu = max(a · |sun.xz|, 0),
  * toward = (a + 1) / 2, away = max((1 − a) / 2, 0):
  *
+ *   w    = band + (1 − band) · (1 − T)
  *   hsky = ( mix(horizon, zenith, (1e-5)^gradientPower)
- *          + band · sunColor · glow.intensity · (wide.w · mu^wide.e + tight.w · mu^tight.e)
- *          + band · twilight.band.color · mix(1, toward^band.sunPower, band.sunBias)
+ *          + w · sunColor · glow.intensity · (wide.w · mu^wide.e + tight.w · mu^tight.e)
+ *          + w · twilight.band.color · mix(1, toward^band.sunPower, band.sunBias)
  *          + twilight.belt.color · exp(−(belt.elevation / belt.width)²) · away^belt.power )
  *        · (1 − shadow.strength · away^shadow.power)
  *
- * (`band` = 1 is the dome itself.) Additive materials (and the light field)
+ * The afterglow's share grows with the haze's optical depth: near hills toward
+ * the sunset (T ≈ 0.94) take about `band` of it and stay dark, a point
+ * infinitely far (T → 0) takes the dome's own horizon (w = 1). With gain 1 and
+ * no glow the far terrain then meets the sky at h = 0 without a step in every
+ * azimuth; a place that wants a brighter horizon puts it in the sky's terms. Additive materials (and the light field)
  * take `T` only; premultiplied ones scale the inscatter by their alpha.
  */
 export interface HazeSpec {
@@ -65,6 +70,7 @@ export interface HazeUniforms {
   uHazeBandShape: { value: [number, number] };
   uHazeBelt: { value: Color };
   uHazeTwilight: { value: [number, number, number] };
+  uHazeBandW: { value: number };
 }
 
 /**
@@ -89,6 +95,7 @@ uniform vec3 uHazeBand;
 uniform vec2 uHazeBandShape;
 uniform vec3 uHazeBelt;
 uniform vec3 uHazeTwilight;
+uniform float uHazeBandW;
 float hazeRho(float y) {
   return y <= uHaze.y ? uHaze.x : uHaze.x * exp(-(y - uHaze.y) / uHaze.z);
 }
@@ -101,26 +108,31 @@ float hazeTransmittance(vec3 eye, vec3 p) {
   float tau = abs(dy) < 0.01 ? d * hazeRho(eye.y) : d * (hazeG(p.y) - hazeG(eye.y)) / dy;
   return exp(-max(tau, 0.0));
 }
-// The sky dome (shared/sky.ts) on the horizon toward horizontal direction dxz.
-vec3 hazeSky(vec2 dxz) {
+// The sky dome (shared/sky.ts) on the horizon toward horizontal direction dxz,
+// its sun-side terms (glow lobes, twilight band) weighted by w.
+vec3 hazeSky(vec2 dxz, float w) {
   vec2 dh = normalize(dxz + vec2(1e-5));
   vec2 sh = normalize(uHazeSun.xz + vec2(1e-5));
   float a = clamp(dot(dh, sh), -1.0, 1.0);
   float mu = max(a * uHazeSun.w, 0.0);
-  vec3 col = uHazeHorizon + uHazeSunGlow * (uHazeLobes.x * pow(mu, uHazeLobes.y) + uHazeLobes.z * pow(mu, uHazeLobes.w));
   float toward = (a + 1.0) * 0.5;
   float away = max((1.0 - a) * 0.5, 0.0);
-  col += uHazeBand * mix(1.0, pow(toward, uHazeBandShape.y), uHazeBandShape.x);
+  vec3 sunSide = uHazeSunGlow * (uHazeLobes.x * pow(mu, uHazeLobes.y) + uHazeLobes.z * pow(mu, uHazeLobes.w))
+               + uHazeBand * mix(1.0, pow(toward, uHazeBandShape.y), uHazeBandShape.x);
+  vec3 col = uHazeHorizon + w * sunSide;
   col += uHazeBelt * pow(away, uHazeTwilight.x);
   col *= 1.0 - uHazeTwilight.y * pow(away, uHazeTwilight.z);
   return col;
 }
-vec3 hazeInscatter(vec3 eye, vec3 p) {
-  return uHaze.w * hazeSky(p.xz - eye.xz) + uHazeGlow * (hazeRho(p.y) / uHaze.x);
+// The afterglow's share grows with the optical depth: band near, the full
+// horizon sky for a point infinitely far (T → 0), where it meets the dome.
+vec3 hazeInscatter(vec3 eye, vec3 p, float T) {
+  float w = uHazeBandW + (1.0 - uHazeBandW) * (1.0 - T);
+  return uHaze.w * hazeSky(p.xz - eye.xz, w) + uHazeGlow * (hazeRho(p.y) / uHaze.x);
 }
 vec3 hazeApply(vec3 c, vec3 eye, vec3 p) {
   float T = hazeTransmittance(eye, p);
-  return c * T + hazeInscatter(eye, p) * (1.0 - T);
+  return c * T + hazeInscatter(eye, p, T) * (1.0 - T);
 }
 `;
 
@@ -137,9 +149,9 @@ const FRAG_MAIN = /* glsl */ `
 #if defined(HAZE_ADDITIVE)
   gl_FragColor.rgb *= hazeT;
 #elif defined(HAZE_PREMULTIPLIED)
-  gl_FragColor.rgb = gl_FragColor.rgb * hazeT + hazeInscatter(cameraPosition, vHazeWorld) * (1.0 - hazeT) * gl_FragColor.a;
+  gl_FragColor.rgb = gl_FragColor.rgb * hazeT + hazeInscatter(cameraPosition, vHazeWorld, hazeT) * (1.0 - hazeT) * gl_FragColor.a;
 #else
-  gl_FragColor.rgb = gl_FragColor.rgb * hazeT + hazeInscatter(cameraPosition, vHazeWorld) * (1.0 - hazeT);
+  gl_FragColor.rgb = gl_FragColor.rgb * hazeT + hazeInscatter(cameraPosition, vHazeWorld, hazeT) * (1.0 - hazeT);
 #endif
 }
 `;
@@ -169,12 +181,12 @@ export class Haze {
       uHazeHorizon: { value: s.horizon.clone().lerp(s.zenith, Math.pow(1e-5, s.gradientPower)) },
       uHazeSun: { value: [s.sun.x, s.sun.y, s.sun.z, sunXZ] },
       uHazeLobes: { value: [s.glow.wide[0], s.glow.wide[1], s.glow.tight[0], s.glow.tight[1]] },
-      // The sun-side terms enter the inscatter at `band` weight (folded in here; the GLSL is the dome's).
-      uHazeSunGlow: { value: s.sunColor.clone().multiplyScalar(s.glow.intensity * spec.band) },
-      uHazeBand: { value: tw ? tw.band.color.clone().multiplyScalar(spec.band) : new Color(0, 0, 0) },
+      uHazeSunGlow: { value: s.sunColor.clone().multiplyScalar(s.glow.intensity) },
+      uHazeBand: { value: tw ? tw.band.color.clone() : new Color(0, 0, 0) },
       uHazeBandShape: { value: tw ? [tw.band.sunBias, tw.band.sunPower] : [0, 1] },
       uHazeBelt: { value: tw ? tw.belt.color.clone().multiplyScalar(Math.exp(-beltZ * beltZ)) : new Color(0, 0, 0) },
       uHazeTwilight: { value: tw ? [tw.belt.power, tw.shadow.strength, tw.shadow.power] : [1, 0, 1] },
+      uHazeBandW: { value: spec.band },
     };
   }
 
@@ -247,7 +259,7 @@ export class Haze {
     return Math.exp(-Math.max(tau, 0));
   }
 
-  /** The inscatter colour toward `p` from `eye`. */
+  /** The inscatter colour toward `p` from `eye` (with the afterglow weight at that point's transmittance). */
   inscatter(eye: Vector3, p: Vector3, out = new Color()): Color {
     const u = this.uniforms;
     let dx = p.x - eye.x;
@@ -260,11 +272,14 @@ export class Haze {
     const a = Math.max(-1, Math.min(1, (dx * sx + dz * sz) / sl));
     const mu = Math.max(a * sxz, 0);
     const [ww, we, tw, te] = u.uHazeLobes.value;
-    out.copy(u.uHazeHorizon.value).add(u.uHazeSunGlow.value.clone().multiplyScalar(ww * Math.pow(mu, we) + tw * Math.pow(mu, te)));
     const toward = (a + 1) / 2;
     const away = Math.max((1 - a) / 2, 0);
     const [bias, power] = u.uHazeBandShape.value;
-    out.add(u.uHazeBand.value.clone().multiplyScalar(1 + (Math.pow(toward, power) - 1) * bias));
+    const sunSide = u.uHazeSunGlow.value.clone().multiplyScalar(ww * Math.pow(mu, we) + tw * Math.pow(mu, te));
+    sunSide.add(u.uHazeBand.value.clone().multiplyScalar(1 + (Math.pow(toward, power) - 1) * bias));
+    const T = this.transmittance(eye, p);
+    const w = this.spec.band + (1 - this.spec.band) * (1 - T);
+    out.copy(u.uHazeHorizon.value).add(sunSide.multiplyScalar(w));
     const [beltPower, shadow, shadowPower] = u.uHazeTwilight.value;
     out.add(u.uHazeBelt.value.clone().multiplyScalar(Math.pow(away, beltPower)));
     out.multiplyScalar((1 - shadow * Math.pow(away, shadowPower)) * this.spec.gain);
@@ -281,7 +296,7 @@ export class Haze {
       gain: s.gain,
       band: s.band,
       glow: s.glow.toArray().map((v) => Math.round(v * 1e5) / 1e5),
-      note: "T = exp(-d·(G(yp)−G(ye))/(yp−ye)), ρ(y) = density (y ≤ inversion) else density·exp(−(y−inversion)/scale); out = c·T + (gain·hsky + glow·ρ(yp)/density)·(1−T); hsky = the sky dome at h=0 toward p with its sun-glow lobes and twilight band × band; additive and lights: c·T. See places/shared/haze.ts",
+      note: "T = exp(-d·(G(yp)−G(ye))/(yp−ye)), ρ(y) = density (y ≤ inversion) else density·exp(−(y−inversion)/scale); out = c·T + (gain·hsky + glow·ρ(yp)/density)·(1−T); hsky = the sky dome at h=0 toward p with its sun-glow lobes and twilight band × w, w = band + (1−band)·(1−T) (so T→0 gives the dome's horizon exactly); additive and lights: c·T. See places/shared/haze.ts",
     };
   }
 }

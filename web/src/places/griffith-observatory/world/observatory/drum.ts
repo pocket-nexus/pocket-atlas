@@ -285,7 +285,8 @@ export function buildDrum(K: Kits, lib: ObsLib): DrumLights {
     prof.push([Math.cos(e) * DRUM.domeR, domeC + Math.sin(e) * DRUM.domeR]);
   }
   prof[n] = [0.001, DRUM.domeTop];
-  copper.lathe(CX, CZ, prof, 0, Math.PI * 2, 72, { uPer: 16 / (2 * Math.PI), vPer: 1 / 5 });
+  // 128 standing-seam pans (~0.6 m at the springing), 16 courses of ~1.25 m.
+  copper.pannedDome(CX, CZ, prof, 128, 1 / 5);
   // Crown vent (p17): a short drum and a cap.
   copper.lathe(
     CX,

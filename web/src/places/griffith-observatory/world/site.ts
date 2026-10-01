@@ -8,7 +8,7 @@ import type { P2 } from "./observatory/kit";
 import { COVER } from "./observatory/cover";
 import { Kits } from "./observatory/kit";
 import { DOMES, DRUM, GROUND, deckOutline } from "./observatory/plan";
-import { rosette, shrub, tree } from "./observatory/props";
+import { oak, pine, rosette, shrub, tree } from "./observatory/props";
 import { Rng } from "../../../core/random";
 import { TRAILS } from "./observatory/survey";
 import { SITE } from "./vista/terrain";
@@ -172,13 +172,16 @@ export function buildSite(w: GriffithWorld, lib: ObsLib): void {
     pos.push(x, covered(x, z) ? H[g] - 0.4 : H[g], z);
     nor.push(...groundNormal(x, z, 1));
     uv.push(x, -z);
-    // Hillside tint: dry grass ↔ bare decomposed granite ↔ dark litter, trails bare and pale.
+    // Hillside tint from the ortho's cover (bare decomposed granite and dry grass pale and
+    // warm, dense chaparral and canopy ground darker with litter), trails bare and pale.
+    // p01 reads the slope under the drum at about (14, 12, 11): warm, a little above black.
     const n = fbm(x * 0.045, z * 0.045, 4, 7);
     const t = trailDistance(x, z);
     const trail = Math.max(0, 1 - Math.max(0, t - 1.2) / 1.8);
-    const r0 = 0.85 + 0.3 * n;
-    const c = [r0, r0 * (0.96 + 0.06 * n), r0 * (0.9 + 0.05 * n)];
-    const pale = [1.25, 1.12, 0.95];
+    const cls = coverAt(x, z);
+    const base = [1.85, 1.6, 1.45, 1.25, 1.1][cls] * (0.85 + 0.3 * n);
+    const c = [base, base * (0.95 + 0.05 * n), base * (0.86 + 0.05 * n)];
+    const pale = [2.0, 1.8, 1.5];
     col.push(...c.map((v, m) => v + (pale[m] - v) * trail));
     return used[g];
   };
@@ -233,6 +236,7 @@ export function buildPlanting(w: GriffithWorld, lib: ObsLib): number {
   /** Distance to the building (its deck outline, the drum and the domes, roughly). */
   const near = (x: number, z: number) => Math.min(Math.hypot(x - DRUM.x, z - DRUM.z) - DRUM.r, Math.max(Math.abs(x) - 32, Math.abs(z + 28) - 8));
   const step = COVER.step;
+  let detailed = 0;
   for (let z = SITE.z0 + step / 2; z < SITE.z1; z += step)
     for (let x = SITE.x0 + step / 2; x < SITE.x1; x += step) {
       const d = Math.hypot(x, z + 30);
@@ -245,18 +249,99 @@ export function buildPlanting(w: GriffithWorld, lib: ObsLib): number {
       const pick = r.next();
       // Trees where the canopy is dark (thinner far out), kept off the building's flanks (p01: shrubs up to the drum's foot).
       const treeP = c === 4 ? (d < 150 ? 0.32 : 0.18) : c === 3 ? 0.04 : 0;
-      if (pick < treeP && gap > 14) {
-        tree(K, lib, px, pz, r.range(6, 10) * Math.min(1, 0.5 + gap / 70), r.chance(0.8) ? "oak" : "pine", r);
+      const h = r.range(6, 10) * Math.min(1, 0.5 + gap / 70);
+      if (pick < treeP && gap > 14 && !blocksLookout(px, pz, y + h, h * 0.6)) {
+        const isOak = r.chance(0.8);
+        // Leaf-card clusters where a shot is near (the drum lookout path, the lawn, the building); card crowns beyond.
+        if (nearShot(px, pz)) {
+          if (isOak) oak(K, lib, px, pz, h, r);
+          else pine(K, lib, px, pz, h * 1.2, r);
+          detailed++;
+        } else tree(K, lib, px, pz, h, isOak ? "oak" : "pine", r);
         continue;
       }
-      const shrubP = (c === 4 ? 0.55 : c === 3 ? 0.8 : c === 2 ? 0.6 : 0.15) * (d < 110 ? 1 : d < 180 ? 0.55 : 0.3);
+      // The slope between the Drum lookout and the building (p01): dense chaparral and scrub-oak masses.
+      const lookout = px < -12 && px > -112 && pz > -5 && pz < 58;
+      const shrubP = lookout ? (c <= 1 ? 0.55 : 0.95) : (c === 4 ? 0.55 : c === 3 ? 0.8 : c === 2 ? 0.6 : 0.15) * (d < 110 ? 1 : d < 180 ? 0.55 : 0.3);
+      const s = r.range(1.8, 3.4) * (c === 2 ? 0.8 : 1) * (lookout ? 1.3 : 1);
+      // On the lookout slope the masses may hide the drum's foot (p01) but not its lit body.
+      if (lookout && blocksLookout(px, pz, y + s * 0.7, s * 0.4, SHRUB_SIGHTS, 6)) {
+        // Low sage and dry grass where a full shrub would stand in the sightline.
+        for (let k = 0; k < 3; k++) {
+          const qx = px + r.range(-2.5, 2.5);
+          const qz = pz + r.range(-2.5, 2.5);
+          const qy = groundY(qx, qz);
+          const q = r.range(0.7, 1.2);
+          if (Math.hypot(qx - LOOKOUT[0], qz - LOOKOUT[1]) > 3 && !blocksLookout(qx, qz, qy + q * 0.55, 0.3, SHRUB_SIGHTS, 3)) shrub(leaf, r.chance(0.5) ? "sage" : "grass", qx, qy, qz, q * 1.4, q * 0.6, r, [r.range(0.8, 1.0), r.range(0.8, 0.95), r.range(0.65, 0.75)]);
+        }
+        continue;
+      }
       if (r.chance(shrubP)) {
-        const s = r.range(1.8, 3.4) * (c === 2 ? 0.8 : 1);
-        shrub(leaf, r.pick(["shrub", "shrub2", "shrub2", "sage"] as const), px, y, pz, s, s * r.range(0.55, 0.8), r, [r.range(0.62, 0.8), r.range(0.66, 0.8), r.range(0.55, 0.65)]);
+        shrub(leaf, r.pick(["shrub", "shrub2", "shrub2", "sage"] as const), px, y, pz, s, s * r.range(0.55, 0.8), r, [r.range(0.8, 1.0), r.range(0.82, 0.98), r.range(0.66, 0.78)]);
       } else if (c <= 1 && d < 120 && r.chance(0.4)) shrub(leaf, "grass", px, y, pz, r.range(0.9, 1.5), r.range(0.4, 0.7), r, [0.95, 0.9, 0.8]);
       else if (d < 90 && r.chance(0.04)) rosette(leaf, "yucca", px, y, pz, r.range(0.8, 1.2), r);
     }
+  footPlanting(K, lib, r);
   const tris = K.emit(w);
-  console.info(`[griffith] site planting: ${tris} triangles`);
+  console.info(`[griffith] site planting: ${tris} triangles, ${detailed} near trees as leaf clusters`);
   return tris;
+}
+
+/**
+ * The Drum lookout's view (p01): the camera on the hillside path and the
+ * sightlines from it to the drum and to the west dome. A tree whose crown
+ * would rise into either sightline is left out, as the lookout's clearing is.
+ */
+const LOOKOUT: [number, number] = [-101.5, 41];
+const SIGHTS: [number, number, number][] = [
+  [DRUM.x, 5.5, DRUM.z],
+  [-29.2, 12, -28.9],
+];
+function blocksLookout(x: number, z: number, top: number, radius: number, sights = SIGHTS, near = 12): boolean {
+  const [cx, cz] = LOOKOUT;
+  const ey = groundY(cx, cz) + 1.6;
+  if (Math.hypot(x - cx, z - cz) < near) return true;
+  for (const [tx, ty, tz] of sights) {
+    const dx = tx - cx;
+    const dz = tz - cz;
+    const l2 = dx * dx + dz * dz;
+    const t = Math.max(0, Math.min(1, ((x - cx) * dx + (z - cz) * dz) / l2));
+    const lateral = Math.hypot(x - cx - dx * t, z - cz - dz * t);
+    if (lateral < radius + 1.5 && t > 0 && t < 1 && top > ey + (ty - ey) * t - 1) return true;
+  }
+  return false;
+}
+
+/** Shrub sightlines from the lookout: the drum just above the promenade's foot, the west dome's drum. */
+const SHRUB_SIGHTS: [number, number, number][] = [
+  [DRUM.x, -1.5, DRUM.z],
+  [-29.2, 6, -28.9],
+];
+
+/** Within reach of a close shot: the drum lookout path (Drum), the lawn (Lawn), the building and its terraces. */
+function nearShot(x: number, z: number): boolean {
+  return Math.hypot(x + 101, z - 41) < 80 || Math.hypot(x + 12, z + 88) < 70 || Math.hypot(x - DRUM.x, z + 10) < 70;
+}
+
+/**
+ * The slope at the drum's south-west foot (p01): chaparral and a few small
+ * oaks right up to the lower drum, so the crest under it is a planted
+ * silhouette with the uplit pilaster feet just above it.
+ */
+function footPlanting(K: Kits, lib: ObsLib, r: Rng): void {
+  const leaf = K.of(lib.foliage());
+  const cov = covers();
+  for (let i = 0; i < 70; i++) {
+    const t = r.range(Math.PI * 0.3, Math.PI * 0.98);
+    const d = r.range(DRUM.r + 2.5, DRUM.r + 13);
+    const x = DRUM.x + Math.cos(t) * d;
+    const z = DRUM.z + Math.sin(t) * d;
+    if (cov.some((p) => inside(p, x, z)) || trailDistance(x, z, 4) < 1.8) continue;
+    const y = groundY(x, z);
+    if (i % 9 === 0 && d > DRUM.r + 7) oak(K, lib, x, z, r.range(4.5, 6.5), r);
+    else {
+      const s = r.range(1.8, 3.2);
+      shrub(leaf, r.pick(["shrub", "shrub2", "oak", "sage"] as const), x, y, z, s, s * r.range(0.6, 0.85), r, [r.range(0.75, 0.95), r.range(0.78, 0.94), r.range(0.62, 0.74)]);
+    }
+  }
 }

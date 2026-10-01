@@ -142,7 +142,7 @@ export function bust(K: Kits, lib: ObsLib, x: number, z: number, facing: number)
 // ------------------------------------------------------------------ railings
 
 /** Pipe railing along a polyline on the ground (posts every ~2 m, top and mid rails), on a low kerb wall if `kerb` > 0. */
-export function railing(K: Kits, lib: ObsLib, line: P2[], opts: { kerb?: number; height?: number; base?: (x: number, z: number) => number } = {}): void {
+export function railing(K: Kits, lib: ObsLib, line: P2[], opts: { kerb?: number; height?: number; base?: (x: number, z: number) => number; drop?: number } = {}): void {
   const steel = K.of(lib.steel());
   const wall = K.of(lib.wall());
   const kerb = opts.kerb ?? 0;
@@ -185,14 +185,17 @@ export function railing(K: Kits, lib: ObsLib, line: P2[], opts: { kerb?: number;
       const y0 = base(p0[0], p0[1]) + kerb;
       const y1 = base(p1[0], p1[1]) + kerb;
       if (kerb > 0) {
+        // The right-hand face (the drop side for a line run with the terrace on its left) runs `drop` m down the retaining wall.
         const g0 = groundY(p0[0], p0[1]) - 0.2;
         const g1 = groundY(p1[0], p1[1]) - 0.2;
+        const drop = opts.drop ?? 0;
         const dx = (p1[0] - p0[0]) / (len / n);
         const dz = (p1[1] - p0[1]) / (len / n);
         const ox = -dz * 0.15;
         const oz = dx * 0.15;
         for (const sgn of [-1, 1]) {
-          wall.face([p0[0] + ox * sgn, g0, p0[1] + oz * sgn], [p1[0] + ox * sgn, g1, p1[1] + oz * sgn], [p1[0] + ox * sgn, y1, p1[1] + oz * sgn], [p0[0] + ox * sgn, y0, p0[1] + oz * sgn], [ox * sgn, 0, oz * sgn], [0, g0], [1, g1], [1, y1], [0, y0]);
+          const d = sgn > 0 ? drop : 0;
+          wall.face([p0[0] + ox * sgn, g0 - d, p0[1] + oz * sgn], [p1[0] + ox * sgn, g1 - d, p1[1] + oz * sgn], [p1[0] + ox * sgn, y1, p1[1] + oz * sgn], [p0[0] + ox * sgn, y0, p0[1] + oz * sgn], [ox * sgn, 0, oz * sgn], [0, g0 - d], [1, g1 - d], [1, y1], [0, y0]);
         }
         wall.face([p0[0] - ox, y0, p0[1] - oz], [p1[0] - ox, y1, p1[1] - oz], [p1[0] + ox, y1, p1[1] + oz], [p0[0] + ox, y0, p0[1] + oz], [0, 1, 0], [0, 0], [1, 0], [1, 1], [0, 1]);
       }
@@ -331,7 +334,7 @@ export function tree(K: Kits, lib: ObsLib, x: number, z: number, h: number, kind
   const cx = x + lean[0];
   const cz = z + lean[1];
   const crownR = h * (kind === "pine" ? 0.38 : 0.52);
-  const tint: V3 = kind === "pine" ? [0.6, 0.68, 0.56] : [0.52, 0.58, 0.48];
+  const tint: V3 = kind === "pine" ? [0.8, 0.86, 0.72] : [0.72, 0.76, 0.62];
   // One central clump and four round it, the crown's mass in the middle.
   for (let i = 0; i < 5; i++) {
     const a = (i / 4) * Math.PI * 2 + r.range(-0.4, 0.4);
@@ -340,6 +343,128 @@ export function tree(K: Kits, lib: ObsLib, x: number, z: number, h: number, kind
     const s = crownR * (i === 0 ? 1.5 : r.range(0.95, 1.2));
     shrub(leaf, kind === "pine" ? "pine" : "oak", cx + Math.cos(a) * d, cy, cz + Math.sin(a) * d, s, s * (kind === "pine" ? 0.6 : 0.8), r, tint);
   }
+}
+
+/** A tapered square limb (bark) from a to b, radius r0 → r1. */
+function limb(k: Kit, a: V3, b: V3, r0: number, r1: number): void {
+  const at = LEAF.bark;
+  const d: V3 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+  const l = Math.hypot(d[0], d[1], d[2]) || 1;
+  const t: V3 = [d[0] / l, d[1] / l, d[2] / l];
+  const ref: V3 = Math.abs(t[1]) > 0.9 ? [1, 0, 0] : [0, 1, 0];
+  const u = normalize3([t[1] * ref[2] - t[2] * ref[1], t[2] * ref[0] - t[0] * ref[2], t[0] * ref[1] - t[1] * ref[0]]);
+  const v: V3 = [t[1] * u[2] - t[2] * u[1], t[2] * u[0] - t[0] * u[2], t[0] * u[1] - t[1] * u[0]];
+  const ring = (p: V3, r: number, i: number): V3 => {
+    const ang = (i / 4) * Math.PI * 2 + Math.PI / 4;
+    const c = Math.cos(ang) * r;
+    const s2 = Math.sin(ang) * r;
+    return [p[0] + u[0] * c + v[0] * s2, p[1] + u[1] * c + v[1] * s2, p[2] + u[2] * c + v[2] * s2];
+  };
+  for (let i = 0; i < 4; i++) {
+    const ang = ((i + 0.5) / 4) * Math.PI * 2 + Math.PI / 4;
+    const n: V3 = [u[0] * Math.cos(ang) + v[0] * Math.sin(ang), u[1] * Math.cos(ang) + v[1] * Math.sin(ang), u[2] * Math.cos(ang) + v[2] * Math.sin(ang)];
+    k.face(ring(a, r0, i), ring(a, r0, i + 1), ring(b, r1, i + 1), ring(b, r1, i), n, [at.u0, at.v0], [at.u1, at.v0], [at.u1, at.v1], [at.u0, at.v1]);
+  }
+}
+
+function normalize3(a: V3): V3 {
+  const l = Math.hypot(a[0], a[1], a[2]) || 1;
+  return [a[0] / l, a[1] / l, a[2] / l];
+}
+
+/** A leaf-cluster card of side `s` centred at c, facing roughly `n` (turned by `spin`). */
+function leafCard(k: Kit, cell: LeafCell, c: V3, s: number, n: V3, spin: number): void {
+  const at = LEAF[cell];
+  const nn = normalize3(n);
+  const ref: V3 = Math.abs(nn[1]) > 0.9 ? [1, 0, 0] : [0, 1, 0];
+  let u = normalize3([nn[1] * ref[2] - nn[2] * ref[1], nn[2] * ref[0] - nn[0] * ref[2], nn[0] * ref[1] - nn[1] * ref[0]]);
+  let v: V3 = [nn[1] * u[2] - nn[2] * u[1], nn[2] * u[0] - nn[0] * u[2], nn[0] * u[1] - nn[1] * u[0]];
+  const cs = Math.cos(spin);
+  const sn = Math.sin(spin);
+  [u, v] = [
+    [u[0] * cs + v[0] * sn, u[1] * cs + v[1] * sn, u[2] * cs + v[2] * sn],
+    [v[0] * cs - u[0] * sn, v[1] * cs - u[1] * sn, v[2] * cs - u[2] * sn],
+  ];
+  const h = s / 2;
+  const P = (a: number, b: number): V3 => [c[0] + u[0] * a * h + v[0] * b * h, c[1] + u[1] * a * h + v[1] * b * h, c[2] + u[2] * a * h + v[2] * b * h];
+  k.quad(P(-1, -1), P(1, -1), P(1, 1), P(-1, 1), nn, [at.u0, at.v0], [at.u1, at.v0], [at.u1, at.v1], [at.u0, at.v1]);
+}
+
+/**
+ * Coast live oak as the photographs show it on the slopes (p01, p06, p25):
+ * a short trunk forking into four or five spreading limbs, a broad dense
+ * dome of leaf-cluster cards on the crown's shell (darker inside), 6–11 m.
+ */
+export function oak(K: Kits, lib: ObsLib, x: number, z: number, h: number, r: Rng): void {
+  const leaf = K.of(lib.foliage());
+  const bark = K.of(lib.bark());
+  const y = groundY(x, z) - 0.2;
+  const W = h * r.range(1.0, 1.3);
+  const fork: V3 = [x + r.range(-0.3, 0.3), y + h * r.range(0.18, 0.26), z + r.range(-0.3, 0.3)];
+  limb(bark, [x, y - 0.3, z], fork, h * 0.04, h * 0.03);
+  const n = r.int(4, 5);
+  const a0 = r.range(0, Math.PI * 2);
+  for (let i = 0; i < n; i++) {
+    const a = a0 + (i / n) * Math.PI * 2 + r.range(-0.3, 0.3);
+    const end: V3 = [x + Math.cos(a) * W * 0.3, y + h * r.range(0.48, 0.62), z + Math.sin(a) * W * 0.3];
+    limb(bark, fork, end, h * 0.022, h * 0.011);
+    const mid: V3 = [(fork[0] + end[0]) / 2, (fork[1] + end[1]) / 2, (fork[2] + end[2]) / 2];
+    limb(bark, mid, [x + Math.cos(a + 0.6) * W * 0.42, y + h * 0.7, z + Math.sin(a + 0.6) * W * 0.42], h * 0.011, h * 0.006);
+  }
+  // Crown shell: an ellipsoid over the limbs; cards on its upper and outer surface, a few inside.
+  const cy = y + h * 0.62;
+  const rw = W / 2;
+  const rh = h * 0.38;
+  const cards = 32;
+  for (let i = 0; i < cards; i++) {
+    const inner = i >= cards - 7;
+    const az = r.range(0, Math.PI * 2);
+    const el = inner ? r.range(-0.3, 0.6) : Math.asin(r.range(-0.35, 1));
+    const k = inner ? r.range(0.25, 0.55) : r.range(0.7, 0.95);
+    const dir: V3 = [Math.cos(el) * Math.cos(az), Math.sin(el), Math.cos(el) * Math.sin(az)];
+    const c: V3 = [x + dir[0] * rw * k, cy + dir[1] * rh * k, z + dir[2] * rw * k];
+    const nrm: V3 = [dir[0] + r.range(-0.6, 0.6), dir[1] + 0.3 + r.range(-0.5, 0.5), dir[2] + r.range(-0.6, 0.6)];
+    const g = inner ? 0.45 : 0.66 + 0.16 * Math.max(0, dir[1]) + r.range(-0.06, 0.06);
+    leaf.tint = [g, g * 1.04, g * 0.86];
+    leafCard(leaf, "oak", c, W * r.range(0.32, 0.42), nrm, r.range(0, Math.PI * 2));
+  }
+  leaf.tint = [1, 1, 1];
+}
+
+/**
+ * Aleppo / stone pine: a tall, slightly bent trunk, five or six branches
+ * from its upper third, each ending in a cluster of needle-tuft cards, an
+ * open irregular crown (p06, p21, p25).
+ */
+export function pine(K: Kits, lib: ObsLib, x: number, z: number, h: number, r: Rng): void {
+  const leaf = K.of(lib.foliage());
+  const bark = K.of(lib.bark());
+  const y = groundY(x, z) - 0.2;
+  const bend: V3 = [x + r.range(-0.8, 0.8), y + h * 0.4, z + r.range(-0.8, 0.8)];
+  const top: V3 = [bend[0] + r.range(-0.8, 0.8), y + h * 0.78, bend[2] + r.range(-0.8, 0.8)];
+  limb(bark, [x, y - 0.3, z], bend, h * 0.03, h * 0.024);
+  limb(bark, bend, top, h * 0.024, h * 0.012);
+  const n = r.int(5, 6);
+  const a0 = r.range(0, Math.PI * 2);
+  const tips: V3[] = [top];
+  for (let i = 0; i < n; i++) {
+    const a = a0 + (i / n) * Math.PI * 2 + r.range(-0.35, 0.35);
+    const t = r.range(0.25, 0.9);
+    const from: V3 = [bend[0] + (top[0] - bend[0]) * t, bend[1] + (top[1] - bend[1]) * t, bend[2] + (top[2] - bend[2]) * t];
+    const reach = h * r.range(0.22, 0.34);
+    const end: V3 = [from[0] + Math.cos(a) * reach, from[1] + h * r.range(0.06, 0.16), from[2] + Math.sin(a) * reach];
+    limb(bark, from, end, h * 0.01, h * 0.005);
+    tips.push(end);
+  }
+  for (const tip of tips) {
+    for (let j = 0; j < 4; j++) {
+      const c: V3 = [tip[0] + r.range(-0.6, 0.6), tip[1] + r.range(-0.2, 0.5), tip[2] + r.range(-0.6, 0.6)];
+      const g = r.range(0.68, 0.82);
+      leaf.tint = [g, g * 1.06, g * 0.88];
+      leafCard(leaf, "pine", c, h * r.range(0.16, 0.22), [r.range(-0.8, 0.8), 1, r.range(-0.8, 0.8)], r.range(0, Math.PI * 2));
+    }
+  }
+  leaf.tint = [1, 1, 1];
 }
 
 /** Yucca or agave rosette: radiating sword leaves. */

@@ -27,11 +27,11 @@ import { DRUM, FACADE, LEVEL, ROTUNDA } from "./plan";
 export const K2700 = new Color(1.0, 0.7, 0.47);
 export const K3000 = new Color(1.0, 0.73, 0.52);
 
-/** Intensities (candela) and reach; tuned against p02 / p04 at the stage's exposure. */
-const WASHER = { intensity: 115, distance: 12, angle: 0.3, penumbra: 0.85 };
-const UPLIGHT = { intensity: 300, distance: 17, angle: 0.28, penumbra: 0.6 };
-const BAY = { intensity: 135, distance: 15, angle: 0.55, penumbra: 0.9 };
-const UPPER = { intensity: 58, distance: 4.8, angle: 0.55, penumbra: 0.8 };
+/** Intensities (candela) and reach; tuned against p01 / p02 / p04 at the stage's exposure (device captures agree with the web within ~3 levels). */
+const WASHER = { intensity: 145, distance: 12, angle: 0.3, penumbra: 0.85 };
+const UPLIGHT = { intensity: 375, distance: 17, angle: 0.28, penumbra: 0.6 };
+const BAY = { intensity: 170, distance: 15, angle: 0.55, penumbra: 0.9 };
+const UPPER = { intensity: 72, distance: 4.8, angle: 0.55, penumbra: 0.8 };
 
 /** A spot light aimed at `target`, its direction kept through the glTF export (target child at (0, 0, −1)). */
 export function spot(w: GriffithWorld, color: Color, intensity: number, distance: number, angle: number, penumbra: number, pos: V3, target: V3): SpotLight {
@@ -118,7 +118,7 @@ export function buildFloodlights(w: GriffithWorld, lib: ObsLib, K: Kits, at: { p
   for (let k = 0; k < 4; k++) {
     const a = Math.PI / 4 + (k * Math.PI) / 2;
     const p: V3 = [ROTUNDA.x + Math.cos(a) * (ROTUNDA.r + 0.55), LEVEL.deck - 1.9, ROTUNDA.z + Math.sin(a) * (ROTUNDA.r + 0.55)];
-    spot(w, K3000, 65, 7, 0.6, 0.85, p, [ROTUNDA.x + Math.cos(a) * (ROTUNDA.r - 0.4), ROTUNDA.wallTop - 0.5, ROTUNDA.z + Math.sin(a) * (ROTUNDA.r - 0.4)]);
+    spot(w, K3000, 80, 7, 0.6, 0.85, p, [ROTUNDA.x + Math.cos(a) * (ROTUNDA.r - 0.4), ROTUNDA.wallTop - 0.5, ROTUNDA.z + Math.sin(a) * (ROTUNDA.r - 0.4)]);
     n++;
   }
   // Side walls of the block (p01: the walls beside the drum read lit; p14: the east wing): washers at their feet.

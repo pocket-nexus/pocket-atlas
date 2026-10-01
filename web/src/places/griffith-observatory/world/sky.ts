@@ -11,8 +11,9 @@ import { SUN_DIR } from "./layout";
  *
  * - south (p09, 31 Aug 2015, ~9 min after the magic-hour frame p08, looking
  *   down the Vermont grid): navy from 25° up, sRGB (8, 28, 65), to a
- *   grey-blue horizon, (17, 31, 56) at 1°; the pale line under it is the
- *   haze over the far carpet (world/haze.ts), not the sky;
+ *   grey-blue horizon, (17, 31, 56) at 1°. The horizon term also carries
+ *   the city's light dome, so the haze over the far carpet (world/haze.ts,
+ *   gain 1) meets the sky at h = 0 without a line (p02, p15);
  * - west-north-west over the Hills: the afterglow band, orange at the
  *   horizon (~(130, 85, 55) at 0.5°) through peach at 5° to mauve-blue at
  *   10–15° (p10's ordering, 3° deeper and darker: p10 is ~10 min after
@@ -27,9 +28,9 @@ import { SUN_DIR } from "./layout";
  */
 export const BLUE_HOUR: SkySpec = {
   zenith: new Color(0.0078, 0.0116, 0.0435),
-  horizon: new Color(0.0128, 0.019, 0.0295),
+  horizon: new Color(0.0143, 0.0221, 0.0335),
   ground: new Color(0.01, 0.01, 0.012),
-  gradientPower: 0.22,
+  gradientPower: 0.184,
   groundBlend: 6,
   sun: SUN_DIR,
   sunColor: new Color(1.0, 0.55, 0.25),

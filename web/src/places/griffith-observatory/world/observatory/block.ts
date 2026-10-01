@@ -3,6 +3,7 @@ import type { ObsLib } from "../../gfx/observatory-materials";
 import { groundY } from "../dem";
 import { arc, deg, Kits, type Kit, type P2, type V3 } from "./kit";
 import { BLOCK, DRUM, FACADE, LEVEL, ROTUNDA, deckOutline } from "./plan";
+import { grilleWindow } from "./windows";
 
 /**
  * The main block: the north façade with its two wings and the entrance
@@ -144,15 +145,14 @@ function wing(K: Kits, lib: ObsLib, x0: number, x1: number): number[] {
     const r = c + ww / 2;
     // Reveals (darker: little sky reaches them), head soffit, sill.
     wall.shade = 0.72;
-    wall.wall([l, z], [l, z + REVEAL], FACADE.sill, FACADE.head, -1);
-    wall.wall([r, z], [r, z + REVEAL], FACADE.sill, FACADE.head, 1);
+    wall.wall([l, z], [l, z + REVEAL], FACADE.sill, FACADE.head, 1);
+    wall.wall([r, z], [r, z + REVEAL], FACADE.sill, FACADE.head, -1);
     wall.shade = 0.6;
     wall.flat([[l, z], [r, z], [r, z + REVEAL], [l, z + REVEAL]], FACADE.head, -1);
     wall.shade = 1;
     wall.box(l - 0.08, r + 0.08, FACADE.sill - 0.12, FACADE.sill, z - 0.12, z + REVEAL, "ny");
-    // Bronze window in the reveal; the two outer windows of each wing a little dimmer.
-    const dim = Math.abs(c - mid) > FACADE.bay * 1.5;
-    decal(art, dim ? "window2" : "window", c, z + REVEAL, 0, -1, ww, FACADE.sill, FACADE.head);
+    // Bronze grille window in the reveal, traced rooms behind its panes.
+    grilleWindow(K, lib, c, z + REVEAL, 0, -1, ww, FACADE.sill, FACADE.head);
     // A recessed panel over the window to the frieze.
     wall.shade = 0.9;
     wall.box(l + 0.1, r - 0.1, FACADE.head + 0.35, FRIEZE[0] - 0.3, z - 0.02, z + 0.05, "pz");

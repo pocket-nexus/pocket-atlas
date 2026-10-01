@@ -24,6 +24,9 @@ export const VISTA_LIGHTS: LightFieldOptions = {
   haze: { glsl: HAZE_GLSL, uniforms: HAZE.uniforms },
 };
 
+/** Gain of the static city carpet (C's grade and haze fixed; measured on the Terrace view). */
+const CARPET_GAIN = 1.1;
+
 /** Adds one light set to the world as a Points object driven by the loop clock. */
 export function addLights(w: GriffithWorld, set: LightSet, opts: LightFieldOptions = VISTA_LIGHTS): void {
   if (!set.count) return;
@@ -38,7 +41,7 @@ export function buildVista(w: GriffithWorld): void {
   const ground = new MeshStandardMaterial({ name: "vista-ground", vertexColors: true, roughness: 1, metalness: 0 });
   const mesh = w.mesh(geometry, ground, 0, 0, 0, w.root, { cast: false, receive: false });
   mesh.name = "vista-terrain";
-  console.info(`[griffith] vista terrain: ${stats.tiles} tiles (${stats.hidden} hidden, viewshed ${stats.viewshedMs} ms), ${stats.triangles} triangles + ${stats.skirts} skirt, by distance ${stats.bands.join("/")}, ${Math.round(performance.now() - t0)} ms`);
+  console.info(`[griffith] vista terrain: ${stats.tiles} tiles (${stats.hidden} hidden, viewshed ${stats.viewshedMs} ms), ${stats.triangles} triangles + ${stats.skirts} skirt + ${stats.ring} ring, by distance ${stats.bands.join("/")}, ${Math.round(performance.now() - t0)} ms`);
 
   const t1 = performance.now();
   const landmarks = buildLandmarks(w);
@@ -49,6 +52,7 @@ export function buildVista(w: GriffithWorld): void {
   const plants = buildPlants(w);
   console.info(`[griffith] vista plants: ${plants.trees} trees, ${plants.shrubs} shrubs, ${plants.triangles} triangles, ${Math.round(performance.now() - t2)} ms`);
 
-  for (const set of cityLightSets()) addLights(w, set);
+  // The static carpet's gain is set against p09: the Terrace carpet's mean reads ~(42, 40, 46).
+  for (const set of cityLightSets()) addLights(w, set, set.name === "city" ? { ...VISTA_LIGHTS, gain: CARPET_GAIN } : VISTA_LIGHTS);
   console.info(`[griffith] vista lights: ${CITY_COUNTS.static} static, ${CITY_COUNTS.signals} signal heads, ${CITY_COUNTS.moving} moving`);
 }

@@ -1,6 +1,7 @@
 import { Color, DoubleSide, MeshBasicMaterial, MeshStandardMaterial, Vector2, type Texture } from "three";
 import type { Quality } from "../../../core/quality";
 import type { Baker, SurfaceMaps } from "../../shared/bake";
+import { makeInteriorWindows } from "../../shared/interior";
 import { paintArtAtlas, type ArtMaps } from "./observatory-art";
 import { leafAtlas } from "./observatory-foliage";
 import * as SURF from "./observatory-surfaces";
@@ -20,7 +21,11 @@ function withMaps(maps: SurfaceMaps, params: ConstructorParameters<typeof MeshSt
 }
 
 /** Amber of the lit interiors (p04, p05: #d1ae61 in the blue-hour photographs). */
-export const WINDOW_GLOW = 2.6;
+export const WINDOW_GLOW = 2.9;
+/** Room brightness behind the tall windows (traced interiors), set against p04's panes. */
+export const INTERIOR_GLOW = 2.4;
+/** The halls' warm light over the traced rooms' neutral walls (p02, p04: the panes read amber, not white). */
+export const INTERIOR_TINT: [number, number, number] = [1.0, 0.78, 0.36];
 
 /**
  * Materials of the observatory and its grounds. Every lit surface is a
@@ -37,6 +42,8 @@ export class ObsLib {
   private maps = new Map<string, SurfaceMaps>();
   private cache = new Map<string, MeshStandardMaterial | MeshBasicMaterial>();
   private artMaps: ArtMaps | null = null;
+  /** Seconds, for the interior windows (advanced by the world's updater). */
+  readonly time = { value: 0 };
   private leaves: Texture | null = null;
 
   constructor(baker: Baker, quality: Quality) {
@@ -122,6 +129,15 @@ export class ObsLib {
     });
   }
 
+  /**
+   * Glass of the tall windows with a traced room behind it (`shared/interior.ts`,
+   * the `interiorWindow` kind on the handheld); the room seeds pick lit, warm,
+   * open rooms (world/observatory/windows.ts).
+   */
+  interior(): MeshStandardMaterial {
+    return this.memo("interior", () => makeInteriorWindows(this.time, INTERIOR_GLOW, INTERIOR_TINT));
+  }
+
   /** Cast bronze: door surrounds, window frames in relief, the armillary sphere, the bust. */
   bronze(): MeshStandardMaterial {
     return this.memo("bronze", () => new MeshStandardMaterial({ color: new Color(0.13, 0.085, 0.05), roughness: 0.42, metalness: 0.85 }));
@@ -148,6 +164,11 @@ export class ObsLib {
   }
 
   // ---------------------------------------------------------- grounds
+
+  /** Road paint: kerb-side stall lines and the zebra crossing (polygon-offset over the asphalt). */
+  paint(): MeshStandardMaterial {
+    return this.memo("paint", () => new MeshStandardMaterial({ color: new Color(0.62, 0.62, 0.6), roughness: 0.85, metalness: 0, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }));
+  }
 
   walk(): MeshStandardMaterial {
     return this.memo("walk", () => withMaps(this.surf("walk", SURF.WALK, 512, 3, 1.2), { vertexColors: true, normalScale: new Vector2(0.7, 0.7) }));

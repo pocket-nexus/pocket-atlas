@@ -228,6 +228,41 @@ export class Kit {
   }
 
   /**
+   * A standing-seam dome: `pans` flat copper pans between the meridian seams
+   * of the surface of revolution `prof` ([r, y], bottom to top), each pan ×
+   * course one flat facet, so the pans catch the floodlight and the sky one by
+   * one; the seams themselves are the facet edges and the copper texture's
+   * raised lines. UVs: u = pan / 8 (the copper tile holds 8 pans), v = arc
+   * length · vPer.
+   */
+  pannedDome(cx: number, cz: number, prof: P2[], pans: number, vPer: number, a0 = 0): void {
+    const arcs: number[] = [0];
+    for (let k = 1; k < prof.length; k++) arcs.push(arcs[k - 1] + Math.hypot(prof[k][0] - prof[k - 1][0], prof[k][1] - prof[k - 1][1]));
+    const S = (t: number, q: P2): V3 => [cx + Math.cos(t) * q[0], q[1], cz + Math.sin(t) * q[0]];
+    for (let i = 0; i < pans; i++) {
+      const t0 = a0 + (i / pans) * Math.PI * 2;
+      const t1 = a0 + ((i + 1) / pans) * Math.PI * 2;
+      const tm = (t0 + t1) / 2;
+      const u0 = i / 8;
+      const u1 = (i + 1) / 8;
+      for (let k = 0; k + 1 < prof.length; k++) {
+        const [r0, y0] = prof[k];
+        const [r1, y1] = prof[k + 1];
+        const out: V3 = [Math.cos(tm) * (y1 - y0), r0 - r1, Math.sin(tm) * (y1 - y0)];
+        const a = S(t0, prof[k]);
+        const b = S(t1, prof[k]);
+        const c = S(t1, prof[k + 1]);
+        const d = S(t0, prof[k + 1]);
+        if (r1 < 0.01) {
+          const n = norm(cross(sub(b, a), sub(c, a)));
+          const m: V3 = dot(n, out) < 0 ? [-n[0], -n[1], -n[2]] : n;
+          this.tri(a, b, c, m, m, m, [u0, arcs[k] * vPer], [u1, arcs[k] * vPer], [(u0 + u1) / 2, arcs[k + 1] * vPer]);
+        } else this.face(a, b, c, d, out, [u0, arcs[k] * vPer], [u1, arcs[k] * vPer], [u1, arcs[k + 1] * vPer], [u0, arcs[k + 1] * vPer]);
+      }
+    }
+  }
+
+  /**
    * Sweeps a cross-section along a polyline in plan: `prof` is [out, y]
    * (out = metres toward the path's outer side, which is the left of travel
    * for side = 1), joined at mitred corners. For cornices, copings, plinths.

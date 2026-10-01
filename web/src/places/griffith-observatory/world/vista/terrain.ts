@@ -29,8 +29,6 @@ const N = 32;
 const G = N + 1;
 /** Root tile: 2^17 m, its corner placed so that every SITE edge lies on the grid of tiles with spacing ≤ 8 m. */
 const ROOT = { x0: SITE.x0 - 65536, z0: SITE.z0 - 65536, size: 131072 };
-/** The far DEM's extent in place metres (no data beyond). */
-const DATA = { x0: -64200, x1: 69100, z0: -59200, z1: 63300 };
 
 let tolerance: Tolerance | null = null;
 
@@ -90,7 +88,6 @@ function leaves(): Tile[] {
     const t = stack.pop()!;
     const x1 = t.x0 + t.size;
     const z1 = t.z0 + t.size;
-    if (x1 <= DATA.x0 || t.x0 >= DATA.x1 || z1 <= DATA.z0 || t.z0 >= DATA.z1) continue;
     if (t.x0 >= SITE.x0 && x1 <= SITE.x1 && t.z0 >= SITE.z0 && z1 <= SITE.z1) continue;
     const s = t.size / N;
     const cx = t.x0 + t.size / 2;
@@ -129,6 +126,62 @@ export interface TerrainStats {
   skirts: number;
   /** Triangles by distance from the origin: < 0.5, 1, 2, 5, 10, 20 km, beyond. */
   bands: number[];
+  /** Triangles of the outer ring beyond the tiles. */
+  ring: number;
+}
+
+/** Outer edge of the ring (m): past the sea horizon from the terraces (71 km) and the roof. */
+const RING_OUT = 115000;
+
+/**
+ * Beyond the tiles (the 2^17 m square ends ~65 km out, short of the 71 km sea
+ * horizon to the west and south), a ring of 1° sectors from the square's
+ * edge to 115 km on the DEM (sea level off its extent, curvature included),
+ * so the Pacific runs to the horizon and the far ground has no edge against
+ * the sky. Its inner vertices lie on the square's edge.
+ */
+function outerRing(pos: number[], nor: number[], col: number[], idx: number[]): number {
+  const x0 = ROOT.x0;
+  const x1 = ROOT.x0 + ROOT.size;
+  const z0 = ROOT.z0;
+  const z1 = ROOT.z0 + ROOT.size;
+  const radii = [1, 1.04, 1.1, 1.2, 1.35, 1.55, 1.8];
+  const N_AZ = 360;
+  const base = pos.length / 3;
+  const c3: number[] = [];
+  for (let a = 0; a < N_AZ; a++) {
+    const th = (a / N_AZ) * Math.PI * 2;
+    const dx = Math.sin(th);
+    const dz = -Math.cos(th);
+    // Distance from the origin to the square's edge along (dx, dz).
+    const tx = dx > 0 ? x1 / dx : dx < 0 ? x0 / dx : Infinity;
+    const tz = dz > 0 ? z1 / dz : dz < 0 ? z0 / dz : Infinity;
+    const r0 = Math.min(tx, tz);
+    for (const f of radii) {
+      const r = Math.min(r0 * f, RING_OUT);
+      const x = dx * r;
+      const z = dz * r;
+      const y = groundY(x, z);
+      pos.push(x, y, z);
+      nor.push(0, 1, 0);
+      c3.length = 0;
+      groundColor(x, y, z, 0, c3);
+      col.push(c3[0], c3[1], c3[2]);
+    }
+  }
+  const R = radii.length;
+  let tris = 0;
+  for (let a = 0; a < N_AZ; a++) {
+    const b = (a + 1) % N_AZ;
+    for (let k = 0; k < R - 1; k++) {
+      const p = base + a * R + k;
+      const q = base + b * R + k;
+      // Azimuth grows clockwise seen from above, so (p, q, p + 1) is counter-clockwise.
+      idx.push(p, q, p + 1, q, q + 1, p + 1);
+      tris += 2;
+    }
+  }
+  return tris;
 }
 
 interface Built {
@@ -183,7 +236,7 @@ class BorderLines {
 export function buildTerrainGeometry(): { geometry: BufferGeometry; stats: TerrainStats } {
   const t0 = performance.now();
   const { shed, at: terrainTolerance } = vistaTolerance();
-  const stats: TerrainStats = { viewshedMs: Math.round(performance.now() - t0), hidden: 0, tiles: 0, triangles: 0, skirts: 0, bands: [0, 0, 0, 0, 0, 0, 0] };
+  const stats: TerrainStats = { viewshedMs: Math.round(performance.now() - t0), hidden: 0, tiles: 0, triangles: 0, skirts: 0, bands: [0, 0, 0, 0, 0, 0, 0], ring: 0 };
   const err = new Float32Array(G * G);
   const tol = new Float32Array(G * G);
   const built: Built[] = [];
@@ -348,6 +401,7 @@ export function buildTerrainGeometry(): { geometry: BufferGeometry; stats: Terra
     };
     for (let k = 0; k < tris.length; k += 6) tri(t.x0 + tris[k] * s, t.z0 + tris[k + 1] * s, t.x0 + tris[k + 2] * s, t.z0 + tris[k + 3] * s, t.x0 + tris[k + 4] * s, t.z0 + tris[k + 5] * s);
   }
+  stats.ring = outerRing(pos, nor, col, idx);
   const geometry = new BufferGeometry();
   geometry.setAttribute("position", new Float32BufferAttribute(pos, 3));
   geometry.setAttribute("normal", new Float32BufferAttribute(nor, 3));

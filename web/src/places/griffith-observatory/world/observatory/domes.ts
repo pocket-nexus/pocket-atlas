@@ -97,7 +97,8 @@ function dome(K: Kits, lib: ObsLib, c: { x: number; z: number }, slitBearing: nu
     const e = (i / 10) * (Math.PI / 2);
     prof.push([Math.max(0.001, Math.cos(e) * R), ys + Math.sin(e) * R]);
   }
-  copper.lathe(c.x, c.z, prof, 0, Math.PI * 2, 40, { uPer, vPer: 1 / 3.6 });
+  // 64 standing-seam pans, 10 courses.
+  copper.pannedDome(c.x, c.z, prof, 64, 1 / 3.6);
   // Brackets round the skirt.
   for (let i = 0; i < 16; i++) {
     const t = (i / 16) * Math.PI * 2 + 0.1;

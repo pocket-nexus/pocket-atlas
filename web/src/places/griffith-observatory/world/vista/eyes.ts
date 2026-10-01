@@ -20,14 +20,13 @@ export interface Eye {
 }
 
 const S = VIEW.sign;
-const O = VIEW.overlook;
 
 /** Mid-shot eyes of `GriffithStage.ts` (eye 1.62 m over the DEM; the roof deck at 8.6 m). */
 export const EYES: Eye[] = [
   { name: "Lawn", x: -12.5, y: 2.0, z: -88.6, heading: 171.5, fov: 38 },
-  { name: "Terrace", x: -38.1, y: 2.1, z: -20.0, heading: 153.5, fov: 40 },
+  { name: "Terrace", x: -16.5, y: 10.2, z: -1.6, heading: 174.5, fov: 40 },
   { name: "Sign", x: S.x, y: S.eye, z: S.z, heading: 312, fov: 14 },
-  { name: "Overlook", x: O.x, y: O.eye, z: O.z, heading: 151.5, fov: O.fov },
+  { name: "Overlook", x: -438, y: 44.2, z: -912, heading: 153, fov: 3.15 },
   { name: "Drum", x: -101.5, y: -43.6, z: 41, heading: 59.5, fov: 32 },
   { name: "Roof", x: 25, y: 10.2, z: -9.2, heading: 182.5, fov: 44 },
 ];

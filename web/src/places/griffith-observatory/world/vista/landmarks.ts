@@ -34,37 +34,60 @@ interface TowerRec {
   min: number;
 }
 
-/** Window grid repeat: 16 windows of 3 m across, 32 floors of 4 m. */
-const WIN_U = 48;
-const WIN_V = 128;
+/** Window grid texture: 16 window columns × 128 floors (one repeat). */
+const COLS = 16;
+const FLOORS = 128;
+
+/** A tower's façade rhythm: window bay (m), floor height (m) and where its lit-floor pattern starts. */
+interface Rhythm {
+  bay: number;
+  floor: number;
+  uOff: number;
+  vOff: number;
+}
 
 /**
- * A 256 × 256 window grid, 16 windows × 32 floors: at 19:30 about a third of
- * the office floors are lit as whole bands (most windows of the floor, one
- * colour per floor: warm white or cool fluorescent under the photos' white
- * balance), the floors between dark with a few lit windows.
+ * A 256 × 1024 window grid, 16 bays × 128 floors, so towers that start at
+ * different floors of it show different patterns. Offices: about a third of
+ * the floors lit at 19:30 as whole bands, one colour per floor (warm white or
+ * neutral fluorescent under the photos' ~3800 K balance, both reading
+ * warm-white to neutral as in p02 and p12), runs of lit floors together, the
+ * floors between dark with a few lit windows. Residential and hotel towers:
+ * a third of the rooms lit, warm.
  */
 function windowTexture(style: "office" | "residential") {
-  const { c, g } = canvas(256, 256);
+  const W = 256;
+  const H = 1024;
+  const { c, g } = canvas(W, H);
   g.fillStyle = "#000";
-  g.fillRect(0, 0, 256, 256);
+  g.fillRect(0, 0, W, H);
   let seed = style === "office" ? 7 : 19;
   const rnd = () => ((seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296);
-  for (let row = 0; row < 32; row++) {
-    // Residential and hotel towers: no lit bands, a third of the rooms lit, mostly warm.
-    const floorOn = style === "office" && rnd() < 0.36;
-    const level = 0.55 + rnd() * 0.45;
-    const warmFloor = rnd() < 0.4;
-    for (let col = 0; col < 16; col++) {
+  const cw = W / COLS;
+  const ch = H / FLOORS;
+  let run = 0;
+  let level = 1;
+  let warmFloor = false;
+  for (let row = 0; row < FLOORS; row++) {
+    // Lit floors come in runs (a tenant's floors), 1–6 floors long.
+    if (run <= 0 && style === "office" && rnd() < 0.12) {
+      run = 1 + Math.floor(rnd() * 6);
+      level = 0.55 + rnd() * 0.45;
+      warmFloor = rnd() < 0.5;
+    }
+    const floorOn = run-- > 0;
+    // Some tenants leave a few bays dark at a floor's end.
+    const gapFrom = rnd() < 0.3 ? Math.floor(rnd() * COLS) : COLS;
+    for (let col = 0; col < COLS; col++) {
       // Texel (0, 0) stays black: roofs sample it.
-      if (row === 31 && col === 0) continue;
-      const lit = floorOn ? rnd() < 0.88 : rnd() < (style === "office" ? 0.05 : 0.32);
+      if (row === FLOORS - 1 && col === 0) continue;
+      const lit = floorOn ? col < gapFrom && rnd() < 0.92 : rnd() < (style === "office" ? 0.04 : 0.32);
       if (!lit) continue;
-      const warm = floorOn ? warmFloor : rnd() < (style === "office" ? 0.6 : 0.8);
-      const v = (floorOn ? level * (0.85 + rnd() * 0.15) : 0.3 + rnd() * 0.5) * 255;
-      const [r, gg, b] = warm ? [1, 0.82, 0.56] : [0.9, 0.95, 1];
+      const warm = floorOn ? warmFloor : rnd() < 0.75;
+      const v = (floorOn ? level * (0.88 + rnd() * 0.12) : 0.3 + rnd() * 0.5) * 255;
+      const [r, gg, b] = warm ? [1, 0.84, 0.6] : [1, 0.95, 0.86];
       g.fillStyle = `rgb(${Math.round(v * r)},${Math.round(v * gg)},${Math.round(v * b)})`;
-      g.fillRect(col * 16 + 1, (31 - row) * 8 + 1, 14, 6);
+      g.fillRect(col * cw + 1, (FLOORS - 1 - row) * ch + 1, cw - 2, ch - 2);
     }
   }
   const t = toTexture(c, true);
@@ -73,13 +96,13 @@ function windowTexture(style: "office" | "residential") {
 }
 
 /** Wall quads (outward) and a roof cap for a ring (x, z pairs; MVT exterior winding). */
-function extrude(ring: Vector2[], y0: number, y1: number, ground: number, uOff: number, vOff: number, roof = true): BufferGeometry {
+function extrude(ring: Vector2[], y0: number, y1: number, ground: number, rh: Rhythm, roof = true): BufferGeometry {
   const pos: number[] = [];
   const uv: number[] = [];
   const nor: number[] = [];
   // Exterior rings have positive shoelace area in (x, z); walk them reversed so (p, q, q↑) faces out.
   const r = [...ring].reverse();
-  let u = uOff;
+  let u = rh.uOff * rh.bay;
   for (let i = 0; i < r.length; i++) {
     const p = r[i];
     const q = r[(i + 1) % r.length];
@@ -87,10 +110,10 @@ function extrude(ring: Vector2[], y0: number, y1: number, ground: number, uOff: 
     if (len < 1e-3) continue;
     const nx = -(q.y - p.y) / len;
     const nz = (q.x - p.x) / len;
-    const u0 = u / WIN_U;
-    const u1 = (u + len) / WIN_U;
-    const v0 = (y0 - ground) / WIN_V + vOff;
-    const v1 = (y1 - ground) / WIN_V + vOff;
+    const u0 = u / (rh.bay * COLS);
+    const u1 = (u + len) / (rh.bay * COLS);
+    const v0 = ((y0 - ground) / rh.floor + rh.vOff) / FLOORS;
+    const v1 = ((y1 - ground) / rh.floor + rh.vOff) / FLOORS;
     pos.push(p.x, y0, p.y, q.x, y0, q.y, q.x, y1, q.y, p.x, y0, p.y, q.x, y1, q.y, p.x, y1, p.y);
     uv.push(u0, v0, u1, v0, u1, v1, u0, v0, u1, v1, u0, v1);
     for (let k = 0; k < 6; k++) nor.push(nx, 0, nz);
@@ -154,21 +177,31 @@ function beacon(set: LightSet, x: number, y: number, z: number, flashing: boolea
   set.add({ x, y, z, r: RED[0], g: RED[1], b: RED[2], intensity: flashing ? 2600 : 500, radius: 0.35, phase, twinkle: 0.3, blink: flashing ? [Math.round((30 * LOOP) / 60), 0.3] : [1, 1] });
 }
 
-/** Named towers matched by position (lat, lon) within 35 m of a ring's centroid. */
+/** Named towers matched by position (OSM centroids) within 35 m of a ring's centroid. */
 const SPECIAL = {
   cityHall: local(34.05356, -118.24291),
-  usBank: local(34.05107, -118.25442),
-  gasCompany: local(34.04994, -118.25509),
+  usBank: local(34.05106, -118.25443),
+  gasCompany: local(34.05008, -118.2531),
+  twoCal: local(34.0514, -118.25163),
+  wellsFargo: local(34.05302, -118.25188),
+  aon: local(34.04924, -118.257),
 };
+
+/** No façade pattern (crowns, floodlit walls, construction). */
+const PLAIN: Rhythm = { bay: 3, floor: 4, uOff: 0, vOff: 0 };
 
 export function buildLandmarks(w: GriffithWorld): { beacons: LightSet; triangles: number } {
   const beacons = new LightSet("beacons");
   // Office towers (banded floors) and residential / hotel towers and mid-rises (scattered rooms, dimmer).
   const glass = new MeshStandardMaterial({ name: "vista-towers", color: new Color(0.035, 0.042, 0.06), roughness: 0.45, metalness: 0, emissive: new Color(1, 1, 1), emissiveMap: windowTexture("office"), emissiveIntensity: 1.3 });
   const homes = new MeshStandardMaterial({ name: "vista-towers-res", color: new Color(0.04, 0.042, 0.05), roughness: 0.6, metalness: 0, emissive: new Color(1, 1, 1), emissiveMap: windowTexture("residential"), emissiveIntensity: 0.9 });
+  // The window grid lays 5.3 texels per metre across and 2 up: the device's
+  // isotropic mips would blur the floors, so the cooker biases by the ratio.
+  for (const m of [glass, homes]) m.userData.pocketAtlas = { lodBias: "auto" };
   const floodlit = new MeshStandardMaterial({ name: "vista-cityhall", color: new Color(0.3, 0.28, 0.24), roughness: 0.8, metalness: 0, emissive: new Color(1, 0.86, 0.68), emissiveIntensity: 0.55 });
-  const crownWhite = new MeshBasicMaterial({ name: "vista-crown-white", color: new Color(2.2, 2.3, 2.6) });
+  const crownWhite = new MeshBasicMaterial({ name: "vista-crown-white", color: new Color(2.4, 2.3, 2.1) });
   const crownBlue = new MeshBasicMaterial({ name: "vista-crown-blue", color: new Color(0.25, 0.6, 3.2) });
+  const signRed = new MeshBasicMaterial({ name: "vista-crown-red", color: new Color(2.6, 0.25, 0.12) });
   const concrete = new MeshStandardMaterial({ name: "vista-construction", color: new Color(0.12, 0.115, 0.11), roughness: 0.9, metalness: 0 });
   // White-painted sheet steel; the faint emission stands in for the city's glow on the letters, which the
   // scene's sky light does not carry (est.; p13 and p22 show them clearly white after dark).
@@ -202,15 +235,25 @@ export function buildLandmarks(w: GriffithWorld): { beacons: LightSet; triangles
     const y0 = t.base + t.min;
     const y1 = t.base + t.h;
     if (near(SPECIAL.cityHall) && t.h > 60) {
-      add(floodlit, extrude(simple, y0, y1, t.base, 0, 0));
+      add(floodlit, extrude(simple, y0, y1, t.base, PLAIN));
     } else {
+      // Each tower its own rhythm: office bays 1.5–3.2 m and floors 3.6–4.4 m, residential bays
+      // 3–5 m and floors 2.9–3.3 m (est.), starting at its own floor of the 128-floor pattern.
       const office = t.h >= 100 && hash(cx, cz, 4) < 0.7;
-      add(office ? glass : homes, extrude(simple, y0, y1, t.base, hash(cx, cz, 1) * WIN_U * 4, Math.floor(hash(cx, cz, 2) * 8) / 8));
+      const rh: Rhythm = office
+        ? { bay: 1.5 + 1.7 * hash(cx, cz, 5), floor: 3.6 + 0.8 * hash(cx, cz, 6), uOff: Math.floor(hash(cx, cz, 1) * COLS), vOff: Math.floor(hash(cx, cz, 2) * FLOORS) }
+        : { bay: 3 + 2 * hash(cx, cz, 5), floor: 2.9 + 0.4 * hash(cx, cz, 6), uOff: Math.floor(hash(cx, cz, 1) * COLS), vOff: Math.floor(hash(cx, cz, 2) * FLOORS) };
+      add(office ? glass : homes, extrude(simple, y0, y1, t.base, rh));
     }
-    if (near(SPECIAL.usBank) && t.h > 300) add(crownWhite, extrude(simple, y1 - 9, y1 + 0.3, t.base, 0, 0, false));
-    if (near(SPECIAL.gasCompany) && t.h > 200) add(crownBlue, extrude(simple, y1 - 6, y1 + 0.3, t.base, 0, 0, false));
-    // Steady red obstruction lights (L-810) at two opposite roof corners of the towers ≥ 200 m.
-    if (t.h >= 200 && tallest(cx, cz, t.h)) {
+    // Crowns lit in 2015 (est. colours): the U.S. Bank Tower's glass crown (colour-programmable,
+    // white on an ordinary night), the Gas Company Tower's blue flame crown, Two California Plaza's
+    // lit top; the logo bands of Wells Fargo (red) and Aon (red) on their top floors.
+    if (near(SPECIAL.usBank) && t.h > 300) add(crownWhite, extrude(simple, y1 - 9, y1 + 0.3, t.base, PLAIN, false));
+    if (near(SPECIAL.gasCompany) && t.h > 200) add(crownBlue, extrude(simple, y1 - 6, y1 + 0.3, t.base, PLAIN, false));
+    if (near(SPECIAL.twoCal) && t.h > 200) add(crownWhite, extrude(simple, y1 - 5, y1 + 0.3, t.base, PLAIN, false));
+    if ((near(SPECIAL.wellsFargo) || near(SPECIAL.aon)) && t.h > 200) add(signRed, extrude(simple, y1 - 7, y1 - 3, t.base, PLAIN, false));
+    // Steady red obstruction lights (L-810) at two opposite roof corners of the tallest towers (≥ 220 m).
+    if (t.h >= 220 && tallest(cx, cz, t.h)) {
       let a = 0;
       let b = 0;
       for (let i = 0; i < simple.length; i++) for (let j = i + 1; j < simple.length; j++) if (simple[i].distanceTo(simple[j]) > simple[a].distanceTo(simple[b])) (a = i), (b = j);
@@ -232,9 +275,9 @@ export function buildLandmarks(w: GriffithWorld): { beacons: LightSet; triangles
         [l / 2, -wd / 2],
       ].map(([a, b]) => c.clone().add(o).addScaledVector(along, a).addScaledVector(across, b));
     const base = groundY(c.x, c.y);
-    add(concrete, extrude(rect(110, 70, new Vector2(-40, 0)), base, base + 30, base, 0, 0));
-    add(concrete, extrude(rect(58, 26), base + 30, base + 150, base, 0, 0));
-    add(concrete, extrude(rect(44, 17), base + 150, base + 206, base, 0, 0));
+    add(concrete, extrude(rect(110, 70, new Vector2(-40, 0)), base, base + 30, base, PLAIN));
+    add(concrete, extrude(rect(58, 26), base + 30, base + 150, base, PLAIN));
+    add(concrete, extrude(rect(44, 17), base + 150, base + 206, base, PLAIN));
     // Work lights on the top decks.
     for (let k = 0; k < 6; k++) {
       const p = c.clone().addScaledVector(along, -20 + k * 8).addScaledVector(across, k % 2 ? 8 : -8);
@@ -243,7 +286,7 @@ export function buildLandmarks(w: GriffithWorld): { beacons: LightSet; triangles
     for (const s of [-1, 1]) {
       const m = c.clone().addScaledVector(along, s * 14);
       const top = base + 206 + 28;
-      add(concrete, extrude(rect(2.2, 2.2, m.clone().sub(c)), base + 206, top, base, 0, 0));
+      add(concrete, extrude(rect(2.2, 2.2, m.clone().sub(c)), base + 206, top, base, PLAIN));
       // Jib raised ~65°, 45 m, toward the outside.
       const tip = m.clone().addScaledVector(along, s * 45 * Math.cos(1.13));
       const jib = [m.clone().addScaledVector(across, -0.6), m.clone().addScaledVector(across, 0.6), tip.clone().addScaledVector(across, 0.6), tip.clone().addScaledVector(across, -0.6)];

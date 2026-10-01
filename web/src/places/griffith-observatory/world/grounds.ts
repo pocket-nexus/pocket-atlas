@@ -42,7 +42,7 @@ const LAMPS: P2[] = [
   [-11.5, -120.5],
   [13.0, -120.5],
   // The service yard and the loading road east of the drum (p14, p17).
-  [21.5, 8.5],
+  [20.6, 0.5],
   [31.4, -2.0],
   [38.6, -22.0],
 ];
@@ -150,7 +150,7 @@ export function buildGrounds(w: GriffithWorld, lib: ObsLib): { triangles: number
   for (let k = 0; k < 3; k++) {
     const a = (k / 3) * Math.PI * 2 + 0.5;
     const p: V3 = [MX + Math.cos(a) * 4.6, mon.base + 0.2, MZ + Math.sin(a) * 4.6];
-    spot(w, K3000, 260, 22, 0.42, 0.8, p, [MX, mon.base + 5.5, MZ]);
+    spot(w, K3000, 325, 22, 0.42, 0.8, p, [MX, mon.base + 5.5, MZ]);
     lights++;
   }
   bust(K, lib, -43.5, -67.9, (130 * Math.PI) / 180);
@@ -164,7 +164,7 @@ export function buildGrounds(w: GriffithWorld, lib: ObsLib): { triangles: number
   }
 
   // ------------------------------------------------------------ railings and edges
-  railing(K, lib, [[-18.4, -118.1], [-38.6, -76.5], [-41.7, -70.2], [-46.1, -70.2], [-46.0, -63.4], [-50.7, -63.4], [-50.7, -60.6], [-49.4, -60.6]], { kerb: 0.45 });
+  railing(K, lib, [[-18.4, -118.1], [-38.6, -76.5], [-41.7, -70.2], [-46.1, -70.2], [-46.0, -63.4], [-50.7, -63.4], [-50.7, -60.6], [-49.4, -60.6]], { kerb: 0.45, drop: 4 });
   railing(K, lib, [[-46.0, -11.7], [-35.3, -11.7], [-35.2, -7.7], [-19.2, -7.7], [-19.2, -2.2], [-17.5, -2.2]], { kerb: 0.45 });
   railing(K, lib, [[17.6, -117.0], [17.2, -56.0], [18.7, -51.6], [21.1, -49.6]], { kerb: 0.35 });
   railing(K, lib, [[-18.4, -118.1], [-18.3, -140.8], [-18.9, -158.5], [-19.9, -161.8], [-22.3, -167.7], [-26.8, -172.0]], { height: 1.2 });
@@ -203,13 +203,8 @@ export function buildGrounds(w: GriffithWorld, lib: ObsLib): { triangles: number
 
   // Outer wall of the loading road round the east dome and the service yard's south edge (p14, p17).
   groundParapet(K, lib, RETAINING.w427734993.slice().reverse());
-  groundParapet(K, lib, RETAINING.w377705458.slice().reverse());
+  groundParapet(K, lib, [[23.4, 9.9], [18.5, 10.1]]);
   groundParapet(K, lib, WALLS.w377705408, 1.5);
-  for (const [x, z] of [
-    [24.0, 11.3],
-    [29.6, 11.0],
-  ] as P2[])
-    binoculars(K, lib, x, groundY(x, z), z, 180);
 
   // ------------------------------------------------------------ binocular viewers
   for (const t of [40, 68, 112, 140]) {
@@ -241,7 +236,160 @@ export function buildGrounds(w: GriffithWorld, lib: ObsLib): { triangles: number
   }
   drape(walk, buffer(GROUND.median, 2.4), { cell: 4, lift: 0.15 });
 
+  lights += yard(w, K, lib);
+  roadDetail(K, lib);
+  outbuildings(K, lib);
   console.info(`[griffith] grounds by material: ${K.tally()}`);
   const triangles = K.emit(w);
   return { triangles, lights };
+}
+
+/**
+ * The service yard below the east deck and its viewing platform (p14, p17,
+ * ortho): the yard floor at −1.6 (DEM) is the car lane along the building;
+ * a raised platform (est. 1.0 m above it) fills the yard's south-east part
+ * out to the retaining wall at z ≈ 10, with a solid 1.05 m parapet on its
+ * outer edges, a pipe railing toward the lane, steps down at its north-west
+ * corner, warm uplights at the parapet's foot pooling on the floor where
+ * the visitors stand, and binocular viewers on posts. The platform's plan
+ * follows the yard paving and the retaining wall's line; its height is read
+ * off p14 (the visitors' feet sit about a parapet's height below the deck
+ * walkway's railing in perspective) and is an estimate.
+ */
+function yard(w: GriffithWorld, K: Kits, lib: ObsLib): number {
+  const deck = K.of(lib.deck());
+  const wall = K.of(lib.wall());
+  const steel = K.of(lib.steel());
+  const lens = K.of(lib.glow(K3000, 1.6, "lens"));
+  const yardY = -1.6;
+  const top = yardY + 1.0;
+  const P = { x0: 23.4, x1: 31.4, z0: 2.4, z1: 9.6 };
+  // Platform: deck floor, its north and west faces down to the lane.
+  deck.flat([[P.x0, P.z0], [P.x1, P.z0], [P.x1, P.z1], [P.x0, P.z1]], top, 1);
+  wall.wall([P.x0, P.z0], [P.x1, P.z0], yardY - 0.1, top, 1, { su: 4 });
+  wall.wall([P.x0, P.z0], [P.x0, P.z1], yardY - 0.1, top, -1, { su: 4 });
+  // Solid parapet on the south and east edges; its outer face runs down the retaining wall.
+  const par: P2[] = [[P.x0 - 0.0, P.z1], [P.x1, P.z1], [P.x1, P.z0]];
+  for (let i = 0; i + 1 < par.length; i++) {
+    const [a, b] = [par[i], par[i + 1]];
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    const dx = (b[0] - a[0]) / len;
+    const dz = (b[1] - a[1]) / len;
+    const ox = dz * 0.3;
+    const oz = -dx * 0.3;
+    // Inner face (toward the platform), outer face (toward the slope), coping.
+    wall.wall(a, b, top, top + 1.05, -1, { su: Math.ceil(len / 1.5) });
+    const ao: P2 = [a[0] + ox, a[1] + oz];
+    const bo: P2 = [b[0] + ox, b[1] + oz];
+    wall.wall(ao, bo, Math.min(groundY(ao[0], ao[1]), groundY(bo[0], bo[1])) - 0.4, top + 1.05, 1, { su: Math.ceil(len / 1.5), sv: 3 });
+    wall.face([a[0] - ox * 0.15, top + 1.05, a[1] - oz * 0.15], [b[0] - ox * 0.15, top + 1.05, b[1] - oz * 0.15], [bo[0] + ox * 0.15, top + 1.05, bo[1] + oz * 0.15], [ao[0] + ox * 0.15, top + 1.05, ao[1] + oz * 0.15], [0, 1, 0], [0, 0], [len, 0], [len, 0.35], [0, 0.35]);
+  }
+  // Pipe railing on the lane side and the platform's north edge.
+  railing(K, lib, [[P.x0, P.z1 - 0.3], [P.x0, P.z0 + 1.6]], { base: () => top });
+  railing(K, lib, [[P.x0 + 1.6, P.z0], [P.x1 - 0.3, P.z0]], { base: () => top });
+  // Steps down to the lane at the north-west corner.
+  for (let i = 0; i < 6; i++) {
+    const y = yardY + ((top - yardY) * (i + 1)) / 6;
+    deck.box(P.x0 - 1.8 + i * 0.3, P.x0, yardY - 0.1, y, P.z0, P.z0 + 1.5, "ny");
+  }
+  // Uplights at the parapet's foot and viewers along the south parapet.
+  let n = 0;
+  for (const x of [25.0, 27.8, 30.4]) {
+    const z = P.z1 - 0.45;
+    steel.box(x - 0.1, x + 0.1, top, top + 0.16, z - 0.1, z + 0.1, "ny");
+    lens.flat([[x - 0.06, z - 0.15], [x + 0.06, z - 0.15], [x + 0.06, z - 0.1], [x - 0.06, z - 0.1]], top + 0.161, 1);
+    point(w, K3000, 5, 4.5, [x, top + 0.25, z - 0.25]);
+    n++;
+    binoculars(K, lib, x - 1.3, top, P.z1 - 0.7, 180);
+  }
+  binoculars(K, lib, P.x1 - 0.7, top, 6.0, 90);
+  return n;
+}
+
+/** Kerbs along the drive, the zebra crossing to the island, diagonal stall lines either side of the median (p16, p21). */
+function roadDetail(K: Kits, lib: ObsLib): void {
+  const walk = K.of(lib.walk());
+  const paint = K.of(lib.paint());
+  // Kerbs: 0.15 m high, 0.3 m wide, on the drive's west and east edges.
+  const west: P2[] = [[-15.5, -121.0], [-15.5, -128.8], [-15.6, -155.0], [-16.6, -160.5], [-19.0, -167.5], [-26.6, -207.4]];
+  const east: P2[] = [[15.8, -200.9], [13.5, -191.1], [11.8, -176.6], [12.1, -165.1], [14.8, -147.7], [17.5, -139.9], [17.8, -134.5], [16.8, -128.5], [15.8, -119.0]];
+  for (const line of [west, east]) {
+    for (let i = 0; i + 1 < line.length; i++) {
+      const a = line[i];
+      const b = line[i + 1];
+      const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      const n = Math.max(1, Math.ceil(len / 4));
+      const dx = (b[0] - a[0]) / len;
+      const dz = (b[1] - a[1]) / len;
+      for (let k = 0; k < n; k++) {
+        const p0: P2 = [a[0] + (b[0] - a[0]) * (k / n), a[1] + (b[1] - a[1]) * (k / n)];
+        const p1: P2 = [a[0] + (b[0] - a[0]) * ((k + 1) / n), a[1] + (b[1] - a[1]) * ((k + 1) / n)];
+        const g0 = groundY(p0[0], p0[1]);
+        const g1 = groundY(p1[0], p1[1]);
+        for (const s of [-1, 1]) {
+          const ox = -dz * 0.15 * s;
+          const oz = dx * 0.15 * s;
+          walk.face([p0[0] + ox, g0 - 0.05, p0[1] + oz], [p1[0] + ox, g1 - 0.05, p1[1] + oz], [p1[0] + ox, g1 + 0.16, p1[1] + oz], [p0[0] + ox, g0 + 0.16, p0[1] + oz], [ox, 0, oz], [0, 0], [1, 0], [1, 0.2], [0, 0.2]);
+        }
+        walk.face([p0[0] + dz * 0.15, g0 + 0.16, p0[1] - dx * 0.15], [p1[0] + dz * 0.15, g1 + 0.16, p1[1] - dx * 0.15], [p1[0] - dz * 0.15, g1 + 0.16, p1[1] + dx * 0.15], [p0[0] - dz * 0.15, g0 + 0.16, p0[1] + dx * 0.15], [0, 1, 0], [p0[0], -p0[1]], [p1[0], -p1[1]], [p1[0], -p1[1]], [p0[0], -p0[1]]);
+      }
+    }
+  }
+  // Zebra crossing from the island to the west sidewalk (way 1158002855), bars along the road.
+  const za: P2 = [-3.6, -138.0];
+  const zb: P2 = [-15.2, -130.1];
+  const cl = Math.hypot(zb[0] - za[0], zb[1] - za[1]);
+  const cx = (zb[0] - za[0]) / cl;
+  const cz = (zb[1] - za[1]) / cl;
+  for (let d = 0.5; d < cl - 0.4; d += 1.1) {
+    const x = za[0] + cx * d;
+    const z = za[1] + cz * d;
+    const y = groundY(x, z) + 0.065;
+    // Bar 0.55 m across the crossing's direction, 3 m along the road (perpendicular to the crossing).
+    const ax = -cz * 1.5;
+    const az = cx * 1.5;
+    const bx = cx * 0.275;
+    const bz = cz * 0.275;
+    paint.face([x - ax - bx, y, z - az - bz], [x + ax - bx, y, z + az - bz], [x + ax + bx, y, z + az + bz], [x - ax + bx, y, z - az + bz], [0, 1, 0], [0, 0], [1, 0], [1, 1], [0, 1]);
+  }
+  // Diagonal stalls (60°) along both sides of the median walk.
+  for (let z = -146; z > -206; z -= 2.7) {
+    for (const s of [-1, 1]) {
+      const x0 = -0.6 + s * 1.3;
+      const y = groundY(x0, z) + 0.065;
+      const lx = s * Math.cos(Math.PI / 6) * 5.5;
+      const lz = -Math.sin(Math.PI / 6) * 5.5;
+      const w = 0.06;
+      paint.face([x0, y, z - w], [x0 + lx, y, z + lz - w], [x0 + lx, y, z + lz + w], [x0, y, z + w], [0, 1, 0], [0, 0], [1, 0], [1, 1], [0, 1]);
+    }
+  }
+}
+
+/**
+ * Outbuildings inside SITE: the low glass-roofed structure on the slope east
+ * of the lawn (LA County 1736517 / OSM 422131197: 8.6 × 26.8 m, roof 344.7 m
+ * ASL, 3.5 m) and the restroom block by the parking (OSM 422130795, 5 m).
+ */
+function outbuildings(K: Kits, lib: ObsLib): void {
+  const wall = K.of(lib.wall());
+  const steel = K.of(lib.steel());
+  const glass = K.of(lib.glazing());
+  // Glass-roofed structure: walls from the slope to the roof edge, a grid of glazing in steel.
+  const g = { x0: 23.6, x1: 32.2, z0: -92.8, z1: -66.0, top: -1.3 };
+  const ring: P2[] = [[g.x0, g.z0], [g.x1, g.z0], [g.x1, g.z1], [g.x0, g.z1]];
+  const foot = Math.min(...ring.map(([x, z]) => groundY(x, z))) - 0.5;
+  wall.ring(ring, foot, g.top + 0.3, true);
+  glass.flat([[g.x0 + 0.3, g.z0 + 0.3], [g.x1 - 0.3, g.z0 + 0.3], [g.x1 - 0.3, g.z1 - 0.3], [g.x0 + 0.3, g.z1 - 0.3]], g.top, 1);
+  wall.box(g.x0, g.x1, g.top, g.top + 0.3, g.z0, g.z0 + 0.3, "ny");
+  wall.box(g.x0, g.x1, g.top, g.top + 0.3, g.z1 - 0.3, g.z1, "ny");
+  wall.box(g.x0, g.x0 + 0.3, g.top, g.top + 0.3, g.z0, g.z1, "ny");
+  wall.box(g.x1 - 0.3, g.x1, g.top, g.top + 0.3, g.z0, g.z1, "ny");
+  for (let z = g.z0 + 2.2; z < g.z1 - 1; z += 2.2) steel.box(g.x0 + 0.3, g.x1 - 0.3, g.top, g.top + 0.08, z - 0.04, z + 0.04, "ny");
+  for (const x of [g.x0 + 2.9, g.x0 + 5.7]) steel.box(x - 0.04, x + 0.04, g.top, g.top + 0.08, g.z0 + 0.3, g.z1 - 0.3, "ny");
+  // Restroom block.
+  const t: P2[] = [[-22.8, -239.8], [-17.1, -239.8], [-17.1, -220.4], [-22.8, -220.4]];
+  const tf = Math.min(...t.map(([x, z]) => groundY(x, z))) - 0.3;
+  const tt = Math.max(...t.map(([x, z]) => groundY(x, z))) + 3.2;
+  wall.ring(t, tf, tt, true);
+  wall.box(-23.1, -16.8, tt, tt + 0.25, -240.1, -220.1, "ny");
 }

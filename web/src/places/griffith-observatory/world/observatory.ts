@@ -18,6 +18,9 @@ export function buildObservatory(w: GriffithWorld): void {
   const t0 = performance.now();
   const lib = new ObsLib(w.baker, w.quality);
   lib.bakeAll();
+  w.updaters.push((_dt, t) => {
+    lib.time.value = t;
+  });
   const K = new Kits();
   const { piers } = buildBlock(K, lib);
   const drum = buildDrum(K, lib);

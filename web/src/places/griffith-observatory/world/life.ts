@@ -437,7 +437,9 @@ function buildVisitors(w: GriffithWorld, p: Paints): void {
   const standers: { x: number; y: number; z: number; face: number; i: number; phone: boolean }[] = [
     // At the parapet of the roof walkway round the drum, south-west (Terrace shot).
     { x: Math.cos(Math.PI * 0.78) * 14.3, y: LEVEL.deck, z: Math.sin(Math.PI * 0.78) * 14.3, face: Math.PI * 0.74, i: 2, phone: false },
-    { x: Math.cos(Math.PI * 0.725) * 14.3, y: LEVEL.deck, z: Math.sin(Math.PI * 0.725) * 14.3, face: Math.PI * 0.62, i: 3, phone: true },
+    // At the west shoulder's south parapet, 3 m ahead of the Terrace camera: a
+    // silhouette with a phone against the carpet in the preview frame (t = 25).
+    { x: -15.3, y: LEVEL.deck, z: 1.5, face: Math.PI * 0.52, i: 3, phone: true },
     // On the lower east terrace below the east deck (Roof shot, p14).
     { x: 23.4, y: LEVEL.east, z: 9.6, face: Math.PI * 0.55, i: 5, phone: true },
     { x: 27.0, y: LEVEL.east, z: 9.8, face: Math.PI * 0.4, i: 0, phone: false },
