@@ -12,7 +12,7 @@ use serde_json::json;
 
 use crate::atlas::Atlas;
 use crate::gpu::Gpu;
-use crate::ui::{accent, rgb, Button, Style, Ui};
+use crate::ui::{accent, drawable, rgb, Button, Style, Ui};
 
 const SAVED_PATH: &str = "ux0:data/pocket-atlas/saved.json";
 
@@ -220,6 +220,12 @@ impl Browser {
         self.focus_changed(atlas, true);
     }
 
+    /// Opens the system keyboard for a search (□, or a control message).
+    pub unsafe fn open_search(&mut self) {
+        let q = self.query.clone();
+        self.ime.open("Search places", &q);
+    }
+
     pub fn dialog_running(&self) -> bool {
         self.ime.running
     }
@@ -237,7 +243,7 @@ impl Browser {
         let _ = std::fs::write(SAVED_PATH, json!({ "saved": self.saved }).to_string());
     }
 
-    pub fn toggle_saved(&mut self, atlas: &Atlas, id: &str) {
+    pub fn toggle_saved(&mut self, atlas: &mut Atlas, id: &str) {
         let name = atlas.meta.places.iter().find(|p| p.id == id).map_or(id.to_string(), |p| p.name.clone());
         if let Some(k) = self.saved.iter().position(|s| s == id) {
             self.saved.remove(k);
@@ -247,6 +253,11 @@ impl Browser {
             self.toast(format!("Saved {name}"));
         }
         self.write_saved();
+        if self.tab == Tab::Saved {
+            self.rebuild(atlas);
+            self.focus = self.focus.min(self.list.len().saturating_sub(1));
+            self.focus_changed(atlas, false);
+        }
     }
 
     fn toast(&mut self, msg: String) {
@@ -384,18 +395,12 @@ impl Browser {
             self.set_tab(atlas, TABS[(ti + TABS.len() - 1) % TABS.len()]);
         }
         if pressed & SCE_CTRL_SQUARE != 0 {
-            let q = self.query.clone();
-            self.ime.open("Search places", &q);
+            self.open_search();
         }
         let focused = self.list.get(self.focus).map(|&i| atlas.meta.places[i].clone());
         if let Some(p) = &focused {
             if pressed & SCE_CTRL_TRIANGLE != 0 {
                 self.toggle_saved(atlas, &p.id);
-                if self.tab == Tab::Saved {
-                    self.rebuild(atlas);
-                    self.focus = self.focus.min(self.list.len().saturating_sub(1));
-                    self.focus_changed(atlas, false);
-                }
             }
             if pressed & (SCE_CTRL_CROSS | SCE_CTRL_CIRCLE) != 0 {
                 if p.enterable {
@@ -449,7 +454,7 @@ impl Browser {
                 let bottom = rgb(0x0c0e14, opacity);
                 ui.rect(gpu, x, y, w, h, &Style::gradient(radius, top, bottom).stroke(1.0, rgb(0xffffff, 0.12 * opacity)));
                 // The place's own name for the city, faint, as on a postmark.
-                let label = if p.locality_native.trim().is_empty() || p.locality_native.chars().all(|c| c == '_') { &p.locality } else { &p.locality_native };
+                let label = if p.locality_native.trim().is_empty() || !drawable(&p.locality_native) { &p.locality } else { &p.locality_native };
                 let scale = (w / 150.0).clamp(0.55, 2.0);
                 let tw = ui.width(scale, label);
                 if tw < w - 8.0 {
@@ -606,16 +611,17 @@ impl Browser {
             }
         }
 
-        // Postcard text, appearing as it opens.
-        let co = ((s - 0.5) * 2.0).max(0.0);
+        // Postcard text, appearing once the picture has nearly opened.
+        let co = ((s - 0.7) / 0.3).max(0.0);
         if co > 0.0 {
             let ih = IMG_W * 0.5;
-            // Scrim and name over the bottom of the picture.
-            ui.rect(gpu, x, y + ih - 64.0, IMG_W, 64.0, &Style::gradient(10.0, rgb(0x000000, 0.0), rgb(0x000000, 0.72 * co * fade)));
+            // Scrim and name over the bottom of the picture (its current size).
+            let sh = 64.0 * iw / IMG_W;
+            ui.rect(gpu, ix, iy + iw * 0.5 - sh, iw, sh, &Style::gradient(10.0, rgb(0x000000, 0.0), rgb(0x000000, 0.72 * co * fade)));
             let name = ui.fit(1.0, &p.name, IMG_W - 28.0);
             ui.text(x + 14.0, y + ih - 14.0, white(co), 1.0, &name);
             let nw = ui.width(1.0, &name);
-            if !p.native.is_empty() && nw + ui.width(0.66, &p.native) + 40.0 < IMG_W {
+            if !p.native.is_empty() && drawable(&p.native) && nw + ui.width(0.66, &p.native) + 40.0 < IMG_W {
                 ui.text(x + 24.0 + nw, y + ih - 14.0, white(0.72 * co), 0.66, &p.native);
             }
             // Kind chip and the saved badge.
@@ -633,7 +639,7 @@ impl Browser {
             }
             // Caption.
             let cy = y + ih;
-            let loc = if p.locality_native.is_empty() || p.locality_native.chars().all(|c| c == '_') {
+            let loc = if p.locality_native.is_empty() || !drawable(&p.locality_native) {
                 format!("{}  ·  {}", p.locality, p.country)
             } else {
                 format!("{} {}  ·  {}", p.locality, p.locality_native, p.country)

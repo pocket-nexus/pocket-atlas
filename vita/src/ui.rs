@@ -37,6 +37,16 @@ pub fn accent(c: [f32; 3], a: f32) -> [f32; 4] {
     [s(c[0]) * a, s(c[1]) * a, s(c[2]) * a, a]
 }
 
+/// Whether the system font draws every character of `s`: it holds Latin,
+/// Greek, Cyrillic, Japanese (JIS X 0208) and common symbols; other scripts
+/// (Hangul, Devanagari, …) come out as blanks.
+pub fn drawable(s: &str) -> bool {
+    s.chars().all(|c| {
+        matches!(c as u32,
+            0x0000..=0x024f | 0x0370..=0x04ff | 0x2000..=0x22ff | 0x2460..=0x27bf | 0x3000..=0x30ff | 0x3200..=0x33ff | 0x4e00..=0x9fff | 0xff00..=0xffef)
+    })
+}
+
 #[derive(Clone, Copy)]
 pub struct Style {
     pub radius: f32,

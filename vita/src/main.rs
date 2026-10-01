@@ -321,7 +321,10 @@ unsafe fn run_atlas(app: &mut App, select: Option<String>) -> Next {
                     app.browser.select(&mut atlas, id);
                 }
                 if let Some(id) = v["save"].as_str() {
-                    app.browser.toggle_saved(&atlas, id);
+                    app.browser.toggle_saved(&mut atlas, id);
+                }
+                if v["keyboard"].as_bool() == Some(true) {
+                    app.browser.open_search();
                 }
                 let pr = &v["probe"];
                 let flag = |k: &str| pr[k].as_bool().unwrap_or(false);
