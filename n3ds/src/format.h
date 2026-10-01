@@ -33,6 +33,8 @@ typedef struct {
   float center[3], radius;
   AtlasLod lod[4];
 } AtlasDraw;
+// AtlasDraw.reserved: local tubes/rings with a shape-preserving middle LOD.
+enum { DRAW_STRUCTURAL_DETAIL = 1 };
 typedef struct {
   char name[32];
   float from[7], to[7], duration;

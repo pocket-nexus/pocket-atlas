@@ -206,6 +206,265 @@ fn repack_geometry(old_geom: Vec<u8>, draws: &mut [Vec<u8>]) -> Vec<u8> {
     geom
 }
 
+// Principal extents make the structural-detail test independent of rotation.
+// World-axis bounds classify a diagonal tube as a thick box; face axes fail
+// on curved tubes and rings. A symmetric 3x3 Jacobi solve covers both cases.
+fn principal_extents(points: &[Vec3]) -> Vec3 {
+    let center = points.iter().copied().sum::<Vec3>() / points.len() as f32;
+    let mut a = [[0.0f32; 3]; 3];
+    for &p in points {
+        let d = (p - center).to_array();
+        for i in 0..3 {
+            for j in 0..3 {
+                a[i][j] += d[i] * d[j];
+            }
+        }
+    }
+    let mut axes = [Vec3::X, Vec3::Y, Vec3::Z];
+    for _ in 0..16 {
+        let (p, q) = [(0, 1), (0, 2), (1, 2)]
+            .into_iter()
+            .max_by(|&(i, j), &(k, l)| a[i][j].abs().total_cmp(&a[k][l].abs()))
+            .unwrap();
+        if a[p][q].abs() < 1e-10 {
+            break;
+        }
+        let angle = 0.5 * (2.0 * a[p][q]).atan2(a[q][q] - a[p][p]);
+        let (s, c) = angle.sin_cos();
+        let (ap, aq, off) = (a[p][p], a[q][q], a[p][q]);
+        a[p][p] = c * c * ap - 2.0 * s * c * off + s * s * aq;
+        a[q][q] = s * s * ap + 2.0 * s * c * off + c * c * aq;
+        a[p][q] = 0.0;
+        a[q][p] = 0.0;
+        for k in 0..3 {
+            if k != p && k != q {
+                let (x, y) = (a[k][p], a[k][q]);
+                a[k][p] = c * x - s * y;
+                a[p][k] = a[k][p];
+                a[k][q] = s * x + c * y;
+                a[q][k] = a[k][q];
+            }
+        }
+        let (x, y) = (axes[p], axes[q]);
+        axes[p] = c * x - s * y;
+        axes[q] = s * x + c * y;
+    }
+    let mut lo = Vec3::splat(f32::MAX);
+    let mut hi = Vec3::splat(f32::MIN);
+    for &p in points {
+        let d = p - center;
+        let q = Vec3::new(d.dot(axes[0]), d.dot(axes[1]), d.dot(axes[2]));
+        lo = lo.min(q);
+        hi = hi.max(q);
+    }
+    let mut e = (hi - lo).to_array();
+    e.sort_by(f32::total_cmp);
+    Vec3::from(e)
+}
+
+fn structural_detail(extent: Vec3, fine: usize, coarse: usize) -> bool {
+    fine >= 24
+        && coarse * 100 < fine * 45
+        && (0.008..=0.12).contains(&extent.x)
+        && (0.1..=2.0).contains(&extent.z)
+}
+
+/// Preserve compact tubes/rings that canonical distance LODs partly erase.
+/// Their coarse geometry stays identical; a separate 2 m cell can select a
+/// bounded-error middle LOD without restoring an entire 32 m street chunk.
+/// Draw reserved bit 0 marks this near-detail policy (no format-size change).
+fn recover_structural_details(
+    geom: &mut Vec<u8>,
+    draws: Vec<Vec<u8>>,
+    eligible_materials: &[bool],
+) -> Vec<Vec<u8>> {
+    let get = |r: &[u8], o: usize| u32::from_le_bytes(r[o..o + 4].try_into().unwrap()) as usize;
+    let put =
+        |r: &mut [u8], o: usize, v: usize| r[o..o + 4].copy_from_slice(&(v as u32).to_le_bytes());
+    let mut output = Vec::new();
+    for d in draws {
+        if get(&d, 12) != u32::MAX as usize
+            || get(&d, 16) != u32::MAX as usize
+            || !eligible_materials[get(&d, 0)]
+        {
+            output.push(d);
+            continue;
+        }
+        let count = get(&d, 8);
+        let base = get(&d, 4);
+        let vertices = geom[base..base + count * 24].to_vec();
+        let positions: Vec<Vec3> = (0..count)
+            .map(|i| {
+                Vec3::new(
+                    readf(&vertices, i * 24),
+                    readf(&vertices, i * 24 + 4),
+                    readf(&vertices, i * 24 + 8),
+                )
+            })
+            .collect();
+        let lods: [Vec<u32>; 4] = std::array::from_fn(|k| {
+            let start = get(&d, 48 + k * 12);
+            geom[start..start + get(&d, 52 + k * 12) * 2]
+                .chunks_exact(2)
+                .map(|v| u16::from_le_bytes([v[0], v[1]]) as u32)
+                .collect()
+        });
+        let mut parent: Vec<usize> = (0..count).collect();
+        fn root(parent: &mut [usize], mut i: usize) -> usize {
+            while parent[i] != i {
+                parent[i] = parent[parent[i]];
+                i = parent[i];
+            }
+            i
+        }
+        let join = |parent: &mut [usize], a, b| {
+            let (a, b) = (root(parent, a), root(parent, b));
+            parent[a] = b;
+        };
+        for t in lods[0].chunks_exact(3) {
+            join(&mut parent, t[0] as usize, t[1] as usize);
+            join(&mut parent, t[1] as usize, t[2] as usize);
+        }
+        let mut at = HashMap::new();
+        for (i, p) in positions.iter().enumerate() {
+            let first = *at.entry(p.to_array().map(f32::to_bits)).or_insert(i);
+            join(&mut parent, first, i);
+        }
+        let roots: Vec<usize> = (0..count).map(|i| root(&mut parent, i)).collect();
+        let mut parts = std::collections::BTreeMap::<usize, [Vec<u32>; 4]>::new();
+        for (k, indices) in lods.iter().enumerate() {
+            for t in indices.chunks_exact(3) {
+                let r = roots[t[0] as usize];
+                debug_assert!(k == 3 || t.iter().all(|&i| roots[i as usize] == r));
+                parts.entry(r).or_default()[k].extend(t);
+            }
+        }
+        let adapter = meshopt::VertexDataAdapter::new(&vertices, 24, 0).unwrap();
+        let attrs: Vec<f32> = vertices
+            .chunks_exact(24)
+            .flat_map(|v| {
+                [
+                    readf(v, 12),
+                    readf(v, 16),
+                    v[20] as f32 / 255.0,
+                    v[21] as f32 / 255.0,
+                    v[22] as f32 / 255.0,
+                ]
+            })
+            .collect();
+        let locked = vec![false; count];
+        let mut retained: [Vec<u32>; 4] = Default::default();
+        let mut cells = std::collections::BTreeMap::<[i32; 3], [Vec<u32>; 4]>::new();
+        for (_, mut part) in parts {
+            let mut used = part[0].clone();
+            used.sort_unstable();
+            used.dedup();
+            let points: Vec<Vec3> = used.iter().map(|&i| positions[i as usize]).collect();
+            if points.is_empty()
+                || !structural_detail(
+                    principal_extents(&points),
+                    part[0].len() / 3,
+                    part[2].len() / 3,
+                )
+            {
+                for k in 0..4 {
+                    retained[k].extend(&part[k]);
+                }
+                continue;
+            }
+            // The middle LOD removes tessellation, never whole components.
+            // UV and display colour still constrain collapses at material seams.
+            let simplified = meshopt::simplify_with_attributes_and_locks(
+                &part[0],
+                &adapter,
+                &attrs,
+                &[0.05, 0.05, 0.2, 0.2, 0.2],
+                20,
+                &locked,
+                (part[0].len() / 9).max(12) * 3,
+                0.008,
+                meshopt::SimplifyOptions::ErrorAbsolute,
+                None,
+            );
+            part[1] = if simplified.is_empty() {
+                part[0].clone()
+            } else {
+                simplified
+            };
+            let lo = points
+                .iter()
+                .copied()
+                .fold(Vec3::splat(f32::MAX), Vec3::min);
+            let hi = points
+                .iter()
+                .copied()
+                .fold(Vec3::splat(f32::MIN), Vec3::max);
+            let key = ((lo + hi) * 0.25).to_array().map(|v| v.floor() as i32);
+            let cell = cells.entry(key).or_default();
+            for k in 0..4 {
+                cell[k].extend(&part[k]);
+            }
+        }
+        if cells.is_empty() {
+            output.push(d);
+            continue;
+        }
+        let mut emit = |indices: [Vec<u32>; 4], detail: bool| {
+            if indices[0].is_empty() {
+                return;
+            }
+            let mut rec = d.clone();
+            let mut remap = HashMap::new();
+            let mut compact: Vec<u8> = Vec::new();
+            let mut lo = Vec3::splat(f32::MAX);
+            let mut hi = Vec3::splat(f32::MIN);
+            let levels: [Vec<u32>; 4] = indices.map(|level| {
+                level
+                    .into_iter()
+                    .map(|i| {
+                        *remap.entry(i).or_insert_with(|| {
+                            let n = (compact.len() / 24) as u32;
+                            compact.extend(&vertices[i as usize * 24..(i as usize + 1) * 24]);
+                            lo = lo.min(positions[i as usize]);
+                            hi = hi.max(positions[i as usize]);
+                            n
+                        })
+                    })
+                    .collect()
+            });
+            align(geom, 16);
+            put(&mut rec, 4, geom.len());
+            put(&mut rec, 8, compact.len() / 24);
+            put(&mut rec, 28, detail as usize);
+            geom.extend(compact);
+            let center = (lo + hi) * 0.5;
+            for (k, v) in [center.x, center.y, center.z, (hi - lo).length() * 0.5]
+                .into_iter()
+                .enumerate()
+            {
+                rec[32 + k * 4..36 + k * 4].copy_from_slice(&v.to_le_bytes());
+            }
+            for (k, indices) in levels.iter().enumerate() {
+                align(geom, 4);
+                put(&mut rec, 48 + k * 12, geom.len());
+                put(&mut rec, 52 + k * 12, indices.len());
+                for &i in &meshopt::optimize_vertex_cache(indices, remap.len()) {
+                    geom.extend((i as u16).to_le_bytes());
+                }
+            }
+            if detail {
+                rec[68..72].copy_from_slice(&0.008f32.to_le_bytes());
+            }
+            output.push(rec);
+        };
+        emit(retained, false);
+        for cell in cells.into_values() {
+            emit(cell, true);
+        }
+    }
+    output
+}
+
 // Display-referred panoramas preserve authored day/twilight colour, sunlight
 // and clouds without spending fragment instructions or an HDR target on PICA.
 fn sky_radiance(s: &pc::DaySky, d: Vec3) -> Vec3 {
@@ -405,6 +664,25 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
     let mut mats = Vec::new();
     let mut texkeys = HashMap::new();
     let mut decoded = HashMap::new();
+    // Aggregate usage before deduplication: a texture shared with a dim
+    // material must retain the resolution needed by its luminous lettering.
+    let mut emissive_strips = vec![false; m.textures.len()];
+    for mat in &m.materials {
+        if mat.emission.is_some()
+            && mat.emissive.iter().copied().fold(0.0, f32::max) > 0.1
+            && mat.color[..3].iter().all(|&v| v < 0.1)
+        {
+            if let Some(ti) = mat.albedo.or(mat.emission) {
+                let t = &m.textures[ti as usize];
+                if t.wrap_s == pc::Wrap::Clamp
+                    && t.wrap_t == pc::Wrap::Clamp
+                    && t.width.max(t.height) >= t.width.min(t.height) * 4
+                {
+                    emissive_strips[ti as usize] = true;
+                }
+            }
+        }
+    }
     for mat in &m.materials {
         let proc = matches!(
             mat.kind,
@@ -454,7 +732,11 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
                     }
                 }
                 // Text atlases retain 1024 so Japanese lettering survives the 400px display.
-                let limit = if src.w >= 2048 || grid[0] > 1 || grid[1] > 1 {
+                let limit = if src.w >= 2048
+                    || grid[0] > 1
+                    || grid[1] > 1
+                    || ti.is_some_and(|id| emissive_strips[id as usize])
+                {
                     1024
                 } else {
                     cap
@@ -886,6 +1168,17 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
         }
         draws.push(rec);
     }
+    let eligible_materials: Vec<bool> = m
+        .materials
+        .iter()
+        .map(|mat| {
+            mat.kind == pc::Kind::Standard
+                && mat.blend == pc::Blend::Opaque
+                && mat.emission.is_none()
+                && mat.emissive.iter().all(|&v| v <= 0.0)
+        })
+        .collect();
+    let draws = recover_structural_details(&mut geom, draws, &eligible_materials);
     // Canonical street chunks are broad. Subdivide detail-only chunks so
     // approaching one rail does not restore all thin geometry across 32 m.
     let get = |r: &[u8], o: usize| u32::from_le_bytes(r[o..o + 4].try_into().unwrap());
@@ -1161,6 +1454,97 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn structural_classifier_preserves_rotated_tubes_but_rejects_wires_and_panels() {
+        let rotation = Quat::from_euler(glam::EulerRot::YXZ, 0.7, 0.4, 0.2);
+        let points: Vec<Vec3> = (0..8)
+            .map(|i| {
+                rotation
+                    * Vec3::new(
+                        if i & 1 == 0 { -0.01 } else { 0.01 },
+                        if i & 2 == 0 { -0.02 } else { 0.02 },
+                        if i & 4 == 0 { -0.3 } else { 0.3 },
+                    )
+                    + Vec3::new(2.0, 4.0, 8.0)
+            })
+            .collect();
+        let extents = principal_extents(&points);
+        assert!((extents - Vec3::new(0.02, 0.04, 0.6)).length() < 1e-5);
+        assert!(structural_detail(extents, 32, 4));
+        assert!(!structural_detail(Vec3::new(0.004, 0.004, 0.6), 32, 0));
+        assert!(!structural_detail(Vec3::new(0.02, 0.4, 0.6), 12, 0));
+        assert!(!structural_detail(extents, 32, 24));
+    }
+
+    #[test]
+    fn partial_tube_lod_gets_local_complete_middle_mesh_without_changing_coarse() {
+        let mut geom = Vec::new();
+        let mut fine = Vec::<u32>::new();
+        // A structural tube and an equally tessellated subpixel wire share
+        // one canonical draw. Both have a few surviving coarse triangles.
+        for (part, radius) in [0.02, 0.002].into_iter().enumerate() {
+            for i in 0..16 {
+                let a = i as f32 * std::f32::consts::TAU / 16.0;
+                for y in [0.0, 0.6] {
+                    fs(
+                        &mut geom,
+                        &[
+                            part as f32 * 8.0 + radius * a.cos(),
+                            y,
+                            radius * a.sin(),
+                            0.0,
+                            0.0,
+                        ],
+                    );
+                    geom.extend([128, 128, 128, 255]);
+                }
+                let a = part as u32 * 32 + i * 2;
+                let b = part as u32 * 32 + ((i + 1) % 16) * 2;
+                fine.extend([a, b, a + 1, b, b + 1, a + 1]);
+            }
+        }
+        let coarse = vec![0, 2, 1, 32, 34, 33];
+        let mut d = Vec::new();
+        u32s(&mut d, &[0, 0, 64, u32::MAX, u32::MAX, u32::MAX, 0, 0]);
+        fs(&mut d, &[4.0, 0.3, 0.0, 4.1]);
+        for (k, indices) in [&fine, &coarse, &coarse, &coarse].into_iter().enumerate() {
+            u32s(&mut d, &[geom.len() as u32, indices.len() as u32]);
+            fs(&mut d, &[if k == 0 { 0.0 } else { 0.25 }]);
+            for &i in indices {
+                geom.extend((i as u16).to_le_bytes());
+            }
+        }
+        let result = recover_structural_details(&mut geom, vec![d], &[true]);
+        assert_eq!(result.len(), 2);
+        let get = |r: &[u8], o: usize| u32::from_le_bytes(r[o..o + 4].try_into().unwrap()) as usize;
+        let detail = result.iter().find(|r| get(r, 28) == 1).unwrap();
+        assert_eq!(get(detail, 52), 96);
+        assert!(get(detail, 64) > 3 && get(detail, 64) <= 96);
+        assert_eq!(get(detail, 76), 3);
+        assert!(readf(detail, 44) < 0.31);
+        assert_eq!(result.iter().map(|r| get(r, 52)).sum::<usize>(), fine.len());
+        assert_eq!(
+            result.iter().map(|r| get(r, 76)).sum::<usize>(),
+            coarse.len()
+        );
+        // Coarse faces retain all coordinates and winding despite remapping.
+        let mut coarse_positions = Vec::new();
+        for r in &result {
+            let start = get(r, 72);
+            for ix in geom[start..start + get(r, 76) * 2].chunks_exact(2) {
+                let offset = get(r, 4) + u16::from_le_bytes([ix[0], ix[1]]) as usize * 24;
+                coarse_positions.push(geom[offset..offset + 12].to_vec());
+            }
+        }
+        let mut expected: Vec<Vec<u8>> = coarse
+            .iter()
+            .map(|&i| geom[i as usize * 24..i as usize * 24 + 12].to_vec())
+            .collect();
+        expected.sort();
+        coarse_positions.sort();
+        assert_eq!(coarse_positions, expected);
+    }
+
     #[test]
     fn batching_preserves_vertices_lods_and_shared_ranges() {
         let mut geometry: Vec<u8> = (0..192).map(|v| v as u8).collect();

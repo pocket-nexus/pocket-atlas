@@ -443,8 +443,12 @@ bool scene_load(const char *path, char *error, size_t capacity) {
     if (!C3D_TexInitWithParams(&reflection_tex, NULL, reflected_params) ||
         !C3D_TexInit(&puddle_tex, 64, 64, GPU_RGBA4))
       goto invalid;
+    // The mirror uses the scene's 0.08 m near plane. At 20 m, a 16-bit Z
+    // buffer merges surfaces separated by about 7.6 cm, so layered signs and
+    // shop fronts fight as the view moves. 24-bit Z resolves those layers and
+    // costs only 32 KiB more at 128x256; the mirror does not need stencil.
     reflection_target = C3D_RenderTargetCreateFromTex(
-        &reflection_tex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH16);
+        &reflection_tex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH24);
     if (!reflection_target)
       goto invalid;
     C3D_TexSetFilter(&reflection_tex, GPU_LINEAR, GPU_LINEAR);
@@ -790,12 +794,20 @@ static bool visible(unsigned i, bool mirror, float *distance) {
 }
 static unsigned select_lod(const AtlasDraw *d, bool mirror, float distance) {
   float tolerance = (0.65f + atlas.step * 0.65f) * (mirror ? 3.5f : 1.0f);
+  bool structural = (d->reserved & DRAW_STRUCTURAL_DETAIL) != 0;
+  bool preserve = structural && !mirror && distance < 24 &&
+                  d->radius * focal_length / distance > 8;
   unsigned lod = atlas.lod_floor;
-  if (!d->lod[lod].count && distance < detail_range)
+  if (!structural && !d->lod[lod].count && distance < detail_range)
     lod = 0;
   for (unsigned k = lod + 1; k < 3; k++)
     if (d->lod[k].error * focal_length / distance < tolerance)
       lod = k;
+  // The coarse level can omit whole thin components. Keep their bounded-error
+  // middle mesh while the local cell is visibly large; never restore the full
+  // street chunk or spend this detail in the low-resolution mirror.
+  if (preserve && lod > 1)
+    lod = 1;
   return lod;
 }
 static void skin(unsigned i, int main_lod, int mirror_lod) {
@@ -1351,6 +1363,12 @@ void scene_control(const char *json) {
     }
     if (n < head->shots)
       set_shot(n, true);
+  }
+  if ((s = field(json, "shotPhase"))) {
+    char *end;
+    float phase = strtof(s, &end);
+    if (end != s && isfinite(phase))
+      shot_time = shots[atlas.shot].duration * clampf(phase, 0, 1);
   }
   if ((s = field(json, "step"))) {
     long n = strtol(s, NULL, 10);

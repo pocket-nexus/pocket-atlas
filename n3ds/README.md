@@ -107,6 +107,7 @@ bun tools/atlas-3ds.ts status
 bun tools/atlas-3ds.ts ctl '{"atlas":true,"tab":"search","search":"summer"}'
 bun tools/atlas-3ds.ts ctl '{"place":"kamakura-koko-mae-crossing"}'
 bun tools/atlas-3ds.ts ctl '{"shot":"Crossing","time":25,"step":0,"hold":true}'
+bun tools/atlas-3ds.ts ctl '{"shot":"Crossing","shotPhase":0.4,"time":10}'
 bun tools/atlas-3ds.ts ctl '{"sheet":true,"settings":{"exposure":0.25}}'
 bun tools/atlas-3ds.ts capture
 bun tools/atlas-3ds.ts capture --surface reflection
@@ -132,6 +133,8 @@ maximum and a 0.5 ms histogram P95. `tour` uses moving cameras and automatic
 quality. Benchmarks temporarily lock physical input and restore it afterward;
 the lock expires after three seconds without control traffic. `hold` pins
 quality, while `time` freezes animation/camera until `play: true`.
+`shotPhase` selects a normalized position within the named camera path for
+repeatable angle comparisons; selecting only `shot` uses its midpoint.
 
 `tour` checkpoints incomplete results and may reconnect after a Wi-Fi drop.
 It accepts only the same build and place with advancing frame and measurement
@@ -156,6 +159,9 @@ approximation. Night scenes retain rain, local light glow and wet planar
 reflections in a 128 × 256 target. PICA uses baked lighting and fixed texture
 combiners, rather than the Vita's complete per-pixel normal/ORM and HDR bloom
 pipeline; exposure is an LDR adjustment and sun shadows are static.
+The reflection target uses 24-bit depth to separate layered shop fronts when
+the view moves. Long, clamped emissive lettering retains up to 1024 texels on
+its long axis, with mipmaps for stable distant sampling.
 
 Native materials with identical GPU state are merged after lighting is baked.
 Static vertices form u16-addressable batches; visible LOD indices are gathered
@@ -166,6 +172,10 @@ LOD from material features: open water uses 0, day/twilight skies use 1, and
 other scenes use 2. Values 0–2 override this for comparisons; status reports
 the actual `lodFloor` and configured `lodSetting`. Automatic quality adapts
 detail tolerance, rain and reflection range to the selected frame budget.
+Compact static tubes and rings that lose their shape in the coarse mesh get
+local detail cells and an 8 mm error middle LOD. That level remains visible
+within 24 m while the cell projects to more than an 8-pixel radius; distant
+geometry and reflection proxies retain their original coarse triangles.
 It starts conservatively on each scene entry, so a costly scene does not
 inherit a lighter scene's highest quality before its first measurements.
 
