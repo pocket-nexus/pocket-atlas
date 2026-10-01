@@ -169,7 +169,12 @@ pub fn cook(input: &Path, output: &Path) {
                     0
                 },
                 alpha_test: (mat.alpha_test * 255.0) as u32,
-                depth_bias: if mat.polygon_offset.is_some()
+                // Interior-window cards sit millimetres in front of facades.
+                // At street-view distances that gap is less than one PSP
+                // 16-bit depth unit, producing view-dependent stripes. Use
+                // the same reversed-depth offset as other surface overlays.
+                depth_bias: if mat.kind == pc::Kind::InteriorWindow
+                    || mat.polygon_offset.is_some()
                     || (mat.albedo.is_some() && mat.emissive.iter().any(|&e| e > 0.1))
                 {
                     4
