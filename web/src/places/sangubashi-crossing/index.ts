@@ -21,7 +21,7 @@ const WALKABLE: Box6[] = Array.from({ length: 21 }, (_, i) => {
 
 export function createStage(ctx: StageContext, place: PlaceDef, progress: Progress) {
   return DayStage.create(ctx, place, progress, {
-    kind: "daytime-railway", season: "spring", shots: SHOTS, walkable: WALKABLE,
+    kind: "daytime-street", season: "spring", shots: SHOTS, walkable: WALKABLE, loopSeconds: PASS.period,
     focus: [-28, -5, -65, 28, 22, 48],
     intro: { pos: [-0.5, 5.5, 24], target: [-1.7, 2.5, -18], fov: 42 }, introSeconds: 5,
     sunDirection: new Vector3(0.58, 0.7, 0.34).normalize(), sunIntensity: 7.2,

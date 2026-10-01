@@ -51,3 +51,34 @@ export function verticalText(g: Ctx, text: string, x: number, y: number, size: n
     } else g.fillText(ch, x, cy);
   });
 }
+
+/** Heaviest weight prefix for `g.font` (signage lettering). */
+export const HEAVY = `900 `;
+
+/** Fills text scaled to fit width `w` (keeps the size if it already fits). */
+export function fitText(g: Ctx, text: string, x: number, y: number, w: number, size: number, font = JP_SANS, weight = HEAVY): number {
+  g.font = `${weight}${size}px ${font}`;
+  const m = g.measureText(text).width;
+  if (m > w) {
+    size *= w / m;
+    g.font = `${weight}${size}px ${font}`;
+  }
+  g.fillText(text, x, y);
+  return size;
+}
+
+/** Text squeezed horizontally to exactly `w` (condensed signage lettering). */
+export function squeezeText(g: Ctx, text: string, x: number, y: number, w: number, size: number, font = JP_SANS, weight = HEAVY, stroke = 0): void {
+  g.font = `${weight}${size}px ${font}`;
+  const m = g.measureText(text).width;
+  g.save();
+  g.translate(x, y);
+  g.scale(w / m, 1);
+  if (stroke > 0) {
+    g.lineWidth = stroke / (w / m);
+    g.lineJoin = "round";
+    g.strokeText(text, 0, 0);
+  }
+  g.fillText(text, 0, 0);
+  g.restore();
+}

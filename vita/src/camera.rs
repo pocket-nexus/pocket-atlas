@@ -69,12 +69,25 @@ impl Rig {
         self.shots.get(self.shot).map(|s| s.name.as_str()).unwrap_or("")
     }
 
-    pub fn next_shot(&mut self) {
+    pub fn shot_count(&self) -> usize {
+        self.shots.len()
+    }
+
+    pub fn shot_index(&self) -> usize {
+        self.shot
+    }
+
+    /// Cuts to shot `k` (cinematic).
+    pub fn set_shot(&mut self, k: usize) {
         if !self.shots.is_empty() {
-            self.shot = (self.shot + 1) % self.shots.len();
+            self.shot = k % self.shots.len();
             self.shot_time = 0.0;
         }
         self.mode = Mode::Cinematic;
+    }
+
+    pub fn next_shot(&mut self) {
+        self.set_shot(self.shot + 1);
     }
 
     /// `stick`: left (move x, z), right (look x, y); `lift`: up/down in m/s.

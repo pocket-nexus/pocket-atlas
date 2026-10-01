@@ -11,22 +11,7 @@ pub struct Rgba {
     pub px: Vec<[f32; 4]>,
 }
 
-fn srgb_to_linear(c: f32) -> f32 {
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-fn linear_to_srgb(c: f32) -> f32 {
-    let c = c.clamp(0.0, 1.0);
-    if c <= 0.0031308 {
-        c * 12.92
-    } else {
-        1.055 * c.powf(1.0 / 2.4) - 0.055
-    }
-}
+use pocket3d_place::color::{decode as srgb_to_linear, encode as linear_to_srgb};
 
 /// Decodes 8-bit RGBA into floats; colour roles are converted to linear.
 pub fn from_rgba8(w: u32, h: u32, data: &[u8], role: TexRole) -> Rgba {
@@ -149,14 +134,20 @@ pub struct Encoded {
     pub data: Vec<u8>,
 }
 
-/// Picks the block format for a role and encodes the full mip chain.
-pub fn encode(src: &Rgba, role: TexRole, cap: u32, alpha: bool) -> Encoded {
+/// Encodes a texture in its role's block format (BC5 normals, BC3 with
+/// alpha, BC1 otherwise). A texture split into `cells` (columns, rows) — a
+/// flipbook — stops its mip chain while a cell is still 4 texels or more
+/// across, so filtering does not mix neighbouring frames.
+pub fn encode_cells(src: &Rgba, role: TexRole, cap: u32, alpha: bool, cells: (u32, u32)) -> Encoded {
     let format = match role {
         TexRole::Normal => TexFormat::Bc5,
         _ if alpha => TexFormat::Bc3,
         _ => TexFormat::Bc1,
     };
-    encode_as(src, role, format, cap, 12)
+    let (w, h) = pow2_fit(src.w, src.h, cap);
+    let cell = (w / cells.0.max(1)).min(h / cells.1.max(1)).max(1);
+    let max_mips = if cells == (1, 1) { 12 } else { (31 - cell.leading_zeros()).saturating_sub(1).max(1) };
+    encode_as(src, role, format, cap, max_mips)
 }
 
 /// Encodes `src` in `format` with at most `max_mips` levels (down to 4×4).
@@ -210,5 +201,18 @@ fn compress(level: &Rgba, role: TexRole, format: TexFormat) -> Vec<u8> {
         }
         TexFormat::Rgba8 => bytes,
         TexFormat::Rgba16f => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flipbook_mips_stop_at_four_texel_cells() {
+        let src = Rgba { w: 512, h: 1024, px: vec![[1.0; 4]; 512 * 1024] };
+        // 32 cells of 512×32: levels 32, 16, 8, 4.
+        assert_eq!(encode_cells(&src, TexRole::Color, 1024, false, (1, 32)).mips, 4);
+        assert!(encode_cells(&src, TexRole::Color, 1024, false, (1, 1)).mips > 4);
     }
 }

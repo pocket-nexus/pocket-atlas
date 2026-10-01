@@ -41,6 +41,23 @@ export interface PlaceModule {
 
 export type PlaceStatus = "live" | "soon";
 
+/**
+ * Kinds of place: light × setting. A kind names the rendering work that
+ * places of that kind share (sky, lights, water, post look), so a new place
+ * of an existing kind reuses it.
+ */
+export type PlaceKind =
+  | "night-street"
+  | "dusk-street"
+  | "daytime-street"
+  | "daytime-slope"
+  | "night-slope"
+  | "daytime-coast"
+  | "dusk-coast"
+  | "night-coast"
+  | "interior"
+  | "rooftop";
+
 /** One place on the globe: a remembered spot, not a whole city. */
 export interface PlaceDef {
   id: string;
@@ -58,6 +75,18 @@ export interface PlaceDef {
   status: PlaceStatus;
   weather: string;
   accent: string;
+  /** Who made the place ("Pocket Atlas" for first-party places). */
+  author?: string;
+  /** Kind of place: the shared rendering work it draws on (exported as the pack's `kind`). */
+  kind: PlaceKind;
+  /** Short descriptors for cards: time of day, weather, what is there. */
+  tags?: string[];
+  /** One sentence about the place. */
+  summary?: string;
+  /** Listed under Featured. */
+  featured?: boolean;
+  /** Cinematic shot the preview card is captured from. */
+  preview?: string;
   load?: () => Promise<PlaceModule>;
 }
 

@@ -49,7 +49,7 @@ at 18 s and the last car clears before the barriers rise at 34–39 s. The train
 is out of sight at the loop boundary. The clock is seekable, so capture times,
 warning lamps, wheels and sound stay aligned. This compressed presentation
 cycle is not an operational signalling model. The rail corridor extends beyond
-the street so the full formation remains on tracks.
+the street for the visible approach and departure.
 
 ## Reference renderer
 

@@ -1,1 +1,1 @@
-export * from "../../shared/daylight/sky";
+export { SKY, bakeClouds, buildSky as buildDaySky } from "../../shared/daylight/sky";

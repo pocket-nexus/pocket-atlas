@@ -17,20 +17,22 @@ A pack connects the two: the web app exports a place as glTF 2.0 with `extras.po
 | --- | --- | --- | --- |
 | Rainy Night Konbini | `tokyo-konbini` | Tokyo backstreet | wet ground with a planar reflection, rain, lit haze, interior-mapped windows, baked vertex lighting, moving lights |
 | Suga Shrine Stairs | `suga-shrine-stairs` | Yotsuya, Tokyo (the 男坂 stairs) | sun with a shadow map, sky occlusion baked into the vertices, alpha-tested foliage, daytime sky with a cloud panorama, ACES grade |
-| Sangubashi in Bloom | `sangubashi-crossing` | Yoyogi, Tokyo (参宮橋３号踏切) | Three.js spring reference: double railway, blossoming trees, petal drift; shared daytime renderer and materials. Vita validation pending. |
+| Radio Kaikan at Blue Hour | `akihabara-radio-kaikan` | Akihabara, Tokyo (秋葉原ラジオ会館, the 2014 building) | twilight sky (sun below the horizon), animated LED signage (flipbooks and scrolling strips), backlit window artwork, panel lights and lamps baked with sky occlusion, pedestrians and a passing train |
+| Kamakura-Kōkōmae Crossing | `kamakura-koko-mae-crossing` | Shichirigahama, Kamakura (鎌倉高校前1号踏切 on the Enoden) | open water (wave layers, Fresnel sky reflection, glitter path) to a 16 km horizon in FogExp2 haze, scrolling surf strips, flashing crossing lamps and gates driven by material and node tracks, a train, Route 134 traffic |
+| Sangubashi in Bloom | `sangubashi-crossing` | Yoyogi, Tokyo (参宮橋３号踏切) | spring foliage, drifting petals, a detailed commuter train, synchronised barriers and moving sunlight shadows; Three.js review |
 
-Real places fall into a finite set of kinds: night streets, daytime residential slopes, interiors, waterfronts, parks. Each first-party place brings its kind's rendering to the best quality the handheld holds, and the work goes into the shared renderer and cooker so later places of the same kind reuse it.
+Real places fall into a finite set of kinds; the registry names them (`PlaceKind` in `web/src/core/types.ts`): `night-street`, `daytime-slope`, `dusk-street`, `daytime-coast` and the Three.js `daytime-street` reference for the places built so far, and `night-slope`, `dusk-coast`, `night-coast`, `interior` and `rooftop` for the places still to come. Each first-party place brings its kind's rendering to the best quality the handheld holds, and the work goes into the shared renderer and cooker so later places of the same kind reuse it. Glass (`places/shared/glass.ts`) blends premultiplied on the web as on the device. The workflow and quality bar for making a place are in the `pocket-atlas-place` skill (`.claude/skills/pocket-atlas-place/`).
 
 ## Layout
 
 | Path | Contents |
 | --- | --- |
-| `web/` | three.js reference places, globe, export script (`scripts/export-place.ts`) |
-| `crates/pocket3d-place` | `.place` pack format: META JSON + texture, geometry and animation blobs |
-| `crates/pocket3d-place-cook` | glTF → pack: BC1/BC3/BC5 textures with mips, quantized vertices, baked vertex lighting, low-poly shelf stock, octahedral environment, effect textures |
+| `web/` | three.js reference places (`src/places/<id>`, shared code in `src/places/shared`), globe, scripts: `export-place.ts`, `export-atlas.ts`, `preview-place.ts` |
+| `crates/pocket3d-place` | pack formats: `.place` (META JSON + texture, geometry and animation blobs) and `atlas.pack` (globe, place list, preview cards, interface font); sRGB helpers |
+| `crates/pocket3d-place-cook` | glTF → pack: BC1/BC3/BC5 textures with mips, quantized vertices, baked vertex lighting and sky occlusion, low-poly shelf stock, octahedral environment, effect textures; the atlas pack and its baked font (`atlas.rs`, `uifont.rs`); annotation readers (`extras.rs`) |
 | `crates/pocket3d-gxm` | GXM layer: GXP registration and patching, own shader patcher, render targets, texture upload, runtime SceShaccCg |
-| `vita/` | Vita app: pack loader, frame renderer, Cg programs (`vita/shaders`), LiveArea art |
-| `tools/atlas.ts` | cook, build, deploy over USB, status/capture/profile, standalone VPK |
+| `vita/` | Vita app: place loader (`scene.rs`), frame renderer (`frame.rs`), atlas globe (`atlas.rs`), place browser (`browser.rs`), settings sheet (`settings.rs`), interface drawing and text (`ui.rs`), file locations (`paths.rs`), Cg programs (`vita/shaders`), LiveArea art |
+| `tools/atlas.ts` | cook (places and the atlas with its font), build, deploy over USB, status/capture/profile/sweep/shots, shader lint, standalone VPK |
 | `vendor/pocketjs` | PocketJS: Vita dev host and wired debug transport |
 
 ## Web
@@ -54,8 +56,10 @@ git submodule update --init
 (cd web && bun scripts/export-place.ts --place tokyo-konbini --seconds 20)  # → .pocket-build/places/tokyo-konbini/scene.glb (the device loops the 20 s of traffic)
 bun tools/atlas.ts cook --place tokyo-konbini  # → .pocket-build/places/tokyo-konbini/tokyo-konbini.place
 
-# The atlas: the globe and the place list for the device's picker
+# The atlas: the globe, the place list, each place's preview card and the interface font
+# (cook-atlas fetches Noto Sans CJK JP Medium/Bold into .pocket-build/fonts once and checks their SHA-256)
 (cd web && bun scripts/export-atlas.ts)       # → .pocket-build/atlas/globe/ (maps, view-ray bakes, places.json)
+(cd web && bun scripts/preview-place.ts)      # → .pocket-build/places/<id>/preview.png (the registry's `preview` shot)
 bun tools/atlas.ts cook-atlas                 # → .pocket-build/atlas/atlas.pack
 
 # 2. Development loop on a console running Pocket Devkit (PocketJS apps/devkit)
@@ -70,11 +74,32 @@ bun tools/atlas.ts capture                    # → .pocket-build/validation/cap
 bun tools/atlas.ts vpk                        # → dist/vita/pocket-atlas-PKAT00001.vpk
 ```
 
-The app opens on the atlas: the web globe (sky, halo and atmosphere baked for the device's fixed camera; surface, clouds and city lights shaded per pixel at 720×408 with 4× MSAA) and the place list. Up/down picks a place, × or ○ enters it, START returns to the atlas. Leaving a place frees its video memory before the next one loads. `ctl` messages naming a `place` enter it; `{"atlas": true}` returns.
+### Atlas screen
+
+The app opens on the atlas: the web globe (sky, halo and atmosphere baked for the device's fixed camera; surface, clouds and city lights shaded per pixel at 720×408 with 4× MSAA) and the place browser beside it. L and R switch its lists:
+
+- **Featured**: the registry's `featured` places.
+- **Explore**: every place, nearest the point the globe faces first; the list re-sorts while the left stick spins the globe.
+- **Saved**: △ on a place; kept in `saved.json` in the data folder (`ux0:data/pocket-atlas`).
+- **Search**: □ opens the system keyboard; each word must match the name, native name, locality, country, tags, kind or author.
+
+Up/down moves through the list and turns the globe to the place; the focused row opens into a postcard with the place's preview (`scripts/preview-place.ts` captures it; the cooker crops it to 2:1 and stores 512×256 BC1 in `atlas.pack`), kind, tags and author. × or ○ enters an open place, START returns to the atlas. Leaving a place frees its video memory before the next one loads.
+
+### Interface text
+
+The interface's text is baked into `atlas.pack`: the cooker rasterizes Inter (from PocketJS) and Noto Sans CJK JP Medium/Bold at the styles of `pocket3d_place::atlas::STYLES` (13–34 px) 1:1 for the 960×544 display into one 8-bit coverage atlas (the `FONT` section; glyph table in `META.font`). The Vita draws each string as one draw on whole pixels. The charset is ASCII, Latin-1, Latin Extended-A, `UI_EXTRA` and every character in the places' strings; a cooker test fails when the Vita code writes a character outside it. A string with a character the atlas lacks (a search typed with the keyboard, scripts such as Devanagari) falls back to the system's vector fonts (PVF).
+
+### Settings sheet
+
+SELECT in a place opens the settings sheet: frame rate profile (`vita30`, `vita60`, `cinematic`), quality step (the governor's, or one held), resolution, 4× MSAA, bloom, the place's lit haze, reflections and rain when it has them, exposure (±2 EV), the camera shot and the performance overlay; △ resets the choices. A resolution whose targets do not fit in video memory is refused. While the sheet is on screen the governor holds its step: the sheet's own cost (about 1 ms at step 0 on Rainy Night Konbini) is in those frame times. Choices carry to the next place and are kept in `settings.json` in the data folder; the ones not made follow the renderer's profile.
+
+### Control messages
+
+`ctl` messages naming a `place` enter it; `{"atlas": true}` returns, and takes `tab` (`featured`, `explore`, `saved`, `search`), `search` (a query), `select` and `save` (place ids) and `keyboard: true` (opens the search keyboard). In a place, `sheet` (true or false) opens or closes the settings sheet, `sheetRow` focuses a row by its label (`"Resolution"`), and `sheetReset: true` drops the saved choices as △ does.
 
 Commands that cook, sync or measure take `--place ID` (default `tokyo-konbini`). Shader sources in `vita/shaders` hot-reload: `bun tools/atlas.ts sync` copies them to the USB share and the device recompiles the programs whose expanded source changed. Compiled programs are cached on the share by content hash; `vpk` packages the ones listed in the device's `gxp/manifest.txt`.
 
-`bun tools/atlas.ts ctl '{"renderProfile":"vita30","view":…,"time":…,"settings":{…}}'` steers the camera and the renderer. Naming a profile resets its switches and governor; `settings` then overrides them: `reflection`, `haze`, `bloom`, `rain`, `msaa`, `maxLights`, `fx`, `skip`, `flat`, `hud`, `profile` (serialized GPU timing), `step` and `hold` (pin a quality step), and the step or profile values `detailM`, `lodPixels`, `cullSize`, `hazeSize`, `hazeLights`, `bloomFull`, `reflSize`, `streaks`, `steam`, `detailMaps`, `vertexLights`.
+`bun tools/atlas.ts ctl '{"renderProfile":"vita30","view":…,"time":…,"settings":{…}}'` steers the camera and the renderer: `shot` cuts to a camera shot by index; `time` freezes the loop at that second and `view` pins a camera until a message without them. Naming a profile resets its switches and governor; `settings` then overrides them: `reflection`, `haze`, `bloom`, `rain`, `msaa`, `maxLights`, `fx`, `skip`, `flat`, `hud`, `profile` (serialized GPU timing), `step` and `hold` (pin a quality step), and the step or profile values `detailM`, `lodPixels`, `cullSize`, `hazeSize`, `hazeLights`, `bloomFull`, `reflSize`, `streaks`, `steam`, `detailMaps`, `vertexLights`.
 
 ## Render profiles
 
@@ -101,7 +126,32 @@ A place exported with a directional light gets the sun per pixel: the static sce
 
 `extras.bake.skyOcclusion` in a place's export makes the cooker cast cosine-weighted rays (48 within 1.5 m for Suga Shrine Stairs, the web's N8AO radius) from every baked vertex against a BVH of the static triangles; the unblocked share scales the hemisphere and environment terms. Edges split for it only down to 1 m near where the camera goes, coarser with distance.
 
-A `gradient-sun-cloudpanorama` sky annotation draws the web's daytime sky (`sky_day_f.cg`), and `extras.post` carries the tone curve (ACES or AgX), grade, vignette, grain and bloom the device bakes into its colour table.
+A `gradient-sun-cloudpanorama` sky annotation draws the web's daytime sky (`sky_day_f.cg`; `places/shared/sky.ts` holds the day dome, the twilight dome and the cloud-panorama bake), and `extras.post` carries the tone curve (ACES or AgX), grade, vignette, grain and bloom the device bakes into its colour table.
+
+## Signage
+
+A material annotated `kind: "sign"` cooks as an unlit HDR surface (`color` multiplies its texture). `frames`, `cols`, `rows` and `fps` play the texture as a flipbook: frame f = ⌊(t + `phase`) · fps⌋ mod frames sits in column f mod cols, row ⌊f / cols⌋ from the top left, and the mesh's coordinates span frame 0's cell (glTF UV space, v down). `scroll: [u, v]` then moves the coordinates in texture widths per second, wrapped to 0..1. Both store as `UvAnim` in the pack; the device offsets the draw's coordinate transform each frame, so an animated sign costs what a still one does. The cooker stops a flipbook texture's mip chain while a cell is still 4 texels across, so filtering does not mix frames (the Radio Kaikan band's 32 px cells keep 4 levels), and cooks the same image separately per flipbook grid.
+
+Every cell of a shared atlas texture (`places/shared/atlas.ts`) gets a border filled with its own edge pixels (16 px on a 4096² atlas; 8 px on Radio Kaikan's 2048² ones; 2 px on the konbini's and Suga's full 4096² atlases): a distant sign samples low mip levels, where a black border would bleed in and BC1 blocks would turn it into dark squares.
+
+## Dusk places
+
+A `dusk-street` place is lit by its signs after sunset:
+
+- **Animated signs** (`places/shared/signs.ts`): see Signage.
+- **Twilight sky** (`places/shared/sky.ts`): the `gradient-sun-cloudpanorama` sky with the sun below the horizon, no disc, no cloud panorama, and a `twilight` object: an afterglow `band` along the horizon weighted toward the sun's azimuth, the pink anti-twilight `belt` opposite the sun, and the Earth's `shadow` under it. The formulas are in the file header; `sky_day_f.cg` evaluates them under `TWILIGHT` (`DaySky::twilight` in the pack).
+
+Radio Kaikan at Blue Hour bakes 25 panel lights (signs, the LED band and screen, shopfronts) and 22 point and spot lights (lantern lamps, soffit downlights, under the Sobu Line bridge) into the vertices, with `bake.skyOcclusion` (48 rays within 6 m) so the street canyon darkens toward the ground; lamp pools split edges down to 0.45 m.
+
+## Coast places
+
+A `daytime-coast` place adds open water to the daytime pipeline (sun with a shadow map, sky occlusion, the cloud-panorama sky):
+
+- **Water** (`places/shared/water.ts`): a material annotated `kind: "water"` cooks as `Kind::Water` (`water_f.cg`, `surface_v.cg` under `WAVES`) and stays one draw however far it reaches (the cooker does not chunk it). Its normal map (BC5) is laid twice on the world's x/z plane, `waves: [[repeatsPerMetre, scrollX, scrollZ], …]` in m/s; `normalScale.x` scales the slopes, `roughness` is the GGX α near the camera and `distanceRoughness` adds α² per metre while the slopes flatten as 1 / (1 + 40 · d · distanceRoughness); `mask` tilts the wave faces toward the eye (the backs of the waves hide at grazing views, so far water reflects less sky). The environment probe is reflected by Schlick Fresnel (f0 = 0.02, the reflection folded above the horizon); `body` × the hemisphere sky fills the rest, mixed toward `shallow` by the mesh's vertex colour (red) over a sandy bottom; the sun adds a GGX highlight; FogExp2 on top, no shadows. The web material patches three.js' standard program to evaluate the same expressions, so the probe, sun and hemisphere it reads are the ones the exporter writes.
+- **Surf** (`foamMaterial` in the same file): alpha-blended lit strips whose vertex alpha fades the foam across the surf zone and whose texture scrolls shoreward (`scroll`, the cooker's `UvAnim`); each strip is one moving node, one draw.
+- **Draw budget**: within 140 m of the origin the cooker chunks static geometry into 32 m cells per material, beyond that into 256 m cells, so a view along a coast pays one draw per material per cell. Kamakura-Kōkōmae Crossing paints its small props (posts, wires, fences, housings, cabinets) from one equipment atlas, merges each vehicle and each train body into one mesh and keeps far land to a few large triangles.
+
+Kamakura-Kōkōmae Crossing loops 120 s: one Fujisawa-bound train, the crossing's 35 s warning, lamps alternating every 0.6 s, four gate arms, six vehicles on 60 s cycles and a cyclist on a 120 s one.
 
 ## Status on hardware
 
@@ -116,9 +166,13 @@ Rainy Night Konbini, measured on a PS Vita 2000 (CPU 444 MHz, GPU 222 MHz) in Po
 | Inside | 33.4 ms | step 0 |
 | Wires | 33.4 ms | step 0 |
 
-With the camera rig and governor running (`bun tools/atlas.ts shots --seconds 130`), every shot averages 29.5–30.0 fps; the longest smoothed frame is 36.8 ms, while the taxi passes Konbini. Serialized GPU time at step 0 (t = 100 s) runs from 31.2 ms (Wires) to 40.7 ms (Puddles): main pass 16–23 ms, haze 5.6 ms, bloom 3.8 ms, composite 2.2 ms, reflection 3.1 ms, display scale 1.2 ms.
+With the camera rig and governor running (`bun tools/atlas.ts shots --seconds 130`), every shot averages 29.5–30.0 fps; the longest smoothed frames are 41–44 ms, in Konbini and Puddles, where the governor steps down while the taxi passes. Serialized GPU time at step 0 (t = 100 s) runs from 31.2 ms (Wires) to 40.7 ms (Puddles): main pass 16–23 ms, haze 5.6 ms, bloom 3.8 ms, composite 2.2 ms, reflection 3.1 ms, display scale 1.2 ms.
 
 Suga Shrine Stairs holds 33.3–33.4 ms at step 0 in every shot (`sweep --time 5`): Stairs, Rails, Below, Lane and Canopy draw 180–720 draws and 81k–137k triangles.
+
+Kamakura-Kōkōmae Crossing holds 30.0 fps at step 0 in every shot with the camera rig and governor running (`shots --seconds 160`): Crossing, Postcard, Platform, Route134, Seawall and Park draw 81–263 draws and 81k–141k triangles, Platform the most. Serialized GPU time is 21.3 ms in Crossing, 20.9 ms in Platform and 23.7 ms in Seawall (main pass 13.4–16.2 ms), with the sun's shadow map drawn once at load.
+
+Radio Kaikan at Blue Hour holds 30.0 fps at step 0 in every shot with the camera rig and governor running (`shots --seconds 130`): Arrival, Facade, Band, Vista, Corner and Clock draw 148–399 draws and 34k–61k triangles. Serialized GPU time (`profile --time 5`) is 17.9–19.5 ms: main pass 10.2–11.7 ms, bloom 4.2 ms, composite 2.1 ms, display scale 1.4 ms.
 
 ## License
 
