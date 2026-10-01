@@ -1,0 +1,22 @@
+; CPU composes model-view-projection once per transform. Float3 attributes
+; receive w=1 from PICA, and tint includes the byte-color normalization.
+; Every mapped output component is written exactly once.
+.fvec projection[4]
+.fvec model[3]
+.fvec tint
+.in inpos v0
+.in intex v1
+.in inclr v2
+.out outpos position
+.out outtex texcoord0
+.out outclr color
+.entry main
+.proc main
+    dp4 outpos.x, projection[0], inpos
+    dp4 outpos.y, projection[1], inpos
+    dp4 outpos.z, projection[2], inpos
+    dp4 outpos.w, projection[3], inpos
+    mov outtex, intex
+    mul outclr, tint, inclr
+    end
+.end

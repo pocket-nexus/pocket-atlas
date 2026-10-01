@@ -2,14 +2,15 @@
 
 A world map of places people remember. A place is a small, self-contained 3D scene of one real spot — a street corner, a stairway, a café — pinned to its location on a shared globe. People will publish their own places (publicly or privately) and download other people's places to visit them.
 
-This repository holds the first-party places, the pipeline that turns a place into a pack for a handheld GPU, and the PS Vita renderer. Publishing and downloading are not built yet; the current work is distributing places at the highest image quality the PS Vita can hold at 30 fps.
+This repository holds the first-party places, the pipeline that turns a place into a pack for a handheld GPU, and the PS Vita and Nintendo 3DS renderers. Publishing and downloading are not built yet; the current work is distributing places at the highest image quality each handheld can hold at 30 fps.
 
-Every place exists twice:
+Places share their assets across the reference and handheld renderers:
 
 - **`web/`** is the reference renderer: a standalone three.js + Vite app with no PocketJS dependency, with a night-side globe to pick a place. Every asset is generated at load time.
 - **`vita/`** renders the same place on a PS Vita with its own GXM pipeline: Cg programs compiled on the device by SceShaccCg, 4× MSAA HDR targets and the effect set the place needs.
+- **`n3ds/`** cooks the shared place assets for PICA200 and renders the Tokyo rainy night scene on an Old 3DS at native 400 × 240, with a 30fps quality budget. See [the 3DS build and debug workflow](n3ds/README.md).
 
-A pack connects the two: the web app exports a place as glTF 2.0 with `extras.pocketAtlas`, and the cooker (`crates/pocket3d-place-cook`) turns it into a `.place` pack for the handheld GPU.
+A pack connects the renderers: the web app exports a place as glTF 2.0 with `extras.pocketAtlas`, and the cooker (`crates/pocket3d-place-cook`) turns it into a `.place` pack for the handheld GPU.
 
 ## Places
 
@@ -30,8 +31,9 @@ Real places fall into a finite set of kinds: night streets, daytime residential 
 | `crates/pocket3d-place-cook` | glTF → pack: BC1/BC3/BC5 textures with mips, quantized vertices, baked vertex lighting, low-poly shelf stock, octahedral environment, effect textures |
 | `crates/pocket3d-gxm` | GXM layer: GXP registration and patching, own shader patcher, render targets, texture upload, runtime SceShaccCg |
 | `vita/` | Vita app: pack loader, frame renderer, Cg programs (`vita/shaders`), LiveArea art |
+| `n3ds/`, `tools/atlas-3ds.ts` | PICA renderer, native cooker, paired wireless deployment, capture and performance measurement |
 | `tools/atlas.ts` | cook, build, deploy over USB, status/capture/profile, standalone VPK |
-| `vendor/pocketjs` | PocketJS: Vita dev host and wired debug transport |
+| `vendor/pocketjs` | PocketJS: Vita dev host and wired debug transport; 3DS paired transport and native installer |
 
 ## Web
 

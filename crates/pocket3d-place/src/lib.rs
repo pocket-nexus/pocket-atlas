@@ -19,6 +19,7 @@
 //! the same container with magic "ATLS".
 
 pub mod atlas;
+pub mod color;
 pub mod meta;
 
 pub use meta::*;
