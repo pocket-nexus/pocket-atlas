@@ -76,11 +76,11 @@ interface Component {
  * (radians in texture space: 0 = +u, π/2 = +v), with a cos²-spread around
  * it. Wave numbers count repeats per texture tile.
  */
-function spectrum(seed: number, heading: number, spreadK = 0.9): Component[] {
+function spectrum(seed: number, heading: number, spreadK = 0.9, falloff = 1.7): Component[] {
   const rng = new Rng(seed);
   const out: Component[] = [];
   const seen = new Set<string>();
-  for (let i = 0; i < 64; i++) {
+  for (let i = 0; i < 96; i++) {
     // Wave numbers from 1 to ~22 repeats per tile, denser at the long end.
     const kmag = 1.2 * Math.pow(18, rng.next());
     const spread = (rng.next() + rng.next() + rng.next() - 1.5) * spreadK;
@@ -92,8 +92,8 @@ function spectrum(seed: number, heading: number, spreadK = 0.9): Component[] {
     if (seen.has(key)) continue;
     seen.add(key);
     const k = Math.hypot(kx, ky);
-    // Height ∝ k^-1.7: the slope spectrum falls slowly toward short waves.
-    out.push({ k: [kx, ky], a: Math.pow(k, -1.7) * (0.6 + 0.8 * rng.next()), phase: rng.next() * Math.PI * 2 });
+    // Height ∝ k^-falloff (1.7 by default): the slope spectrum falls slowly toward short waves.
+    out.push({ k: [kx, ky], a: Math.pow(k, -falloff) * (0.6 + 0.8 * rng.next()), phase: rng.next() * Math.PI * 2 });
   }
   return out;
 }
@@ -110,8 +110,8 @@ function spectrum(seed: number, heading: number, spreadK = 0.9): Component[] {
  * distribution gives. A place whose cameras all stand on one shore tilts
  * the mean normal toward that shore to stand in for the masking.
  */
-export function bakeWaveNormals(baker: Baker, opts: { seed?: number; heading?: number; size?: number; strength?: number; spread?: number; tilt?: [number, number] } = {}): Texture {
-  const comps = spectrum(opts.seed ?? 7, opts.heading ?? -Math.PI / 2, opts.spread ?? 0.9);
+export function bakeWaveNormals(baker: Baker, opts: { seed?: number; heading?: number; size?: number; strength?: number; spread?: number; falloff?: number; tilt?: [number, number] } = {}): Texture {
+  const comps = spectrum(opts.seed ?? 7, opts.heading ?? -Math.PI / 2, opts.spread ?? 0.9, opts.falloff ?? 1.7);
   const tilt = opts.tilt ?? [0, 0];
   // Normalise so the RMS slope of the texture is about `strength`.
   let ms = 0;

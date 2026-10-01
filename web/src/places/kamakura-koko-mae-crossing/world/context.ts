@@ -9,17 +9,18 @@ import type { CoastLib } from "../gfx/materials";
 
 export type Updater = (dt: number, t: number) => void;
 
-/** Collects geometry per material and emits one mesh each (static props). */
+/** Collects geometry per (material, casts shadow) and emits one mesh each (static props). */
 export class Bag {
-  private m = new Map<Material, { geos: BufferGeometry[]; cast: boolean }>();
+  private m = new Map<string, { mat: Material; geos: BufferGeometry[]; cast: boolean }>();
   add(mat: Material, g: BufferGeometry, cast = true): void {
-    let e = this.m.get(mat);
-    if (!e) this.m.set(mat, (e = { geos: [], cast }));
+    const key = `${mat.uuid}|${cast}`;
+    let e = this.m.get(key);
+    if (!e) this.m.set(key, (e = { mat, geos: [], cast }));
     e.geos.push(g);
   }
   emit(w: KamakuraWorld, parent: Object3D = w.root): Mesh[] {
     const out: Mesh[] = [];
-    for (const [mat, e] of this.m) out.push(w.mesh(merge(e.geos), mat, 0, 0, 0, parent, { cast: e.cast }));
+    for (const e of this.m.values()) out.push(w.mesh(merge(e.geos), e.mat, 0, 0, 0, parent, { cast: e.cast }));
     this.m.clear();
     return out;
   }

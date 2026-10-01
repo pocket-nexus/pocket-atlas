@@ -109,7 +109,45 @@ export function buildBuildings(w: KamakuraWorld): void {
       tri([ax, base, az], [bx, base, bz], [bx, top, bz], [u0, v0], [u1, v0], [u1, v1]);
       tri([ax, base, az], [bx, top, bz], [ax, top, az], [u0, v0], [u1, v1], [u0, v1]);
     }
-    // Roof: gabled on small rectangular houses, flat elsewhere.
+    // Villas: a balcony slab along each wall facing the sea or the slope road, every floor.
+    const plain = vWall(style, 0) + 0.004;
+    const slab = (ax: number, az: number, bx: number, bz: number, y: number, depth: number, thick: number) => {
+      const ex = bx - ax;
+      const ez = bz - az;
+      const len = Math.hypot(ex, ez);
+      // Outward normal of a counter-clockwise (from above) ring: (−ez, ex) / len.
+      const ox = (-ez / len) * depth;
+      const oz = (ex / len) * depth;
+      const up = new Vector3(0, 1, 0);
+      const outV = new Vector3(ox, 0, oz);
+      const A = [ax, y, az];
+      const B = [bx, y, bz];
+      const C = [bx + ox, y, bz + oz];
+      const D = [ax + ox, y, az + oz];
+      const lift = (p: number[]) => [p[0], p[1] + thick, p[2]];
+      const uvp = [0.1, plain];
+      triOut(lift(A), lift(B), lift(C), uvp, uvp, uvp, up);
+      triOut(lift(A), lift(C), lift(D), uvp, uvp, uvp, up);
+      triOut(D, C, lift(C), uvp, uvp, uvp, outV);
+      triOut(D, lift(C), lift(D), uvp, uvp, uvp, outV);
+      triOut(A, C, B, uvp, uvp, uvp, up.clone().negate());
+      triOut(A, D, C, uvp, uvp, uvp, up.clone().negate());
+    };
+    if (style === 0 && h > 5.5 && north < 160) {
+      tintNow = wallTint;
+      const floors = Math.min(4, Math.floor(h / floorH));
+      for (let i = 0; i < n; i++) {
+        const j = (i + 1) % n;
+        const [ax, az, bx, bz] = [ring[i * 2], ring[i * 2 + 1], ring[j * 2], ring[j * 2 + 1]];
+        const len = Math.hypot(bx - ax, bz - az);
+        // Seaward (south) and west-facing walls longer than 4 m.
+        const nx = -(bz - az) / len;
+        const nz = (bx - ax) / len;
+        if (len < 4 || (nz < 0.5 && nx > -0.7)) continue;
+        for (let f = 1; f < floors; f++) slab(ax, az, bx, bz, base + f * floorH - 0.18, 1.0, 0.18);
+      }
+    }
+    // Roof: gabled on small rectangular houses, flat with a parapet elsewhere.
     tintNow = roofTint;
     const vr = FACADE.roof;
     if (n === 4 && use === 0 && h < 10 && r.chance(0.45)) {
@@ -132,6 +170,21 @@ export function buildBuildings(w: KamakuraWorld): void {
       triOut(q(a), q(b), q(m0), [0, vg], [0.2, vg], [0.1, vg], m0.clone().sub(mid).setY(0));
       triOut(q(c), q(d), q(m1), [0, vg], [0.2, vg], [0.1, vg], m1.clone().sub(mid).setY(0));
     } else {
+      // Parapet: the wall carried 0.45 m above the roof, plain render, with a coping.
+      tintNow = wallTint;
+      for (let i = 0; i < n; i++) {
+        const j = (i + 1) % n;
+        const [ax, az, bx, bz] = [ring[i * 2], ring[i * 2 + 1], ring[j * 2], ring[j * 2 + 1]];
+        const ex = bx - ax;
+        const ez = bz - az;
+        const outV = new Vector3(-ez, 0, ex);
+        const uvp = [0.2, plain];
+        triOut([ax, top, az], [bx, top, bz], [bx, top + 0.45, bz], uvp, uvp, uvp, outV);
+        triOut([ax, top, az], [bx, top + 0.45, bz], [ax, top + 0.45, az], uvp, uvp, uvp, outV);
+        triOut([ax, top + 0.45, az], [bx, top + 0.45, bz], [bx, top, bz], uvp, uvp, uvp, outV.clone().negate());
+        triOut([ax, top + 0.45, az], [bx, top, bz], [ax, top, az], uvp, uvp, uvp, outV.clone().negate());
+      }
+      tintNow = roofTint;
       const pts: Vector2[] = [];
       for (let i = 0; i < n; i++) pts.push(new Vector2(ring[i * 2], ring[i * 2 + 1]));
       const tris = ShapeUtils.triangulateShape(pts, []);
@@ -264,6 +317,39 @@ function villas(w: KamakuraWorld): void {
   col.translate(18.9, base + 4.9, -5.2);
   bag.add(lib.stoneClad(), col);
 
+  // The stone-clad garage and villa base above the rock wall, east of the slope at 21.5–28 m north
+  // (p01, p02): a white shutter on its north face to the junction, a terrace with a glass
+  // balustrade, cycads and a palm on top.
+  {
+    const clad = lib.stoneClad();
+    const x0 = 6.1;
+    const x1 = 9.9;
+    const n0 = 21.5;
+    const n1 = 28.0;
+    const top = 6.2;
+    const box = new BoxGeometry(x1 - x0, top - 1.6, n1 - n0);
+    box.translate((x0 + x1) / 2, (top + 1.6) / 2, -(n0 + n1) / 2);
+    bag.add(clad, box);
+    const cap = new BoxGeometry(x1 - x0 + 0.2, 0.12, n1 - n0 + 0.2);
+    cap.translate((x0 + x1) / 2, top + 0.06, -(n0 + n1) / 2);
+    bag.add(w.printed, w.tint(cap, "beige"));
+    const shutter = new PlaneGeometry(2.6, 2.1);
+    shutter.rotateY(Math.PI);
+    shutter.translate((x0 + x1) / 2, 3.15 + 1.05, -n1 - 0.02);
+    bag.add(w.printed, w.tint(shutter, "white"), false);
+    const rails: BufferGeometry[] = [];
+    for (const [a, b] of [
+      [new Vector3(x0, top, -n0), new Vector3(x0, top, -n1)],
+      [new Vector3(x0, top, -n1), new Vector3(x1, top, -n1)],
+    ] as [Vector3, Vector3][]) {
+      const g = new PlaneGeometry(a.distanceTo(b), 1.05);
+      g.rotateY(-Math.atan2(b.z - a.z, b.x - a.x));
+      g.translate((a.x + b.x) / 2, top + 0.6, (a.z + b.z) / 2);
+      rails.push(g);
+    }
+    bag.add(lib.glassRail(), merge(rails), false);
+  }
+
   // Glass balustrades: along the east wall top of the slope road (3–22 m north) and the track wall (8–62 m east).
   const glass = lib.glassRail();
   const rails: BufferGeometry[] = [];
@@ -274,13 +360,13 @@ function villas(w: KamakuraWorld): void {
     g.translate((a.x + b.x) / 2, (a.y + b.y) / 2 + 0.55, (a.z + b.z) / 2);
     rails.push(g);
   };
-  for (let n = 3.5; n < 21; n += 2.5) {
+  for (let n = 6.5; n < 21; n += 2.5) {
     const [, e0] = slopeEdges(n);
     const [, e1] = slopeEdges(n + 2.5);
     const a = new Vector3(e0 + 0.6, 0, -n);
     const b = new Vector3(e1 + 0.6, 0, -(n + 2.5));
-    a.y = Math.max(hillY(a.x, a.z), slopeY(n) + 2);
-    b.y = Math.max(hillY(b.x, b.z), slopeY(n + 2.5) + 2);
+    a.y = Math.max(hillY(a.x, a.z), slopeY(n) + 3.2);
+    b.y = Math.max(hillY(b.x, b.z), slopeY(n + 2.5) + 3.2);
     pane(a, b);
   }
   for (let u = 9; u < 62; u += 3) {
@@ -298,8 +384,8 @@ function villas(w: KamakuraWorld): void {
   const fronds: BufferGeometry[] = [];
   const trunks: BufferGeometry[] = [];
   const cell = (i: number) => ({ u0: (i % 2) * 0.5, u1: (i % 2) * 0.5 + 0.5, v0: i < 2 ? 0.5 : 0, v1: i < 2 ? 1 : 0.5 });
-  const plant = (x: number, z: number, kind: "palm" | "cycad" | "bush") => {
-    const y = hillY(x, z);
+  const plant = (x: number, z: number, kind: "palm" | "cycad" | "bush") => plantAt(x, z, hillY(x, z), kind);
+  function plantAt(x: number, z: number, y: number, kind: "palm" | "cycad" | "bush") {
     if (kind === "palm") {
       const h = r.range(5, 8);
       trunks.push(new CylinderGeometry(0.14, 0.2, h, 6, 1, true).translate(x, y + h / 2, z));
@@ -330,7 +416,14 @@ function villas(w: KamakuraWorld): void {
         fronds.push(g);
       }
     }
-  };
+  }
+  const onGarage: [number, number, "palm" | "cycad" | "bush"][] = [
+    [7.0, 22.6, "cycad"],
+    [8.6, 24.0, "cycad"],
+    [7.2, 26.8, "bush"],
+    [9.2, 26.9, "palm"],
+  ];
+  for (const [x, n, k] of onGarage) plantAt(x, -n, 6.2, k);
   for (const [x, n, k] of [
     [8.5, 5, "cycad"],
     [8.8, 9, "bush"],

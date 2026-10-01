@@ -1,10 +1,9 @@
-import { BoxGeometry, BufferGeometry, CircleGeometry, CylinderGeometry, LatheGeometry, PlaneGeometry, SphereGeometry, Vector2, Vector3, type Material } from "three";
+import { BoxGeometry, BufferGeometry, CatmullRomCurve3, CircleGeometry, CylinderGeometry, LatheGeometry, PlaneGeometry, SphereGeometry, TubeGeometry, Vector2, Vector3, type Material } from "three";
 import { mapUV, type AtlasRect } from "../../shared/atlas";
-import { cable } from "../../shared/geo";
-import { rod } from "../../shared/shapes";
+import { merge, rod } from "../../shared/shapes";
 import { crossingSign, mapBoard, noParking, solid, speed50 } from "../gfx/art";
 import { Bag, type KamakuraWorld, type SOLIDS } from "./context";
-import { COAST, SECTION, slopeEdges, slopeY, TRACK } from "./layout";
+import { COAST, LOOP, SECTION, slopeEdges, slopeY, TRACK } from "./layout";
 import { hillY } from "./terrain";
 
 /**
@@ -16,6 +15,18 @@ import { hillY } from "./terrain";
  * road signs and city map boards, Route 134's street lamps and the
  * signalised pedestrian crossing west of the junction.
  */
+
+/** A sagging wire as a three-sided tube (thin enough that more sides only cost triangles). */
+function wireTube(a: Vector3, b: Vector3, sag: number, radius: number, segments: number, radial = 3): BufferGeometry {
+  const pts: Vector3[] = [];
+  for (let i = 0; i <= segments; i++) {
+    const t = i / segments;
+    const p = new Vector3().lerpVectors(a, b, t);
+    p.y -= sag * 4 * t * (1 - t);
+    pts.push(p);
+  }
+  return new TubeGeometry(new CatmullRomCurve3(pts), segments, radius, radial, false);
+}
 
 function place(g: BufferGeometry, p: Vector3, yaw = 0): BufferGeometry {
   if (yaw) g.rotateY(yaw);
@@ -68,6 +79,11 @@ export function buildProps(w: KamakuraWorld): void {
   const galv = "galv" as const;
   const black = "black" as const;
   const brown = "brown" as const;
+  // Overhead wires: one moving mesh that sways a few centimetres in the onshore breeze. On the
+  // handheld a moving draw is one call and casts no sun shadow (thin wires in the 2048² shadow
+  // map leave broken streaks on the road).
+  const wires: BufferGeometry[] = [];
+  const wire = (g: BufferGeometry) => wires.push(w.tint(g, "black"));
   // Small props paint from the printed atlas (one draw per chunk with the signs).
   const add: Add = (m, g, cast = true) => (typeof m === "string" ? bag.add(P, w.tint(g, m), cast) : bag.add(m, g, cast));
 
@@ -99,15 +115,15 @@ export function buildProps(w: KamakuraWorld): void {
   for (let i = 0; i < catU.length - 1; i++) {
     const a = wireMess[i];
     const b = wireMess[i + 1];
-    add(black, cable(a, b, 0.25, 0.008, 10), false);
-    add(black, cable(wireCont[i], wireCont[i + 1], 0.02, 0.007, 6), false);
+    wire(wireTube(a, b, 0.25, 0.008, 10));
+    wire(wireTube(wireCont[i], wireCont[i + 1], 0.02, 0.007, 6));
     const span = catU[i + 1] - catU[i];
     for (let k = 1; k < Math.round(span / 5); k++) {
       const f = k / Math.round(span / 5);
       const top = new Vector3().lerpVectors(a, b, f);
       top.y -= 0.25 * 4 * f * (1 - f);
       const bot = new Vector3().lerpVectors(wireCont[i], wireCont[i + 1], f);
-      add(black, rod(top, bot, 0.006, 3), false);
+      wire(rod(top, bot, 0.006, 3));
     }
   }
   // Two feeders along the track at 7.3 m (the two horizontal cables above the sea in the canonical view).
@@ -115,7 +131,7 @@ export function buildProps(w: KamakuraWorld): void {
     for (let i = 0; i < catU.length - 1; i++) {
       const a = TRACK.offset(catU[i], 2.3 + off, new Vector3()).setY(7.3);
       const b = TRACK.offset(catU[i + 1], 2.3 + off, new Vector3()).setY(7.3);
-      add(black, cable(a, b, 0.35, 0.016, 10), false);
+      wire(wireTube(a, b, 0.35, 0.016, 10));
     }
   }
 
@@ -130,7 +146,7 @@ export function buildProps(w: KamakuraWorld): void {
   const ne2 = utilityPole(add, concrete, eUp, 12.0, 0.05);
   // Thin wires cast no sun shadow (sub-pixel on the handheld's shadow map); the twisted cable does.
   const span = (a: Vector3[], b: Vector3[], sag: number, r: number) => {
-    for (let i = 0; i < Math.min(a.length, b.length); i++) add(black, cable(a[i], b[i], sag, r, 14), false);
+    for (let i = 0; i < Math.min(a.length, b.length); i++) wire(wireTube(a[i], b[i], sag, r, 14));
   };
   // Wires across the slope road and up it (the lines across the sky in the canonical view).
   span(nw.top, ne.top, 0.9, 0.009);
@@ -141,11 +157,11 @@ export function buildProps(w: KamakuraWorld): void {
   span(ne2.low, nw2.low, 1.0, 0.012);
   // Wires from the corner pole west along the footway and east along the track.
   const westEnd = TRACK.offset(-60, -7.5, new Vector3()).setY(9.5);
-  for (const p of nw.low.slice(0, 2)) add(black, cable(p, westEnd.clone().setY(p.y - 1), 1.2, 0.012, 12), false);
+  for (const p of nw.low.slice(0, 2)) wire(wireTube(p, westEnd.clone().setY(p.y - 1), 1.2, 0.012, 12));
   // The thick black twisted cable sagging across the road at the crossing, about 6.5 m up at its lowest.
   const cabA = TRACK.offset(9.5, 2.3, new Vector3()).setY(7.8);
   const cabB = nw.low[1].clone().setY(8.1);
-  add(black, cable(cabA, cabB, 1.6, 0.05, 24), true);
+  wire(wireTube(cabA, cabB, 1.6, 0.05, 20, 6));
 
   // ------------------------------------------------------------ curve mirror
   {
@@ -269,4 +285,12 @@ export function buildProps(w: KamakuraWorld): void {
   }
 
   bag.emit(w);
+  const sway = w.group();
+  sway.name = "overhead-wires";
+  sway.userData.dynamic = true;
+  w.mesh(merge(wires), P, 0, 0, 0, sway, { cast: false, receive: false });
+  w.update((_dt, t) => {
+    const tl = ((t % LOOP) + LOOP) % LOOP;
+    sway.position.set(0.025 * Math.sin((2 * Math.PI * 17 * tl) / LOOP), 0.008 * Math.sin((2 * Math.PI * 11 * tl) / LOOP), 0);
+  });
 }

@@ -136,10 +136,43 @@ export function buildSlope(w: KamakuraWorld): void {
   {
     const [xw, xe] = slopeEdges(4.4);
     const mid = (xw + xe) / 2 + 0.6;
-    bag.add(P, pad(mid, xe - 1.2, 4.1, 4.45, (_x, n) => roadY(n) + 0.014, white), false);
+    bag.add(P, pad(mid, xe - 1.2, 4.1, 4.45, (_x, n) => roadY(n) + 0.075, white), false);
     const [zw, ze] = slopeEdges(7.5);
-    for (let x = zw + 0.5; x < ze - 1.3; x += 0.9) bag.add(P, pad(x, x + 0.45, 5.7, 9.3, (_x, n) => roadY(n) + 0.014, white), false);
+    for (let x = zw + 0.5; x < ze - 1.3; x += 0.9) bag.add(P, pad(x, x + 0.45, 5.7, 9.3, (_x, n) => roadY(n) + 0.075, white), false);
   }
+
+  // ---- manhole covers and the turn arrow in the northbound lane (p01).
+  const manhole = w.draw("manhole", 128, 128, (g, cw, ch) => {
+    g.clearRect(0, 0, cw, ch);
+    g.fillStyle = "#3a3936";
+    g.beginPath();
+    g.arc(cw / 2, ch / 2, cw / 2 - 1, 0, Math.PI * 2);
+    g.fill();
+    g.strokeStyle = "#57554f";
+    g.lineWidth = 2;
+    for (let k = 1; k < 4; k++) {
+      g.beginPath();
+      g.arc(cw / 2, ch / 2, (cw / 2 - 1) * (k / 4), 0, Math.PI * 2);
+      g.stroke();
+    }
+  });
+  for (const [x, n] of [
+    [0.6, 6.6],
+    [0.9, 15.5],
+    [0.2, 33],
+  ]) bag.add(w.cut, pad(x - 0.35, x + 0.35, n - 0.35, n + 0.35, (_x, nn) => roadY(nn) + 0.075, manhole), false);
+  const arrow = w.draw("lane-arrow", 512, 128, (g, cw, ch) => {
+    g.clearRect(0, 0, cw, ch);
+    g.fillStyle = "#e2e1da";
+    g.fillRect(cw * 0.18, ch * 0.38, cw * 0.78, ch * 0.24);
+    g.beginPath();
+    g.moveTo(0, ch / 2);
+    g.lineTo(cw * 0.22, ch * 0.05);
+    g.lineTo(cw * 0.22, ch * 0.95);
+    g.closePath();
+    g.fill();
+  });
+  bag.add(w.cut, pad(-2.9, 0.1, 23.6, 24.6, (_x, nn) => roadY(nn) + 0.075, arrow), false);
 
   // ---- the paved north-west corner and the green pedestrian strip's approach.
   bag.add(lib.paving(), pad(-12.5, CROSSING.strip[0] - 0.02, -CROSSING.deck[0], 9.5, () => 0.24));

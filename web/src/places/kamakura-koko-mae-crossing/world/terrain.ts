@@ -82,10 +82,13 @@ function initControl(): void {
     [-6, -7],
     [-9.5, -8],
   ]) addCtl(x, z, 0.22, 3);
-  // The station side: footway level along the track, west of the crossing.
-  for (let x = -10; x > -170; x -= 15) {
-    const p = COAST.offset(COAST.project(x, 0), -6, new Vector3());
-    addCtl(p.x, p.z, 0.3, 1.5);
+  // The station side: the footway and the entrance plaza at footway level, west of the crossing.
+  for (let x = -8; x > -180; x -= 8) {
+    const u = COAST.project(x, 0);
+    for (const s of x < -32 ? [-5, -8, -11] : [-5, -7]) {
+      const p = COAST.offset(u, s, new Vector3());
+      addCtl(p.x, p.z, 0.25, s === -11 ? 1.5 : 4);
+    }
   }
   // The track's inland bend east of the split: a cutting at rail level.
   for (let u = TRACK_SPLIT; u < TRACK.max; u += 20) {
@@ -282,7 +285,7 @@ function edgeWalls(w: KamakuraWorld, side: 1 | -1, verts: Vector3[], cols: numbe
     if (tall < 0.25 && Math.min(p0.y - r0, p1.y - r1) > -0.25) continue;
     // East: rock-faced walls under the villa, the planted triangle's kerb, the junction (no wall), block walls above it.
     if (side > 0 && n0 > 32.5 && n1 < 44.5) continue;
-    const mat = side > 0 ? (n1 < 26.5 ? rubble : n1 < 33 || n0 > 44 ? concrete : block) : n0 > 38 ? block : concrete;
+    const mat = side > 0 ? (n1 < 26.5 || n0 > 44 ? rubble : n1 < 33 ? concrete : block) : n0 > 38 ? block : concrete;
     face(mat, p0, p1, Math.min(r0, p0.y), Math.min(r1, p1.y), outRoad);
   }
   // Track edge (b = 0): row 0, columns i, as far as the walls show.

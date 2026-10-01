@@ -20,19 +20,20 @@ import { stations } from "./util";
 export const WATER = {
   name: "sea",
   waves: [
-    { repeatsPerMetre: 1 / 34, scroll: [0.45, 1.5] as [number, number] },
-    { repeatsPerMetre: 1 / 7.3, scroll: [-0.55, 0.85] as [number, number] },
+    // Non-aligned scales (21 m and 5.3 m tiles, ratio 0.252) and crossing drifts break the repeat.
+    { repeatsPerMetre: 1 / 21, scroll: [0.6, 1.3] as [number, number] },
+    { repeatsPerMetre: 1 / 5.3, scroll: [-0.9, 0.55] as [number, number] },
   ] as [{ repeatsPerMetre: number; scroll: [number, number] }, { repeatsPerMetre: number; scroll: [number, number] }],
   slope: 0.36,
   roughness: 0.08,
   distanceRoughness: 0.000015,
-  body: new Color(0.0, 0.5, 0.52),
+  body: new Color(0.0, 0.3, 0.38),
   envMapIntensity: 0.85,
 };
 
 export function buildSea(w: KamakuraWorld, baker: Baker): Water {
   // The shore is to the north (−z, texture −v) of every shot: tilt the mean normal toward it.
-  const waves = bakeWaveNormals(baker, { seed: 11, heading: -Math.PI / 2 - 0.25, spread: 1.3, tilt: [0, -0.3] });
+  const waves = bakeWaveNormals(baker, { seed: 11, heading: -Math.PI / 2 - 0.25, spread: 2.2, falloff: 1.35, tilt: [0, -0.3] });
   const water = createWater(WATER, waves);
   w.update((_dt, t) => water.update(t));
 

@@ -58,10 +58,11 @@ const PK = VIEW.park;
 
 const SHOTS: Shot[] = [
   {
-    // The canonical view: 51 m up the slope, eye 17.0 m T.P., heading 183°, tilted 3.5° down.
+    // The canonical view: 51 m up the slope, eye 17.0 m T.P., heading 183°, tilted 3.4° down,
+    // 18° vertical (p01): the horizon 32 % down the frame, the crossing band about 73 %.
     name: "Crossing",
-    from: key([C.x - 0.4, 6.9, C.z - 2.5], 183.2, -3.5, 24),
-    to: key([C.x, 6.8, C.z], 183, -3.5, 24),
+    from: key([C.x - 0.4, 6.9, C.z - 2.5], 183.2, -3.4, 18),
+    to: key([C.x, 6.8, C.z], 183, -3.4, 18),
     duration: 12,
   },
   {

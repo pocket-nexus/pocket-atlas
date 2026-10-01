@@ -7,20 +7,21 @@
 /** 4 m of sun-bleached, salt-dusted asphalt: light aggregate, sealed cracks, patches. */
 export const ASPHALT = /* glsl */ `
 Surface surface(vec2 uv) {
-  vec3 w = worley(uv * 80.0, vec2(80.0));
-  vec3 w2 = worley(uv * 190.0 + 3.1, vec2(190.0));
-  float stone = smoothstep(0.62, 0.2, w.x) * step(0.25, w.z);
+  vec3 w = worley(uv * 130.0, vec2(130.0));
+  vec3 w2 = worley(uv * 260.0 + 3.1, vec2(260.0));
+  float stone = smoothstep(0.62, 0.2, w.x) * step(0.25, w.z) * 0.7;
   float fine = smoothstep(0.55, 0.1, w2.x) * step(0.4, w2.z);
   float grime = fbm(uv * 6.0, vec2(6.0), 5);
   float wear = fbm(uv * 1.5 + 4.0, vec2(1.5), 4);
   float patchA = smoothstep(0.66, 0.68, fbm(uv * 2.0 + 0.3, vec2(2.0), 4)) * 0.6;
-  float crack = smoothstep(0.972, 0.995, ridged(uv * 4.0, vec2(4.0), 4)) * (0.2 + 0.4 * smoothstep(0.5, 0.75, grime));
-  vec3 binder = mix(vec3(0.105, 0.098, 0.086), vec3(0.135, 0.126, 0.11), grime) * (0.96 + 0.08 * wear);
+  // Sealed cracks: short and rare (long ridges read as lines converging down the road).
+  float crack = smoothstep(0.985, 0.998, ridged(uv * 4.0, vec2(4.0), 4)) * smoothstep(0.6, 0.8, grime);
+  vec3 binder = mix(vec3(0.088, 0.083, 0.073), vec3(0.112, 0.105, 0.092), grime) * (0.96 + 0.08 * wear);
   binder = mix(binder, vec3(0.075, 0.074, 0.072), patchA * 0.5);
-  vec3 stoneCol = mix(vec3(0.17, 0.158, 0.14), vec3(0.27, 0.252, 0.225), w.z);
+  vec3 stoneCol = mix(vec3(0.14, 0.132, 0.118), vec3(0.22, 0.207, 0.185), w.z);
   vec3 col = mix(binder, stoneCol, stone * (1.0 - patchA * 0.7) * 0.75);
   col = mix(col, vec3(0.19, 0.18, 0.17), fine * 0.35);
-  col = mix(col, vec3(0.05, 0.05, 0.05), crack * 0.75);
+  col = mix(col, vec3(0.05, 0.05, 0.05), crack * 0.35);
   float h = stone * 0.4 + fine * 0.14 + grime * 0.2 - crack * 0.6 - patchA * 0.05;
   float r = mix(0.9, 0.8, stone) - patchA * 0.05;
   return S(col, h, r, 1.0 - crack * 0.6 - (1.0 - stone) * 0.1, 0.0);
@@ -48,9 +49,9 @@ Surface surface(vec2 uv) {
 export const RUBBLE = /* glsl */ `
 Surface surface(vec2 uv) {
   vec2 q = uv + 0.04 * vec2(gnoise(uv * 6.0, vec2(6.0)), gnoise(uv * 6.0 + 4.1, vec2(6.0)));
-  vec3 w = worley(q * vec2(6.0, 7.0), vec2(6.0, 7.0));
+  vec3 w = worley(q * vec2(9.0, 10.0), vec2(9.0, 10.0));
   float edge = w.y - w.x;
-  float joint = 1.0 - smoothstep(0.015, 0.06, edge);
+  float joint = 1.0 - smoothstep(0.01, 0.045, edge);
   float face = sqrt(smoothstep(0.0, 0.45, edge));
   float split = fbm(uv * 30.0, vec2(30.0), 5);
   float pits = fbm(uv * 110.0, vec2(110.0), 3);
@@ -61,7 +62,7 @@ Surface surface(vec2 uv) {
   float salt = smoothstep(0.62, 0.8, fbm(uv * 8.0 + 1.7, vec2(8.0), 5)) * face;
   stone = mix(stone, vec3(0.42, 0.41, 0.38), salt * 0.3);
   float weeds = smoothstep(0.5, 0.75, fbm(uv * 4.0 + 9.0, vec2(4.0), 5));
-  vec3 mortar = mix(vec3(0.24, 0.235, 0.22), vec3(0.09, 0.13, 0.05), weeds * 0.7);
+  vec3 mortar = mix(vec3(0.09, 0.088, 0.083), vec3(0.06, 0.09, 0.035), weeds * 0.7);
   vec3 col = mix(stone, mortar, joint);
   float h = face * 0.9 + split * 0.25 + pits * 0.05 - joint * 0.3;
   return S(col, h, mix(0.82, 0.95, joint), 1.0 - joint * 0.5 - (1.0 - face) * 0.15, 0.0);

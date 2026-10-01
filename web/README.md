@@ -2,8 +2,9 @@
 
 A standalone three.js app: a night-side globe where you pick a place, a
 rain-soaked Tokyo backstreet with a 24-hour konbini, the stairs of Suga
-Shrine in Yotsuya on a summer afternoon, and the street in front of
-Akihabara Radio Kaikan at blue hour. It does not use any PocketJS runtime, build tooling or packages — it is
+Shrine in Yotsuya on a summer afternoon, the street in front of
+Akihabara Radio Kaikan at blue hour, and the Enoden crossing at
+Kamakura-Kōkōmae above Sagami Bay. It does not use any PocketJS runtime, build tooling or packages — it is
 a plain Vite + TypeScript project with its own lockfile.
 
 Every asset is generated at load time: Earth textures are rasterised from
@@ -43,6 +44,7 @@ Requires WebGL 2. Tested in Chrome on Apple silicon (ANGLE / Metal).
 | `?cam=Konbini\|Puddles\|Vending\|Crossing\|Inside\|Wires` | start at a named shot (konbini) |
 | `?cam=Stairs\|Rails\|Below\|Lane\|Canopy` | start at a named shot (Suga Shrine Stairs) |
 | `?cam=Arrival\|Facade\|Band\|Vista\|Corner\|Clock` | start at a named shot (Radio Kaikan at Blue Hour) |
+| `?cam=Crossing\|Postcard\|Platform\|Route134\|Seawall\|Park` | start at a named shot (Kamakura-Kōkōmae Crossing) |
 | `?view=px,py,pz,tx,ty,tz[,fov]` | explicit camera (with `?shot`) |
 | `?t=12.5` | simulation clock when the stage appears (with `?shot`, captures are reproducible) |
 | `?stats` | frame time and draw-call readout |
@@ -191,6 +193,37 @@ bun scripts/shot.ts "/?shot&stats&q=high&cam=Puddles#/place/tokyo-konbini" out.p
 - **Finish.** N8AO, a bloom above luminance 1.0, AgX tone mapping and the
   shared grade with cool shadows and warm highlights (`fx/post.ts`).
 
+## How Kamakura-Kōkōmae Crossing is put together
+
+- **Site.** The origin is the crossing on the rail (OSM node 3937261506), +X
+  east, −Z north; heights are above the rail, 10.2 m T.P., so the sea lies
+  at y = −10.2. The track, Route 134, the sea wall and the beach follow the
+  Enoden centreline at the offsets of the junction cross-section (sidewalk
+  2.8–7.6 m, lanes 7.6–17.1 m, sea-wall top to 18.8 m, sand 8 m below); the
+  slope road follows the GSI 1 m profile (10 % grade) and PLATEAU's road
+  edges (`world/layout.ts`). East of x ≈ 410 m the track bends inland toward
+  Shichirigahama station behind the houses.
+- **Hillside.** Ground heights interpolate the GSI survey and the PLATEAU
+  building bases on two grids that follow the slope road's edges and the
+  track exactly, with rock-faced and block retaining walls on those lines
+  (`world/terrain.ts`); 195 PLATEAU buildings (footprints, ground levels,
+  heights) and rows of houses beyond ±250 m share one facade atlas tinted per
+  house through vertex colours (`world/buildings.ts`).
+- **Crossing.** Masts north-east and south-west of the road (striped and
+  plain crossbucks, two red lamps per face, the ふみきり LED box, the bell and
+  the direction indicator), four striped gate arms, the ochre deck with the
+  green pedestrian strip, spike mats, the rules board, cabinets
+  (`world/crossing.ts`); `world/timeline.ts` drives the sequence.
+- **Sea.** `places/shared/water.ts` on a few large triangles to 25 km, two
+  surf strips, sailboats, and the coast in the haze (Inamuragasaki, Miura,
+  Enoshima) as low-poly curtains placed by their angles above the horizon
+  (`world/sea.ts`, `world/far.ts`).
+- **Life.** One Enoden 500 type (two articulated units, 50.8 m) per 120 s
+  loop, eight vehicles on Route 134, two visitors on the Rainy Night Konbini
+  rig (`world/train.ts`, `world/traffic.ts`, `world/people.ts`).
+- **Sound.** Surf in sets, the road, cicadas, the electronic bell while the
+  crossing rings, the train's motor (`audio.ts`).
+
 ## Layout
 
 ```
@@ -216,4 +249,9 @@ src/
       fx/        dusk post-processing
       world/     site plan, ground, Radio Kaikan, facade toolkit, neighbours,
                  props, people, viaduct and towers
+    kamakura-koko-mae-crossing/  Kamakura-Kōkōmae Crossing
+      gfx/       seaside surfaces, material set, canvas art (signs, livery, facades)
+      fx/        daylight post-processing
+      world/     site plan and survey data, coast strip, terrain, slope road,
+                 buildings, crossing, props, train, traffic, people, sea, far coast
 ```

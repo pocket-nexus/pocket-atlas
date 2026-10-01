@@ -34,12 +34,12 @@ type Add = (m: Material | keyof typeof SOLIDS, g: BufferGeometry, cast?: boolean
 
 /** Lamp head: black housing, round lens and hood, facing +z, centred on the lens. */
 function lampHead(add: Add, lens: Material, p: Vector3, yaw: number): void {
-  const housing = new BoxGeometry(0.34, 0.34, 0.14);
-  housing.translate(0, 0, -0.08);
-  const glass = new CylinderGeometry(0.115, 0.115, 0.03, 14);
+  const housing = new BoxGeometry(0.42, 0.42, 0.16);
+  housing.translate(0, 0, -0.09);
+  const glass = new CylinderGeometry(0.15, 0.15, 0.03, 14);
   glass.rotateX(Math.PI / 2);
   // Hood: the upper half of a short tube over the lens.
-  const hood = new CylinderGeometry(0.15, 0.15, 0.24, 12, 1, true, -Math.PI / 2, Math.PI);
+  const hood = new CylinderGeometry(0.19, 0.19, 0.28, 12, 1, true, -Math.PI / 2, Math.PI);
   hood.rotateX(Math.PI / 2);
   hood.translate(0, 0, 0.1);
   for (const [g, m] of [
@@ -92,10 +92,10 @@ export function buildCrossing(w: KamakuraWorld): CrossingState {
   ];
   for (const m of masts) {
     const base = new Vector3(m.x, 0.05, m.z);
-    add(P, place(pole(0.075, 0.07, 4.25, A.stripe), base.clone().setY(2.17)));
+    add(P, place(pole(0.1, 0.09, 4.25, A.stripe), base.clone().setY(2.17)));
     add(black, place(new SphereGeometry(0.08, 8, 6, 0, Math.PI * 2, 0, Math.PI / 2), base.clone().setY(4.3)));
     // Crossbuck, centre 3.5 m up, square to the road.
-    const xs = new PlaneGeometry(1.3, 1.3);
+    const xs = new PlaneGeometry(1.55, 1.55);
     mapUV(xs, m.striped ? A.xStriped : A.xPlain);
     add(w.cut, place(xs, base.clone().setY(3.55).add(new Vector3(0, 0, 0.09))));
     // Lamp pairs on short arms beside the pole, one per face.
@@ -105,7 +105,7 @@ export function buildCrossing(w: KamakuraWorld): CrossingState {
       const arm = base.clone().addScaledVector(side, -0.42).addScaledVector(out, 0.14);
       add(black, rodBetween(base.clone().setY(2.9), arm.clone().setY(2.9), 0.03), false);
       add(black, rodBetween(base.clone().setY(2.42), arm.clone().setY(2.42), 0.03), false);
-      lampHead(add, lampA, arm.clone().setY(2.92), yaw);
+      lampHead(add, lampA, arm.clone().setY(2.98), yaw);
       lampHead(add, lampB, arm.clone().setY(2.42), yaw);
     }
     if (m.striped) {
@@ -142,10 +142,11 @@ export function buildCrossing(w: KamakuraWorld): CrossingState {
 
   // ------------------------------------------------------------ gates
   const gates: { x: number; z: number; to: number }[] = [
-    { x: 5.75, z: -3.55, to: 1.3 },
-    { x: -4.4, z: -3.55, to: 1.0 },
-    { x: 5.6, z: 3.35, to: 1.3 },
-    { x: -4.6, z: 3.65, to: 1.0 },
+    // Each arm reaches past the road's centre line; the west arms sit a hand's width outboard of the east ones.
+    { x: 5.75, z: -3.55, to: -0.4 },
+    { x: -4.4, z: -3.8, to: 1.6 },
+    { x: 5.6, z: 3.35, to: -0.4 },
+    { x: -4.6, z: 3.6, to: 1.6 },
   ];
   const arms: Group[] = [];
   const holder = w.group();
@@ -168,7 +169,10 @@ export function buildCrossing(w: KamakuraWorld): CrossingState {
     const arm = new Group();
     arm.name = "gate-arm";
     pivot.add(arm);
-    const bar = new BoxGeometry(len, 0.09, 0.07);
+    // Striped arm, 0.12 m deep at the pivot, tapering to 0.07 m at the tip.
+    const bar = new BoxGeometry(len, 0.12, 0.1);
+    const bp = bar.getAttribute("position");
+    for (let i = 0; i < bp.count; i++) if (bp.getX(i) > 0) bp.setXYZ(i, bp.getX(i), bp.getY(i) * 0.6, bp.getZ(i) * 0.7);
     const buv = bar.getAttribute("uv");
     for (let i = 0; i < buv.count; i++) buv.setXY(i, A.arm.u0 + buv.getX(i) * (A.arm.u1 - A.arm.u0), A.arm.v0 + buv.getY(i) * (A.arm.v1 - A.arm.v0));
     bar.translate(len / 2 + 0.15, 0, 0);

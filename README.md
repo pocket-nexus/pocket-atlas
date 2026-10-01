@@ -18,6 +18,7 @@ A pack connects the two: the web app exports a place as glTF 2.0 with `extras.po
 | Rainy Night Konbini | `tokyo-konbini` | Tokyo backstreet | wet ground with a planar reflection, rain, lit haze, interior-mapped windows, baked vertex lighting, moving lights |
 | Suga Shrine Stairs | `suga-shrine-stairs` | Yotsuya, Tokyo (the 男坂 stairs) | sun with a shadow map, sky occlusion baked into the vertices, alpha-tested foliage, daytime sky with a cloud panorama, ACES grade |
 | Radio Kaikan at Blue Hour | `akihabara-radio-kaikan` | Akihabara, Tokyo (秋葉原ラジオ会館, the 2014 building) | twilight sky (sun below the horizon), animated LED signage (flipbooks and scrolling strips), backlit window artwork, panel lights and lamps baked with sky occlusion, pedestrians and a passing train |
+| Kamakura-Kōkōmae Crossing | `kamakura-koko-mae-crossing` | Shichirigahama, Kamakura (鎌倉高校前1号踏切 on the Enoden) | open water (wave layers, Fresnel sky reflection, glitter path) to a 16 km horizon in FogExp2 haze, scrolling surf strips, flashing crossing lamps and gates driven by material and node tracks, a train, Route 134 traffic |
 
 Real places fall into a finite set of kinds: night streets, daytime residential slopes, interiors, waterfronts, parks. Each first-party place brings its kind's rendering to the best quality the handheld holds, and the work goes into the shared renderer and cooker so later places of the same kind reuse it.
 
@@ -119,6 +120,16 @@ A `dusk-street` place is lit by its signs after sunset:
 - **Twilight sky** (`places/shared/sky.ts`): the `gradient-sun-cloudpanorama` sky with the sun below the horizon, no disc, no cloud panorama, and a `twilight` object: an afterglow `band` along the horizon weighted toward the sun's azimuth, the pink anti-twilight `belt` opposite the sun, and the Earth's `shadow` under it. The formulas are in the file header; `sky_day_f.cg` evaluates them under `TWILIGHT` (`DaySky::twilight` in the pack).
 
 Radio Kaikan at Blue Hour bakes 25 panel lights (signs, the LED band and screen, shopfronts) and 22 point and spot lights (lantern lamps, soffit downlights, under the Sobu Line bridge) into the vertices, with `bake.skyOcclusion` (48 rays within 6 m) so the street canyon darkens toward the ground; lamp pools split edges down to 0.45 m.
+
+## Coast places
+
+A `daytime-coast` place adds open water to the daytime pipeline (sun with a shadow map, sky occlusion, the cloud-panorama sky):
+
+- **Water** (`places/shared/water.ts`): a `MeshStandardMaterial` annotated `kind: "water"` cooks as `Kind::Water` (`water_f.cg`, `surface_v.cg` under `WAVES`). Its normal map (cooked to BC5) is laid twice on the world's x/z plane, `waves: [[repeatsPerMetre, scrollX, scrollZ], …]` in m/s; `normalScale.x` scales the slopes, `roughness` is the GGX α near the camera and `distanceRoughness` adds α² per metre while the slopes flatten as 1 / (1 + 40 · d · distanceRoughness). The environment probe is reflected by Schlick Fresnel (f0 = 0.02, the reflection folded above the horizon), `body` × the hemisphere sky fills the rest, the sun adds a GGX highlight; FogExp2 on top, no shadows. The web material patches three.js' standard program to evaluate the same expressions, so the probe, sun and hemisphere it reads are the ones the exporter writes. A tilt baked into the wave texture's mean slope stands in for the masking of wave backs seen from the shore.
+- **Surf** (`foamMaterial` in the same file): alpha-blended lit strips whose vertex alpha fades the foam across the surf zone and whose texture scrolls shoreward (`scroll`, the cooker's `UvAnim`); each strip is one moving node so it costs one draw.
+- **Draw budget**: within 140 m of the origin the cooker chunks static geometry into 32 m cells per material, beyond that into 256 m cells, so a view along a coast pays one draw per material per cell. Kamakura-Kōkōmae Crossing paints small props (posts, wires, fences, housings, cabinets) from solid patches of its printed atlas (`KamakuraWorld.tint`), merges each vehicle and each train body into one mesh, keeps far land to a few large triangles and keeps every shot under 250 draws.
+
+Kamakura-Kōkōmae Crossing loops 120 s: one Fujisawa-bound train, the crossing's 35 s warning, lamps alternating every 0.6 s, four gate arms, eight vehicles on 60 s cycles.
 
 ## Status on hardware
 
