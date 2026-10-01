@@ -1,0 +1,27 @@
+// Rounded rectangle with a vertical gradient, an optional border and an
+// optional image (TEX), premultiplied. The edge ramps over `soft` pixels:
+// one for anti-aliasing, more for a drop shadow.
+
+uniform float4 uShape;   // half width, half height, corner radius, edge softness (px)
+uniform float4 uFill;    // premultiplied colour at the top
+uniform float4 uFill2;   // premultiplied colour at the bottom
+uniform float4 uStroke;  // premultiplied border colour
+uniform float4 uStrokeW; // border width (px), -, -, -
+#ifdef TEX
+uniform sampler2D uSource;
+#endif
+
+half4 main(float2 vLocal : TEXCOORD0, float2 vUv : TEXCOORD1) : COLOR
+{
+    float2 q = abs(vLocal) - uShape.xy + uShape.z;
+    float d = length(max(q, float2(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - uShape.z;
+    float cover = saturate(0.5 - d / uShape.w);
+    float t = saturate(vLocal.y / (2.0 * uShape.y) + 0.5);
+    float4 c = lerp(uFill, uFill2, t);
+#ifdef TEX
+    c = c * (float4)tex2D(uSource, vUv);
+#endif
+    float ring = saturate(0.5 - (abs(d + uStrokeW.x * 0.5) - uStrokeW.x * 0.5)) * step(0.01, uStrokeW.x);
+    c = uStroke * ring + c * (1.0 - ring * uStroke.a);
+    return (half4)(c * cover);
+}

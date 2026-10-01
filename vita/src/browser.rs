@@ -1,0 +1,670 @@
+//! The place browser beside the globe: lists of places as postcards with
+//! their baked previews. Four lists switch with L and R: Featured, Explore
+//! (nearest the point the globe faces, re-sorted while the stick spins it),
+//! Saved (△ on a card; kept in `ux0:data/pocket-atlas/saved.json`) and
+//! Search (□ opens the system keyboard; words match name, native name,
+//! locality, country, tags, kind and author). The focused card opens into a
+//! postcard and the globe turns to it; the others stay one-line rows.
+
+use pocket3d_place::atlas::AtlasPlace;
+use pocketjs_vita::input::Pad;
+use serde_json::json;
+
+use crate::atlas::Atlas;
+use crate::gpu::Gpu;
+use crate::ui::{accent, rgb, Button, Style, Ui};
+
+const SAVED_PATH: &str = "ux0:data/pocket-atlas/saved.json";
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tab {
+    Featured,
+    Explore,
+    Saved,
+    Search,
+}
+
+pub const TABS: [Tab; 4] = [Tab::Featured, Tab::Explore, Tab::Saved, Tab::Search];
+
+impl Tab {
+    pub fn label(self) -> &'static str {
+        match self {
+            Tab::Featured => "FEATURED",
+            Tab::Explore => "EXPLORE",
+            Tab::Saved => "SAVED",
+            Tab::Search => "SEARCH",
+        }
+    }
+
+    pub fn by_name(s: &str) -> Option<Tab> {
+        TABS.into_iter().find(|t| t.label().eq_ignore_ascii_case(s))
+    }
+}
+
+pub enum Action {
+    Enter(String),
+}
+
+// Panel geometry (display pixels).
+const PX: f32 = 576.0;
+const PW: f32 = 368.0;
+const PY: f32 = 16.0;
+const PH: f32 = 512.0;
+const LIST_Y: f32 = PY + 88.0;
+const LIST_H: f32 = PH - 88.0 - 10.0;
+/// Card image (2:1) and the compact row's thumbnail.
+const IMG_W: f32 = 344.0;
+const THUMB_W: f32 = 96.0;
+const ROW_H: f32 = 60.0;
+const CARD_H: f32 = IMG_W * 0.5 + 84.0;
+const GAP: f32 = 6.0;
+/// Previews are 16:9 frames stored in 2:1 textures; a 2:1 card shows the
+/// middle 16:9 ÷ 2:1 of their height.
+const CROP: [f32; 4] = [0.0, 0.0556, 1.0, 0.9444];
+
+/// The system keyboard (SceImeDialog) for the search query.
+struct Ime {
+    param: Box<vitasdk_sys::SceImeDialogParam>,
+    title: Vec<u16>,
+    initial: Vec<u16>,
+    input: Box<[u16; 65]>,
+    running: bool,
+}
+
+impl Ime {
+    fn new() -> Self {
+        Self { param: Box::new(unsafe { core::mem::zeroed() }), title: Vec::new(), initial: Vec::new(), input: Box::new([0; 65]), running: false }
+    }
+
+    unsafe fn open(&mut self, title: &str, initial: &str) -> bool {
+        use vitasdk_sys::*;
+        if self.running {
+            return true;
+        }
+        self.title = title.encode_utf16().chain([0]).collect();
+        self.initial = initial.encode_utf16().take(64).chain([0]).collect();
+        self.input.fill(0);
+        let p = &mut *self.param;
+        *p = core::mem::zeroed();
+        // sceImeDialogParamInit (an inline function in the SDK headers).
+        p.sdkVersion = 0x0357_0011;
+        p.commonParam.magic = SCE_COMMON_DIALOG_MAGIC_NUMBER.wrapping_add(&p.commonParam as *const _ as u32);
+        p.type_ = SCE_IME_TYPE_DEFAULT;
+        p.option = 0;
+        p.dialogMode = 0;
+        p.textBoxMode = SCE_IME_DIALOG_TEXTBOX_MODE_DEFAULT;
+        p.title = self.title.as_ptr();
+        p.maxTextLength = 64;
+        p.initialText = self.initial.as_mut_ptr();
+        p.inputTextBuffer = self.input.as_mut_ptr();
+        let r = sceImeDialogInit(p);
+        self.running = r >= 0;
+        if r < 0 {
+            pocketjs_vita::vita_log(format_args!("atlas: sceImeDialogInit 0x{:08x}", r as u32));
+        }
+        self.running
+    }
+
+    /// The entered text once the dialog closes (`Some(None)`: cancelled).
+    unsafe fn poll(&mut self) -> Option<Option<String>> {
+        use vitasdk_sys::*;
+        if !self.running || sceImeDialogGetStatus() != SCE_COMMON_DIALOG_STATUS_FINISHED {
+            return None;
+        }
+        let mut result: SceImeDialogResult = core::mem::zeroed();
+        sceImeDialogGetResult(&mut result);
+        sceImeDialogTerm();
+        self.running = false;
+        if result.button != SCE_IME_DIALOG_BUTTON_ENTER as i32 {
+            return Some(None);
+        }
+        let n = self.input.iter().position(|&c| c == 0).unwrap_or(self.input.len());
+        Some(Some(String::from_utf16_lossy(&self.input[..n])))
+    }
+}
+
+pub struct Browser {
+    pub tab: Tab,
+    /// Place indices of the current list, and the focused row.
+    pub list: Vec<usize>,
+    pub focus: usize,
+    focus_id: Option<String>,
+    /// Saved place ids, most recent first.
+    pub saved: Vec<String>,
+    pub query: String,
+    /// Animated state: list scroll (px), per-place card opening (0..1),
+    /// tab underline (x, width), list fade-in after a change.
+    scroll: f32,
+    open: Vec<f32>,
+    underline: (f32, f32),
+    fade: f32,
+    toast: Option<(String, f32)>,
+    explore_from: (f32, f32),
+    ime: Ime,
+    time: f32,
+}
+
+fn unit(lat: f32, lon: f32) -> [f32; 3] {
+    let (la, lo) = (lat.to_radians(), lon.to_radians());
+    [la.cos() * lo.sin(), la.sin(), la.cos() * lo.cos()]
+}
+
+fn kind_label(kind: &str) -> String {
+    kind.replace('-', " ").to_uppercase()
+}
+
+/// Search score of a place for the query words (`None`: a word matches
+/// nothing).
+fn score(p: &AtlasPlace, words: &[String]) -> Option<u32> {
+    let tags = p.tags.join(" ");
+    let kind = p.kind.replace('-', " ");
+    let fields: [(&str, u32); 9] = [
+        (&p.name, 8),
+        (&p.native, 8),
+        (&p.locality, 6),
+        (&p.locality_native, 6),
+        (&p.country, 4),
+        (&tags, 4),
+        (&kind, 3),
+        (&p.author, 2),
+        (&p.summary, 1),
+    ];
+    let mut total = 0;
+    for w in words {
+        let best = fields.iter().filter(|(f, _)| f.to_lowercase().contains(w.as_str())).map(|(_, k)| *k).max()?;
+        total += best;
+    }
+    if words.first().is_some_and(|w| p.name.to_lowercase().starts_with(w.as_str())) {
+        total += 4;
+    }
+    Some(total)
+}
+
+impl Browser {
+    pub fn new() -> Self {
+        let saved = std::fs::read(SAVED_PATH)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .and_then(|v| v["saved"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()))
+            .unwrap_or_default();
+        Self {
+            tab: Tab::Featured,
+            list: Vec::new(),
+            focus: 0,
+            focus_id: None,
+            saved,
+            query: String::new(),
+            scroll: 0.0,
+            open: Vec::new(),
+            underline: (0.0, 0.0),
+            fade: 0.0,
+            toast: None,
+            explore_from: (0.0, 0.0),
+            ime: Ime::new(),
+            time: 0.0,
+        }
+    }
+
+    /// Rebuilds the list for a freshly loaded atlas, keeping the tab and the
+    /// focused place.
+    pub fn attach(&mut self, atlas: &mut Atlas) {
+        self.open = vec![0.0; atlas.meta.places.len()];
+        self.explore_from = (atlas.lat, atlas.lon);
+        self.rebuild(atlas);
+        if let Some(&i) = self.list.get(self.focus) {
+            self.open[i] = 1.0;
+        }
+        self.scroll = self.scroll_goal();
+        self.underline = (0.0, 0.0);
+        self.fade = 1.0;
+        self.focus_changed(atlas, true);
+    }
+
+    pub fn dialog_running(&self) -> bool {
+        self.ime.running
+    }
+
+    pub fn focused<'a>(&self, atlas: &'a Atlas) -> Option<&'a AtlasPlace> {
+        self.list.get(self.focus).map(|&i| &atlas.meta.places[i])
+    }
+
+    fn is_saved(&self, id: &str) -> bool {
+        self.saved.iter().any(|s| s == id)
+    }
+
+    fn write_saved(&self) {
+        let _ = std::fs::create_dir_all("ux0:data/pocket-atlas");
+        let _ = std::fs::write(SAVED_PATH, json!({ "saved": self.saved }).to_string());
+    }
+
+    pub fn toggle_saved(&mut self, atlas: &Atlas, id: &str) {
+        let name = atlas.meta.places.iter().find(|p| p.id == id).map_or(id.to_string(), |p| p.name.clone());
+        if let Some(k) = self.saved.iter().position(|s| s == id) {
+            self.saved.remove(k);
+            self.toast(format!("Removed {name} from Saved"));
+        } else {
+            self.saved.insert(0, id.to_string());
+            self.toast(format!("Saved {name}"));
+        }
+        self.write_saved();
+    }
+
+    fn toast(&mut self, msg: String) {
+        self.toast = Some((msg, 2.4));
+    }
+
+    /// The list for the current tab.
+    fn rebuild(&mut self, atlas: &Atlas) {
+        let places = &atlas.meta.places;
+        let all = 0..places.len();
+        let mut list: Vec<usize> = match self.tab {
+            Tab::Featured => {
+                let mut l: Vec<usize> = all.clone().filter(|&i| places[i].featured).collect();
+                if l.is_empty() {
+                    l = all.collect();
+                }
+                l.sort_by_key(|&i| !places[i].enterable);
+                l
+            }
+            Tab::Explore => {
+                let c = unit(self.explore_from.0, self.explore_from.1);
+                let mut l: Vec<(usize, f32)> = all
+                    .map(|i| {
+                        let u = unit(places[i].lat, places[i].lon);
+                        (i, -(u[0] * c[0] + u[1] * c[1] + u[2] * c[2]))
+                    })
+                    .collect();
+                l.sort_by(|a, b| a.1.total_cmp(&b.1));
+                l.into_iter().map(|x| x.0).collect()
+            }
+            Tab::Saved => self.saved.iter().filter_map(|id| places.iter().position(|p| &p.id == id)).collect(),
+            Tab::Search => {
+                let words: Vec<String> = self.query.to_lowercase().split_whitespace().map(String::from).collect();
+                if words.is_empty() {
+                    Vec::new()
+                } else {
+                    let mut l: Vec<(usize, u32)> = all.filter_map(|i| score(&places[i], &words).map(|s| (i, s))).collect();
+                    l.sort_by(|a, b| b.1.cmp(&a.1).then(places[b.0].enterable.cmp(&places[a.0].enterable)));
+                    l.into_iter().map(|x| x.0).collect()
+                }
+            }
+        };
+        list.dedup();
+        self.list = list;
+        self.focus = self.focus_id.as_ref().and_then(|id| self.list.iter().position(|&i| &places[i].id == id)).unwrap_or(0);
+    }
+
+    fn focus_changed(&mut self, atlas: &mut Atlas, turn: bool) {
+        let f = self.list.get(self.focus).copied();
+        self.focus_id = f.map(|i| atlas.meta.places[i].id.clone()).or(self.focus_id.take());
+        atlas.highlight = f;
+        atlas.listed = (0..atlas.meta.places.len()).map(|i| self.list.contains(&i)).collect();
+        if turn {
+            if let Some(i) = f {
+                atlas.turn_to(i);
+            }
+        }
+    }
+
+    pub fn set_tab(&mut self, atlas: &mut Atlas, tab: Tab) {
+        if tab == Tab::Explore {
+            self.explore_from = (atlas.lat, atlas.lon);
+        }
+        self.tab = tab;
+        self.rebuild(atlas);
+        self.fade = 0.0;
+        self.focus_changed(atlas, true);
+    }
+
+    pub fn search(&mut self, atlas: &mut Atlas, query: &str) {
+        self.query = query.trim().to_string();
+        self.set_tab(atlas, Tab::Search);
+    }
+
+    /// Focuses place `id` (control or deep link), in the current list or
+    /// else in Explore.
+    pub fn select(&mut self, atlas: &mut Atlas, id: &str) -> bool {
+        let Some(i) = atlas.meta.places.iter().position(|p| p.id == id) else { return false };
+        self.focus_id = Some(id.to_string());
+        if !self.list.contains(&i) {
+            self.tab = Tab::Explore;
+            self.explore_from = (atlas.meta.places[i].lat, atlas.meta.places[i].lon);
+        }
+        self.rebuild(atlas);
+        self.focus_changed(atlas, true);
+        true
+    }
+
+    /// Input and animation for one frame. `spun`: the stick turned the globe.
+    pub unsafe fn update(&mut self, atlas: &mut Atlas, dt: f32, _pad: &Pad, pressed: u32, spun: bool) -> Option<Action> {
+        use vitasdk_sys::*;
+        self.time += dt;
+        if let Some((_, t)) = &mut self.toast {
+            *t -= dt;
+        }
+        if self.toast.as_ref().is_some_and(|t| t.1 <= 0.0) {
+            self.toast = None;
+        }
+        // Animation.
+        let k = 1.0 - (-dt * 14.0).exp();
+        for (i, o) in self.open.iter_mut().enumerate() {
+            let goal = if self.list.get(self.focus) == Some(&i) { 1.0 } else { 0.0 };
+            *o += (goal - *o) * k;
+        }
+        self.scroll += (self.scroll_goal() - self.scroll) * (1.0 - (-dt * 12.0).exp());
+        self.fade = (self.fade + dt * 6.0).min(1.0);
+
+        if let Some(r) = self.ime.poll() {
+            if let Some(q) = r {
+                self.search(atlas, &q);
+            }
+            return None;
+        }
+        if self.ime.running {
+            return None;
+        }
+        if spun && self.tab == Tab::Explore {
+            // The list follows the globe; the globe does not follow the list.
+            self.explore_from = (atlas.lat, atlas.lon);
+            self.focus_id = None;
+            self.rebuild(atlas);
+            self.focus_changed(atlas, false);
+        }
+        let n = self.list.len();
+        if n > 0 && pressed & (SCE_CTRL_DOWN | SCE_CTRL_UP) != 0 {
+            let down = pressed & SCE_CTRL_DOWN != 0;
+            self.focus = if down { (self.focus + 1).min(n - 1) } else { self.focus.saturating_sub(1) };
+            self.focus_changed(atlas, true);
+        }
+        let ti = TABS.iter().position(|&t| t == self.tab).unwrap_or(0);
+        if pressed & SCE_CTRL_RTRIGGER != 0 {
+            self.set_tab(atlas, TABS[(ti + 1) % TABS.len()]);
+        }
+        if pressed & SCE_CTRL_LTRIGGER != 0 {
+            self.set_tab(atlas, TABS[(ti + TABS.len() - 1) % TABS.len()]);
+        }
+        if pressed & SCE_CTRL_SQUARE != 0 {
+            let q = self.query.clone();
+            self.ime.open("Search places", &q);
+        }
+        let focused = self.list.get(self.focus).map(|&i| atlas.meta.places[i].clone());
+        if let Some(p) = &focused {
+            if pressed & SCE_CTRL_TRIANGLE != 0 {
+                self.toggle_saved(atlas, &p.id);
+                if self.tab == Tab::Saved {
+                    self.rebuild(atlas);
+                    self.focus = self.focus.min(self.list.len().saturating_sub(1));
+                    self.focus_changed(atlas, false);
+                }
+            }
+            if pressed & (SCE_CTRL_CROSS | SCE_CTRL_CIRCLE) != 0 {
+                if p.enterable {
+                    return Some(Action::Enter(p.id.clone()));
+                }
+                self.toast(format!("{} is coming soon", p.name));
+            }
+        }
+        None
+    }
+
+    fn row_h(&self, i: usize) -> f32 {
+        let a = self.open.get(i).copied().unwrap_or(0.0);
+        ROW_H + (CARD_H - ROW_H) * a + GAP
+    }
+
+    /// Keeps the focused card in view with one row above it.
+    fn scroll_goal(&self) -> f32 {
+        let mut top = 0.0;
+        let mut total = 0.0;
+        for r in 0..self.list.len() {
+            let h = if r == self.focus { CARD_H + GAP } else { ROW_H + GAP };
+            if r < self.focus {
+                top += h;
+            }
+            total += h;
+        }
+        let above = if self.focus > 0 { ROW_H + GAP + 4.0 } else { 0.0 };
+        (top - above).clamp(0.0, (total - LIST_H).max(0.0))
+    }
+
+    /// Status for the device report.
+    pub fn status(&self, atlas: &Atlas) -> serde_json::Value {
+        json!({
+            "tab": self.tab.label(),
+            "list": self.list.iter().map(|&i| atlas.meta.places[i].id.clone()).collect::<Vec<_>>(),
+            "focus": self.focused(atlas).map(|p| p.id.clone()),
+            "saved": self.saved,
+            "query": self.query,
+            "ime": self.ime.running,
+        })
+    }
+
+    /// Image of a place: its preview, or a placeholder in its colours.
+    unsafe fn picture(&self, ui: &Ui, gpu: &mut Gpu, atlas: &Atlas, p: &AtlasPlace, x: f32, y: f32, w: f32, radius: f32, opacity: f32) {
+        let h = w * 0.5;
+        match p.preview.and_then(|t| atlas.texture(t)) {
+            Some(tex) => ui.image(gpu, tex, x, y, w, h, CROP, &Style::fill(radius, rgb(0xffffff, opacity)).stroke(1.0, rgb(0xffffff, 0.12 * opacity))),
+            None => {
+                let top = accent(p.accent.map(|c| c * 0.55), opacity);
+                let bottom = rgb(0x0c0e14, opacity);
+                ui.rect(gpu, x, y, w, h, &Style::gradient(radius, top, bottom).stroke(1.0, rgb(0xffffff, 0.12 * opacity)));
+                // The place's own name for the city, faint, as on a postmark.
+                let label = if p.locality_native.trim().is_empty() || p.locality_native.chars().all(|c| c == '_') { &p.locality } else { &p.locality_native };
+                let scale = (w / 150.0).clamp(0.55, 2.0);
+                let tw = ui.width(scale, label);
+                if tw < w - 8.0 {
+                    ui.text(x + (w - tw) * 0.5, y + h * 0.5 + 9.0 * scale, rgb(0xffffff, 0.32 * opacity), scale, label);
+                }
+            }
+        }
+    }
+
+    /// The panel, the brand and the hints.
+    ///
+    /// # Safety
+    /// Inside the vita2d display scene.
+    pub unsafe fn draw(&mut self, ui: &Ui, gpu: &mut Gpu, atlas: &Atlas) {
+        let places = &atlas.meta.places;
+        let white = |a: f32| rgb(0xffffff, a);
+        let grey = |a: f32| rgb(0xb4b8c4, a);
+
+        // Brand.
+        ui.text(40.0, 58.0, white(1.0), 1.25, "P O C K E T   A T L A S");
+        let open = places.iter().filter(|p| p.enterable).count();
+        ui.text(40.0, 84.0, grey(0.85), 0.66, &format!("Places people remember  ·  {} places, {open} open", places.len()));
+
+        // Panel.
+        ui.shadow(gpu, PX, PY, PW, PH, 16.0, 24.0, 0.45);
+        ui.rect(gpu, PX, PY, PW, PH, &Style::gradient(16.0, rgb(0x161a24, 0.78), rgb(0x0c0e14, 0.84)).stroke(1.0, white(0.09)));
+
+        // Tabs, L / R at the ends, an underline sliding to the current one.
+        let ty = PY + 30.0;
+        ui.button(gpu, PX + 24.0, ty - 5.0, Button::L, 0.9);
+        ui.button(gpu, PX + PW - 24.0, ty - 5.0, Button::R, 0.9);
+        let span = (PX + 46.0, PX + PW - 46.0);
+        let cell = (span.1 - span.0) / TABS.len() as f32;
+        let focus_accent = self.focused(atlas).map_or(rgb(0x8fb4ff, 1.0), |p| accent(p.accent, 1.0));
+        for (k, t) in TABS.iter().enumerate() {
+            let label = t.label();
+            let tw = ui.width(0.56, label);
+            let cx = span.0 + cell * (k as f32 + 0.5);
+            let on = *t == self.tab;
+            ui.text(cx - tw * 0.5, ty, if on { white(1.0) } else { grey(0.6) }, 0.56, label);
+            if on {
+                let goal = (cx - tw * 0.5, tw);
+                if self.underline.1 == 0.0 {
+                    self.underline = goal;
+                }
+                let e = 0.35;
+                self.underline.0 += (goal.0 - self.underline.0) * e;
+                self.underline.1 += (goal.1 - self.underline.1) * e;
+            }
+        }
+        ui.rect(gpu, self.underline.0, ty + 8.0, self.underline.1, 2.0, &Style::fill(1.0, focus_accent));
+        ui.rect(gpu, PX + 16.0, ty + 20.0, PW - 32.0, 1.0, &Style::fill(0.0, white(0.07)));
+
+        // What the list is.
+        let sub = match self.tab {
+            Tab::Featured => format!("Picked for you  ·  {}", self.list.len()),
+            Tab::Explore => "Nearest the middle of the globe  ·  spin it to explore".to_string(),
+            Tab::Saved if self.list.is_empty() => "Nothing saved yet".to_string(),
+            Tab::Saved => format!("{} saved", self.list.len()),
+            Tab::Search if self.query.is_empty() => "Search by name, city, country or tag".to_string(),
+            Tab::Search => format!("“{}”  ·  {} result{}", self.query, self.list.len(), if self.list.len() == 1 { "" } else { "s" }),
+        };
+        ui.text(PX + 18.0, PY + 72.0, grey(0.8), 0.58, &ui.fit(0.58, &sub, PW - 36.0));
+
+        // The list.
+        let a = self.fade;
+        ui.clip(Some((PX + 1.0, LIST_Y - 6.0, PW - 2.0, LIST_H + 6.0)));
+        let mut y = LIST_Y - self.scroll;
+        for (r, &i) in self.list.iter().enumerate() {
+            let h = self.row_h(i);
+            if y + h >= LIST_Y - 8.0 && y <= LIST_Y + LIST_H {
+                self.item(ui, gpu, atlas, &places[i], i, r == self.focus, PX + 12.0, y, a);
+            }
+            y += h;
+        }
+        if self.list.is_empty() {
+            let (title, body) = match self.tab {
+                Tab::Saved => ("No saved places", "Press △ on a place to keep it here."),
+                Tab::Search if self.query.is_empty() => ("Find a place", "Press □ and type a name, a city or a tag."),
+                Tab::Search => ("No places found", "Press □ to try other words."),
+                _ => ("No places", ""),
+            };
+            ui.text(PX + 24.0, LIST_Y + 40.0, white(0.9 * a), 0.9, title);
+            ui.text(PX + 24.0, LIST_Y + 66.0, grey(0.85 * a), 0.62, body);
+        }
+        ui.clip(None);
+        // Edge fades over the scrolled list.
+        if self.scroll > 1.0 {
+            ui.rect(gpu, PX + 1.0, LIST_Y - 6.0, PW - 2.0, 18.0, &Style::gradient(0.0, rgb(0x141822, 0.9), rgb(0x141822, 0.0)));
+        }
+
+        // Hints along the bottom, under the globe.
+        let hy = 524.0;
+        let mut x = 40.0;
+        let focused = self.focused(atlas);
+        if focused.is_some_and(|p| p.enterable) {
+            x += ui.hint(gpu, x, hy, &[Button::Cross], "Visit", 1.0) + 18.0;
+        }
+        if let Some(p) = focused {
+            x += ui.hint(gpu, x, hy, &[Button::Triangle], if self.is_saved(&p.id) { "Unsave" } else { "Save" }, 1.0) + 18.0;
+        }
+        x += ui.hint(gpu, x, hy, &[Button::Square], "Search", 1.0) + 18.0;
+        x += ui.hint(gpu, x, hy, &[Button::L, Button::R], "Lists", 1.0) + 18.0;
+        ui.hint(gpu, x, hy, &[Button::Stick], "Spin", 1.0);
+
+        if let Some((msg, t)) = &self.toast {
+            let o = (t.min(0.4) / 0.4).clamp(0.0, 1.0);
+            let tw = ui.width(0.7, msg);
+            let (cx, cy) = (atlas.meta.globe.center_x, 462.0);
+            ui.rect(gpu, cx - tw * 0.5 - 16.0, cy - 17.0, tw + 32.0, 32.0, &Style::fill(16.0, rgb(0x0c0e14, 0.82 * o)).stroke(1.0, white(0.14 * o)));
+            ui.text(cx - tw * 0.5, cy + 5.0, white(o), 0.7, msg);
+        }
+    }
+
+    /// One place: a row (thumbnail, name, locality) that opens into a
+    /// postcard (preview, kind, name, locality, tags, author, status) as it
+    /// takes focus.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn item(&self, ui: &Ui, gpu: &mut Gpu, atlas: &Atlas, p: &AtlasPlace, i: usize, focused: bool, x: f32, y: f32, fade: f32) {
+        let a = self.open.get(i).copied().unwrap_or(0.0);
+        let s = a * a * (3.0 - 2.0 * a);
+        let white = |o: f32| rgb(0xffffff, o * fade);
+        let grey = |o: f32| rgb(0xb4b8c4, o * fade);
+        let acc = |o: f32| accent(p.accent, o * fade);
+        let saved = self.is_saved(&p.id);
+        let w = PW - 24.0;
+
+        // Card behind the opened postcard.
+        if s > 0.02 {
+            let ch = ROW_H + (CARD_H - ROW_H) * s;
+            ui.rect(gpu, x - 4.0, y - 4.0, w + 8.0, ch + 2.0, &Style::fill(14.0, rgb(0x1c212c, 0.9 * s * fade)).stroke(1.5, acc(0.75 * s)));
+        }
+        // Picture: thumbnail → card image.
+        let iw = THUMB_W + (IMG_W - THUMB_W) * s;
+        let ix = x + 2.0 + (0.0 - 2.0) * s;
+        let iy = y + 6.0 * (1.0 - s);
+        self.picture(ui, gpu, atlas, p, ix, iy, iw, 6.0 + 4.0 * s, fade);
+
+        // Row text, fading as the card opens.
+        let ro = (1.0 - s * 2.0).max(0.0);
+        if ro > 0.0 {
+            let tx = x + THUMB_W + 16.0;
+            let tw = w - THUMB_W - 16.0 - 44.0;
+            ui.text(tx, y + 26.0, white(0.94 * ro), 0.74, &ui.fit(0.74, &p.name, tw));
+            let loc = if p.country.is_empty() { p.locality.clone() } else { format!("{}  ·  {}", p.locality, p.country) };
+            ui.text(tx, y + 46.0, grey(0.85 * ro), 0.58, &ui.fit(0.58, &loc, tw));
+            if p.enterable {
+                ui.text_right(x + w - 6.0, y + 26.0, acc(ro), 0.5, "OPEN");
+            } else {
+                ui.text_right(x + w - 6.0, y + 26.0, grey(0.55 * ro), 0.5, "SOON");
+            }
+            if saved {
+                ui.text_right(x + w - 6.0, y + 46.0, acc(ro), 0.62, "★");
+            }
+        }
+
+        // Postcard text, appearing as it opens.
+        let co = ((s - 0.5) * 2.0).max(0.0);
+        if co > 0.0 {
+            let ih = IMG_W * 0.5;
+            // Scrim and name over the bottom of the picture.
+            ui.rect(gpu, x, y + ih - 64.0, IMG_W, 64.0, &Style::gradient(10.0, rgb(0x000000, 0.0), rgb(0x000000, 0.72 * co * fade)));
+            let name = ui.fit(1.0, &p.name, IMG_W - 28.0);
+            ui.text(x + 14.0, y + ih - 14.0, white(co), 1.0, &name);
+            let nw = ui.width(1.0, &name);
+            if !p.native.is_empty() && nw + ui.width(0.66, &p.native) + 40.0 < IMG_W {
+                ui.text(x + 24.0 + nw, y + ih - 14.0, white(0.72 * co), 0.66, &p.native);
+            }
+            // Kind chip and the saved badge.
+            if !p.kind.is_empty() {
+                let k = kind_label(&p.kind);
+                let kw = ui.width(0.48, &k);
+                ui.rect(gpu, x + 10.0, y + 10.0, kw + 16.0, 18.0, &Style::fill(9.0, rgb(0x000000, 0.5 * co * fade)));
+                ui.text(x + 18.0, y + 23.0, white(0.92 * co), 0.48, &k);
+            }
+            if saved {
+                let b = "★ SAVED";
+                let bw = ui.width(0.48, b);
+                ui.rect(gpu, x + IMG_W - bw - 26.0, y + 10.0, bw + 16.0, 18.0, &Style::fill(9.0, rgb(0x000000, 0.5 * co * fade)));
+                ui.text(x + IMG_W - bw - 18.0, y + 23.0, acc(co), 0.48, b);
+            }
+            // Caption.
+            let cy = y + ih;
+            let loc = if p.locality_native.is_empty() || p.locality_native.chars().all(|c| c == '_') {
+                format!("{}  ·  {}", p.locality, p.country)
+            } else {
+                format!("{} {}  ·  {}", p.locality, p.locality_native, p.country)
+            };
+            ui.text(x + 4.0, cy + 24.0, white(0.9 * co), 0.66, &ui.fit(0.66, &loc, w - 110.0));
+            ui.text_right(x + w - 4.0, cy + 24.0, grey(0.75 * co), 0.5, &p.weather.to_uppercase());
+            // Tags.
+            let mut tx = x + 4.0;
+            for t in &p.tags {
+                let tw = ui.width(0.5, t);
+                if tx + tw + 16.0 > x + w {
+                    break;
+                }
+                ui.rect(gpu, tx, cy + 34.0, tw + 14.0, 18.0, &Style::fill(9.0, [0.0; 4]).stroke(1.0, white(0.22 * co)));
+                ui.text(tx + 7.0, cy + 47.0, white(0.82 * co), 0.5, t);
+                tx += tw + 20.0;
+            }
+            // Author and what × does.
+            if !p.author.is_empty() {
+                ui.text(x + 4.0, cy + 74.0, grey(0.8 * co), 0.56, &format!("by {}", p.author));
+            }
+            if p.enterable {
+                let l = "VISIT";
+                let lw = ui.width(0.56, l);
+                ui.text(x + w - 4.0 - lw, cy + 74.0, acc(co), 0.56, l);
+                if focused {
+                    ui.button(gpu, x + w - 18.0 - lw, cy + 69.0, Button::Cross, co * fade);
+                }
+            } else {
+                ui.text_right(x + w - 4.0, cy + 74.0, grey(0.7 * co), 0.56, "COMING SOON");
+            }
+        }
+    }
+}

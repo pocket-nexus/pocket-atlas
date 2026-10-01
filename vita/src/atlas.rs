@@ -1,5 +1,5 @@
-//! The atlas screen: the globe of the web reference (`atlas.pack`), the
-//! places on it and the list to pick one from.
+//! The atlas screen: the globe of the web reference (`atlas.pack`) and the
+//! places on it; the place browser beside it is `browser.rs`.
 //!
 //! The camera and the sun are fixed while the Earth turns, as on the web in
 //! free mode, so the sky, the atmosphere halo and the atmosphere over the disc
@@ -12,7 +12,7 @@ use pocket3d_gxm::mem::{Arena, Kind};
 use pocket3d_gxm::target::{ColorFormat, Depth, Msaa, Target};
 use pocket3d_gxm::texture::{Texture, Uploader};
 use pocket3d_place as pc;
-use pocket3d_place::atlas::{AtlasMeta, AtlasPlace};
+use pocket3d_place::atlas::AtlasMeta;
 use pocketjs_vita::input::Pad;
 use vita2d_sys as g;
 
@@ -33,11 +33,6 @@ const SEG_V: usize = 64;
 const SPIN: f32 = 60.0;
 /// Seconds without input before the globe drifts on its own.
 const IDLE_AFTER: f32 = 8.0;
-
-/// What the player asked for on the atlas screen.
-pub enum Pick {
-    Place(String),
-}
 
 pub struct Atlas {
     pub meta: AtlasMeta,
@@ -64,13 +59,13 @@ pub struct Atlas {
     pub lat: f32,
     pub lon: f32,
     goal: Option<(f32, f32)>,
-    /// Places in list order (enterable first) and the selected row.
-    pub order: Vec<usize>,
-    pub selected: usize,
+    /// The browser's focused place (a wider, steady ring) and the places in
+    /// its current list (full brightness; the rest dimmed).
+    pub highlight: Option<usize>,
+    pub listed: Vec<bool>,
     idle: f32,
     time: f32,
     tick: u32,
-    toast: Option<(String, f32)>,
     pub load_ms: u32,
     /// Profiling switches (`{"atlas": true, "probe": {...}}`).
     pub probe: Probe,
@@ -373,8 +368,6 @@ impl Atlas {
         }
         let grain = tiled_u8(grain_px, GRAIN, GRAIN, false, true)?;
 
-        let mut list: Vec<usize> = (0..meta.places.len()).collect();
-        list.sort_by_key(|&i| !meta.places[i].enterable);
         let (lat, lon) = (meta.globe.start_lat, meta.globe.start_lon);
         let mut atlas = Self {
             textures,
@@ -396,79 +389,48 @@ impl Atlas {
             lat,
             lon,
             goal: None,
-            order: list,
-            selected: 0,
+            highlight: None,
+            listed: vec![true; meta.places.len()],
             idle: 0.0,
             time: 0.0,
             tick: 0,
-            toast: None,
             load_ms: 0,
             probe: Probe::default(),
             sun_curve: curve,
             meta,
         };
-        atlas.focus_selected();
         atlas.load_ms = t0.elapsed().as_millis() as u32;
         Ok(atlas)
     }
 
-    pub fn place(&self, row: usize) -> &AtlasPlace {
-        &self.meta.places[self.order[row]]
-    }
-
-    /// Turns the selected place into the lit-limb-free part of the disc
-    /// without centring it (the web's card hover).
-    fn focus_selected(&mut self) {
-        let p = self.place(self.selected);
+    /// Turns place `i` into the lit-limb-free part of the disc without
+    /// centring it (the web's card hover).
+    pub fn turn_to(&mut self, i: usize) {
+        let p = &self.meta.places[i];
         self.goal = Some(((p.lat * 0.75).clamp(-40.0, 55.0), p.lon - 4.0));
+        self.idle = 0.0;
     }
 
-    /// Selects the row of place `id` (control or deep link).
-    pub fn select(&mut self, id: &str) -> bool {
-        match self.order.iter().position(|&i| self.meta.places[i].id == id) {
-            Some(r) => {
-                self.selected = r;
-                self.focus_selected();
-                true
-            }
-            None => false,
-        }
+    /// A pack texture (place previews), if `i` names one.
+    pub fn texture(&self, i: u32) -> Option<*const g::SceGxmTexture> {
+        self.textures.get(i as usize).map(|t| &t.gxm as *const _)
     }
 
-    /// Input and animation for one frame.
-    pub fn update(&mut self, dt: f32, pad: &Pad, pressed: u32) -> Option<Pick> {
-        use vitasdk_sys::*;
+    /// The globe for one frame: the left stick spins it, otherwise it eases
+    /// to the browser's place and drifts after a while. Returns whether the
+    /// stick turned it.
+    pub fn update(&mut self, dt: f32, pad: &Pad) -> bool {
         self.time += dt;
-        if let Some((_, t)) = &mut self.toast {
-            *t -= dt;
-        }
-        if self.toast.as_ref().is_some_and(|t| t.1 <= 0.0) {
-            self.toast = None;
-        }
-        let n = self.order.len();
-        let mut touched = false;
-        if pressed & SCE_CTRL_DOWN != 0 {
-            self.selected = (self.selected + 1) % n;
-            self.focus_selected();
-            touched = true;
-        }
-        if pressed & SCE_CTRL_UP != 0 {
-            self.selected = (self.selected + n - 1) % n;
-            self.focus_selected();
-            touched = true;
-        }
         let axis = |v: u8| {
             let f = ((v as f32 - 128.0) / 127.0).clamp(-1.0, 1.0);
             ((f.abs() - 0.18) / 0.82).max(0.0).copysign(f)
         };
         let (sx, sy) = (axis(pad.lx), axis(pad.ly));
-        if sx != 0.0 || sy != 0.0 {
+        let spun = sx != 0.0 || sy != 0.0;
+        if spun {
             self.goal = None;
             self.lon = wrap_deg(self.lon + sx * SPIN * dt);
             self.lat = (self.lat - sy * SPIN * dt).clamp(-60.0, 70.0);
-            touched = true;
-        }
-        if touched {
             self.idle = 0.0;
         } else {
             self.idle += dt;
@@ -485,14 +447,7 @@ impl Atlas {
             None if self.idle > IDLE_AFTER => self.lon = wrap_deg(self.lon + self.meta.globe.idle_deg_per_s * dt),
             None => {}
         }
-        if pressed & (SCE_CTRL_CROSS | SCE_CTRL_CIRCLE) != 0 {
-            let p = self.place(self.selected);
-            if p.enterable {
-                return Some(Pick::Place(p.id.clone()));
-            }
-            self.toast = Some((format!("{} ({}) is under construction", p.name, p.locality), 2.5));
-        }
-        None
+        spun
     }
 
     fn earth_rot(&self) -> Mat4 {
@@ -636,8 +591,7 @@ impl Atlas {
             g::sceGxmSetFrontDepthWriteEnable(ctx, g::SceGxmDepthWriteMode_SCE_GXM_DEPTH_WRITE_DISABLED);
             g::sceGxmSetVertexStream(ctx, 0, self.quad_vb.cast());
             let pulse = (self.time * 1.4).fract();
-            for (row, &i) in self.order.iter().enumerate() {
-                let pl = &self.meta.places[i];
+            for (i, pl) in self.meta.places.iter().enumerate() {
                 let world = rot.transform_point3(lat_lon(pl.lat, pl.lon) * 1.004);
                 let facing = world.normalize().dot((eye - world).normalize());
                 let vis = ((facing - 0.05) / 0.2).clamp(0.0, 1.0);
@@ -646,10 +600,11 @@ impl Atlas {
                 }
                 let c = vp * world.extend(1.0);
                 let (x, y) = (c.x / c.w, c.y / c.w);
-                let selected = row == self.selected;
+                let selected = self.highlight == Some(i);
+                let dim = if self.listed.get(i).copied().unwrap_or(true) { 1.0 } else { 0.3 };
                 let px = if selected { 26.0 } else if pl.enterable { 18.0 } else { 11.0 };
                 let (hx, hy) = (px * 2.0 / W as f32, px * 2.0 / H as f32);
-                let gain = vis * if pl.enterable { 5.0 } else { 1.6 } * if selected { 1.6 } else { 1.0 };
+                let gain = vis * dim * if pl.enterable { 5.0 } else { 1.6 } * if selected { 1.6 } else { 1.0 };
                 let (ring_r, ring_s) = if selected { (0.62, 0.8) } else if pl.enterable { (0.2 + 0.7 * pulse, 0.9 * (1.0 - pulse)) } else { (0.5, 0.0) };
                 let u = Uniforms::reserve(ctx, p);
                 u.set(p, U::Marker, &[x, y, hx, hy]);
@@ -715,72 +670,6 @@ impl Atlas {
         bind(ctx, p, S::Source, &self.rt.fin.texture);
         g::sceGxmSetVertexStream(ctx, 0, self.tri_vb.cast());
         g::sceGxmDraw(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, self.tri_ib.cast(), 3);
-    }
-
-    /// The brand, the place list and the hints, drawn with vita2d over the
-    /// presented frame (the web overlay's layout at 960×544).
-    ///
-    /// # Safety
-    /// Inside the vita2d display scene.
-    pub unsafe fn ui(&self, font: *mut g::vita2d_pgf) {
-        if self.probe.no_ui {
-            return;
-        }
-        let text = |x: i32, y: i32, color: u32, scale: f32, s: &str| {
-            let c = std::ffi::CString::new(s.replace('\0', " ")).unwrap();
-            g::vita2d_pgf_draw_text(font, x, y, color, scale, c.as_ptr());
-        };
-        let width = |scale: f32, s: &str| {
-            let c = std::ffi::CString::new(s.replace('\0', " ")).unwrap();
-            g::vita2d_pgf_text_width(font, scale, c.as_ptr())
-        };
-        // Colours are 0xAABBGGRR.
-        let abgr = |c: [f32; 3], a: u8| -> u32 {
-            let s = |v: f32| {
-                let v = v.clamp(0.0, 1.0);
-                ((if v < 0.0031308 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 }) * 255.0).round() as u32
-            };
-            (a as u32) << 24 | s(c[2]) << 16 | s(c[1]) << 8 | s(c[0])
-        };
-        // Brand.
-        text(40, 58, 0xffff_ffff, 1.25, "P O C K E T   A T L A S");
-        text(40, 86, 0xb0d8_d8d8, 0.72, "Pick a place on the night side of the planet. Step inside.");
-
-        // Place list.
-        let (x0, y0, w) = (600, 28, 332);
-        let open = self.meta.places.iter().filter(|p| p.enterable).count();
-        g::vita2d_draw_rectangle(x0 as f32, y0 as f32, w as f32, 488.0, 0xa010_0c0a);
-        text(x0 + 16, y0 + 24, 0x90c8_c8c8, 0.62, "PLACES");
-        let count = format!("{open} / {} OPEN", self.meta.places.len());
-        text(x0 + w - 16 - width(0.62, &count), y0 + 24, 0x90c8_c8c8, 0.62, &count);
-        let card_h = 74;
-        let rows = 6usize;
-        let first = self.selected.saturating_sub(rows - 2).min(self.order.len().saturating_sub(rows));
-        for (k, row) in (first..self.order.len().min(first + rows)).enumerate() {
-            let p = self.place(row);
-            let y = y0 + 40 + k as i32 * card_h;
-            let sel = row == self.selected;
-            if sel {
-                g::vita2d_draw_rectangle((x0 + 8) as f32, y as f32, (w - 16) as f32, (card_h - 6) as f32, abgr(p.accent.map(|c| c * 0.35), 0x70));
-                g::vita2d_draw_rectangle((x0 + 8) as f32, y as f32, 3.0, (card_h - 6) as f32, abgr(p.accent, 0xff));
-            }
-            let head = if sel { 0xffff_ffff } else { 0xd0e8_e8e8 };
-            text(x0 + 20, y + 24, head, 0.95, &p.locality);
-            text(x0 + 24 + width(0.95, &p.locality), y + 24, 0x90b8_b8b8, 0.72, &p.locality_native);
-            text(x0 + 20, y + 44, 0xc0d0_d0d0, 0.72, &p.name);
-            let (status, sc) = if p.enterable { ("OPEN NOW  ·  ENTER", abgr(p.accent, 0xff)) } else { ("UNDER CONSTRUCTION", 0x80a0_a0a0) };
-            text(x0 + 20, y + 62, sc, 0.55, status);
-            let wx = p.weather.to_uppercase();
-            text(x0 + w - 20 - width(0.55, &wx), y + 62, 0x80a0_a0a0, 0.55, &wx);
-        }
-        // Hints and the toast.
-        text(40, 522, 0xa0c8_c8c8, 0.62, "UP / DOWN  place     X  enter     LEFT STICK  spin     START  back to the atlas (in a place)");
-        if let Some((msg, t)) = &self.toast {
-            let a = (t.min(0.5) / 0.5 * 255.0) as u32;
-            let tw = width(0.72, msg);
-            g::vita2d_draw_rectangle((300 - tw / 2 - 14) as f32, 452.0, (tw + 28) as f32, 30.0, (a * 0xa0 / 255) << 24 | 0x100c0a);
-            text(300 - tw / 2, 473, a << 24 | 0xe8e8e8, 0.72, msg);
-        }
     }
 
     /// # Safety
