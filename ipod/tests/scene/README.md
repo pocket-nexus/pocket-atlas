@@ -10,6 +10,10 @@ This isolated Cargo package loads the production scene loader, GLES declarations
 and validators by relative path. It also imports the production effects module to exercise particle visibility, discontinuous lifecycle boundaries and post-processing decisions. The scene tests mock GLES calls to check malformed
 containers, semantic validation, HDR uploads, animation and resource cleanup after
 injected allocation or upload failures. They do not establish device GPU behavior.
+The production user-state module is exercised with cold-launch round trips,
+catalog reordering, removed scene IDs, nonfinite/range rejection, malformed and
+oversized documents, interrupted or failed replacement, and concurrent readers.
+State fixtures also stay under `.pocket-build/`; no iOS or GL runtime is needed.
 The lockfile pins host dependencies; build output and generated fixtures stay in
 the repository's ignored `.pocket-build/` directory.
 

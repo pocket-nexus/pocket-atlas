@@ -581,6 +581,19 @@ impl Renderer {
         glDisable(0x8037);
         glFrontFace(0x0901);
     }
+    // A completion boundary separates geometry, framebuffer fetch and
+    // render-to-texture post work. Normal telemetry excludes the wait;
+    // explicit profiling includes it as synchronized pass time.
+    unsafe fn end_pass(&mut self, stage: usize, started: f64, complete: bool) -> f64 {
+        let submitted = crate::atlas_seconds();
+        if complete || self.profile {
+            glFinish();
+        }
+        let finished = crate::atlas_seconds();
+        self.timings[stage] =
+            ((if self.profile { finished } else { submitted } - started) * 1000.0) as f32;
+        finished
+    }
     pub unsafe fn frame(
         &mut self,
         s: &Scene,
@@ -603,11 +616,7 @@ impl Renderer {
             self.count += stats.draws;
             self.triangles += stats.triangles;
         }
-        if self.profile {
-            glFinish();
-        }
-        self.timings[0] = ((crate::atlas_seconds() - stamp) * 1000.0) as f32;
-        stamp = crate::atlas_seconds();
+        stamp = self.end_pass(0, stamp, false);
         let projection = glam::camera::rh::proj::opengl::perspective(
             fov * core::f32::consts::PI / 180.0,
             1.5,
@@ -647,32 +656,20 @@ impl Renderer {
             );
             self.fullscreen(p);
         }
-        if self.profile {
-            glFinish();
-        }
-        self.timings[1] = ((crate::atlas_seconds() - stamp) * 1000.0) as f32;
-        stamp = crate::atlas_seconds();
+        stamp = self.end_pass(1, stamp, false);
         self.main.bind();
         glDepthMask(1);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         self.sky(s, eye, target, fov, time, false);
         self.meshes(s, vp, eye, time, false, reflection);
         self.submit_ms = ((crate::atlas_seconds() - stamp) * 1000.0) as f32;
-        if self.profile {
-            glFinish();
-        }
-        self.timings[2] = ((crate::atlas_seconds() - stamp) * 1000.0) as f32;
-        stamp = crate::atlas_seconds();
+        stamp = self.end_pass(2, stamp, true);
         let stats = self
             .effects
             .draw_geometry(s, vp, eye, target, fov, time, rain);
         self.count += stats.draws;
         self.triangles += stats.particle_quads * 2;
-        if self.profile {
-            glFinish();
-        }
-        self.timings[3] = ((crate::atlas_seconds() - stamp) * 1000.0) as f32;
-        stamp = crate::atlas_seconds();
+        stamp = self.end_pass(3, stamp, true);
         let fx = self.effects.post(
             s,
             self.main.texture,
@@ -719,9 +716,6 @@ impl Renderer {
         p.tex("uSource", self.present.texture, 0);
         self.fullscreen(p);
         glDepthMask(1);
-        if self.profile {
-            glFinish();
-        }
-        self.timings[4] = ((crate::atlas_seconds() - stamp) * 1000.0) as f32;
+        self.end_pass(4, stamp, true);
     }
 }

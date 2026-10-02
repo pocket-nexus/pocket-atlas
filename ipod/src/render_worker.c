@@ -19,6 +19,7 @@ extern void glReadPixels(int, int, int, int, unsigned, unsigned, void *), glFini
 extern int atlas_init(const char *), atlas_value(int);
 extern void atlas_frame(float, int, int, unsigned), atlas_action(int);
 extern void atlas_touch(int, float, float, int), atlas_command(const char *), atlas_shutdown(void);
+extern void atlas_suspend(void);
 extern const char *atlas_text(int, int), *atlas_status(void);
 extern double atlas_seconds(void);
 
@@ -183,7 +184,12 @@ static void *render_main(void *unused) {
              * background callback. No GL call occurs while parked. */
             atlas_touch(-1, 0, 0, -1);
             atlas_audio_active(0);
-            if (bound) { glFinish(); current_context(NULL); bound = 0; }
+            if (bound) {
+                glFinish();
+                atlas_suspend();
+                write_text("status.json", atlas_status());
+                current_context(NULL); bound = 0;
+            }
             pthread_mutex_lock(&mutex);
             parked = 1;
             pthread_cond_broadcast(&changed);

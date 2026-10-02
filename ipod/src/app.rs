@@ -1,4 +1,10 @@
-use crate::{gl::*, read, renderer::Renderer, scene::Scene};
+use crate::{
+    gl::*,
+    read,
+    renderer::Renderer,
+    scene::Scene,
+    state::{Store, UserState},
+};
 use alloc::{
     ffi::CString,
     format,
@@ -9,6 +15,7 @@ use core::ffi::c_char;
 use glam::Vec3;
 use serde::Deserialize;
 extern "C" {
+    fn atlas_documents_path() -> *const c_char;
     fn atlas_audio_available() -> i32;
     fn atlas_audio_error() -> *const c_char;
     fn atlas_resident_bytes() -> u32;
@@ -28,12 +35,18 @@ struct Place {
     accent: String,
 }
 pub struct App {
+    state_store: Option<Store>,
+    state_restored: bool,
+    state_saved: bool,
+    state_error: String,
     details: Vec<CString>,
     authors: Vec<CString>,
     last_command: String,
     build_id: String,
     profile: bool,
     reset_dt: bool,
+    reload: bool,
+    saved_door: f32,
     sound: bool,
     ids: Vec<CString>,
     globe: Option<crate::globe::Globe>,
@@ -119,7 +132,22 @@ impl App {
                 }
             })
             .collect();
-        Self {
+        let documents = unsafe { atlas_documents_path() };
+        let state_store = if documents.is_null() {
+            None
+        } else {
+            Store::new(&unsafe { core::ffi::CStr::from_ptr(documents) }.to_string_lossy()).ok()
+        };
+        let state_error = if state_store.is_none() {
+            String::from("Documents directory is unavailable")
+        } else {
+            String::new()
+        };
+        let mut app = Self {
+            state_store,
+            state_restored: false,
+            state_saved: false,
+            state_error,
             markers,
             details,
             authors,
@@ -127,6 +155,8 @@ impl App {
             build_id,
             profile: false,
             reset_dt: false,
+            reload: false,
+            saved_door: 0.0,
             sound: false,
             ids,
             globe: None,
@@ -163,13 +193,99 @@ impl App {
             error_text: CString::new("").unwrap(),
             touches: Vec::new(),
             globe_rotation: [31.0, 131.0],
+        };
+        app.restore_user_state();
+        app
+    }
+
+    fn restore_user_state(&mut self) {
+        let Some(store) = &self.state_store else {
+            return;
+        };
+        let state = match store.load() {
+            Ok(Some(state)) => state,
+            Ok(None) => return,
+            Err(error) => {
+                self.state_error = error.into();
+                return;
+            }
+        };
+        let selected = match state.selected(self.places.iter().map(|p| p.id.as_str())) {
+            Ok(selected) => selected,
+            Err(error) => {
+                self.state_error = error.into();
+                return;
+            }
+        };
+        self.selected = selected;
+        self.reload = selected.is_some();
+        self.reset_dt = true;
+        self.time = state.time;
+        self.shot = state.shot as usize;
+        self.shot_time = state.shot_time;
+        self.paused = state.paused;
+        self.cinematic = state.cinematic;
+        self.eye = Vec3::from(state.eye);
+        self.target = Vec3::from(state.target);
+        self.fov = state.fov;
+        self.saved_door = state.door;
+        self.globe_rotation = state.globe_rotation;
+        self.sound = state.sound;
+        self.rain = state.rain;
+        self.reflection = state.reflection;
+        self.bloom = state.bloom;
+        self.quality = state.quality;
+        self.state_restored = true;
+    }
+
+    pub fn save_user_state(&mut self) {
+        // A queued scene change already resets its shot, but selected and its
+        // camera still describe the displayed scene. Keep the last checkpoint.
+        if self.pending.is_some() {
+            return;
+        }
+        let Some(store) = &self.state_store else {
+            return;
+        };
+        let state = UserState {
+            version: UserState::VERSION,
+            place: self.selected.map(|i| self.places[i].id.clone()),
+            time: self.time,
+            shot: self.shot as u32,
+            shot_time: self.shot_time.max(0.0),
+            paused: self.paused,
+            cinematic: self.cinematic,
+            eye: self.eye.to_array(),
+            target: self.target.to_array(),
+            fov: self.fov,
+            door: self
+                .scene
+                .as_ref()
+                .map(|s| s.door)
+                .unwrap_or(self.saved_door),
+            globe_rotation: [self.globe_rotation[0], self.globe_rotation[1] % 360.0],
+            sound: self.sound,
+            rain: self.rain,
+            reflection: self.reflection,
+            bloom: self.bloom,
+            quality: self.quality,
+        };
+        match store.save(&state) {
+            Ok(()) => {
+                self.state_saved = true;
+                self.state_error.clear();
+            }
+            Err(error) => {
+                self.state_saved = false;
+                self.state_error = error.into();
+            }
         }
     }
     pub fn value(&self, field: i32) -> i32 {
         match field {
             0 => self.places.len() as i32,
             1 => {
-                if self.pending.is_some() {
+                if self.pending.is_some() || self.reload {
                     2
                 } else if !self.error.is_empty() {
                     3
@@ -247,6 +363,7 @@ impl App {
                     glFinish();
                 }
                 self.pending = None;
+                self.reload = false;
                 self.renderer = None;
                 self.scene = None;
                 self.selected = None;
@@ -408,6 +525,35 @@ impl App {
             }
         }
     }
+    /// The owner calls this with a current, drained GL context before iOS
+    /// suspends the process. Preserve navigation but release the working set.
+    pub unsafe fn suspend(&mut self) {
+        // iOS may terminate a suspended process without a termination callback.
+        // Commit the CPU state while the complete current view still exists.
+        self.save_user_state();
+        self.saved_door = self
+            .scene
+            .as_ref()
+            .map(|s| s.door)
+            .unwrap_or(self.saved_door);
+        self.renderer = None;
+        self.scene = None;
+        self.globe = None;
+        self.globe_tried = false;
+        self.touches.clear();
+        self.reload = self.selected.is_some();
+        self.reset_dt = true;
+        glFinish();
+        let mut status: serde_json::Value =
+            serde_json::from_slice(self.status.as_bytes()).unwrap_or_default();
+        status["state"] = "suspended".into();
+        status["gpuBytes"] = 0.into();
+        status["residentBytes"] = atlas_resident_bytes().into();
+        status["audioPlaying"] = false.into();
+        status["userStateSaved"] = self.state_saved.into();
+        status["userStateError"] = self.state_error.clone().into();
+        self.status = CString::new(status.to_string()).unwrap();
+    }
     pub unsafe fn frame(&mut self, dt: f32, w: i32, h: i32, fbo: u32) {
         let dt = if self.reset_dt {
             self.reset_dt = false;
@@ -415,6 +561,11 @@ impl App {
         } else {
             dt
         };
+        let resuming = self.reload && self.pending.is_none();
+        self.reload = false;
+        if resuming {
+            self.pending = self.selected;
+        }
         if let Some(i) = self.pending.take() {
             glFinish();
             self.reset_dt = true;
@@ -428,13 +579,24 @@ impl App {
             let id = &self.places[i].id;
             let assets = format!("{}/assets", self.root);
             match Scene::load(&format!("{assets}/{id}.place")) {
-                Ok(s) => match Renderer::new(&assets, id, &s) {
+                Ok(mut s) => match Renderer::new(&assets, id, &s) {
                     Ok(r) => {
+                        if resuming {
+                            s.door = self.saved_door;
+                            // A bundle update may shorten or remove shots. The
+                            // saved view remains valid without unbounded loops.
+                            self.shot %= s.meta.camera.shots.len();
+                            self.shot_time = self
+                                .shot_time
+                                .clamp(0.0, s.meta.camera.shots[self.shot].duration);
+                        }
                         self.scene = Some(s);
                         self.renderer = Some(r);
                         self.selected = Some(i);
                         self.touches.clear();
-                        self.time = 0.0;
+                        if !resuming {
+                            self.time = 0.0;
+                        }
                     }
                     Err(e) => self.error = e,
                 },
@@ -575,7 +737,7 @@ impl App {
         );
         self.frame += 1;
         self.fps_ms = self.fps_ms * 0.95 + measured_dt * 1000.0 * 0.05;
-        let status = serde_json::json!({"residentBytes":atlas_resident_bytes(),"audioPlaying":audio_playing != 0,"audioError":core::ffi::CStr::from_ptr(atlas_audio_error()).to_string_lossy(),"buildId":self.build_id,"paused":self.paused,"cinematic":self.cinematic,"sound":self.sound,"rain":self.rain,"reflection":self.reflection,"bloom":self.bloom,"lastCommand":self.last_command,"state":if self.error.is_empty(){"running"}else{"error"},"error":self.error,"frame":self.frame,"place":self.selected.map(|i|self.places[i].id.as_str()).unwrap_or("atlas"),"width":w,"height":h,"renderWidth":self.renderer.as_ref().map(|r|r.width),"renderHeight":self.renderer.as_ref().map(|r|r.height),"frameMs":self.fps_ms,"fps":1000.0/self.fps_ms,"time":time,"shot":self.shot,"quality":self.quality,"timingKind":if self.profile {"synchronized-pass"}else{"cpu-submission"},"submitMs":self.renderer.as_ref().map(|r|r.submit_ms),"passesMs":self.renderer.as_ref().map(|r|r.timings),"camera":self.eye.to_array(),"target":self.target.to_array(),"fov":self.fov,"globeRotation":self.globe_rotation,"draws":self.renderer.as_ref().map(|r|r.count).unwrap_or(0),"triangles":self.renderer.as_ref().map(|r|r.triangles).unwrap_or(0),"gpuBytes":self.scene.as_ref().map(|s|s.gpu_bytes).unwrap_or(0),"glError":glGetError()});
+        let status = serde_json::json!({"userStateRestored":self.state_restored,"userStateSaved":self.state_saved,"userStateError":self.state_error,"shotTime":self.shot_time,"residentBytes":atlas_resident_bytes(),"audioPlaying":audio_playing != 0,"audioError":core::ffi::CStr::from_ptr(atlas_audio_error()).to_string_lossy(),"buildId":self.build_id,"paused":self.paused,"cinematic":self.cinematic,"sound":self.sound,"rain":self.rain,"reflection":self.reflection,"bloom":self.bloom,"lastCommand":self.last_command,"state":if self.error.is_empty(){"running"}else{"error"},"error":self.error,"frame":self.frame,"place":self.selected.map(|i|self.places[i].id.as_str()).unwrap_or("atlas"),"width":w,"height":h,"renderWidth":self.renderer.as_ref().map(|r|r.width),"renderHeight":self.renderer.as_ref().map(|r|r.height),"frameMs":self.fps_ms,"fps":1000.0/self.fps_ms,"time":time,"shot":self.shot,"quality":self.quality,"timingKind":if self.profile {"synchronized-pass"}else{"cpu-submission"},"submitMs":self.renderer.as_ref().map(|r|r.submit_ms),"passesMs":self.renderer.as_ref().map(|r|r.timings),"camera":self.eye.to_array(),"target":self.target.to_array(),"fov":self.fov,"globeRotation":self.globe_rotation,"draws":self.renderer.as_ref().map(|r|r.count).unwrap_or(0),"triangles":self.renderer.as_ref().map(|r|r.triangles).unwrap_or(0),"gpuBytes":self.scene.as_ref().map(|s|s.gpu_bytes).unwrap_or(0),"glError":glGetError()});
         self.status = CString::new(status.to_string()).unwrap();
     }
 }

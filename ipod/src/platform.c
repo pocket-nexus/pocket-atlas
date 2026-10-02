@@ -23,6 +23,7 @@ extern SEL sel_registerName(const char *);
 extern BOOL class_addMethod(Class, SEL, void (*)(void), const char *);
 extern void *objc_msgSend(void), *objc_msgSend_stret(void);
 extern int UIApplicationMain(int, char **, id, id);
+extern id NSSearchPathForDirectoriesInDomains(unsigned, unsigned, BOOL);
 extern void glGenFramebuffers(int, unsigned *), glBindFramebuffer(unsigned, unsigned);
 extern void glGenRenderbuffers(int, unsigned *), glBindRenderbuffer(unsigned, unsigned);
 extern void glGetRenderbufferParameteriv(unsigned, unsigned, int *);
@@ -117,6 +118,25 @@ static id string(const char *value) {
 
 static const char *utf8(id value) {
     return ((const char *(*)(id, SEL))objc_msgSend)(value, selector("UTF8String"));
+}
+
+/* Resolve application storage through Foundation, independent of the shell's
+ * HOME. Called during atlas_init, before handing ownership to the worker. */
+const char *atlas_documents_path(void) {
+    static char documents[1024];
+    id paths = NSSearchPathForDirectoriesInDomains(9, 1, 1);
+    if (get_int(paths, "count") == 0) return NULL;
+    id path = ((id (*)(id, SEL, unsigned))objc_msgSend)(
+        paths, selector("objectAtIndex:"), 0);
+    const char *value = utf8(path);
+    if (!value || strlen(value) >= sizeof documents) return NULL;
+    id manager = send(klass("NSFileManager"), "defaultManager");
+    BOOL ready = ((BOOL (*)(id, SEL, id, BOOL, id, void *))objc_msgSend)(
+        manager, selector("createDirectoryAtPath:withIntermediateDirectories:attributes:error:"),
+        path, 1, NULL, NULL);
+    if (!ready) return NULL;
+    memcpy(documents, value, strlen(value) + 1);
+    return documents;
 }
 
 static Rect rectangle(float x, float y, float w, float h) {

@@ -18,6 +18,7 @@ static int has_render_owner, selected = -1;
 static _Thread_local int context_bound;
 static atomic_int drawing, frame_number, gl_calls, shutdown_done;
 static atomic_int contacts, fail_allocation, hold_frame, fail_context;
+static atomic_int suspended;
 static char place_text[128] = "initial", command[128], status_text[256] = "{}";
 
 static void sleep_ms(unsigned milliseconds) {
@@ -136,6 +137,10 @@ void atlas_shutdown(void) {
     assert(!atomic_load(&drawing));
     atomic_store(&shutdown_done, 1);
 }
+void atlas_suspend(void) {
+    render_owner(); assert(context_bound); assert(!atomic_load(&drawing));
+    atomic_fetch_add(&suspended, 1);
+}
 int atlas_audio_init(const char *path) {
     (void)path; assert(pthread_equal(pthread_self(), main_thread)); return 1;
 }
@@ -212,6 +217,7 @@ int main(int argc, char **argv) {
     atlas_worker_touch(1, 90, 100, 99);
     atlas_worker_active(0);
     assert(!atomic_load(&drawing));
+    assert(atomic_load(&suspended) == 1);
     int calls = atomic_load(&gl_calls);
     sleep_ms(70);
     assert(calls == atomic_load(&gl_calls));

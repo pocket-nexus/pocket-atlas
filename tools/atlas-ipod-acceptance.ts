@@ -73,7 +73,7 @@ for (const place of PLACES.filter(
           time: 25,
           quality: 1,
           renderWidth: width,
-          profile: false,
+          profile: args.includes("--profile"),
           rain: true,
           bloom: true,
           reflection: true,

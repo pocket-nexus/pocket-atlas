@@ -177,7 +177,7 @@ int atlas_audio_update(const char *place, double scene_seconds, int enabled, int
 void atlas_audio_active(int active) {
     foreground = active != 0;
     if (!foreground) {
-        if (player) send(player, "pause");
+        stop_player();
         activate_session(0);
     }
 }

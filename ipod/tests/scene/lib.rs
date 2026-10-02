@@ -14,6 +14,10 @@ mod validation;
 mod gpu;
 #[path = "../../src/effects.rs"]
 mod effects;
+#[path = "../../src/state.rs"]
+mod state;
+#[cfg(test)]
+mod state_tests;
 fn read(path: &str) -> Result<alloc::vec::Vec<u8>,alloc::string::String> {
     std::fs::read(path).map_err(|e| e.to_string())
 }

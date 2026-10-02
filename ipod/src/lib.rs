@@ -8,6 +8,7 @@ mod gpu;
 mod renderer;
 mod scene;
 mod shadow;
+mod state;
 mod validation;
 use alloc::{ffi::CString, format, string::String, vec, vec::Vec};
 use core::{
@@ -101,6 +102,12 @@ pub unsafe extern "C" fn atlas_frame(dt: f32, w: i32, h: i32, fbo: u32) {
     }
 }
 #[no_mangle]
+pub unsafe extern "C" fn atlas_suspend() {
+    if let Some(a) = &mut *APP.0.get() {
+        a.suspend();
+    }
+}
+#[no_mangle]
 pub unsafe extern "C" fn atlas_status() -> *const c_char {
     (*APP.0.get())
         .as_ref()
@@ -134,6 +141,9 @@ pub unsafe extern "C" fn atlas_touch(phase: i32, x: f32, y: f32, id: i32) {
 }
 #[no_mangle]
 pub unsafe extern "C" fn atlas_shutdown() {
+    if let Some(a) = &mut *APP.0.get() {
+        a.save_user_state();
+    }
     *APP.0.get() = None;
 }
 
