@@ -88,6 +88,14 @@ pub fn tint(x: &Value) -> Option<[f32; 3]> {
     x.get("tint").and_then(|t| t.as_array()).filter(|a| a.len() >= 3 && a.iter().take(3).all(|v| v.is_number())).map(|_| v3(&x["tint"]))
 }
 
+/// Shaded emission retains a web material's normal/height modulation.
+pub fn emission_shade(x: &Value) -> Option<pc::EmissionShade> {
+    let value = x.get("emissionShade")?;
+    let shade: pc::EmissionShade = serde_json::from_value(value.clone()).expect("invalid emissionShade");
+    assert!(shade.normal.iter().chain(&shade.height).all(|v| v.is_finite()) && shade.height[0] < shade.height[1], "invalid emissionShade range");
+    Some(shade)
+}
+
 /// A material's `lodBias`: a number (mip levels, clamped to −3..1), or
 /// `"auto"` (None: measured from the texture's mapping).
 pub fn lod_bias(x: &Value) -> Option<Option<f32>> {
@@ -126,6 +134,20 @@ pub fn twilight(t: &Value) -> pc::Twilight {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn shaded_emission_annotation() {
+        assert!(emission_shade(&json!({})).is_none());
+        let shade = emission_shade(&json!({"emissionShade": {"normal": [0.12, 0.4, 0, 0.6], "height": [0.05, 1.45, 0.62, 1]}})).unwrap();
+        assert_eq!(shade.normal, [0.12, 0.4, 0.0, 0.6]);
+        assert_eq!(shade.height, [0.05, 1.45, 0.62, 1.0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid emissionShade range")]
+    fn shaded_emission_rejects_empty_height_range() {
+        emission_shade(&json!({"emissionShade": {"normal": [0, 0, 0, 1], "height": [1, 1, 0, 1]}}));
+    }
 
     #[test]
     fn sign_flipbook_and_scroll() {

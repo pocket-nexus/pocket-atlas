@@ -15,14 +15,25 @@ float pHash(float n) { return frac(sin(n * 12.9898) * 43758.5453); }
 float4 main(
     float3 vWorld : TEXCOORD0,
     float2 vUv : TEXCOORD3,
+#ifdef PRODUCTS
+    float2 vPackage : TEXCOORD6,
+#endif
     half4 vColor : COLOR0) : COLOR
 {
-    float3 c = srgbToLinear(vColor.rgb);
+    // Recover the authored u8 instance colour before hashing. Interpolator
+    // rounding must not choose a different package for every fragment.
+    float3 seedColor = floor((float3)vColor.rgb * 255.0 + 0.5) / 255.0;
+    float3 c = srgbToLinear(seedColor);
+#ifdef PRODUCTS
+    float h1 = vPackage.x;
+    float band = vPackage.y;
+#else
     float runSeed = dot(c, float3(12.9898, 78.233, 37.719));
     float h1 = pHash(runSeed * 0.37 + 1.0);
     float h2 = pHash(runSeed * 0.71 + 7.0);
-    float y = vColor.a;
     float band = floor(h2 * 8.0);
+#endif
+    float y = vColor.a;
     float2 puv = float2(h1 * 0.93 + frac(vUv.x) * 0.055, (band + 0.08 + saturate(vUv.y) * 0.8) / 8.0);
     float3 pack = srgbToLinear(tex2D(uAlbedo, puv).rgb);
     float side = step(0.004, y) * step(y, 0.996);

@@ -207,6 +207,7 @@ async function lint(): Promise<void> {
     ["standard_f.cg", ["LIGHTS=0", "BAKED", "FAR", "DAMP", "ALBEDO_MAP", "NORMAL_MAP", "FOG"]], ["standard_f.cg", ["LIGHTS=2", "BAKED", "LITE", "WET", "PLANAR", "ALBEDO_MAP", "NORMAL_MAP", "FOG"]], ["glass_f.cg", ["LIGHTS=0", "BAKED", "FOG"]], ["glass_f.cg", ["LIGHTS=0", "BAKED", "LITE", "FOG"]],
     ["standard_f.cg", ["LIGHTS=4", ...lit]], ["standard_f.cg", ["LIGHTS=2", "DAMP", "CLEARCOAT", "ALPHA_TEST", "REFLECTION"]],
     ["standard_f.cg", ["LIGHTS=0", "INTERIOR", "ALBEDO_MAP"]], ["unlit_f.cg", ["ALBEDO_MAP", "VERTEX_COLOR", "FOG", "ALPHA_TEST"]],
+    ["standard_f.cg", ["LIGHTS=0", "INTERIOR", "VERTEX_COLOR", "EMISSION_SHADE"]],
     ["glass_f.cg", ["LIGHTS=4", "FOG"]], ["glass_f.cg", ["LIGHTS=0", "REFLECTION"]], ["window_f.cg", ["FOG"]], ["window_f.cg", ["REFLECTION"]],
     ["products_f.cg", []], ["skyline_f.cg", []], ["tower_f.cg", []], ["sky_v.cg", []], ["sky_f.cg", []],
     ...["STREAK", "SPLASH", "DRIP", "STEAM", "BEACON"].map((d): [string, string[]] => ["fx_v.cg", [d]]),

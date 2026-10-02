@@ -16,6 +16,8 @@ The web exporter (`web/src/places/shared/export.ts`) writes glTF 2.0 with these 
 | `water` | `Water`, one draw, not chunked [Coast places] | normal map = wave texture; `waves: [[repeatsPerMetre, scrollX, scrollZ] ×2]` (required), `body: [r, g, b]` (required), `shallow` (vertex colour red blends toward it), `mask` (wave-face tilt toward the eye), `distanceRoughness`; `roughness` = GGX α near the camera; `normalScale.x` = slope scale |
 | `lights` | `Lights`: a light field, one vertex per light, additive point sprites [Dusk vistas] | on a `THREE.Points` material: `minPixels`, `maxPixels` (pixels of a 272-pixel-high frame), `gain`, `depthPull` (per km of distance, default 0.012), `loop` (s, default: the exported loop). Point attributes: `position`, `color` (COLOR_0, linear, largest channel 1), `light` → `_LIGHT` (intensity, radius m, phase 0–1, twinkle 0–1), optional `path` → `_PATH` (dx, dy, dz m, whole cycles per loop) and `blink` → `_BLINK` (whole cycles per loop, duty) |
 
+`Standard` materials can carry `emissionShade` ([Shaded emission] in README): normal coefficients and height range/gains for authored emission, also modulated by vertex colour.
+
 Any material may carry `frames`/`scroll` (e.g. surf strips): `UvAnim` applies to every kind.
 
 ## Nodes

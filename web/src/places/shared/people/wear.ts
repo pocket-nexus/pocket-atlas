@@ -50,6 +50,9 @@ export class Wear {
     if (!m) {
       m = base.clone();
       m.name = `${base.name}-shaded`;
+      m.userData.pocketAtlas = { ...m.userData.pocketAtlas,
+        emissionShade: { normal: [0.12, 0.4, 0, 0.6], height: [0.05, 1.45, 0.62, 1] },
+      };
       m.onBeforeCompile = (sh) => {
         sh.fragmentShader = sh.fragmentShader.replace(
           "#include <emissivemap_fragment>",

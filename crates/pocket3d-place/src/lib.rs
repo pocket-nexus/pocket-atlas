@@ -18,6 +18,10 @@
 //! addressed by byte ranges inside `META`. The atlas pack ([`atlas`]) uses
 //! the same container with magic "ATLS".
 
+#![cfg_attr(not(feature = "std"), no_std)]
+extern crate alloc;
+use alloc::{vec, vec::Vec, string::{String, ToString}};
+
 pub mod atlas;
 pub mod color;
 pub mod meta;

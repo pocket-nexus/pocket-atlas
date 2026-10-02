@@ -11,3 +11,5 @@ node_modules/
 /.pocket-build/
 
 .DS_Store
+
+/ipod/target/

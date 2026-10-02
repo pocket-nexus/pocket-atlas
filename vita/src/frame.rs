@@ -221,6 +221,7 @@ struct Mat {
     tex: [Option<usize>; 4],
     base: [f32; 4],
     emissive: [f32; 4],
+    emission_shade: Option<pc::EmissionShade>,
     pbr: [f32; 4],
     pbr_flat: [f32; 4],
     envk: [f32; 4],
@@ -281,6 +282,9 @@ fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: boo
         }
         if m.interior {
             defines.push("INTERIOR");
+        }
+        if m.emission_shade.is_some() {
+            defines.push("EMISSION_SHADE");
         }
         if sun && !m.interior {
             defines.push("SUN");
@@ -369,6 +373,7 @@ fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: boo
         tex,
         base,
         emissive,
+        emission_shade: m.emission_shade,
         // uPbr.w: occlusion strength for the ORM map; without the map, the
         // occlusion itself (1 when the material has none).
         // Water: uPbr.y is the wave faces' slope toward the eye.
@@ -1662,6 +1667,12 @@ impl Renderer {
             }
             u.set(p, U::Base, &base);
             u.set(p, U::Emissive, &emissive);
+            if let Some(shade) = m.emission_shade {
+                let mut values = [0.0; 8];
+                values[..4].copy_from_slice(&shade.normal);
+                values[4..].copy_from_slice(&shade.height);
+                u.set(p, U::EmissionShade, &values);
+            }
             u.set(p, U::Pbr, if mirror || tier > 0 { &m.pbr_flat } else { &m.pbr });
             let mut envk = m.envk;
             envk[3] = f.rain;

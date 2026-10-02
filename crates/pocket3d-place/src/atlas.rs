@@ -13,6 +13,8 @@
 //! The interface font travels in the same pack: [`FontMeta`] in `META` and
 //! its 8-bit coverage atlas in the `FONT` section (top row first).
 
+use alloc::{vec::Vec, string::String};
+
 use crate::meta::Texture;
 use serde::{Deserialize, Serialize};
 

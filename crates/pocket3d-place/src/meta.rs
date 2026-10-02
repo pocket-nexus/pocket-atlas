@@ -1,5 +1,9 @@
 //! The `META` table: everything a renderer needs besides raw GPU payloads.
 
+use alloc::{vec::Vec, string::String};
+#[cfg(not(feature = "std"))]
+use num_traits::Float;
+
 use serde::{Deserialize, Serialize};
 
 pub type Vec3 = [f32; 3];
@@ -145,6 +149,9 @@ pub struct Material {
     /// Linear HDR emission (already multiplied by intensity). Products:
     /// (light level, packaging mix, 0); interior windows: (room intensity, 0, 0).
     pub emissive: Vec3,
+    /// Authored emission shading by world normal, height and vertex colour.
+    #[serde(default)]
+    pub emission_shade: Option<EmissionShade>,
     pub roughness: f32,
     pub metalness: f32,
     pub normal_scale: f32,
@@ -177,6 +184,14 @@ pub struct Material {
     /// (a museum hall's warm light); white when absent.
     #[serde(default)]
     pub tint: Option<Vec3>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct EmissionShade {
+    /// Coefficients of (abs(N.x), N.y, abs(N.z), 1).
+    pub normal: [f32; 4],
+    /// (lower height, upper height, lower gain, upper gain).
+    pub height: [f32; 4],
 }
 
 /// A light field's sprites (web `places/shared/lights.ts`). Per light and
@@ -242,7 +257,7 @@ impl LightPoint {
         for k in 0..3 {
             out.extend(s16((self.position[k] - offset[k]) / scale[k].max(1e-6)));
         }
-        out.extend(s16(self.phase.rem_euclid(1.0)));
+        out.extend(s16(num_traits::Euclid::rem_euclid(&self.phase, &1.0)));
         let c = self.color;
         let peak = c[0].max(c[1]).max(c[2]).max(1e-6);
         // Channels above 1 move into the intensity.
@@ -335,8 +350,8 @@ impl UvAnim {
             let (cw, ch) = (1.0 / cols as f32, 1.0 / rows as f32);
             uv = [uv[0] * cw, uv[1] * ch, uv[2] * cw + (f % cols) as f32 * cw, uv[3] * ch + (f / cols) as f32 * ch];
         }
-        uv[2] += (time * self.scroll[0]).rem_euclid(1.0);
-        uv[3] += (time * self.scroll[1]).rem_euclid(1.0);
+        uv[2] += num_traits::Euclid::rem_euclid(&(time * self.scroll[0]), &1.0);
+        uv[3] += num_traits::Euclid::rem_euclid(&(time * self.scroll[1]), &1.0);
         uv
     }
 }

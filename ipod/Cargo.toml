@@ -1,0 +1,23 @@
+[package]
+name = "pocket-atlas-ipod"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+crate-type = ["staticlib"]
+
+[workspace]
+
+[dependencies]
+pocket3d-place = { path = "../crates/pocket3d-place", default-features = false }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+glam = { version = "0.33", default-features = false, features = ["libm"] }
+libm = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

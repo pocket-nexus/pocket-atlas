@@ -41,6 +41,9 @@ uniform sampler2D uAlbedo;
 uniform sampler2D uNormalMap;
 uniform sampler2D uOrm;
 uniform sampler2D uEmission;
+#ifdef EMISSION_SHADE
+uniform float4 uEmissionShade[2]; // world normal coefficients; height range/gains
+#endif
 uniform sampler2D uEnv;
 uniform sampler2D uPuddles;
 uniform sampler2D uRipples;
@@ -379,6 +382,14 @@ half4 main(
     half3 emission = (half3)uEmissive.rgb;
 #ifdef EMISSION_MAP
     emission *= srgbToLinear(tex2D(uEmission, vUv).rgb);
+#endif
+#ifdef EMISSION_SHADE
+    float shade = dot(float4(abs((float)N.x), (float)N.y, abs((float)N.z), 1.0), uEmissionShade[0]);
+    shade *= lerp(uEmissionShade[1].z, uEmissionShade[1].w, smoothstep(uEmissionShade[1].x, uEmissionShade[1].y, vWorld.y));
+    emission *= (half)shade;
+#ifdef VERTEX_COLOR
+    emission *= srgbToLinear(vColor.rgb);
+#endif
 #endif
     color += emission;
 

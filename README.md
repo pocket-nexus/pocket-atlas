@@ -50,6 +50,10 @@ bun run dev          # http://127.0.0.1:5173
 
 Controls and URL switches are listed in `web/README.md`.
 
+## iPod touch 4
+
+The native GLES2 app includes the live globe, all current places and UIKit navigation, settings, About and touch controls. See [the iPod build and device workflow](ipod/README.md) for assets, IPA installation, quality modes and hardware limits.
+
 ## PSP
 
 Rainy Night Konbini runs locally at **480×272**, with baked lighting, alpha-tested shelf facings, planar reflections of lit surfaces and moving objects, rain, lamp halos, the six authored camera shots, the taxi and skinned pedestrians. The analog stick moves; the D-pad looks. L/R change shots, START resumes the camera sequence, × pauses, □ toggles rain, △ toggles reflections, ○ mutes sound, and SELECT toggles the diagnostic readout. Walking near the entrance opens the doors and plays the door chime; the rain bed quiets indoors. HOME exits.
@@ -234,3 +238,7 @@ Radio Kaikan at Blue Hour holds 30.0 fps at step 0 in every shot with the camera
 ## License
 
 MIT
+
+### Shaded emission
+
+A standard material may export `emissionShade: { normal: [x, y, z, bias], height: [low, high, lowGain, highGain] }` in `extras.pocketAtlas`. Its emission is multiplied by `dot([abs(N.x), N.y, abs(N.z), 1], normal)`, the smooth height gain and linear vertex colour when present. This preserves the shared indoor wardrobe shading on native renderers; it is an optional material feature and older packs retain their previous appearance. The cooker rejects non-finite coefficients and empty height ranges.

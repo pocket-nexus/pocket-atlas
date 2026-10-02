@@ -19,6 +19,7 @@ mod occlusion;
 mod pica;
 mod procedural;
 mod psp;
+mod gles;
 mod psp_products;
 mod textures;
 
@@ -300,6 +301,7 @@ impl<'a> Cook<'a> {
             alpha_test,
             color,
             emissive,
+            emission_shade: extras::emission_shade(&x),
             roughness: pbr.roughness_factor(),
             metalness: pbr.metallic_factor(),
             normal_scale: m.normal_texture().map(|t| t.scale()).unwrap_or(1.0),
@@ -587,6 +589,12 @@ fn push_draw(b: geometry::Built, material: u32, layout: pc::VertexLayout, node: 
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("gles") {
+        let argv: Vec<String> = std::env::args().collect();
+        let get = |k: &str| argv.iter().position(|x| x == k).and_then(|i| argv.get(i + 1));
+        gles::cook(std::path::Path::new(get("--in").expect("gles --in PATH")), std::path::Path::new(get("--out").expect("gles --out PATH")), get("--tex").and_then(|s| s.parse().ok()).unwrap_or(1024));
+        return;
+    }
     if std::env::args().nth(1).as_deref() == Some("psp") {
         let argv: Vec<String> = std::env::args().collect();
         let get = |k: &str| argv.iter().position(|x| x == k).and_then(|i| argv.get(i + 1));
@@ -951,6 +959,7 @@ fn main() {
             alpha_test: 0.0,
             color: [1.0; 4],
             emissive: [0.0; 3],
+            emission_shade: None,
             roughness: 1.0,
             metalness: 0.0,
             normal_scale: 1.0,

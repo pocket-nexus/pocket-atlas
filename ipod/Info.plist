@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>dev.pocket-nexus.atlas</string>
+<key>CFBundleExecutable</key><string>PocketAtlas</string>
+<key>CFBundleName</key><string>Pocket Atlas</string>
+<key>CFBundleDisplayName</key><string>Pocket Atlas</string>
+<key>CFBundleIconFiles</key><array><string>Icon.png</string><string>Icon@2x.png</string></array>
+<key>UIPrerenderedIcon</key><true/>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleShortVersionString</key><string>0.1.0</string>
+<key>MinimumOSVersion</key><string>6.0</string>
+<key>UIDeviceFamily</key><array><integer>1</integer></array>
+<key>UIStatusBarHidden</key><true/>
+<key>CFBundleURLTypes</key><array><dict><key>CFBundleURLSchemes</key><array><string>pocket-atlas</string></array></dict></array>
+<key>UIRequiredDeviceCapabilities</key><array><string>armv7</string><string>opengles-2</string></array>
+</dict></plist>

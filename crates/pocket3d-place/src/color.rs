@@ -1,5 +1,8 @@
 //! Shared scene-linear to display colour transform for handheld backends.
 
+#[cfg(not(feature = "std"))]
+use num_traits::Float;
+
 /// three.js ACESFilmicToneMapping (exposure applied by the caller), linear out.
 fn aces(c: [f32; 3]) -> [f32; 3] {
     let x = c.map(|v| v / 0.6);
@@ -15,7 +18,7 @@ fn aces(c: [f32; 3]) -> [f32; 3] {
         [-0.07367, -0.00605, 1.07602],
     ];
     let mul = |m: [[f32; 3]; 3], v: [f32; 3]| -> [f32; 3] {
-        std::array::from_fn(|j| m[0][j] * v[0] + m[1][j] * v[1] + m[2][j] * v[2])
+        core::array::from_fn(|j| m[0][j] * v[0] + m[1][j] * v[1] + m[2][j] * v[2])
     };
     let v = mul(input, x)
         .map(|v| (v * (v + 0.0245786) - 0.000090537) / (v * (0.983729 * v + 0.4329510) + 0.238081));
@@ -39,7 +42,7 @@ pub fn tone(c: [f32; 3], post: &crate::Post) -> [f32; 3] {
         t * t * (3.0 - 2.0 * t)
     };
     let (sh, hi) = (1.0 - smooth(0.0, 0.35, l), smooth(0.35, 1.0, l));
-    std::array::from_fn(|k| {
+    core::array::from_fn(|k| {
         let x = (l + (v[k] - l) * post.saturation + post.lift[k] * sh * 0.04)
             * (1.0 + (post.gain[k] - 1.0) * hi);
         let x = x.clamp(0.0, 1.0);
@@ -54,7 +57,7 @@ pub fn tone(c: [f32; 3], post: &crate::Post) -> [f32; 3] {
 /// AgX (as three.js), display-linear out.
 fn agx(c: [f32; 3]) -> [f32; 3] {
     let mul = |v: [f32; 3], m: [[f32; 3]; 3]| -> [f32; 3] {
-        std::array::from_fn(|j| v[0] * m[0][j] + v[1] * m[1][j] + v[2] * m[2][j])
+        core::array::from_fn(|j| v[0] * m[0][j] + v[1] * m[1][j] + v[2] * m[2][j])
     };
     let to2020 = [
         [0.6274, 0.0691, 0.0164],

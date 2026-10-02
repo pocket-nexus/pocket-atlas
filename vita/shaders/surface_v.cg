@@ -51,6 +51,9 @@ void main(
     uniform float4 uEye,
     out half4 oHaze : TEXCOORD7,
 #endif
+#ifdef PRODUCTS
+    out float2 oPackage : TEXCOORD6,
+#endif
     out float4 oPosition : POSITION,
 #ifndef FLAT
     out half3 oNormal : TEXCOORD1,
@@ -94,6 +97,16 @@ void main(
     float4 clipPos = mul(uViewProj, float4(world, 1.0));
     oPosition = clipPos;
     oWorld = world;
+#ifdef PRODUCTS
+    // Instance colour is constant over each product. Choose the package once
+    // per vertex: interpolator rounding must not perturb a fragment hash.
+    float3 seed = floor(aColor.rgb * 255.0 + 0.5) / 255.0;
+    float3 packageColor = seed * (seed * (seed * 0.305306011 + 0.682171111) + 0.012522878);
+    float runSeed = dot(packageColor, float3(12.9898, 78.233, 37.719));
+    float h1 = frac(sin((runSeed * 0.37 + 1.0) * 12.9898) * 43758.5453);
+    float band = floor(frac(sin((runSeed * 0.71 + 7.0) * 12.9898) * 43758.5453) * 8.0);
+    oPackage = float2(h1, band);
+#endif
 #ifndef FLAT
     oNormal = (half3)normalize(n);
 #ifdef WAVES
