@@ -69,6 +69,13 @@ pub struct Texture {
     /// when it drops the map (an ORM map's occlusion, roughness, metalness).
     #[serde(default)]
     pub mean: [f32; 4],
+    /// Mip level bias for the texture's mapping: a texture laid with more
+    /// texels per metre along one direction than the other (a window grid
+    /// of narrow windows and tall floors) is blurred by isotropic mip
+    /// selection along the sparser direction; a negative bias picks the
+    /// level by that direction instead.
+    #[serde(default)]
+    pub lod_bias: f32,
 }
 
 // --------------------------------------------------------------- materials
@@ -93,6 +100,10 @@ pub enum Kind {
     /// Open water (sea, lake, river): `Material::water`, the normal map as
     /// the wave texture, `roughness` near the camera.
     Water,
+    /// A field of point lights (`VertexLayout::Lights`, one vertex per
+    /// light, no indices): street and window lights, traffic, beacons drawn
+    /// as additive sprites sized by distance (`Material::lights`).
+    Lights,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,6 +171,118 @@ pub struct Material {
     pub uv_anim: Option<UvAnim>,
     #[serde(default)]
     pub water: Option<Water>,
+    #[serde(default)]
+    pub lights: Option<LightField>,
+    /// Interior windows: linear colour the traced room is multiplied by
+    /// (a museum hall's warm light); white when absent.
+    #[serde(default)]
+    pub tint: Option<Vec3>,
+}
+
+/// A light field's sprites (web `places/shared/lights.ts`). Per light and
+/// frame, at distance d: the physical diameter in render pixels
+/// `D = radius · H / (d · tan(fovY / 2))`, the sprite diameter
+/// `S = clamp(D, min_pixels, max_pixels)`, the energy kept by `(D / S)²`
+/// while D < S, value `colour · intensity · gain · (D / S)² · twinkle · T`
+/// (T: the vista haze's transmittance) over a `(1 − r²)²` profile, added to
+/// the scene with depth test and no depth write.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LightField {
+    /// Sprite diameter range in pixels of a 272-pixel-high frame (scaled by
+    /// H / 272 for other render heights).
+    pub min_pixels: f32,
+    pub max_pixels: f32,
+    pub gain: f32,
+    /// Depth pull per km: a light's depth moves toward the eye by
+    /// `clamp(depth_pull · d / 1 km, 0.002, 0.5)` of its distance d, its
+    /// screen position unchanged (at grazing angles the ground under the
+    /// pixels below a far light is nearer than the light).
+    #[serde(default)]
+    pub depth_pull: f32,
+    /// Seconds the moving and blinking lights repeat over (the place's loop):
+    /// position + path · fract(phase + cycles · t / period), on while
+    /// fract(phase + blink cycles · t / period) < duty.
+    pub period: f32,
+}
+
+/// One light of a field as the cooker reads it (place frame, linear colour).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LightPoint {
+    pub position: Vec3,
+    /// Linear RGB, largest channel 1.
+    pub color: Vec3,
+    /// Linear HDR peak at the physical size.
+    pub intensity: f32,
+    /// Physical radius (m).
+    pub radius: f32,
+    /// 0..1: offsets the path, the blink and the twinkle.
+    pub phase: f32,
+    /// 0..1: scintillation through the air, growing with distance.
+    pub twinkle: f32,
+    /// Travel over one cycle (m) and whole cycles per period.
+    pub path: Vec3,
+    pub path_cycles: f32,
+    /// Whole blinks per period and the share of each blink the light is on
+    /// (0 cycles and duty 1: always on).
+    pub blink_cycles: f32,
+    pub duty: f32,
+}
+
+impl LightPoint {
+    /// Bytes per light in `VertexLayout::Lights`.
+    pub const STRIDE: usize = 40;
+    /// Lights per draw at most: a 16-bit index range even if each light
+    /// became a four-vertex quad.
+    pub const PER_DRAW: usize = 16384;
+
+    /// Encodes the light for `VertexLayout::Lights`, its position quantized
+    /// against the draw's dequantisation (`offset`, `scale`).
+    pub fn encode(&self, offset: Vec3, scale: Vec3, out: &mut Vec<u8>) {
+        let s16 = |v: f32| ((v.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes();
+        for k in 0..3 {
+            out.extend(s16((self.position[k] - offset[k]) / scale[k].max(1e-6)));
+        }
+        out.extend(s16(self.phase.rem_euclid(1.0)));
+        let c = self.color;
+        let peak = c[0].max(c[1]).max(c[2]).max(1e-6);
+        // Channels above 1 move into the intensity.
+        let (c, i) = if peak > 1.0 { (c.map(|x| x / peak), self.intensity * peak) } else { (c, self.intensity) };
+        out.extend([crate::color::encode8(c[0]), crate::color::encode8(c[1]), crate::color::encode8(c[2]), (self.twinkle.clamp(0.0, 1.0) * 255.0).round() as u8]);
+        for v in [i, self.radius, self.path[0], self.path[1], self.path[2], self.path_cycles.round()] {
+            out.extend(v.to_le_bytes());
+        }
+        out.extend([self.blink_cycles.round().clamp(0.0, 255.0) as u8, (self.duty.clamp(0.0, 1.0) * 255.0).round() as u8, 0, 0]);
+    }
+
+    /// World bounds over its path.
+    pub fn bounds(&self) -> (Vec3, Vec3) {
+        let end: Vec3 = core::array::from_fn(|k| self.position[k] + self.path[k]);
+        (core::array::from_fn(|k| self.position[k].min(end[k])), core::array::from_fn(|k| self.position[k].max(end[k])))
+    }
+}
+
+#[cfg(test)]
+mod light_tests {
+    use super::*;
+
+    #[test]
+    fn encodes_forty_bytes() {
+        let l = LightPoint { position: [10.0, -5.0, 2.0], color: [2.0, 1.0, 0.0], intensity: 3.0, radius: 0.25, phase: 1.25, twinkle: 0.5, path: [0.0, 0.0, -400.0], path_cycles: 3.0, blink_cycles: 300.0, duty: 0.5 };
+        let mut out = Vec::new();
+        l.encode([0.0; 3], [20.0, 20.0, 20.0], &mut out);
+        assert_eq!(out.len(), LightPoint::STRIDE);
+        let i16_at = |o: usize| i16::from_le_bytes([out[o], out[o + 1]]);
+        let f32_at = |o: usize| f32::from_le_bytes(out[o..o + 4].try_into().unwrap());
+        assert_eq!((i16_at(0), i16_at(2), i16_at(4)), (16384, -8192, 3277));
+        // Phase wraps into 0..1.
+        assert_eq!(i16_at(6), 8192);
+        // The colour's peak above 1 moves into the intensity.
+        assert_eq!(&out[8..12], &[255, 188, 0, 128]);
+        assert_eq!((f32_at(12), f32_at(16), f32_at(28), f32_at(32)), (6.0, 0.25, -400.0, 3.0));
+        // Blink cycles stop at 255.
+        assert_eq!(&out[36..40], &[255, 128, 0, 0]);
+        assert_eq!(l.bounds(), ([10.0, -5.0, -398.0], [10.0, -5.0, 2.0]));
+    }
 }
 
 /// Open water: two layers of the normal map laid on the world's x/z plane
@@ -253,6 +376,11 @@ pub enum VertexLayout {
     /// Static + baked diffuse irradiance, square-root RGBM u8n×4 (28 bytes):
     /// irradiance / π = (rgb · a)² · 64.
     Baked,
+    /// One light of a field per vertex (40 bytes, [`LightPoint::encode`]):
+    /// position s16n×3 + phase s16n, sRGB colour u8n×3 + twinkle u8n,
+    /// intensity f32, radius f32, path f32×3 + cycles f32, blink cycles u8,
+    /// duty u8n, 2 spare bytes. Drawn without an index list.
+    Lights,
 }
 
 impl VertexLayout {
@@ -261,6 +389,7 @@ impl VertexLayout {
             VertexLayout::Static => 24,
             VertexLayout::Skinned => 32,
             VertexLayout::Baked => 28,
+            VertexLayout::Lights => LightPoint::STRIDE as u32,
         }
     }
 }
@@ -501,6 +630,246 @@ pub struct TwilightShadow {
     pub power: f32,
 }
 
+impl DaySky {
+    /// The dome on the horizon (elevation 0) toward a horizontal direction
+    /// whose azimuth cosine to the sun is `a` (`sky_day_f.cg` and the web's
+    /// `places/shared/sky.ts` at h = 0; no clouds, no disc).
+    pub fn horizon_at(&self, a: f32) -> Vec3 {
+        let (base, sun) = self.horizon_parts(a);
+        core::array::from_fn(|k| base[k] + sun[k])
+    }
+
+    /// [`DaySky::horizon_at`] in two parts, both under the Earth's shadow:
+    /// the base (the gradient's horizon and the anti-twilight belt) and the
+    /// sun side (the glow lobes and the afterglow band), which the vista
+    /// haze weighs by its optical depth.
+    pub fn horizon_parts(&self, a: f32) -> (Vec3, Vec3) {
+        let a = a.clamp(-1.0, 1.0);
+        let t = 1e-5f32.powf(self.gradient_power);
+        let mut base: Vec3 = core::array::from_fn(|k| self.horizon[k] + (self.zenith[k] - self.horizon[k]) * t);
+        let s = self.sun_direction;
+        let mu = (a * (s[0] * s[0] + s[2] * s[2]).sqrt()).max(0.0);
+        let lobe = |w: [f32; 2]| if mu > 0.0 { w[0] * mu.powf(w[1]) } else { 0.0 };
+        let glow = self.glow * (lobe(self.glow_wide) + lobe(self.glow_tight));
+        let mut sun: Vec3 = self.sun_color.map(|c| c * glow);
+        if let Some(tw) = &self.twilight {
+            let toward = (a + 1.0) * 0.5;
+            let away = ((1.0 - a) * 0.5).max(0.0);
+            let band = 1.0 + (toward.powf(tw.band.sun_power) - 1.0) * tw.band.sun_bias;
+            let bz = tw.belt.elevation / tw.belt.width.max(1e-6);
+            let belt = (-bz * bz).exp() * away.powf(tw.belt.power);
+            let shadow = 1.0 - tw.shadow.strength * away.powf(tw.shadow.power);
+            for k in 0..3 {
+                base[k] = (base[k] + tw.belt.color[k] * belt) * shadow;
+                sun[k] = (sun[k] + tw.band.color[k] * band) * shadow;
+            }
+        }
+        (base, sun)
+    }
+}
+
+// --------------------------------------------------------------- vista haze
+
+/// Height-dependent haze under a temperature inversion (`dusk-vista`
+/// places; web `places/shared/haze.ts`): extinction `ρ(y) = density` up to
+/// the inversion top `inversion` (place y), `density · e^(−(y − inversion) /
+/// scale)` above. Between the eye and a point d metres away the optical
+/// depth is `d · (G(y_p) − G(y_e)) / (y_p − y_e)` with G the antiderivative
+/// of ρ; a surface keeps `T = e^(−τ)` of its colour and gains
+/// `(gain · (base + w · sun) + glow · ρ(y_p) / density) · (1 − T)`, with
+/// base and sun the two parts of the sky on the horizon toward the point
+/// ([`DaySky::horizon_parts`]) and `w = band + (1 − band) · (1 − T)`: the
+/// afterglow's share grows with the optical depth, so far terrain meets the
+/// sky in every azimuth. Additive surfaces and the light field take `T`
+/// only. Replaces the uniform fog on every material that has fog.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct VistaHaze {
+    pub density: f32,
+    pub inversion: f32,
+    pub scale: f32,
+    pub gain: f32,
+    pub glow: Vec3,
+    /// Weight of the sky's sun side in the inscatter of clear air (`w` at
+    /// T = 1; 1: the dome at any depth).
+    #[serde(default = "one")]
+    pub band: f32,
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+impl VistaHaze {
+    /// Knots of [`VistaHaze::sky_tables`]: the horizon at
+    /// `sqrt((1 − a) / 2) = k / (SKY_KNOTS − 1)` (finer toward the sun).
+    pub const SKY_KNOTS: usize = 17;
+
+    /// ρ(y) / ρ0.
+    pub fn relative_density(&self, y: f32) -> f32 {
+        if y <= self.inversion { 1.0 } else { (-(y - self.inversion) / self.scale.max(1e-3)).exp() }
+    }
+
+    /// G(y), the antiderivative of ρ.
+    pub fn column(&self, y: f32) -> f32 {
+        if y <= self.inversion {
+            self.density * y
+        } else {
+            self.density * (self.inversion + self.scale * (1.0 - (-(y - self.inversion) / self.scale.max(1e-3)).exp()))
+        }
+    }
+
+    /// T between the eye and a point.
+    pub fn transmittance(&self, eye: Vec3, p: Vec3) -> f32 {
+        let d = ((p[0] - eye[0]).powi(2) + (p[1] - eye[1]).powi(2) + (p[2] - eye[2]).powi(2)).sqrt();
+        let dy = p[1] - eye[1];
+        let tau = if dy.abs() < 0.01 { d * self.density * self.relative_density(eye[1]) } else { d * (self.column(p[1]) - self.column(eye[1])) / dy };
+        (-tau.max(0.0)).exp()
+    }
+
+    /// `gain` × the two parts of the sky on the horizon at the knots (see
+    /// `SKY_KNOTS`): the base, then the sun side; the renderer interpolates
+    /// linearly between knots and adds `w` × the sun side. Without a day
+    /// sky, the night sky's horizon colour as the base.
+    pub fn sky_tables(&self, sky: Option<&DaySky>, night_horizon: Vec3) -> ([Vec3; Self::SKY_KNOTS], [Vec3; Self::SKY_KNOTS]) {
+        let parts: [(Vec3, Vec3); Self::SKY_KNOTS] = core::array::from_fn(|k| {
+            let u = k as f32 / (Self::SKY_KNOTS - 1) as f32;
+            sky.map_or((night_horizon, [0.0; 3]), |s| s.horizon_parts(1.0 - 2.0 * u * u))
+        });
+        (core::array::from_fn(|k| parts[k].0.map(|x| x * self.gain)), core::array::from_fn(|k| parts[k].1.map(|x| x * self.gain)))
+    }
+
+    /// The sun side's weight at transmittance `t`.
+    pub fn sun_weight(&self, t: f32) -> f32 {
+        self.band + (1.0 - self.band) * (1.0 - t)
+    }
+}
+
+#[cfg(test)]
+mod haze_tests {
+    use super::*;
+
+    /// Griffith Observatory at blue hour (web `world/sky.ts`, `world/haze.ts`).
+    fn blue_hour() -> DaySky {
+        let (el, az) = ((-5.0f32).to_radians(), 280.1f32.to_radians());
+        DaySky {
+            zenith: [0.01, 0.025, 0.09],
+            horizon: [0.09, 0.08, 0.14],
+            ground: [0.02, 0.02, 0.03],
+            gradient_power: 0.45,
+            ground_blend: 6.0,
+            sun_direction: [az.sin() * el.cos(), el.sin(), -az.cos() * el.cos()],
+            sun_color: [0.5, 0.22, 0.08],
+            glow: 0.4,
+            glow_wide: [0.4, 3.0],
+            glow_tight: [0.6, 24.0],
+            disc: 0.0,
+            disc_cos_inner: 1.0,
+            disc_cos_outer: 1.0,
+            clouds: None,
+            cloud_sun: [0.0; 3],
+            cloud_ambient: [0.0; 3],
+            fade_elevation: 0.04,
+            drift: 0.0,
+            twilight: Some(Twilight {
+                band: TwilightBand { color: [0.45, 0.17, 0.05], height: 0.08, sun_bias: 0.9, sun_power: 2.4 },
+                belt: TwilightBelt { color: [0.08, 0.04, 0.07], elevation: 0.12, width: 0.09, power: 1.5 },
+                shadow: TwilightShadow { strength: 0.35, height: 0.07, power: 1.6 },
+            }),
+        }
+    }
+
+    const HAZE: VistaHaze = VistaHaze { density: 1.2e-4, inversion: -60.0, scale: 120.0, gain: 1.0, glow: [0.01, 0.009, 0.007], band: 1.0 };
+
+    #[test]
+    fn transmittance_in_and_above_the_layer() {
+        // Level inside the layer: e^(−ρ0 d).
+        let t = HAZE.transmittance([0.0, -100.0, 0.0], [10_000.0, -100.0, 0.0]);
+        assert!((t - (-1.2f32).exp()).abs() < 1e-5, "{t}");
+        // From the terrace (above the inversion) down to the basin floor
+        // 20 km away: the column from −300 m to +2 m over the drop.
+        let (eye, p) = ([0.0, 2.0, 0.0], [0.0, -300.0, 20_000.0]);
+        let d = (20_000.0f32.powi(2) + 302.0f32.powi(2)).sqrt();
+        let g = |y: f32| if y <= -60.0 { 1.2e-4 * y } else { 1.2e-4 * (-60.0 + 120.0 * (1.0 - (-(y + 60.0) / 120.0).exp())) };
+        let want = (-(d * (g(-300.0) - g(2.0)) / -302.0)).exp();
+        assert!((HAZE.transmittance(eye, p) - want).abs() < 1e-5);
+        // Continuous across the |dy| < 1 cm branch.
+        let a = HAZE.transmittance([0.0, 10.0, 0.0], [5000.0, 10.009, 0.0]);
+        let b = HAZE.transmittance([0.0, 10.0, 0.0], [5000.0, 10.011, 0.0]);
+        assert!((a - b).abs() < 1e-4, "{a} {b}");
+        assert_eq!(HAZE.relative_density(-61.0), 1.0);
+        assert!((HAZE.relative_density(60.0) - (-1.0f32).exp()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn horizon_matches_the_web_dome() {
+        let sky = blue_hour();
+        // Opposite the sun: no lobes; band × (1 − bias); belt; shadow.
+        let c = sky.horizon_at(-1.0);
+        let base = 0.09 + (0.01 - 0.09) * 1e-5f32.powf(0.45);
+        let belt = (-(0.12f32 / 0.09).powi(2)).exp() * 0.08;
+        let want = (base + 0.45 * 0.1 + belt) * (1.0 - 0.35);
+        assert!((c[0] - want).abs() < 1e-5, "{} {want}", c[0]);
+        // Toward the sun the afterglow band and the glow lobes add up.
+        assert!(sky.horizon_at(1.0)[0] > 0.5);
+    }
+
+    #[test]
+    fn parts_split_the_dome() {
+        let sky = blue_hour();
+        // Toward the sun (a = 1): mu = |sun.xz|, toward = 1, away = 0.
+        let s = sky.sun_direction;
+        let mu = (s[0] * s[0] + s[2] * s[2]).sqrt();
+        let base = 0.09 + (0.01 - 0.09) * 1e-5f32.powf(0.45);
+        let sun = 0.5 * 0.4 * (0.4 * mu.powf(3.0) + 0.6 * mu.powf(24.0)) + 0.45;
+        let (b, u) = sky.horizon_parts(1.0);
+        assert!((b[0] - base).abs() < 1e-6 && (u[0] - sun).abs() < 1e-5, "{b:?} {u:?}");
+        // Opposite the sun: the belt in the base, the band's floor on the
+        // sun side, both under the Earth's shadow.
+        let belt = (-(0.12f32 / 0.09).powi(2)).exp() * 0.08;
+        let (b, u) = sky.horizon_parts(-1.0);
+        assert!((b[0] - (base + belt) * 0.65).abs() < 1e-6 && (u[0] - 0.45 * 0.1 * 0.65).abs() < 1e-6);
+        // The parts add up to the dome.
+        let (b, u) = sky.horizon_parts(0.3);
+        let d = sky.horizon_at(0.3);
+        assert!((0..3).all(|k| (b[k] + u[k] - d[k]).abs() < 1e-6));
+        // Griffith: w runs from `band` in clear air to 1 at full depth, so
+        // gain 1 without glow meets the dome where T → 0.
+        let griffith = VistaHaze { density: 1.6e-4, inversion: -60.0, scale: 60.0, gain: 1.0, glow: [0.0; 3], band: 0.25 };
+        assert_eq!((griffith.sun_weight(1.0), griffith.sun_weight(0.0)), (0.25, 1.0));
+        assert!((griffith.sun_weight(0.6) - 0.55).abs() < 1e-6);
+        let (ta, tb) = VistaHaze { gain: 1.25, ..griffith }.sky_tables(Some(&sky), [0.0; 3]);
+        let (b, u) = sky.horizon_parts(1.0);
+        assert!((ta[0][1] - 1.25 * b[1]).abs() < 1e-6 && (tb[0][1] - 1.25 * u[1]).abs() < 1e-6);
+        // Absent from older packs, `band` reads as 1.
+        let h: VistaHaze = serde_json::from_str(r#"{"density":1e-4,"inversion":0,"scale":50,"gain":1,"glow":[0,0,0]}"#).unwrap();
+        assert_eq!(h.band, 1.0);
+    }
+
+    #[test]
+    fn sky_table_interpolates_within_two_percent() {
+        let sky = blue_hour();
+        let (base, sun) = HAZE.sky_tables(Some(&sky), [0.0; 3]);
+        let n = (VistaHaze::SKY_KNOTS - 1) as f32;
+        let mut worst = 0.0f32;
+        for i in 0..=720 {
+            let theta = i as f32 / 720.0 * core::f32::consts::PI;
+            let a = theta.cos();
+            let u = ((1.0 - a) * 0.5).max(0.0).sqrt() * n;
+            let k = (u.floor() as usize).min(VistaHaze::SKY_KNOTS - 2);
+            let f = u - k as f32;
+            let exact = sky.horizon_at(a);
+            for c in 0..3 {
+                let at = |t: &[Vec3; VistaHaze::SKY_KNOTS]| t[k][c] + (t[k + 1][c] - t[k][c]) * f;
+                let lerp = at(&base) + at(&sun);
+                // Relative to the brightest channel at that azimuth.
+                let peak = exact[0].max(exact[1]).max(exact[2]);
+                worst = worst.max((lerp - exact[c]).abs() / peak);
+            }
+        }
+        assert!(worst < 0.02, "worst {worst}");
+    }
+}
+
 // -------------------------------------------------------------------- post
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -632,5 +1001,8 @@ pub struct Meta {
     pub day_sky: Option<DaySky>,
     #[serde(default)]
     pub post: Post,
+    /// The vista haze (`dusk-vista` places), in place of the uniform fog.
+    #[serde(default)]
+    pub vista_haze: Option<VistaHaze>,
     pub stats: serde_json::Value,
 }

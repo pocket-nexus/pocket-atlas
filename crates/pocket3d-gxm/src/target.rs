@@ -268,6 +268,12 @@ impl Fence {
         s
     }
 
+    /// Whether the GPU has written slot `i`'s last value (non-blocking).
+    pub fn done(&self, i: usize) -> bool {
+        let s = &self.slots[i % self.slots.len()];
+        s.value == 0 || unsafe { core::ptr::read_volatile(s.address) } == s.value
+    }
+
     pub fn wait(&self, i: usize) {
         let s = &self.slots[i % self.slots.len()];
         if s.value != 0 {

@@ -140,6 +140,13 @@ impl Occluder {
         best
     }
 
+    /// Visibility along a directional-light ray. Offset along the receiving
+    /// normal just as for the hemisphere bake, avoiding self-intersection.
+    pub fn ray_visibility(&self, p: Vec3, n: Vec3, direction: Vec3, reach: f32) -> f32 {
+        if self.tris.is_empty() { return 1.0; }
+        1.0 - self.blocked(p + n.normalize_or(Vec3::Y) * 0.025, direction.normalize_or(Vec3::Y), reach)
+    }
+
     /// Unblocked share of the cosine-weighted hemisphere around `n` at `p`.
     pub fn visibility(&self, p: Vec3, n: Vec3) -> f32 {
         let n = n.normalize_or(Vec3::Y);
@@ -153,5 +160,19 @@ impl Occluder {
             open += 1.0 - self.blocked(o, d, self.reach);
         }
         open / self.rays.len() as f32
+    }
+}
+
+#[cfg(test)]
+mod directional_tests {
+    use super::*;
+    #[test]
+    fn sunlight_obeys_blockers_and_foliage_opacity() {
+        for opacity in [1.0, 0.55] {
+            let scene = Occluder::new(vec![Tri { a: Vec3::new(-2.0, 1.0, -2.0), e1: Vec3::new(4.0, 0.0, 0.0), e2: Vec3::new(0.0, 0.0, 4.0), opacity }], 8, 4.0);
+            assert!((scene.ray_visibility(Vec3::new(-0.5, 0.0, -0.5), Vec3::Y, Vec3::Y, 20.0) - (1.0-opacity)).abs() < 1e-6);
+            assert_eq!(scene.ray_visibility(Vec3::new(4.0, 0.0, 0.0), Vec3::Y, Vec3::Y, 20.0), 1.0);
+            assert_eq!(scene.ray_visibility(Vec3::new(-0.5, 0.0, -0.5), Vec3::Y, Vec3::Y, 0.5), 1.0);
+        }
     }
 }

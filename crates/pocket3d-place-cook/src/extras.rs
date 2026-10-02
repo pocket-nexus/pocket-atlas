@@ -48,6 +48,70 @@ pub fn water(x: &Value, material: &str) -> pc::Water {
     }
 }
 
+/// A light field's sprite range, gain and depth pull (`kind: "lights"`, the
+/// web's defaults); `period` from the material's `loop` (s), else
+/// `fallback` (the place's recorded loop).
+pub fn light_field(x: &Value, fallback: f32) -> pc::LightField {
+    let min_pixels = f(x, "minPixels", 2.0).max(0.0);
+    pc::LightField {
+        min_pixels,
+        max_pixels: f(x, "maxPixels", 16.0).max(min_pixels),
+        gain: f(x, "gain", 1.0),
+        depth_pull: f(x, "depthPull", 0.012).max(0.0),
+        period: f(x, "loop", fallback).max(1e-3),
+    }
+}
+
+/// One light of a field: `p` and `color` from POSITION and COLOR_0, the
+/// rest from the custom attributes `_LIGHT` (intensity, radius, phase,
+/// twinkle), `_PATH` (dx, dy, dz, cycles) and `_BLINK` (cycles, duty), each
+/// optional (missing: no light, no motion, always on).
+pub fn light_point(p: [f32; 3], color: [f32; 3], light: Option<&[f32]>, path: Option<&[f32]>, blink: Option<&[f32]>) -> pc::LightPoint {
+    let at = |v: Option<&[f32]>, i: usize, d: f32| v.and_then(|v| v.get(i)).copied().unwrap_or(d);
+    pc::LightPoint {
+        position: p,
+        color,
+        intensity: at(light, 0, 0.0),
+        radius: at(light, 1, 0.0),
+        phase: at(light, 2, 0.0),
+        twinkle: at(light, 3, 0.0),
+        path: [at(path, 0, 0.0), at(path, 1, 0.0), at(path, 2, 0.0)],
+        path_cycles: at(path, 3, 0.0),
+        blink_cycles: at(blink, 0, 0.0),
+        duty: if blink.is_some() { at(blink, 1, 1.0) } else { 1.0 },
+    }
+}
+
+/// An interior window's `tint` (linear RGB, three numbers); None when
+/// absent or malformed (white).
+pub fn tint(x: &Value) -> Option<[f32; 3]> {
+    x.get("tint").and_then(|t| t.as_array()).filter(|a| a.len() >= 3 && a.iter().take(3).all(|v| v.is_number())).map(|_| v3(&x["tint"]))
+}
+
+/// A material's `lodBias`: a number (mip levels, clamped to −3..1), or
+/// `"auto"` (None: measured from the texture's mapping).
+pub fn lod_bias(x: &Value) -> Option<Option<f32>> {
+    match x.get("lodBias")? {
+        Value::String(s) if s == "auto" => Some(None),
+        v => v.as_f64().map(|b| Some((b as f32).clamp(-3.0, 1.0))),
+    }
+}
+
+/// The vista haze (scene `haze` with an `inversion`); `None` for the night
+/// streets' lit haze, which shares the key. `band` (the weight of the sky's
+/// sun-side terms in the inscatter) is 1, the dome, when absent.
+pub fn vista_haze(h: &Value) -> Option<pc::VistaHaze> {
+    h.get("inversion")?.as_f64()?;
+    Some(pc::VistaHaze {
+        density: f(h, "density", 0.0),
+        inversion: f(h, "inversion", 0.0),
+        scale: f(h, "scale", 100.0).max(1e-3),
+        gain: f(h, "gain", 1.0),
+        glow: v3(&h["glow"]),
+        band: f(h, "band", 1.0),
+    })
+}
+
 /// The twilight terms of a day sky (`sky.twilight`).
 pub fn twilight(t: &Value) -> pc::Twilight {
     let (b, l, s) = (&t["band"], &t["belt"], &t["shadow"]);
@@ -83,6 +147,49 @@ mod tests {
     #[should_panic(expected = "two layers")]
     fn water_needs_waves() {
         water(&json!({"body": [0, 0, 0]}), "sea");
+    }
+
+    #[test]
+    fn light_field_and_points() {
+        let x = json!({"kind": "lights", "minPixels": 1.5, "maxPixels": 12, "gain": 0.8});
+        let l = light_field(&x, 120.0);
+        assert_eq!((l.min_pixels, l.max_pixels, l.gain, l.period, l.depth_pull), (1.5, 12.0, 0.8, 120.0, 0.012));
+        assert_eq!(light_field(&json!({"loop": 60, "minPixels": 3, "maxPixels": 1}), 120.0).max_pixels, 3.0);
+        let p = light_point([1.0, 2.0, 3.0], [1.0, 0.5, 0.1], Some(&[40.0, 0.2, 0.25, 0.6]), Some(&[0.0, 0.0, -900.0, 2.0]), None);
+        assert_eq!((p.intensity, p.radius, p.phase, p.twinkle), (40.0, 0.2, 0.25, 0.6));
+        assert_eq!((p.path, p.path_cycles, p.blink_cycles, p.duty), ([0.0, 0.0, -900.0], 2.0, 0.0, 1.0));
+        let b = light_point([0.0; 3], [1.0, 0.0, 0.0], None, None, Some(&[40.0, 0.1]));
+        assert_eq!((b.blink_cycles, b.duty, b.intensity), (40.0, 0.1, 0.0));
+    }
+
+    #[test]
+    fn interior_tint() {
+        let x = json!({"kind": "interiorWindow", "intensity": 2.4, "tint": [1.0, 0.78, 0.36]});
+        assert_eq!(tint(&x), Some([1.0, 0.78, 0.36]));
+        // Places without one (the konbini, Akihabara) stay white.
+        assert_eq!(tint(&json!({"kind": "interiorWindow", "intensity": 1.4})), None);
+        assert_eq!(tint(&json!({"tint": [1, 0.5]})), None);
+        assert_eq!(tint(&json!({"tint": "warm"})), None);
+    }
+
+    #[test]
+    fn lod_bias_number_or_auto() {
+        assert_eq!(lod_bias(&json!({"lodBias": "auto"})), Some(None));
+        assert_eq!(lod_bias(&json!({"lodBias": -1.5})), Some(Some(-1.5)));
+        assert_eq!(lod_bias(&json!({"lodBias": -9})), Some(Some(-3.0)));
+        assert_eq!(lod_bias(&json!({"lodBias": "sharp"})), None);
+        assert_eq!(lod_bias(&json!({})), None);
+    }
+
+    #[test]
+    fn vista_haze_needs_an_inversion() {
+        let h = vista_haze(&json!({"density": 1.6e-4, "inversion": -60, "scale": 60, "gain": 1.25, "band": 0.25, "glow": [0.0045, 0.003, 0.0035], "note": "…"})).unwrap();
+        assert_eq!((h.density, h.inversion, h.scale, h.gain, h.band, h.glow), (1.6e-4, -60.0, 60.0, 1.25, 0.25, [0.0045, 0.003, 0.0035]));
+        // Without `band`, the sky's sun-side terms keep their full weight.
+        assert_eq!(vista_haze(&json!({"density": 1e-4, "inversion": 0})).unwrap().band, 1.0);
+        // The night streets' lit haze shares the key.
+        assert!(vista_haze(&json!({"density": 0.015, "ambient": [0.1, 0.1, 0.1]})).is_none());
+        assert!(vista_haze(&Value::Null).is_none());
     }
 
     #[test]

@@ -54,6 +54,7 @@ export type PlaceKind =
   | "night-slope"
   | "daytime-coast"
   | "dusk-coast"
+  | "dusk-vista"
   | "night-coast"
   | "interior"
   | "rooftop";

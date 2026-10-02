@@ -25,8 +25,8 @@ pub mod meta;
 pub use meta::*;
 
 pub const MAGIC: [u8; 4] = *b"PLCE";
-/// 5: water, signage animation, twilight sky.
-pub const VERSION: u32 = 5;
+/// 6: light fields (`Kind::Lights`, `VertexLayout::Lights`), the vista haze.
+pub const VERSION: u32 = 6;
 
 pub const TAG_META: [u8; 4] = *b"META";
 pub const TAG_TEXTURES: [u8; 4] = *b"TEXD";

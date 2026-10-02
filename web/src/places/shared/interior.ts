@@ -1,4 +1,4 @@
-import { MeshStandardMaterial, type PlaneGeometry, type BufferAttribute } from "three";
+import { MeshStandardMaterial, Vector3, type PlaneGeometry, type BufferAttribute } from "three";
 import { GLSL_NOISE } from "./glsl";
 
 /**
@@ -137,18 +137,19 @@ const FRAG_EMISSIVE = /* glsl */ `
   // Window frame shadowing at the edges.
   vec2 e = min(local, 1.0 - local);
   inside *= smoothstep(0.0, 0.04, min(e.x, e.y)) * 0.85 + 0.15;
-  totalEmissiveRadiance = inside * uIntensity;
+  totalEmissiveRadiance = inside * uIntensity * uTint;
 }
 `;
 
 /**
  * Apartment and office windows with parallax rooms. The material keeps its
  * glass specular (env + lights) and replaces emission with the traced room;
- * `time` (seconds) flickers the television rooms.
+ * `time` (seconds) flickers the television rooms; `tint` (linear RGB,
+ * default white) colours the whole interior, e.g. a museum hall's warm light.
  */
-export function makeInteriorWindows(time: { value: number }, intensity = 1.4): MeshStandardMaterial {
+export function makeInteriorWindows(time: { value: number }, intensity = 1.4, tint: [number, number, number] = [1, 1, 1]): MeshStandardMaterial {
   const m = new MeshStandardMaterial({ color: 0x06080a, roughness: 0.06, metalness: 0, envMapIntensity: 1.1 });
-  const local = { uIntensity: { value: intensity } };
+  const local = { uIntensity: { value: intensity }, uTint: { value: new Vector3(...tint) } };
   m.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = time;
     Object.assign(shader.uniforms, local);
@@ -156,13 +157,14 @@ export function makeInteriorWindows(time: { value: number }, intensity = 1.4): M
       .replace("#include <common>", `#include <common>\n${VERT_PARS}`)
       .replace("#include <project_vertex>", `#include <project_vertex>\n${VERT_MAIN}`);
     shader.fragmentShader = shader.fragmentShader
-      .replace("#include <common>", `#include <common>\nuniform float uIntensity;\n${FRAG_PARS}`)
+      .replace("#include <common>", `#include <common>\nuniform float uIntensity;\nuniform vec3 uTint;\n${FRAG_PARS}`)
       .replace("#include <emissivemap_fragment>", `#include <emissivemap_fragment>\n${FRAG_EMISSIVE}`);
   };
   m.customProgramCacheKey = () => "interior-windows";
   // vUv is only declared when a map is present; force the UV varying.
   m.defines = { USE_UV: "" };
   m.name = "interior-windows";
-  m.userData.pocketAtlas = { kind: "interiorWindow", intensity };
+  const white = tint.every((v) => v === 1);
+  m.userData.pocketAtlas = white ? { kind: "interiorWindow", intensity } : { kind: "interiorWindow", intensity, tint };
   return m;
 }

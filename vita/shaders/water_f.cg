@@ -5,7 +5,8 @@
 // far water shows the sun as a glitter path rather than a mirror line.
 // Writes HDR radiance and the eye distance (haze input) in alpha.
 //
-// Defines: SUN, FOG, SHALLOW (vertex colour red blends the body colour toward
+// Defines: SUN, FOG, VISTA (the vista haze from the vertex stage in place of
+// the fog), SHALLOW (vertex colour red blends the body colour toward
 // the shallow colour over a sandy bottom).
 
 #include "common.cgh"
@@ -32,6 +33,9 @@ half4 main(
     float2 vUv : TEXCOORD3,
 #ifdef SHALLOW
     half4 vColor : COLOR0,
+#endif
+#ifdef VISTA
+    half4 vHaze : TEXCOORD7,
 #endif
     float2 vUv2 : TEXCOORD6) : COLOR
 {
@@ -70,7 +74,9 @@ half4 main(
         color += uSunRad.rgb * (dotNL * Fs * V_GGX_SmithCorrelated(alpha, dotNL, dotNV) * D_GGX(alpha, dotNH));
     }
 #endif
-#ifdef FOG
+#if defined(VISTA)
+    color = color * vHaze.a + vHaze.rgb;
+#elif defined(FOG)
     color = lerp(color, uFog.rgb, fogFactor(dist, uFog.w));
 #endif
     return half4((half3)color, (half)dist);

@@ -220,6 +220,14 @@ class Materials {
 
   private make(m: Material): Material {
     const pc = (clean(m.userData.pocketAtlas ?? {}) as Record<string, unknown>) ?? {};
+    if (pc.kind === "lights") {
+      // A light field (shared/lights.ts, a ShaderMaterial on THREE.Points,
+      // which GLTFExporter does not write): the annotation carries the
+      // sprite range and gain, the point attributes carry every light.
+      const out = new MeshBasicMaterial({ vertexColors: true });
+      out.userData = { pocketAtlas: pc };
+      return out;
+    }
     const common = {
       side: m.side,
       transparent: m.transparent,
@@ -382,6 +390,12 @@ function reduce(times: number[], values: number[], stride: number, eps: number):
 
 // -------------------------------------------------------------------- export
 
+/** Points drawn by a light-field material (`kind: "lights"`, contract 1). */
+function isLightField(o: Object3D): boolean {
+  const p = o as Points;
+  return !!p.isPoints && !Array.isArray(p.material) && (p.material as Material).userData?.pocketAtlas?.kind === "lights";
+}
+
 export async function exportPlace(input: ExportInput): Promise<ExportOutput> {
   const { world, renderer } = input;
   const say = input.onProgress ?? (() => {});
@@ -473,12 +487,17 @@ export async function exportPlace(input: ExportInput): Promise<ExportOutput> {
   const drop: Object3D[] = [];
   clone.traverse((o) => {
     const kind = o.userData.pocketAtlas?.kind;
-    if (kind === "sky" || kind === "skyline" || kind === "beacons" || (o as Points).isPoints || (o as RectAreaLight).isRectAreaLight || (o as HemisphereLight).isHemisphereLight) {
+    if (kind === "sky" || kind === "skyline" || kind === "beacons" || ((o as Points).isPoints && !isLightField(o)) || (o as RectAreaLight).isRectAreaLight || (o as HemisphereLight).isHemisphereLight) {
       drop.push(o);
       return;
     }
     const mesh = o as Mesh;
-    if (mesh.isMesh) {
+    if (isLightField(o)) {
+      // POINTS with COLOR_0 and the custom attributes _LIGHT, _PATH, _BLINK
+      // (GLTFExporter prefixes non-standard attribute names with `_`).
+      const p = o as Points;
+      p.material = materials.convert(p.material as Material);
+    } else if (mesh.isMesh) {
       if (kind === "tower") {
         const m = new MeshBasicMaterial({ color: 0xff6020 });
         m.userData = { pocketAtlas: { kind: "tower" } };

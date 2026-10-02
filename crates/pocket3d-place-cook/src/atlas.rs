@@ -70,7 +70,7 @@ pub fn cook(input: &Path, output: &Path, faces: &uifont::Faces) {
         let range = pc::Range { offset: blob.len() as u32, size: data.len() as u32 };
         blob.extend_from_slice(data);
         println!("  {name:18} {format:?} {width}x{height} ×{mips}  {} KiB", data.len() / 1024);
-        textures.push(pc::Texture { name: name.into(), role, format, width, height, mips, data: range, wrap_s, wrap_t: pc::Wrap::Clamp, has_alpha: alpha, mean: [0.0; 4] });
+        textures.push(pc::Texture { name: name.into(), role, format, width, height, mips, data: range, wrap_s, wrap_t: pc::Wrap::Clamp, has_alpha: alpha, mean: [0.0; 4], lod_bias: 0.0 });
         (textures.len() - 1) as u32
     };
 
