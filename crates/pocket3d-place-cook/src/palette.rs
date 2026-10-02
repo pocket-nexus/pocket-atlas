@@ -16,12 +16,19 @@ fn eligible(m: &pc::Material) -> bool {
         && m.color.iter().chain([&m.roughness, &m.metalness]).all(|&v| (0.0..=1.0).contains(&v))
 }
 
-fn canonical(m: &pc::Material) -> pc::Material {
+fn canonical(m: &pc::Material, moving: bool) -> pc::Material {
     let mut out = m.clone();
     out.name = "solid-pbr-palette".into();
     out.color = [1.0; 4];
+    // VERTEX_PBR reads actual surface values from UVs, including FAR/LITE.
+    // These canonical factors only select shader features. Match native
+    // material(): SUN_SPEC iff roughness < .6 or metalness > .3. Keeping
+    // rough non-metal static surfaces separate lets their draw omit GGX.
+    // Moving assemblies keep one palette to avoid duplicating their draws;
+    // the shader's per-surface UV branch handles their mixed reflectance.
+    let sun_spec = moving || m.roughness < 0.6 || m.metalness > 0.3;
     out.roughness = 1.0;
-    out.metalness = 1.0;
+    out.metalness = if sun_spec { 1.0 } else { 0.0 };
     out.vertex_color = true;
     out.vertex_pbr = true;
     out
@@ -66,7 +73,7 @@ pub fn batch(
             out.push(p);
             continue;
         }
-        let palette = canonical(&m);
+        let palette = canonical(&m, p.moving);
         // Serialize every retained feature, so sidedness, fog, env strength,
         // polygon offset and any future fields remain exact batch boundaries.
         let key = serde_json::to_vec(&palette).unwrap();
@@ -174,6 +181,61 @@ mod tests {
         let ids: HashSet<_> = prims.iter().map(|p| p.material).collect();
         assert_eq!(ids.len(), 3);
         assert_eq!(prims.iter().filter(|p| mats[p.material as usize].double_sided).count(), 1);
+    }
+
+    #[test]
+    fn static_sun_spec_split_keeps_boundary_values_and_vertex_attributes() {
+        let below_rough = f32::from_bits(0.6f32.to_bits() - 1);
+        let above_metal = f32::from_bits(0.3f32.to_bits() + 1);
+        let cases = [
+            (0.6, 0.3, false), (below_rough, 0.3, true),
+            (0.6, above_metal, true), (1.0, 0.3, false),
+            (0.6, 0.0, false), (0.0, 0.0, true),
+        ];
+        let original: Vec<_> = cases.iter().enumerate().map(|(i, &(rough, metal, _))| {
+            let mut m = material();
+            m.roughness = rough;
+            m.metalness = metal;
+            m.color = [0.25 + i as f32 * 0.05, 0.4, 0.7, 1.0];
+            m.vertex_color = i % 2 == 0;
+            m
+        }).collect();
+        let mut mats = original.clone();
+        let mut prims: Vec<_> = (0..cases.len()).map(|i| {
+            let mut p = triangle(i + 1, Mat4::IDENTITY, i as u32);
+            p.moving = false;
+            for v in &mut p.verts { v.pos.x += i as f32 * 2.0; }
+            p
+        }).collect();
+        let parent = (1..=cases.len()).map(|i| (i, 0)).collect();
+        batch(&mut prims, &mut mats, &parent, &HashSet::from([0]), &HashMap::from([(0, Mat4::IDENTITY)]), &HashSet::new());
+        // Static primitives remain separate until the existing spatial
+        // chunker, but share exactly two shader-compatible material IDs.
+        assert_eq!(prims.len(), cases.len());
+        assert_eq!(prims.iter().map(|p| p.material).collect::<HashSet<_>>().len(), 2);
+        assert_eq!(prims.iter().map(|p| p.tris.len()).sum::<usize>(), cases.len());
+        let mut seen = HashSet::new();
+        for p in &prims {
+            let m = &mats[p.material as usize];
+            // Same feature selection used by vita/src/frame.rs material().
+            let selected_spec = m.roughness < 0.6 || m.metalness > 0.3;
+            for triangle in p.verts.chunks_exact(3) {
+                let i = (triangle[0].pos.x / 2.0) as usize;
+                let source = &original[i];
+                seen.insert(i);
+                assert_eq!(selected_spec, cases[i].2);
+                for (v, expected_pos) in triangle.iter().zip([Vec3::ZERO, Vec3::X, Vec3::Y]) {
+                    assert_eq!(v.pos, expected_pos + Vec3::X * i as f32 * 2.0);
+                    assert_eq!(v.uv, Vec2::new(source.roughness, source.metalness));
+                    for (k, encoded) in [128u8, 64, 200].into_iter().enumerate() {
+                        let linear = if source.vertex_color { pc::color::decode(encoded as f32 / 255.0) } else { 1.0 };
+                        assert_eq!(v.color[k], pc::color::encode8(linear * source.color[k]));
+                    }
+                    assert_eq!(v.color[3], 255);
+                }
+            }
+        }
+        assert_eq!(seen.len(), cases.len());
     }
 
     #[test]

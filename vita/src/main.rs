@@ -20,6 +20,7 @@ mod provision;
 mod scene;
 mod settings;
 mod shaders;
+mod sun_bounds;
 mod ui;
 
 use std::sync::mpsc;
@@ -778,7 +779,7 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                 swap_ms = swap_ms * 0.9 + t_swap.elapsed().as_secs_f32() * 1000.0 * 0.1;
 
                 let st = &renderer.stats;
-                let pass = |p: &frame::PassStats| json!({"draws": p.draws, "tris": p.tris, "lod": p.lod, "culled": p.culled, "missing": p.missing, "lights": p.lights, "unbaked": p.unbaked});
+                let pass = |p: &frame::PassStats| json!({"draws": p.draws, "tris": p.tris, "lod": p.lod, "culled": p.culled, "missing": p.missing, "lights": p.lights, "unbaked": p.unbaked, "movingReceivers": p.moving_receivers});
                 let s = &renderer.settings;
                 // Main-pass triangles by material, heaviest first (profiling).
                 let mut by: Vec<(usize, u32)> = renderer.stats.by_material.iter().copied().enumerate().filter(|x| x.1 > 0).collect();

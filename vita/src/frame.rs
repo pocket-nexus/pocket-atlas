@@ -121,6 +121,8 @@ pub struct PassStats {
     /// without baked lighting.
     pub lights: [u32; 3],
     pub unbaked: u32,
+    /// Draws whose light-space bounds can receive a moving caster's shadow.
+    pub moving_receivers: u32,
 }
 
 /// GPU time per scene, for profiling (`profile` control setting). Each scene
@@ -540,11 +542,10 @@ pub struct Renderer {
     twilight: bool,
 }
 
-/// The sun's shadow map: the static scene rendered once from the sun, its
-/// distance along the light packed into RGB (`shadow_f.cg`).
+/// Orthographic sunlight depth: cached static geometry and moving casters.
 struct SunPass {
     target: Target,
-    /// Point-sampled view of the map (the packed depth must not be filtered).
+    /// Point-sampled R32F distance; the shader filters comparison results.
     map: g::SceGxmTexture,
     vp: [f32; 16],
     dir: [f32; 4],
@@ -556,6 +557,8 @@ struct SunPass {
     moving: Option<(Target, g::SceGxmTexture)>,
     moving_ready: bool,
     moving_k: [f32; 4],
+    receiver_rows: [[f32; 4]; 3],
+    moving_bounds: Vec<crate::sun_bounds::SunBounds>,
     planes: [Vec4; 6],
     moving_error: f32,
 }
@@ -565,10 +568,12 @@ impl SunPass {
         let l = Vec3::from(sun.direction).normalize_or(Vec3::Y);
         let sh = sun.shadow.clone().unwrap_or(pc::SunShadow { position: (l * 80.0).to_array(), ortho: [-40.0, 40.0, -40.0, 40.0, 1.0, 160.0], map_size: 2048, bias: 0.0, normal_bias: 0.02, radius: 1.0 });
         let size = sh.map_size.clamp(512, 2048);
-        let target = Target::new(vram, mem, size, size, ColorFormat::Rgba8, Msaa::None, Depth::Transient)?;
+        let target = Target::new(vram, mem, size, size, ColorFormat::R32f, Msaa::None, Depth::Transient)?;
         let mut map = target.texture;
         g::sceGxmTextureSetMinFilter(&mut map, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_POINT);
         g::sceGxmTextureSetMagFilter(&mut map, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_POINT);
+        g::sceGxmTextureSetUAddrMode(&mut map, g::SceGxmTextureAddrMode_SCE_GXM_TEXTURE_ADDR_CLAMP);
+        g::sceGxmTextureSetVAddrMode(&mut map, g::SceGxmTextureAddrMode_SCE_GXM_TEXTURE_ADDR_CLAMP);
         let pos = Vec3::from(sh.position);
         let up = if l.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
         let view = glam::camera::rh::view::look_at_mat4(pos, pos - l, up);
@@ -583,10 +588,12 @@ impl SunPass {
         let near = pos.dot(-l) + o[4];
         let range = (o[5] - o[4]).max(1.0);
         let moving = if moving {
-            let target = Target::new(vram, mem, 512, 512, ColorFormat::Rgba8, Msaa::None, Depth::Transient)?;
+            let target = Target::new(vram, mem, 512, 512, ColorFormat::R32f, Msaa::None, Depth::Transient)?;
             let mut map = target.texture;
             g::sceGxmTextureSetMinFilter(&mut map, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_POINT);
             g::sceGxmTextureSetMagFilter(&mut map, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_POINT);
+            g::sceGxmTextureSetUAddrMode(&mut map, g::SceGxmTextureAddrMode_SCE_GXM_TEXTURE_ADDR_CLAMP);
+            g::sceGxmTextureSetVAddrMode(&mut map, g::SceGxmTextureAddrMode_SCE_GXM_TEXTURE_ADDR_CLAMP);
             Some((target, map))
         } else { None };
         Ok(Self {
@@ -601,7 +608,11 @@ impl SunPass {
             ready: false,
             moving,
             moving_ready: false,
-            moving_k: [near, 1.0 / range, sh.bias.abs().max(0.04 / range), 512.0],
+            // Scale the depth bias with this coarser map's texel footprint.
+            // A fixed 4 cm bias striped oblique train panels on the device.
+            moving_k: [near, 1.0 / range, sh.bias.abs().max(1.5 * (o[1] - o[0]).max(o[3] - o[2]) / 512.0 / range), 512.0],
+            receiver_rows: [urow.to_array(), vrow.to_array(), [-l.x / range, -l.y / range, -l.z / range, -near / range]],
+            moving_bounds: Vec::new(),
             planes: [r.w_axis + r.x_axis, r.w_axis - r.x_axis, r.w_axis + r.y_axis, r.w_axis - r.y_axis, r.z_axis, r.w_axis - r.z_axis],
             moving_error: (o[1] - o[0]).max(o[3] - o[2]) / 512.0,
         })
@@ -791,7 +802,7 @@ impl Renderer {
             // Words 0..2 belong to the frame fence in main.rs.
             timeline: Timeline::new(8, 32),
             order: Vec::new(),
-            pipe_cache: vec![core::ptr::null(); scene.meta.materials.len() * 54],
+            pipe_cache: vec![core::ptr::null(); scene.meta.materials.len() * 108],
             pipe_epoch: u32::MAX,
             pipe_mode: (Msaa::X4, false, false),
             tick: 0,
@@ -817,6 +828,7 @@ impl Renderer {
         let Self { refls, mains, hazes, prefilters, finals, down, up, _vram, _mem, sun, .. } = self;
         if let Some(s) = sun {
             s.target.destroy();
+            if let Some((moving, _)) = s.moving { moving.destroy(); }
         }
         for (a, b) in refls {
             a.destroy();
@@ -853,9 +865,9 @@ impl Renderer {
                     if vlit && *n > 0 {
                         let vs = surface_key(v, false, vs_needs(m, *tier, false));
                         gpu.want(&vs.with(if *n == 2 { "VERTEX_LIGHTS=2" } else { "VERTEX_LIGHTS=4" }));
-                        gpu.want(&frag_key(m, 0, false, baked, *tier).with("VERTEX_LIGHTS"));
+                        want_frag(gpu, frag_key(m, 0, false, baked, *tier).with("VERTEX_LIGHTS"));
                     } else {
-                        gpu.want(&frag_key(m, *n, false, baked, *tier));
+                        want_frag(gpu, frag_key(m, *n, false, baked, *tier));
                     }
                 }
             }
@@ -863,9 +875,9 @@ impl Renderer {
                 for n in if !m.lit { &[0usize][..] } else if baked { &[0usize, 1][..] } else { &[0usize, 2][..] } {
                     if vlit && *n > 0 {
                         gpu.want(&surface_key(v, false, vs_needs(m, 0, true)).with("VERTEX_LIGHTS=2"));
-                        gpu.want(&frag_key(m, 0, true, baked, 0).with("VERTEX_LIGHTS"));
+                        want_frag(gpu, frag_key(m, 0, true, baked, 0).with("VERTEX_LIGHTS"));
                     } else {
-                        gpu.want(&frag_key(m, *n, true, baked, 0));
+                        want_frag(gpu, frag_key(m, *n, true, baked, 0));
                     }
                 }
             }
@@ -902,9 +914,10 @@ impl Renderer {
     /// Cached static map or the smaller per-frame map of rigid moving casters.
     unsafe fn shadow_pass(&mut self, ctx: *mut g::SceGxmContext, gpu: &mut Gpu, scene: &Scene, moving: bool) -> Result<(), String> {
         let Some(sp) = self.sun.as_mut().map(|s| s as *mut SunPass) else { return Ok(()) };
-        let fill = PipeKey { vs: key_v("post_v.cg", &[]), fs: Key::new("fill_f.cg", &[]), layout: Layout::Pos2, blend: BlendMode::Opaque, output: Out::Uchar4, msaa: Msaa::None.gxm() };
+        let fill = PipeKey { vs: key_v("post_v.cg", &[]), fs: Key::new("fill_f.cg", &[]), layout: Layout::Pos2, blend: BlendMode::Opaque, output: Out::Float, msaa: Msaa::None.gxm() };
         let Some(fill) = gpu.pipeline(&fill).map(|p| p as *const Pipeline) else { return Ok(()) };
         let mut draws = Vec::new();
+        let mut moving_bounds = Vec::new();
         for (i, d) in scene.draws.iter().enumerate() {
             if d.node.is_some() != moving || !scene.meta.draws[i].cast_shadow { continue; }
             if moving {
@@ -915,9 +928,15 @@ impl Renderer {
                 }) { continue; }
             }
             let Some((vs, fs, layout)) = self.shadow_keys(d) else { continue };
-            let key = PipeKey { vs, fs, layout, blend: BlendMode::Opaque, output: Out::Uchar4, msaa: Msaa::None.gxm() };
+            let key = PipeKey { vs, fs, layout, blend: BlendMode::Opaque, output: Out::Float, msaa: Msaa::None.gxm() };
             match gpu.pipeline(&key) {
-                Some(p) => draws.push((i, p as *const Pipeline)),
+                Some(p) => {
+                    draws.push((i, p as *const Pipeline));
+                    if moving {
+                        let (lo, hi) = scene.bounds(d);
+                        moving_bounds.push(crate::sun_bounds::project(&(*sp).receiver_rows, lo.to_array(), hi.to_array(), 0.0));
+                    }
+                },
                 None => return Ok(()),
             }
         }
@@ -963,7 +982,10 @@ impl Renderer {
             }
         }
         self.timeline.end(ctx, &*target, if moving { "moving-shadow" } else { "sun-shadow" });
-        if moving { (*sp).moving_ready = true; } else { (*sp).ready = true; }
+        if moving {
+            (*sp).moving_ready = true;
+            (*sp).moving_bounds = moving_bounds;
+        } else { (*sp).ready = true; }
         Ok(())
     }
 
@@ -1483,7 +1505,12 @@ impl Renderer {
                 1 | 2 => 1,
                 _ => 2,
             };
-            let slot = (((mi * 3 + v) * 2 + mirror as usize) * 3 + tier) * 3 + lc;
+            let moving_shadow = self.mats[mi].defines.contains(&"MOVING_SHADOW") && self.sun.as_ref().is_some_and(|s| {
+                if !s.moving_ready { return true; }
+                let receiver = crate::sun_bounds::project(&s.receiver_rows, lo.to_array(), hi.to_array(), s.rad[3]);
+                s.moving_bounds.iter().any(|caster| crate::sun_bounds::may_receive(&receiver, caster, 1.0 / s.moving_k[3]))
+            });
+            let slot = ((((mi * 3 + v) * 2 + mirror as usize) * 3 + tier) * 3 + lc) * 2 + moving_shadow as usize;
             let mut pp = self.pipe_cache[slot];
             if pp.is_null() {
                 // Moving and skinned standard meshes: lights per vertex.
@@ -1494,6 +1521,7 @@ impl Renderer {
                     vs = vs.with(if n == 2 { "VERTEX_LIGHTS=2" } else { "VERTEX_LIGHTS=4" });
                     fs = fs.with("VERTEX_LIGHTS");
                 }
+                if !moving_shadow { fs.defines.retain(|d| d != "MOVING_SHADOW"); }
                 let key = PipeKey {
                     vs,
                     fs,
@@ -1619,6 +1647,7 @@ impl Renderer {
             let (ib, count) = lod.map_or((d.ib, d.count), |l| (l.0, l.1));
             g::sceGxmDraw(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, ib.cast(), count);
             st.draws += 1;
+            st.moving_receivers += moving_shadow as u32;
             st.tris += count / 3;
             st.lod += lod.is_some() as u32;
             if self.mats[mi].lit {
@@ -1736,6 +1765,14 @@ fn surface_key(variant: usize, flat: bool, n: VsNeeds) -> Key {
         }
     }
     Key::new("surface_v.cg", &defs)
+}
+
+fn want_frag(gpu: &mut Gpu, mut key: Key) {
+    gpu.want(&key);
+    if key.defines.iter().any(|d| d == "MOVING_SHADOW") {
+        key.defines.retain(|d| d != "MOVING_SHADOW");
+        gpu.want(&key);
+    }
 }
 
 /// `tier`: 0 full detail, 1 LITE (no normal, ORM or streak maps), 2 FAR.

@@ -63,11 +63,58 @@ use pc::color::encode8 as srgb8;
 
 /// Where static geometry is chunked: a grid cell (32 m near the middle,
 /// 256 m beyond), or one chunk for the whole primitive (open water: its cost
-/// is per pixel, and chunks only add draws).
+/// is per pixel, and chunks only add draws). Faces wider than a normal cell
+/// use their own bucket so they do not expand the local cells' bounds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum Cell {
     Grid(i32, i32),
     Whole,
+    /// Long faces must not pull a normal cell's AABB across the scene.
+    Oversized,
+}
+
+fn triangle_cell(p: [Vec3; 3], cell: f32) -> Cell {
+    let lo = p[0].min(p[1]).min(p[2]);
+    let hi = p[0].max(p[1]).max(p[2]);
+    if (hi.x - lo.x).max(hi.z - lo.z) > cell {
+        return Cell::Oversized;
+    }
+    let center = (p[0] + p[1] + p[2]) / 3.0;
+    let far = center.x.abs() > 140.0 || center.z.abs() > 140.0;
+    let size = if far { 256.0 } else { cell };
+    let offset = if far { 1000 } else { 0 };
+    Cell::Grid((center.x / size).floor() as i32 + offset, (center.z / size).floor() as i32 + offset)
+}
+
+/// Quantized skinning must remain a convex combination: both camera and
+/// shadow bounds use the union of the joint-transformed bind boxes.
+fn quantize_weights(w: [f32; 4]) -> [u8; 4] {
+    assert!(w.iter().all(|v| v.is_finite() && *v >= 0.0), "invalid skin weights");
+    let sum: f32 = w.iter().sum();
+    if sum == 0.0 { return [255, 0, 0, 0]; }
+    let mut q = w.map(|x| (x / sum * 255.0).round() as i32);
+    let largest = (0..4).max_by_key(|&i| q[i]).unwrap();
+    q[largest] += 255 - q.iter().sum::<i32>();
+    q.map(|x| x as u8)
+}
+
+/// Position seams shared by triangles in different buckets, including an
+/// oversized face beside a local one. Attribute seams do not break the lock.
+fn chunk_boundaries(verts: &[Vertex], tris: &[[u32; 3]], cells: &[Cell]) -> HashSet<[u32; 3]> {
+    let mut edge_cell: HashMap<([u32; 3], [u32; 3]), Cell> = HashMap::new();
+    let mut cut = HashSet::new();
+    for (t, &cell) in tris.iter().zip(cells) {
+        for k in 0..3 {
+            let (a, b) = (geometry::pos_bits(verts[t[k] as usize].pos), geometry::pos_bits(verts[t[(k + 1) % 3] as usize].pos));
+            let edge = if a <= b { (a, b) } else { (b, a) };
+            let first = *edge_cell.entry(edge).or_insert(cell);
+            if first != cell {
+                cut.insert(edge.0);
+                cut.insert(edge.1);
+            }
+        }
+    }
+    cut
 }
 
 // ------------------------------------------------------------------ builder
@@ -390,12 +437,7 @@ fn read_primitive(
             }
             let (jn, wt) = match (&joints, &weights) {
                 (Some(j), Some(w)) => {
-                    let w = w[i];
-                    let sum = (w[0] + w[1] + w[2] + w[3]).max(1e-6);
-                    let mut q = w.map(|x| (x / sum * 255.0).round() as i32);
-                    let diff = 255 - q.iter().sum::<i32>();
-                    q[0] += diff;
-                    (j[i].map(|x| x.min(255) as u8), q.map(|x| x.clamp(0, 255) as u8))
+                    (j[i].map(|x| x.min(255) as u8), quantize_weights(w[i]))
                 }
                 _ => ([0; 4], [255, 0, 0, 0]),
             };
@@ -1036,12 +1078,6 @@ fn main() {
     // shares with another chunk of the same primitive (locked in its LODs).
     type Bucket = (Vec<Vertex>, Vec<[u32; 3]>, HashSet<[u32; 3]>);
     let mut static_buckets: BTreeMap<(u32, Cell, bool, bool), Bucket> = BTreeMap::new();
-    let cell_of = |p: Vec3, cell: f32| -> Cell {
-        let far = p.x.abs() > 140.0 || p.z.abs() > 140.0;
-        let size = if far { 256.0 } else { cell };
-        let o = if far { 1000 } else { 0 };
-        Cell::Grid((p.x / size).floor() as i32 + o, (p.z / size).floor() as i32 + o)
-    };
     let mut scene_min = Vec3::splat(f32::MAX);
     let mut scene_max = Vec3::splat(f32::MIN);
     for p in &prims {
@@ -1054,23 +1090,11 @@ fn main() {
         let cells: Vec<Cell> = p
             .tris
             .iter()
-            .map(|t| if water { Cell::Whole } else { cell_of((p.verts[t[0] as usize].pos + p.verts[t[1] as usize].pos + p.verts[t[2] as usize].pos) / 3.0, a.cell) })
+            .map(|t| if water { Cell::Whole } else { triangle_cell(t.map(|i| p.verts[i as usize].pos), a.cell) })
             .collect();
         // Edges (by position, across attribute seams) whose triangles land in
         // different chunks.
-        let mut edge_cell: HashMap<([u32; 3], [u32; 3]), Cell> = HashMap::new();
-        let mut cut: HashSet<[u32; 3]> = HashSet::new();
-        for (t, &cell) in p.tris.iter().zip(&cells) {
-            for k in 0..3 {
-                let (ka, kb) = (geometry::pos_bits(p.verts[t[k] as usize].pos), geometry::pos_bits(p.verts[t[(k + 1) % 3] as usize].pos));
-                let e = if ka <= kb { (ka, kb) } else { (kb, ka) };
-                let first = *edge_cell.entry(e).or_insert(cell);
-                if first != cell {
-                    cut.insert(e.0);
-                    cut.insert(e.1);
-                }
-            }
-        }
+        let cut = chunk_boundaries(&p.verts, &p.tris, &cells);
         for (t, &cell) in p.tris.iter().zip(&cells) {
             let e = static_buckets.entry((p.material, cell, p.no_reflect, p.baked)).or_default();
             let base = e.0.len() as u32;
@@ -1486,6 +1510,64 @@ fn main() {
     println!("{}", serde_json::to_string_pretty(&stats).unwrap());
     println!("wrote {} ({:.1} MiB)", a.output.display(), pack.len() as f64 / 1048576.0);
     let _ = Vec4::ZERO;
+}
+
+#[cfg(test)]
+mod chunk_tests {
+    use super::*;
+
+    #[test]
+    fn quantized_skin_weights_stay_inside_joint_bounds() {
+        for w in [[0.0, 0.5, 0.5, 0.0], [0.0, 0.333, 0.333, 0.334], [0.25; 4], [0.0, 0.0, 0.0, 1.0], [0.0; 4]] {
+            let q = quantize_weights(w);
+            assert_eq!(q.iter().map(|&x| x as u32).sum::<u32>(), 255);
+            let points = [-120.0, -40.0, 80.0, 140.0];
+            let position: f64 = points.into_iter().zip(q).map(|(p, q)| p * q as f64 / 255.0).sum();
+            assert!((-120.0..=140.0).contains(&position));
+            if w.iter().sum::<f32>() > 0.0 {
+                for (source, encoded) in w.into_iter().zip(q) { if source == 0.0 { assert_eq!(encoded, 0); } }
+            }
+        }
+    }
+
+    #[test]
+    fn long_faces_keep_their_geometry_without_expanding_local_bounds() {
+        let long = [Vec3::new(-210.0, 5.6, 0.0), Vec3::new(210.0, 5.6, 0.0), Vec3::new(210.0, 5.62, 0.0)];
+        let local = [Vec3::new(60.0, 0.0, 0.0), Vec3::new(61.0, 0.0, 0.0), Vec3::new(60.0, 1.0, 0.0)];
+        let input = [long, local];
+        let mut groups: BTreeMap<Cell, Vec<[Vec3; 3]>> = BTreeMap::new();
+        for triangle in input { groups.entry(triangle_cell(triangle, 32.0)).or_default().push(triangle); }
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[&Cell::Oversized], [long]);
+        assert_eq!(groups[&Cell::Grid(1, 0)], [local]);
+        assert_eq!(groups.values().map(Vec::len).sum::<usize>(), input.len());
+        let local_max = groups[&Cell::Grid(1, 0)].iter().flatten().map(|v| v.x).fold(f32::MIN, f32::max);
+        assert_eq!(local_max, 61.0);
+    }
+
+    #[test]
+    fn oversized_boundaries_lock_shared_positions_across_attribute_seams() {
+        let mut verts: Vec<Vertex> = [Vec3::ZERO, Vec3::new(0.5, 0.0, 0.5), Vec3::new(0.5, 0.0, 1.0), Vec3::new(-100.0, 0.0, 0.0), Vec3::ZERO, Vec3::new(0.5, 0.0, 0.5)]
+            .into_iter().map(|pos| Vertex { pos, ..Vertex::default() }).collect();
+        verts[4].uv = Vec2::new(0.3, 0.9);
+        verts[5].normal = Vec3::X;
+        let tris = [[0, 1, 2], [3, 5, 4]];
+        let cells: Vec<_> = tris.iter().map(|tri| triangle_cell(tri.map(|i| verts[i as usize].pos), 32.0)).collect();
+        assert_eq!(cells, [Cell::Grid(0, 0), Cell::Oversized]);
+        let cut = chunk_boundaries(&verts, &tris, &cells);
+        assert_eq!(cut, HashSet::from([geometry::pos_bits(verts[0].pos), geometry::pos_bits(verts[1].pos)]));
+        // The same edge is not a chunk boundary when both triangles share a bucket.
+        assert!(chunk_boundaries(&verts, &tris, &[Cell::Whole, Cell::Whole]).is_empty());
+    }
+
+    #[test]
+    fn oversized_threshold_follows_horizontal_cell_size() {
+        let triangle = [Vec3::ZERO, Vec3::new(10.0, 0.0, 0.0), Vec3::new(10.0, 80.0, 0.0)];
+        assert_eq!(triangle_cell(triangle, 8.0), Cell::Oversized);
+        assert_eq!(triangle_cell(triangle, 32.0), Cell::Grid(0, 0));
+        let distant = triangle.map(|p| p + Vec3::X * 200.0);
+        assert_eq!(triangle_cell(distant, 32.0), Cell::Grid(1000, 1000));
+    }
 }
 
 #[cfg(test)]

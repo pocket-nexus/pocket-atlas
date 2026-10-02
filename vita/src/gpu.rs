@@ -253,6 +253,7 @@ pub enum BlendMode {
 pub enum Out {
     Uchar4,
     Half4,
+    Float,
 }
 
 pub struct Pipeline {
@@ -443,6 +444,7 @@ impl Gpu {
         let output = match key.output {
             Out::Uchar4 => Output::Uchar4,
             Out::Half4 => Output::Half4,
+            Out::Float => Output::Float,
         };
         let fp = match program::fragment_program(self.patcher, &fs.reg, output, key.msaa, blend, vs.reg.program()) {
             Ok(fp) => fp,

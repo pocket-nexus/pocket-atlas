@@ -70,10 +70,10 @@ uniform sampler2D uMovingShadow;
 uniform float4 uMovingShadowK; // same depth range and UV projection, smaller moving map
 #endif
 
-// Packed distance along the light (shadow_f.cg).
+// Orthographic distance stored as R32F and sampled without filtering.
 float shadowDepth(float2 uv)
 {
-    return dot(tex2D(uShadow, uv).rgb, float3(1.0, 1.0 / 255.0, 1.0 / 65025.0));
+    return tex2D(uShadow, uv).r;
 }
 
 // Share of the sun that reaches `sp`: the four map texels around it
@@ -99,16 +99,18 @@ float sunLit(float3 sp)
     lit = lerp(lerp(s00, s10, f.x), lerp(s01, s11, f.x), f.y);
 #endif
 #ifdef MOVING_SHADOW
+    // A moving caster cannot darken a pixel already fully occluded by the
+    // static map: min(0, movingLit) is still zero. Depth comparisons stay float.
+    if (lit <= 0.0) return 0.0;
     t = float2(dot(uSunMat[0], wp), dot(uSunMat[1], wp)) * uMovingShadowK.w - 0.5;
     f = frac(t);
     uv = (t - f + 0.5) / uMovingShadowK.w;
     o = 1.0 / uMovingShadowK.w;
     d = (-dot(uSunDir.xyz, sp) - uMovingShadowK.x) * uMovingShadowK.y - uMovingShadowK.z;
-    float3 decode = float3(1.0, 1.0 / 255.0, 1.0 / 65025.0);
-    s00 = step(d, dot(tex2D(uMovingShadow, uv).rgb, decode));
-    s10 = step(d, dot(tex2D(uMovingShadow, uv + float2(o, 0.0)).rgb, decode));
-    s01 = step(d, dot(tex2D(uMovingShadow, uv + float2(0.0, o)).rgb, decode));
-    s11 = step(d, dot(tex2D(uMovingShadow, uv + float2(o, o)).rgb, decode));
+    s00 = step(d, tex2D(uMovingShadow, uv).r);
+    s10 = step(d, tex2D(uMovingShadow, uv + float2(o, 0.0)).r);
+    s01 = step(d, tex2D(uMovingShadow, uv + float2(0.0, o)).r);
+    s11 = step(d, tex2D(uMovingShadow, uv + float2(o, o)).r);
     lit = min(lit, lerp(lerp(s00, s10, f.x), lerp(s01, s11, f.x), f.y));
 #endif
     return lit;
@@ -336,24 +338,35 @@ half4 main(
 
 #ifdef SUN
     {
-#if defined(FAR) && !defined(MOVING_SHADOW)
-        float lit = 1.0;
-#else
-        // Offset along the geometric normal against self-shadowing acne.
-        float lit = sunLit(vWorld + (float3)Ng * uSunRad.w);
-#endif
         float3 L = uSunDir.xyz;
         float ndl = saturate(dot((float3)N, L));
-        float3 E = uSunRad.rgb * (lit * ndl);
-        diffuse += (half3)(E * INV_PI) * diffuseColor;
-#if defined(SUN_SPEC) && !defined(NO_SPECULAR)
-        if (lit * ndl > 0.0) {
-            float3 H = normalize(L + (float3)V);
-            float alpha = (float)(roughness * roughness);
-            float dotNV = saturate(dot((float3)N, (float3)V));
-            specular += (half3)(E * (float3)F_Schlick(specularColor, (half)saturate(dot((float3)V, H))) * (V_GGX_SmithCorrelated(alpha, ndl, dotNV) * D_GGX(alpha, saturate(dot((float3)N, H)))));
-        }
+        // Both Lambert and GGX are multiplied by ndl. Back-facing surfaces
+        // therefore need neither the static nor the moving shadow lookup.
+        if (ndl > 0.0) {
+#if defined(FAR) && !defined(MOVING_SHADOW)
+            float lit = 1.0;
+#else
+            // Offset along the geometric normal against self-shadowing acne.
+            float lit = sunLit(vWorld + (float3)Ng * uSunRad.w);
 #endif
+            float3 E = uSunRad.rgb * (lit * ndl);
+            diffuse += (half3)(E * INV_PI) * diffuseColor;
+#if defined(SUN_SPEC) && !defined(NO_SPECULAR)
+            // Palette factors select features; actual surface properties
+            // came from UVs above. Apply the same lobe selection that the
+            // renderer uses for individual solid materials before batching.
+            if (lit > 0.0
+#ifdef VERTEX_PBR
+                && (roughness < (half)0.6 || metalness > (half)0.3)
+#endif
+            ) {
+                float3 H = normalize(L + (float3)V);
+                float alpha = (float)(roughness * roughness);
+                float dotNV = saturate(dot((float3)N, (float3)V));
+                specular += (half3)(E * (float3)F_Schlick(specularColor, (half)saturate(dot((float3)V, H))) * (V_GGX_SmithCorrelated(alpha, ndl, dotNV) * D_GGX(alpha, saturate(dot((float3)N, H)))));
+            }
+#endif
+        }
     }
 #endif
 

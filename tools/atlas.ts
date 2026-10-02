@@ -33,6 +33,7 @@ import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, write
 import { resolve } from "node:path";
 import { packageVitaVpk } from "../vendor/pocketjs/tools/vita-package.ts";
 import { prepareVitaUsb } from "../vendor/pocketjs/tools/vita-usb.ts";
+import { VitaUsbClient } from "../vendor/pocketjs/tools/vita-dev-client.ts";
 
 const ROOT = resolve(import.meta.dir, "..");
 const POCKETJS = resolve(ROOT, "vendor/pocketjs");
@@ -243,12 +244,17 @@ async function lint(): Promise<void> {
 // Every measurement names the render profile, which resets the device's
 // switches and governor to the profile's; `settings` then overrides them.
 const RENDER = value("--render", "vita30");
-const STATUS = resolve(USB_SHARE, `pocket-vita/${title}/status.json`);
 
 /** The device's engine status (the USB host replaces the file while it is read). */
 function engine(): any {
   for (let i = 0; ; i++) {
-    try { return JSON.parse(readFileSync(STATUS, "utf8")).engine ?? {}; } catch (e) { if (i > 20) throw e; }
+    try {
+      const status = new VitaUsbClient(USB_SHARE, title).status();
+      const runtime = JSON.parse(readFileSync(`${OUT_DIR}/${output}.runtime.json`, "utf8"));
+      if (status.nativeBuild !== runtime.nativeBuild) throw new Error("another native build owns the Vita; refusing to measure it");
+      if (status.error || status.engine?.renderError || status.engine?.errors?.length) throw new Error(`Vita renderer error: ${JSON.stringify(status.error || status.engine.renderError || status.engine.errors)}`);
+      return status.engine ?? {};
+    } catch (e) { if (i > 20) throw e; }
     Bun.sleepSync(50);
   }
 }
@@ -326,7 +332,9 @@ async function profile(): Promise<void> {
     // Jittered, so samples do not lock onto one parity of alternating frames.
     await Bun.sleep(280 + Math.random() * 90);
     const seen = new Map<string, number>();
-    for (const [name, ms] of engine().passes ?? []) seen.set(name, (seen.get(name) ?? 0) + ms);
+    const e = engine();
+    if (e.stage !== "running" || e.place !== PLACE) throw new Error("requested place changed during GPU profiling");
+    for (const [name, ms] of e.passes ?? []) seen.set(name, (seen.get(name) ?? 0) + ms);
     for (const [name, ms] of seen) {
       const a = sum.get(name) ?? { ms: 0, frames: 0 };
       sum.set(name, { ms: a.ms + ms, frames: a.frames + 1 });
@@ -355,7 +363,7 @@ async function settle(): Promise<void> {
   await Bun.sleep(2000);
   for (let i = 0; i < 600; i++) {
     const e = engine();
-    if (!(e.main?.missing || e.reflection?.missing || e.pending)) return;
+    if (e.stage === "running" && e.place === PLACE && !(e.main?.missing || e.reflection?.missing || e.pending)) return;
     if (i % 10 === 0) console.log(`waiting for programs: ${e.pending ?? 0} compiling, ${e.main?.missing ?? 0} + ${e.reflection?.missing ?? 0} draws missing`);
     await Bun.sleep(500);
   }
@@ -426,18 +434,19 @@ async function vpk(): Promise<void> {
 async function shots(): Promise<void> {
   const seconds = Number(value("--seconds", "90"));
   await Bun.write(`${SHARE}/control.json`, JSON.stringify({ place: PLACE, renderProfile: RENDER }) + "\n");
-  await Bun.sleep(3000);
+  await settle();
   const acc = new Map<string, { ms: number[]; steps: Set<number>; levels: Set<number> }>();
   const end = Date.now() + seconds * 1000;
   while (Date.now() < end) {
     try {
-      const e = JSON.parse(readFileSync(STATUS, "utf8")).engine;
+      const e = engine();
+      if (e.stage !== "running" || e.place !== PLACE) throw new Error("requested place is not running");
       const a = acc.get(e.view.shot) ?? { ms: [], steps: new Set(), levels: new Set() };
       a.ms.push(e.frameMs);
       a.steps.add(e.settings.step);
       a.levels.add(e.settings.level);
       acc.set(e.view.shot, a);
-    } catch { /* replaced while read */ }
+    } catch (e) { throw new Error(`shot measurement interrupted: ${e}`); }
     await Bun.sleep(500);
   }
   console.log(`render profile ${RENDER}`);

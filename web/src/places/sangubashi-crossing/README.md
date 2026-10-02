@@ -85,7 +85,7 @@ bun scripts/export-place.ts --place sangubashi-crossing --seconds 64 \
   --base http://127.0.0.1:5198 --out ../.pocket-build/validation/sangubashi/export
 ```
 
-## Offline Vita preparation
+## Vita adaptation
 
 The default web geometry remains the full reference. `geometry=handheld`
 selects the shared daytime geometry profile: the train retains all eight
@@ -125,22 +125,60 @@ geometry and animation storage. The native renderer gives moving rigid
 casters a separate shadow map while retaining the cached street shadows.
 Skinned particle bounds cover every joint, including the short final batch.
 
-The handheld export with a 512 px texture cap cooks to 39.03 MiB: 667 total
+The handheld export with a 512 px texture cap cooks to 38.97 MiB: 674 total
 draws, 416,849 LOD0 triangles, 299 animated nodes and 11 skins. The offline
 `vita30` step-0 scan samples 960 times at three camera positions for each of
-the six shots. It peaks at 358 main-pass draws, 234,799 triangles and 48,864
+the six shots. It peaks at 349 main-pass draws, 215,419 triangles and 48,864
 moving triangles. These remain above the planning guides (250 / 130k / 30k);
 the counts are conservative, omit extra render passes and do not replace GPU
-profiling. Budget and frame-rate acceptance are still open.
+profiling. Long faces are isolated from local static chunks so rails and
+wires cannot keep distant buildings at near-camera LOD and shader detail.
+Budget and frame-rate acceptance are still open.
 
-These are offline steps. `build` produces a Devkit runtime VPK/SELF; the place
-and atlas packs remain separate. A standalone `PKAT00001` package still needs
-the new shaders compiled by SceShaccCg on a free console. Host shader lint,
-cross-compilation and CPU budget scans do not establish device compilation,
-GPU time, frame rate or physical screen quality. A subsequent authorized
-native replacement received a successful startup receipt, but another task
-replaced the runtime and shared shaders during scene compilation. Device
-testing is now paused at the user's request; Sangubashi compilation, rendering
-and performance acceptance remain unverified.
+`build` produces a Devkit runtime VPK/SELF; the place and atlas packs remain
+separate. On 2026-10-02 the USB deployment entered this place, completed
+SceShaccCg compilation with no shader errors or missing draws, and returned
+960×544 GXM captures including the passing train. This is device evidence;
+physical button and screen acceptance is still separate.
+
+At the Train shot's halfway camera, time 19.73 s, `vita30` step 0, 4× MSAA,
+480×272 HDR, the initial serialized GPU total was 60.21 ms (main 50.97 ms).
+The last fully compiled trial, using directly sampled stored depth and
+conservative moving-shadow receiver culling, measured 54.23 ms (main 45.00
+ms, moving map 1.70 ms). This still fails the 30 fps target. The wider moving
+shadow bias was checked in device captures and removed the train's stripes.
+
+The current build stores the same normalized depth in a single-channel R32F
+colour target, recovering the stored-depth trial's additional 17 MiB of
+CDRAM. It retains receiver culling and separates rough non-metal static
+palettes from sun-GGX palettes. A depth-prepass experiment was measured and
+removed because it increased GPU cost. No scene geometry was removed for
+these renderer optimizations.
+
+Native build `3b1aa4a3a7430b3902db398b15e9eba6` was successfully replaced in
+Pocket Devkit and entered shader compilation. The last status had 26 new
+programs compiled, 270 pending, no reported shader errors, and 39 MiB free
+CDRAM. USB disconnected and the Vita disappeared from the host's USB device
+list before this build completed compilation. The host has been restarted
+and is waiting for reconnection. Final R32F captures, the six-shot continuous
+run, re-entry/resource checks and standalone packaging are still pending.
+Previous device captures and timings must not be presented as this build's
+acceptance. Host build and shader lint do not establish SceShaccCg completion
+or runtime image correctness.
+
+To repeat a measurement on an existing USB host (replace the share path):
+
+```sh
+bun tools/atlas.ts native --place sangubashi-crossing --share /path/to/share
+bun tools/atlas.ts ctl '{"place":"sangubashi-crossing"}' --share /path/to/share
+# Wait for this place to be running with pending=0 and missing=0.
+bun tools/atlas.ts profile '{"step":0,"hold":true}' \
+  --place sangubashi-crossing --shot Train --time 19.73 --share /path/to/share
+bun tools/atlas.ts shots --place sangubashi-crossing --seconds 146 \
+  --share /path/to/share
+```
+
+The measurement tools reject stale status, another native build, shader
+errors and a changed place rather than reporting another task's results.
 The existing native renderer has no audio path; the procedural railway sound
-remains a web feature. The PocketJS pin and Vita transport are unchanged.
+remains a web feature. The PocketJS pin and transport implementation are unchanged.

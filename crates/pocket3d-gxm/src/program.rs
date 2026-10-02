@@ -224,6 +224,8 @@ pub enum Output {
     /// Packed 32-bit float formats (F11F11F10, SE5M9M9M9) are written through
     /// half registers and packed by the output unit.
     Half2,
+    /// Single-channel F32 (32-bit) targets.
+    Float,
 }
 
 /// # Safety
@@ -241,6 +243,7 @@ pub unsafe fn fragment_program(
         Output::Uchar4 => g::SceGxmOutputRegisterFormat_SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4,
         Output::Half4 => g::SceGxmOutputRegisterFormat_SCE_GXM_OUTPUT_REGISTER_FORMAT_HALF4,
         Output::Half2 => g::SceGxmOutputRegisterFormat_SCE_GXM_OUTPUT_REGISTER_FORMAT_HALF2,
+        Output::Float => g::SceGxmOutputRegisterFormat_SCE_GXM_OUTPUT_REGISTER_FORMAT_FLOAT,
     };
     let mut out: *mut g::SceGxmFragmentProgram = ptr::null_mut();
     let r = g::sceGxmShaderPatcherCreateFragmentProgram(

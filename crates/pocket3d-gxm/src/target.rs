@@ -16,6 +16,8 @@ pub enum ColorFormat {
     Rgba16f,
     /// Packed float RGB, 32 bits per pixel.
     R11G11B10f,
+    /// Single-channel 32-bit float, sampled through the red component.
+    R32f,
 }
 
 impl ColorFormat {
@@ -24,6 +26,7 @@ impl ColorFormat {
             ColorFormat::Rgba8 => g::SceGxmColorFormat_SCE_GXM_COLOR_FORMAT_U8U8U8U8_ABGR,
             ColorFormat::Rgba16f => g::SceGxmColorFormat_SCE_GXM_COLOR_FORMAT_F16F16F16F16_ABGR,
             ColorFormat::R11G11B10f => g::SceGxmColorFormat_SCE_GXM_COLOR_FORMAT_F11F11F10_RGB,
+            ColorFormat::R32f => g::SceGxmColorFormat_SCE_GXM_COLOR_FORMAT_F32_R,
         }
     }
 
@@ -32,6 +35,7 @@ impl ColorFormat {
             ColorFormat::Rgba8 => g::SceGxmTextureFormat_SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR,
             ColorFormat::Rgba16f => g::SceGxmTextureFormat_SCE_GXM_TEXTURE_FORMAT_F16F16F16F16_ABGR,
             ColorFormat::R11G11B10f => g::SceGxmTextureFormat_SCE_GXM_TEXTURE_FORMAT_F11F11F10_RGB,
+            ColorFormat::R32f => g::SceGxmTextureFormat_SCE_GXM_TEXTURE_FORMAT_F32_RRRR,
         }
     }
 
@@ -55,6 +59,7 @@ impl ColorFormat {
             ColorFormat::Rgba8 => Output::Uchar4,
             ColorFormat::Rgba16f => Output::Half4,
             ColorFormat::R11G11B10f => Output::Half4,
+            ColorFormat::R32f => Output::Float,
         }
     }
 }
