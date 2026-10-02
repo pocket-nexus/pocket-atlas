@@ -395,7 +395,10 @@ pub fn cook(input: &Path, output: &Path) {
         .iter()
         .map(|s| {
             let mut name = [0; 16];
-            let len = s.name.len().min(15);
+            let mut len = s.name.len().min(15);
+            while !s.name.is_char_boundary(len) {
+                len -= 1;
+            }
             name[..len].copy_from_slice(&s.name.as_bytes()[..len]);
             let key = |k: &pc::ShotKey| {
                 [
@@ -500,7 +503,9 @@ fn batch_geometry(w: &mut Writer, draws: &mut [pp::Draw], materials: &[pp::Mater
             let mut icount = 0;
             while end < group.len() {
                 let d = &draws[group[end]];
-                if count + d.vertices.count > 65535 || icount + d.indices.count > 65532 {
+                if count + d.vertices.count > 65535
+                    || (icount + d.indices.count) as usize > pp::MAX_INDICES
+                {
                     break;
                 }
                 count += d.vertices.count;

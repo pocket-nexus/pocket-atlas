@@ -12,6 +12,8 @@ pub const DOUBLE_SIDED: u32 = 2;
 pub const WET: u32 = 4;
 pub const NO_REFLECT: u32 = 8;
 pub const NO_DEPTH_WRITE: u32 = 16;
+/// GE PRIM has a 16-bit vertex/index count. Keep complete triangles.
+pub const MAX_INDICES: usize = 65532;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default, Pod, Zeroable)]
@@ -155,6 +157,16 @@ pub fn validate(bytes: &[u8]) -> Result<&Header, &'static str> {
     if h.frames == 0 || !h.fps.is_finite() || h.fps <= 0.0 {
         return Err("animation clock");
     }
+    if !h.fog_near.is_finite()
+        || !h.fog_far.is_finite()
+        || h.fog_far <= h.fog_near
+        || !h.door_radius.is_finite()
+        || h.door_radius < 0.0
+        || !h.door_travel.is_finite()
+        || h.door_trigger.iter().any(|v| !v.is_finite())
+    {
+        return Err("environment values");
+    }
     let ts = slice::<Texture>(bytes, h.textures)?;
     for t in ts {
         if !t.width.is_power_of_two()
@@ -188,6 +200,12 @@ pub fn validate(bytes: &[u8]) -> Result<&Header, &'static str> {
         }
         if m.grid.iter().any(|&v| v == 0)
             || !m.fps.is_finite()
+            || m.fps < 0.0
+            || m.grid[0]
+                .checked_mul(m.grid[1])
+                .is_none_or(|cells| m.frames > cells)
+            || m.alpha_test > 255
+            || m.depth_bias > i32::MAX as u32
             || m.uv_speed.iter().any(|v| !v.is_finite())
         {
             return Err("material animation");
@@ -210,6 +228,13 @@ pub fn validate(bytes: &[u8]) -> Result<&Header, &'static str> {
         {
             return Err("node values");
         }
+        if !valid_rotation(&n.rotation)
+            || slice::<f32>(bytes, n.track)?
+                .chunks_exact(7)
+                .any(|key| !valid_rotation(&key[3..7]))
+        {
+            return Err("node rotation");
+        }
     }
     for d in slice::<Draw>(bytes, h.draws)? {
         if d.material as usize >= ms.len() || (d.node != NONE && d.node as usize >= ns.len()) {
@@ -226,9 +251,14 @@ pub fn validate(bytes: &[u8]) -> Result<&Header, &'static str> {
         if d.vertices.offset % 16 != 0
             || d.indices.offset % 16 != 0
             || is.len() % 3 != 0
+            || is.len() > MAX_INDICES
+            || vs.len() > 65535
             || is.iter().any(|&i| i as usize >= vs.len())
         {
             return Err("GE geometry");
+        }
+        if !valid_bounds(&d.min, &d.max) {
+            return Err("draw bounds");
         }
         let ws = slice::<Weights>(bytes, d.weights)?;
         let js = slice::<Joint>(bytes, d.joints)?;
@@ -236,29 +266,54 @@ pub fn validate(bytes: &[u8]) -> Result<&Header, &'static str> {
             return Err("skin layout");
         }
         if js.len() > 64
-            || js.iter().any(|j| j.node as usize >= ns.len())
+            || js
+                .iter()
+                .any(|j| j.node as usize >= ns.len() || j.inverse.iter().any(|v| !v.is_finite()))
             || ws
                 .iter()
                 .any(|w| (0..4).any(|i| w.weights[i] != 0 && w.joints[i] as usize >= js.len()))
         {
             return Err("skin joint");
         }
+        if ws
+            .iter()
+            .any(|w| w.weights.iter().map(|&v| v as u32).sum::<u32>() != 255)
+        {
+            return Err("skin weights");
+        }
     }
     let shots = slice::<Shot>(bytes, h.shots)?;
     if shots.is_empty()
-        || shots
-            .iter()
-            .any(|s| !s.duration.is_finite() || s.duration <= 0.0)
+        || shots.iter().any(|s| {
+            !s.duration.is_finite()
+                || s.duration <= 0.0
+                || !valid_camera(&s.from)
+                || !valid_camera(&s.to)
+        })
     {
         return Err("camera shots");
     }
-    slice::<[f32; 6]>(bytes, h.dry_boxes)?;
-    slice::<[f32; 6]>(bytes, h.walkable)?;
+    for b in slice::<[f32; 6]>(bytes, h.dry_boxes)?
+        .iter()
+        .chain(slice::<[f32; 6]>(bytes, h.walkable)?)
+    {
+        if !valid_bounds(&b[..3], &b[3..]) {
+            return Err("volume bounds");
+        }
+    }
     for l in slice::<Light>(bytes, h.lights)? {
         if l.track.count != 0 && Some(l.track.count) != h.frames.checked_mul(4) {
             return Err("light track");
         }
-        slice::<f32>(bytes, l.track)?;
+        if !l.radius.is_finite()
+            || l.radius < 0.0
+            || l.pos
+                .iter()
+                .chain(slice::<f32>(bytes, l.track)?)
+                .any(|v| !v.is_finite())
+        {
+            return Err("light values");
+        }
     }
     for d in h.doors {
         if d != NONE && d as usize >= ns.len() {
@@ -266,6 +321,21 @@ pub fn validate(bytes: &[u8]) -> Result<&Header, &'static str> {
         }
     }
     Ok(h)
+}
+
+fn valid_rotation(q: &[f32]) -> bool {
+    let norm: f32 = q.iter().map(|v| v * v).sum();
+    norm.is_finite() && (0.99..=1.01).contains(&norm)
+}
+fn valid_bounds(lo: &[f32], hi: &[f32]) -> bool {
+    lo.iter()
+        .zip(hi)
+        .all(|(a, b)| a.is_finite() && b.is_finite() && a <= b)
+}
+fn valid_camera(key: &[f32; 7]) -> bool {
+    key.iter().all(|v| v.is_finite()) && (1.0..179.0).contains(&key[6])
+        // The rig uses Y as up; a coincident or vertical target has no basis.
+        && (key[0] - key[3]) * (key[0] - key[3]) + (key[2] - key[5]) * (key[2] - key[5]) > 1e-8
 }
 
 #[cfg(test)]
@@ -283,6 +353,7 @@ mod tests {
         h.bytes = n as u32;
         h.frames = 1;
         h.fps = 30.0;
+        h.fog_far = 100.0;
         h.doors = [NONE; 2];
         h.shots = Span {
             offset: core::mem::size_of::<Header>() as u32,
@@ -291,6 +362,8 @@ mod tests {
         bytes[..core::mem::size_of::<Header>()].copy_from_slice(bytemuck::bytes_of(&h));
         let mut shot = Shot::zeroed();
         shot.duration = 12.0;
+        shot.from = [0.0, 1.0, 2.0, 0.0, 1.0, 0.0, 45.0];
+        shot.to = shot.from;
         bytes[core::mem::size_of::<Header>()..].copy_from_slice(bytemuck::bytes_of(&shot));
         data
     }
@@ -324,5 +397,104 @@ mod tests {
             }
         )
         .is_err());
+    }
+
+    #[test]
+    fn rejects_camera_and_environment_values_before_gpu_submission() {
+        for component in 0..7 {
+            let mut data = fixture();
+            let offset = core::mem::size_of::<Header>() / 4 + 4 + component;
+            data[offset] = f32::NAN.to_bits();
+            assert!(validate(bytemuck::cast_slice(&data)).is_err());
+        }
+        let mut data = fixture();
+        let offset = core::mem::size_of::<Header>() / 4 + 4;
+        data[offset + 2] = 0.0f32.to_bits(); // coincident eye and target
+        assert!(validate(bytemuck::cast_slice(&data)).is_err());
+        let mut data = fixture();
+        let h = bytemuck::from_bytes_mut::<Header>(
+            &mut bytemuck::cast_slice_mut::<_, u8>(&mut data)[..core::mem::size_of::<Header>()],
+        );
+        h.fog_far = h.fog_near;
+        assert!(validate(bytemuck::cast_slice(&data)).is_err());
+    }
+
+    #[test]
+    fn rejects_corrupt_skin_and_ge_draw_limits() {
+        fn with<T: Pod>(data: &mut std::vec::Vec<u32>, items: &[T]) -> Span {
+            data.resize(data.len().next_multiple_of(4), 0);
+            let offset = data.len() * 4;
+            let payload = bytemuck::cast_slice::<_, u8>(items);
+            data.resize(data.len() + payload.len().div_ceil(4), 0);
+            bytemuck::cast_slice_mut::<_, u8>(data)[offset..offset + payload.len()]
+                .copy_from_slice(payload);
+            Span {
+                offset: offset as u32,
+                count: items.len() as u32,
+            }
+        }
+        let mut data = fixture();
+        let material = with(
+            &mut data,
+            &[Material {
+                texture: NONE,
+                grid: [1, 1],
+                ..Default::default()
+            }],
+        );
+        let node = with(
+            &mut data,
+            &[Node {
+                parent: NONE,
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                scale: [1.0; 3],
+                ..Default::default()
+            }],
+        );
+        let draw = Draw {
+            vertices: with(&mut data, &[Vertex::default(); 3]),
+            indices: with(&mut data, &[0u16, 1, 2]),
+            weights: with(
+                &mut data,
+                &[Weights {
+                    joints: [0; 4],
+                    weights: [255, 0, 0, 0],
+                }; 3],
+            ),
+            joints: with(
+                &mut data,
+                &[Joint {
+                    node: 0,
+                    inverse: [0.0; 16],
+                }],
+            ),
+            node: NONE,
+            ..Default::default()
+        };
+        let draws = with(&mut data, &[draw]);
+        let size = data.len() as u32 * 4;
+        let h = bytemuck::from_bytes_mut::<Header>(
+            &mut bytemuck::cast_slice_mut::<_, u8>(&mut data)[..core::mem::size_of::<Header>()],
+        );
+        h.bytes = size;
+        h.materials = material;
+        h.nodes = node;
+        h.draws = draws;
+        assert!(validate(bytemuck::cast_slice(&data)).is_ok());
+        let mut bad = data.clone();
+        bad[draw.joints.offset as usize / 4 + 1] = f32::NAN.to_bits();
+        assert_eq!(
+            validate(bytemuck::cast_slice(&bad)).err(),
+            Some("skin joint")
+        );
+        let mut bad = data.clone();
+        bad[draw.weights.offset as usize / 4 + 1] = 0;
+        assert_eq!(
+            validate(bytemuck::cast_slice(&bad)).err(),
+            Some("skin weights")
+        );
+        let mut bad = data;
+        bad[draws.offset as usize / 4 + 3] = 65535; // GE rejects counts above 65532, even if a span fits.
+        assert!(validate(bytemuck::cast_slice(&bad)).is_err());
     }
 }

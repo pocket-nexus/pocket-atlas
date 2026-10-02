@@ -21,6 +21,29 @@ pub struct Stats {
     pub triangles: u32,
     pub gpu_us: u32,
 }
+/// Each pass owns one purpose; stencil/reflection state is set by frame().
+#[derive(Clone, Copy, PartialEq)]
+enum Pass {
+    WetMask,
+    Reflection,
+    WetSurface,
+    Opaque,
+    Transparent,
+}
+impl Pass {
+    fn includes(self, draw: &pp::Draw, material: &pp::Material) -> bool {
+        let wet = material.flags & pp::WET != 0;
+        let alpha = material.flags & pp::ALPHA != 0;
+        match self {
+            Self::WetMask => wet,
+            Self::Reflection => !wet && !alpha && draw.flags & pp::NO_REFLECT == 0,
+            Self::WetSurface => wet && !alpha,
+            Self::Opaque => !wet && !alpha,
+            Self::Transparent => alpha,
+        }
+    }
+}
+
 unsafe fn matrix(kind: MatrixMode, m: Mat4) {
     let data = Align16(m.to_cols_array());
     sceGuSetMatrix(kind, &*(data.0.as_ptr() as *const ScePspFMatrix4));
@@ -116,8 +139,7 @@ impl Renderer {
         s: &Scene,
         index: usize,
         time: f32,
-        mirror: bool,
-        mask: bool,
+        pass: Pass,
         reflect: bool,
         stats: &mut Stats,
         indices: (u32, *const c_void),
@@ -127,14 +149,10 @@ impl Renderer {
         if d.indices.count == 0 {
             return;
         }
+        let mirror = pass == Pass::Reflection;
+        let mask = pass == Pass::WetMask;
         sceGuDepthOffset(mat.depth_bias as i32);
         let wet = mat.flags & pp::WET != 0;
-        if mask && !wet {
-            return;
-        }
-        if mirror && (wet || d.flags & pp::NO_REFLECT != 0 || mat.flags & pp::ALPHA != 0) {
-            return;
-        }
         let mut model = s.model(d);
         if mirror {
             model = Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0)) * model;
@@ -269,21 +287,14 @@ impl Renderer {
         s: &Scene,
         clip: &[Vec4; 6],
         time: f32,
-        pass: u32,
+        pass: Pass,
         reflect: bool,
         stats: &mut Stats,
     ) {
         for group in &s.batches {
             let d = &s.draws[group[0]];
             let m = &s.materials[d.material as usize];
-            let wet = m.flags & pp::WET != 0;
-            let alpha = m.flags & pp::ALPHA != 0;
-            if (pass == 0 && !wet)
-                || (pass == 1 && (wet || alpha || d.flags & pp::NO_REFLECT != 0))
-                || (pass == 2 && (!wet || alpha))
-                || (pass == 3 && (wet || alpha))
-                || (pass == 4 && !alpha)
-            {
+            if !pass.includes(d, m) {
                 continue;
             }
             let is_visible = |i: usize| {
@@ -298,7 +309,7 @@ impl Renderer {
             if count == 0 {
                 continue;
             }
-            if group.len() == 1 || count > 65532 {
+            if group.len() == 1 || count as usize > pp::MAX_INDICES {
                 for &i in group {
                     if is_visible(i) {
                         let d = &s.draws[i];
@@ -306,8 +317,7 @@ impl Renderer {
                             s,
                             i,
                             time,
-                            pass == 1,
-                            pass == 0,
+                            pass,
                             reflect,
                             stats,
                             (
@@ -337,8 +347,7 @@ impl Renderer {
                     s,
                     group[0],
                     time,
-                    pass == 1,
-                    pass == 0,
+                    pass,
                     reflect,
                     stats,
                     (count, indices as _),
@@ -397,7 +406,7 @@ impl Renderer {
                 StencilOperation::Replace,
             );
             sceGuPixelMask(0x00ffffff);
-            self.pass(s, &clip, time, 0, reflect, &mut stats);
+            self.pass(s, &clip, time, Pass::WetMask, reflect, &mut stats);
             sceGuPixelMask(0);
             sceGuDepthMask(0);
             sceGuClear(ClearBuffer::DEPTH_BUFFER_BIT);
@@ -407,14 +416,14 @@ impl Renderer {
                 StencilOperation::Keep,
                 StencilOperation::Keep,
             );
-            self.pass(s, &mirror_clip, time, 1, reflect, &mut stats);
+            self.pass(s, &mirror_clip, time, Pass::Reflection, reflect, &mut stats);
             sceGuDisable(GuState::StencilTest);
             sceGuDepthMask(0);
             sceGuClear(ClearBuffer::DEPTH_BUFFER_BIT);
         }
-        self.pass(s, &clip, time, 2, reflect, &mut stats);
-        self.pass(s, &clip, time, 3, reflect, &mut stats);
-        self.pass(s, &clip, time, 4, reflect, &mut stats);
+        self.pass(s, &clip, time, Pass::WetSurface, reflect, &mut stats);
+        self.pass(s, &clip, time, Pass::Opaque, reflect, &mut stats);
+        self.pass(s, &clip, time, Pass::Transparent, reflect, &mut stats);
         sceGuDepthOffset(0);
         self.halos(s, rig, time);
         if rain {

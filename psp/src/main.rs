@@ -4,10 +4,11 @@ extern crate alloc;
 
 mod audio;
 mod camera;
+mod dev;
 mod renderer;
 mod scene;
 
-use alloc::{format, vec, vec::Vec};
+use alloc::{vec, vec::Vec};
 use pocket3d_place_psp as pp;
 use psp::{sys::*, Align16};
 
@@ -50,20 +51,9 @@ unsafe fn load(path: &[u8]) -> Result<(Vec<Align16<[u8; 16]>>, usize), &'static 
     sceIoClose(fd);
     Ok((bytes, len))
 }
-unsafe fn write(path: &[u8], text: &str) {
-    let fd = sceIoOpen(
-        path.as_ptr(),
-        IoOpenFlags::WR_ONLY | IoOpenFlags::CREAT | IoOpenFlags::TRUNC,
-        0o666,
-    );
-    if fd.0 >= 0 {
-        sceIoWrite(fd, text.as_ptr() as _, text.len());
-        sceIoClose(fd);
-    }
-}
 unsafe fn run() {
     scePowerSetClockFrequency(333, 333, 166);
-    psp::dprintln!("Pocket Atlas / PSP\nLoading Rainy Night Konbini...");
+    psp::dprintln!("Pocket Atlas / PSP\nLoading scene.place...");
     let (storage, len) = match load(b"scene.place\0").or_else(|_| load(b"host0:/scene.place\0")) {
         Ok(v) => v,
         Err(e) => {
@@ -100,13 +90,12 @@ unsafe fn run() {
     let mut hud = false;
     let mut muted = false;
     let mut was_open = false;
-    let mut nonce = 0u32;
+    let mut dev = dev::Session::connect();
     let mut frame = 0u32;
     let mut work_sum = 0u64;
     let mut gpu_sum = 0u64;
     let mut max_work = 0u32;
     let mut sample_start = now;
-    let mut control = [0u8; 128];
     loop {
         let start = sceKernelGetSystemTimeLow();
         let dt = (start.wrapping_sub(now) as f32 / 1e6).min(0.1);
@@ -146,35 +135,14 @@ unsafe fn run() {
             reflection = !reflection;
         }
         if frame % 30 == 0 {
-            let fd = sceIoOpen(b"host0:/control.txt\0".as_ptr(), IoOpenFlags::RD_ONLY, 0);
-            if fd.0 >= 0 {
-                let n = sceIoRead(fd, control.as_mut_ptr() as _, 127);
-                sceIoClose(fd);
-                if n > 0 {
-                    if let Ok(s) = core::str::from_utf8(&control[..n as usize]) {
-                        let mut parts = s.split_whitespace();
-                        let shot = parts.next().and_then(|v| v.parse::<i32>().ok());
-                        let time = parts.next().and_then(|v| v.parse::<f32>().ok());
-                        let pause = parts.next().and_then(|v| v.parse::<u32>().ok());
-                        let r = parts.next().and_then(|v| v.parse::<u32>().ok());
-                        let refl = parts.next().and_then(|v| v.parse::<u32>().ok());
-                        let id = parts.next().and_then(|v| v.parse::<u32>().ok());
-                        if let (Some(s), Some(t), Some(p), Some(r), Some(rf), Some(id)) =
-                            (shot, time, pause, r, refl, id)
-                        {
-                            if id != nonce && t.is_finite() {
-                                nonce = id;
-                                frozen = t;
-                                paused = p != 0;
-                                rain = r != 0;
-                                reflection = rf != 0;
-                                if s >= 0 {
-                                    rig.cut(s as usize % scene.shots.len(), scene.shots);
-                                    rig.shot_time = scene.shots[rig.shot].duration * 0.5;
-                                }
-                            }
-                        }
-                    }
+            if let Some(command) = dev.poll() {
+                frozen = command.time;
+                paused = command.pause;
+                rain = command.rain;
+                reflection = command.reflection;
+                if command.shot >= 0 && (command.shot as usize) < scene.shots.len() {
+                    rig.cut(command.shot as usize, scene.shots);
+                    rig.shot_time = scene.shots[rig.shot].duration * 0.5;
                 }
             }
         }
@@ -241,7 +209,23 @@ unsafe fn run() {
             let shot = core::str::from_utf8(&scene.shots[rig.shot].name)
                 .unwrap_or("")
                 .trim_end_matches('\0');
-            write(b"host0:/status.json\0",&format!("{{\"target\":\"psp\",\"frame\":{},\"shot\":\"{}\",\"shotIndex\":{},\"time\":{:.2},\"fps\":{:.2},\"frameMs\":{:.2},\"workMs\":{:.2},\"gpuWaitMs\":{:.2},\"maxWorkMs\":{:.2},\"draws\":{},\"triangles\":{},\"packBytes\":{},\"rain\":{},\"reflection\":{},\"paused\":{},\"freeCamera\":{}}}\n",frame,shot,rig.shot,time,1000.0/ms,ms,work_sum as f32/30000.0,gpu_sum as f32/30000.0,max_work as f32/1000.0,stats.draws,stats.triangles,len,rain,reflection,paused,!rig.cinematic));
+            dev.report(dev::Status {
+                frame,
+                shot,
+                shot_index: rig.shot,
+                time,
+                frame_ms: ms,
+                work_ms: work_sum as f32 / 30000.0,
+                gpu_wait_ms: gpu_sum as f32 / 30000.0,
+                max_work_ms: max_work as f32 / 1000.0,
+                draws: stats.draws,
+                triangles: stats.triangles,
+                pack_bytes: len,
+                rain,
+                reflection,
+                paused,
+                free_camera: !rig.cinematic,
+            });
             if hud {
                 psp::dprintln!("{} {:.1} fps / {} tris", shot, 1000.0 / ms, stats.triangles);
             }
