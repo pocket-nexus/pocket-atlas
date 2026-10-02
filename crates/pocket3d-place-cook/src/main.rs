@@ -18,6 +18,8 @@ mod geometry;
 mod occlusion;
 mod pica;
 mod procedural;
+mod psp;
+mod psp_products;
 mod textures;
 
 use geometry::Vertex;
@@ -585,6 +587,14 @@ fn push_draw(b: geometry::Built, material: u32, layout: pc::VertexLayout, node: 
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("psp") {
+        let argv: Vec<String> = std::env::args().collect();
+        let get = |k: &str| argv.iter().position(|x| x == k).and_then(|i| argv.get(i + 1));
+        let input = get("--in").expect("psp --in <cooked.place> --out <psp.place>");
+        let output = get("--out").expect("psp --out <psp.place>");
+        psp::cook(std::path::Path::new(input), std::path::Path::new(output));
+        return;
+    }
     let cli: Vec<String> = std::env::args().collect();
     if let Some(i) = cli.iter().position(|a| a == "--pica-from") {
         let get = |k: &str| cli.iter().position(|a| a == k).and_then(|i| cli.get(i + 1));

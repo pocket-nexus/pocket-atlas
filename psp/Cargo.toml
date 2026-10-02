@@ -1,0 +1,20 @@
+[package]
+name = "pocket-atlas-psp"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace]
+
+[dependencies]
+psp = { git = "https://github.com/pocket-nexus/rust-psp.git", rev = "2cbaf8c9bc72569c76240a1d9743de10731e5f6b", features = ["abort-only"] }
+pocket3d-place-psp = { path = "../crates/pocket3d-place-psp" }
+bytemuck = "1"
+glam = { version = "0.33", default-features = false, features = ["libm"] }
+libm = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

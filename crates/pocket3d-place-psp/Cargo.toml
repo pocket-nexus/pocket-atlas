@@ -1,0 +1,9 @@
+[package]
+name = "pocket3d-place-psp"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Validated PSP GE place payload shared by the Atlas cooker and runtime"
+
+[dependencies]
+bytemuck = { version = "1", features = ["derive", "min_const_generics"] }
