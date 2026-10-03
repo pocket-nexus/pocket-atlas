@@ -211,7 +211,10 @@ export class DriveStage implements Stage {
     put(".drive-prompt",this.ui.dataset.saveError?"Storage unavailable · progress cannot be saved":s.completed?"Journey complete — thank you for driving":near?(Math.abs(s.speed)<0.5?"E / ×  ·  Deliver & continue":"Slow down and park for your delivery"):s.damage>75||s.fuel<0.2?"Backspace · Call recovery":stop&&stop.s<s.s-30?"Delivery missed · turn back safely":"KEEP LEFT · Snow tyres fitted");
     put(".drive-menu-copy",s.completed?`Delivered to Biei. ${(s.odometer/1000).toFixed(1)} km driven · ${Math.floor((s.elapsed+s.penaltySeconds)/60)} min · ${s.recoveries} recoveries. Start a new journey whenever you like.`:`A small car, a long road, and snow across the Furano valley. Carry parcels north through four stops. Pull over and press E at each delivery. Your journey saves along the way.`);
     const resume=this.ui.querySelector('[data-act="resume"]') as HTMLButtonElement;resume.hidden=s.completed;resume.textContent=this.saved?"CONTINUE JOURNEY →":"START JOURNEY →";
-    const m=this.map.getContext("2d")!;m.clearRect(0,0,224,174);m.save();m.translate(112,116);m.rotate(-s.yaw);const scale=.095;
+    // World forward is (-sin(yaw), -cos(yaw)) in X/Z; Canvas +Y is +Z.
+    // Rotating the route by +yaw puts the car's forward direction at screen up.
+    // Restore the transform before drawing the fixed, upward-pointing arrow.
+    const m=this.map.getContext("2d")!;m.clearRect(0,0,224,174);m.save();m.translate(112,116);m.rotate(s.yaw);const scale=.095;
     m.lineCap="round";m.lineWidth=7;m.strokeStyle="#334852";m.beginPath();
     for(let d=Math.max(0,s.s-700),i=0;d<Math.min(end.s,s.s+1300);d+=20,i++){const p=sampleRoute(this.route,d),x=(p.x-s.x)*scale,z=(p.z-s.z)*scale;if(i===0)m.moveTo(x,z);else m.lineTo(x,z);}m.stroke();
     m.lineWidth=2;m.strokeStyle="#e5c99a";m.stroke();
