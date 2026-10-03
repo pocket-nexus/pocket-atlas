@@ -9,12 +9,13 @@
 //! renderer is relative to a render origin near the camera, moved in whole
 //! kilometres when the camera has gone far from it.
 
+mod audio;
 mod hud;
 pub mod pack;
 mod stream;
 
 use glam::{EulerRot, Quat, Vec3};
-use pocket3d_drive::{autopilot, next_stop, Car, Chase, Controls, DriveView, Spec, Stop, Trip, TripEvent, TripPhase};
+use pocket3d_drive::{autopilot, drive_sound, next_stop, sound::QUIET, Car, Chase, Controls, DriveSound, DriveView, Spec, Stop, Traffic, Trip, TripEvent, TripPhase, TRAFFIC_CARS};
 use pocketjs_vita::input::Pad;
 use serde_json::{json, Value};
 use vitasdk_sys as sdk;
@@ -51,6 +52,8 @@ pub enum Outcome {
 struct Nodes {
     root: Option<usize>,
     wheels: [Option<usize>; 4],
+    /// The other vehicles' nodes (`traffic-0` …).
+    traffic: [Option<usize>; TRAFFIC_CARS],
 }
 
 pub struct Drive {
@@ -84,6 +87,9 @@ pub struct Drive {
     /// Seconds since the trip's phase last changed (cards fade in).
     phase_time: f32,
     saved: usize,
+    audio: Option<audio::Audio>,
+    sound: DriveSound,
+    traffic: Traffic,
 }
 
 fn spec_of(c: &pocket3d_place::route::CarSpec) -> Spec {
@@ -142,7 +148,7 @@ impl Drive {
             return Err("route: fewer than two stops".into());
         }
         let node = |name: &str| scene.meta.nodes.iter().position(|n| n.name == name || n.name.rsplit_once('_').is_some_and(|(b, _)| b == name));
-        let nodes = Nodes { root: node("car"), wheels: [node("wheel-fl"), node("wheel-fr"), node("wheel-rl"), node("wheel-rr")] };
+        let nodes = Nodes { root: node("car"), wheels: [node("wheel-fl"), node("wheel-fr"), node("wheel-rl"), node("wheel-rr")], traffic: core::array::from_fn(|i| node(&format!("traffic-{i}"))) };
         let brake_material = scene.meta.materials.iter().position(|m| m.name == "car-brake");
         // A trip in progress resumes from the last stop reached.
         let saved = paths::read_json(&format!("route-{id}.json")).and_then(|v| v["reached"].as_u64()).map_or(0, |n| n as usize);
@@ -175,6 +181,9 @@ impl Drive {
             events: Vec::new(),
             phase_time: 0.0,
             saved: reached,
+            audio: unsafe { audio::Audio::start() },
+            sound: QUIET,
+            traffic: Traffic::new(car.s, pack.line.length),
             stops,
             pack,
         })
@@ -194,6 +203,7 @@ impl Drive {
         if let Some(km) = v["km"].as_f64() {
             let s = (km * 1000.0).clamp(12.0, self.pack.line.length - 20.0);
             self.car = Car::start(&self.pack.line, s, LANE);
+            self.traffic = Traffic::new(s, self.pack.line.length);
             self.chase.ready = false;
             self.prev_eye = None;
             self.trip.reached = self.stops.iter().rposition(|st| st.s <= s).unwrap_or(0).min(self.stops.len() - 2);
@@ -252,6 +262,7 @@ impl Drive {
                     outcome = Outcome::Leave;
                 } else if pressed & sdk::SCE_CTRL_SQUARE != 0 {
                     self.car = Car::start(&self.pack.line, self.stops[self.trip.reached].s.max(12.0), LANE);
+                    self.traffic = Traffic::new(self.car.s, self.pack.line.length);
                     self.chase.ready = false;
                     self.paused = false;
                 }
@@ -272,6 +283,14 @@ impl Drive {
             let input = if self.trip.phase == TripPhase::Arrived { Controls { steer: input.steer, throttle: 0.0, brake: 1.0 } } else { input };
             let before = self.car.odometer;
             self.car.step(&input, &self.pack.line, dtf, &self.spec);
+            if self.traffic.step(&self.car, self.pack.line.length, dtf) {
+                // Both stop where they met.
+                self.car.vx = 0.0;
+                self.car.vy = 0.0;
+                self.car.yaw_rate = 0.0;
+                self.trip.scrapes += 1;
+                self.notice = Some(("Easy: keep to the left lane".into(), String::new(), 4.0));
+            }
             self.events.clear();
             let phase = self.trip.phase;
             let mut events = core::mem::take(&mut self.events);
@@ -295,6 +314,10 @@ impl Drive {
             if let Some(mi) = self.brake_material {
                 scene.emissive_gain[mi] = if input.brake > 0.1 && !self.car.reverse { 4.2 } else { 1.0 };
             }
+            self.sound = drive_sound(&self.car, if self.car.reverse { input.brake } else { input.throttle }, &self.sound, dtf);
+        }
+        if let Some(a) = &self.audio {
+            a.update(&self.sound, if driving && !self.paused { 1.0 } else { 0.0 });
         }
 
         // The camera, absolute.
@@ -344,6 +367,20 @@ impl Drive {
             if let Some(w) = *w {
                 scene.meta.nodes[w].rotation = Quat::from_euler(EulerRot::YXZ, if i < 2 { -c.steer as f32 } else { 0.0 }, -spin, 0.0).to_array();
             }
+        }
+        for (i, n) in self.nodes.traffic.iter().enumerate() {
+            let Some(n) = *n else { continue };
+            let t = &self.traffic.cars[i];
+            let node = &mut scene.meta.nodes[n];
+            if t.s < 0.0 {
+                node.scale = [0.0; 3];
+                continue;
+            }
+            let p = self.pack.line.at(t.s);
+            let dir = if t.v < 0.0 { -1.0 } else { 1.0 };
+            node.scale = [1.0; 3];
+            node.translation = [(p.x - p.tz * t.d - self.origin[0]) as f32, (p.y - 0.02 * t.d.abs() - self.origin[1]) as f32, (p.z + p.tx * t.d - self.origin[2]) as f32];
+            node.rotation = Quat::from_euler(EulerRot::YXZ, -((p.tx * dir).atan2(-p.tz * dir)) as f32, (p.grade.atan() * dir) as f32, 0.0).to_array();
         }
         // The bonnet camera sits inside the body.
         let hide = look.is_none() && self.mode == Mode::Drive && self.cam == DriveView::Hood;
@@ -445,6 +482,9 @@ impl Drive {
     /// # Safety
     /// GPU idle with respect to every cell.
     pub unsafe fn release(self) {
+        if let Some(a) = self.audio {
+            a.stop();
+        }
         self.stream.release();
     }
 }

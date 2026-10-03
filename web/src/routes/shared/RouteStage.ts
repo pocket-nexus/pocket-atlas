@@ -6,9 +6,12 @@ import type { ExportFogLight } from "../../places/shared/export";
 import { bearing } from "../../places/shared/geo";
 import { createPlacePost } from "../../places/shared/post";
 import { buildSky, type Sky } from "../../places/shared/sky";
-import { PlaceStage, type PlaceAudio } from "../../places/shared/stage";
+import { PlaceStage } from "../../places/shared/stage";
+import { driveSound, QUIET, RouteAudio, type DriveSound } from "./audio";
 import type { RouteDef, RouteView } from "./def";
+import { autopilot } from "./drive/autopilot";
 import { newChase, stepChase, type DriveView, type Eye } from "./drive/chase";
+import { newTraffic, stepTraffic, type Traffic } from "./drive/traffic";
 import { newTrip, nextStop, stepTrip, type Stop, type TripState } from "./drive/trip";
 import { KEI, startState, stepCar, type CarState, type Controls, type Surface } from "./drive/vehicle";
 import { Snow } from "./fx/snow";
@@ -16,6 +19,7 @@ import { sunPosition, toLocal, type Frame, JPRCS_XII } from "./geodesy";
 import { RouteHud } from "./hud";
 import { buildCar, type Car } from "./kit/car";
 import { Kit } from "./kit/materials";
+import { buildTraffic, type TrafficFleet } from "./kit/traffic";
 import { Cells } from "./layers";
 import { Line } from "./line";
 import { fetchRouteFiles, type RouteFiles, type RouteJson } from "./source";
@@ -26,11 +30,6 @@ interface RouteExport {
   root: Group;
   updaters: ((dt: number, t: number) => void)[];
   fogLights: ExportFogLight[];
-}
-
-class RouteAudio implements PlaceAudio {
-  start(): void {}
-  stop(): void {}
 }
 
 /** Keyboard and gamepad into the car's controls; keys ramp like a hand on the wheel. */
@@ -130,6 +129,11 @@ export class RouteStage extends PlaceStage<RouteExport, RouteAudio> {
   private view: DriveView = "chase";
   private driving = true;
   private streamClock = 0;
+  /** `?auto=60`: the autopilot drives at up to this speed (m/s), for captures and for watching. */
+  private auto = 0;
+  private sound: DriveSound = QUIET;
+  private traffic!: Traffic;
+  private fleet!: TrafficFleet;
   private sunDir: Vector3;
   private stops: Stop[];
   private surface: Surface;
@@ -145,12 +149,14 @@ export class RouteStage extends PlaceStage<RouteExport, RouteAudio> {
   ) {
     const p0 = line.at(0);
     const focus: Box6 = [p0.x - 60000, -200, p0.z - 60000, p0.x + 60000, 3000, p0.z + 60000];
-    super(ctx, place, new PerspectiveCamera(50, 1, 0.3, 60000), { shots, walkable: [focus], focus, intro: shots[0].from, introSeconds: 0.01, viewFov: 50 }, new RouteAudio());
+    super(ctx, place, new PerspectiveCamera(50, 1, 0.3, 60000), { shots, walkable: [focus], focus, intro: shots[0].from, introSeconds: 0.01, viewFov: 50 }, new RouteAudio(ctx.audio));
     const json = files.route;
     const frame: Frame = { zone: JPRCS_XII, north0: json.frame.north0, east0: json.frame.east0 };
-    this.stops = def.stops.map((s, i) => {
+    const stops = place.route?.stops ?? [];
+    if (stops.length < 2) throw new Error(`${place.id} has no route stops in the registry`);
+    this.stops = stops.map((s, i) => {
       if (i === 0) return { name: s.name, native: s.native, s: 0 };
-      if (i === def.stops.length - 1) return { name: s.name, native: s.native, s: line.length };
+      if (i === stops.length - 1) return { name: s.name, native: s.native, s: line.length };
       const [x, z] = toLocal(frame, s.lat, s.lon);
       const p = line.project(x, z, 400);
       if (!p) throw new Error(`stop ${s.name} is not within 400 m of the route`);
@@ -207,10 +213,14 @@ export class RouteStage extends PlaceStage<RouteExport, RouteAudio> {
     root.add(this.car.root);
     const q = new URLSearchParams(location.search);
     const km = Number(q.get("km"));
+    this.auto = (Number(q.get("auto")) || 0) / 3.6;
     const startS = Number.isFinite(km) && km > 0 ? Math.min(this.line.length - 50, km * 1000) : 12;
     this.state = startState(this.surface, startS, -1.7);
     this.trip.reached = Math.max(0, this.stops.findIndex((st) => st.s > startS) - 1);
     this.car.pose(this.state, false);
+    this.fleet = buildTraffic();
+    root.add(this.fleet.root);
+    this.traffic = newTraffic(this.state.s, this.line.length);
     root.add(this.swatches());
 
     this.sky = buildSky(root, skySpec, 30000);
@@ -343,13 +353,24 @@ export class RouteStage extends PlaceStage<RouteExport, RouteAudio> {
       if (k === "r") {
         // Back to the last stop reached, in the left lane.
         this.state = startState(this.surface, Math.max(12, this.stops[this.trip.reached].s), -1.7);
+        this.traffic = newTraffic(this.state.s, this.line.length);
         this.chase.ready = false;
         return;
       }
     }
     const before = c.odometer;
-    const input = this.trip.phase === "arrived" ? { steer: this.pad.controls.steer, throttle: 0, brake: 1 } : this.pad.controls;
+    const wheel = this.auto > 0 ? autopilot(c, this.line, this.auto, -1.7) : this.pad.controls;
+    const input = this.trip.phase === "arrived" ? { steer: wheel.steer, throttle: 0, brake: 1 } : wheel;
     stepCar(c, input, this.surface, dt);
+    if (stepTraffic(this.traffic, c, this.line.length, dt)) {
+      // Both stop where they met.
+      c.vx = 0;
+      c.vy = 0;
+      c.yawRate = 0;
+      this.trip.scrapes++;
+      this.hud.say("Easy — keep to the left lane", 4);
+    }
+    this.fleet.pose(this.traffic, this.line);
     for (const e of stepTrip(this.trip, c, this.stops, dt, c.odometer - before, c.scrape === 0 && c.impact > 1.5)) {
       if (e.type === "stop") this.hud.say(`<b>${this.stops[e.index].name}</b> · ${this.stops[e.index].native}`);
       else {
@@ -362,6 +383,8 @@ export class RouteStage extends PlaceStage<RouteExport, RouteAudio> {
       }
     }
     if (this.trip.phase === "driving" && this.trip.seconds < 0.5) this.hud.panel("");
+    this.sound = driveSound(c, c.reverse ? input.brake : input.throttle, this.sound, dt);
+    this.audio.update(this.sound);
     this.car.pose(c, input.brake > 0.1 && !c.reverse);
     stepChase(this.chase, c, this.view, dt, this.eye);
     this.camera.position.set(...this.eye.pos);
@@ -381,6 +404,8 @@ export class RouteStage extends PlaceStage<RouteExport, RouteAudio> {
     else {
       this.car.root.visible = true;
       this.rig.update(dt, time);
+      this.sound = { ...QUIET, rpm: this.sound.rpm + (900 - this.sound.rpm) * Math.min(1, dt * 3) };
+      this.audio.update(this.sound);
     }
     this.camera.updateMatrixWorld();
     this.advance(dt, time);

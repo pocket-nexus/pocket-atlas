@@ -2,7 +2,9 @@
 
 A world map of places people remember. A place is a small, self-contained 3D scene of one real spot — a street corner, a stairway, a café — pinned to its location on a shared globe. People will publish their own places (publicly or privately) and download other people's places to visit them.
 
-This repository holds the first-party places, the pipeline that turns a place into a pack for a handheld GPU, and native PS Vita, Nintendo 3DS and PSP renderers. Publishing and downloading are not built yet. Vita and 3DS target 30 fps; PSP currently supports the Rainy Night Konbini place through its fixed-function GE pipeline.
+A **route** is a real road driven from one end to the other at its true length: the first is National Route 237 from Asahikawa to Furano in snow, 50.8 km in a kei car, on the web and the PS Vita. See [Routes](docs/ROUTES.md).
+
+This repository holds the first-party places and routes, the pipeline that turns them into packs for a handheld GPU, and native PS Vita, Nintendo 3DS and PSP renderers. Publishing and downloading are not built yet. Vita and 3DS target 30 fps; PSP currently supports the Rainy Night Konbini place through its fixed-function GE pipeline.
 
 Places share their assets across the reference and handheld renderers:
 
@@ -22,6 +24,8 @@ The web app exports glTF 2.0 with `extras.pocketAtlas`. The cooker seals a lossl
 | Kamakura-Kōkōmae Crossing | `kamakura-koko-mae-crossing` | Shichirigahama, Kamakura (鎌倉高校前1号踏切 on the Enoden) | open water (wave layers, Fresnel sky reflection, glitter path) to a 16 km horizon in FogExp2 haze, scrolling surf strips, flashing crossing lamps and gates driven by material and node tracks, a train, Route 134 traffic |
 | Griffith Observatory at Blue Hour | `griffith-observatory` | Mount Hollywood, Los Angeles, over the basin (September 2015) | light fields of GXM point sprites (52k city lights, 5k moving), height haze with an inversion layer to a 71 km horizon, floodlit masonry baked into vertices, parallax windows, a resolution boost to 640×362 |
 
+| Route 237 in Snow (a route) | `hokkaido-r237` | Asahikawa to Furano, Hokkaido (国道237号) | a 50.8 km road streamed as cells on four layers, graded terrain and ploughed banks from survey data, sky light baked along the road, falling snow, a driven car with a single-track model on packed snow, traffic, a trip with stops |
+
 Real places fall into a finite set of kinds; the registry names them (`PlaceKind` in `web/src/core/types.ts`): `night-street`, `daytime-slope`, `dusk-street`, `daytime-coast`, `dusk-vista` for the places built so far, and `daytime-street`, `night-slope`, `dusk-coast`, `night-coast`, `interior` and `rooftop` for the places still to come. Each first-party place brings its kind's rendering to the best quality the handheld holds, and the work goes into the shared renderer and cooker so later places of the same kind reuse it. Glass (`places/shared/glass.ts`) blends premultiplied on the web as on the device. The workflow and quality bar for making a place are in the `pocket-atlas-place` skill (`.claude/skills/pocket-atlas-place/`).
 
 ## Layout
@@ -36,7 +40,10 @@ Real places fall into a finite set of kinds; the registry names them (`PlaceKind
 | `psp/` | Native PSP place viewer: GE rendering, animated nodes and skinning, camera controls, procedural rain audio, PSPLINK telemetry |
 | `crates/pocket3d-place-psp` | Validated `PLPS` payload: shared GE vertex buffers, spatial index chunks, swizzled RGBA4444 mip chains, animation and camera data; no JSON on the device |
 | `n3ds/`, `tools/atlas-3ds.ts` | PICA renderer, native cooker, paired wireless deployment, capture and performance measurement |
-| `tools/atlas.ts` | cook (places and the atlas with its font), build, deploy over USB, status/capture/profile/sweep/shots, shader lint, standalone VPK |
+| `web/src/routes/` | routes: `shared/` (the world model, cell generators, the kit, the drive, the stage) and one folder per route with its surveyed data; scripts: `export-route.ts`, `vehicle-trace.ts`, `route-probe.ts` |
+| `crates/pocket3d-drive` | a route's simulation as every device runs it (the driven line, the car, the trip, traffic, cameras, sound parameters): the port of the web reference, held to it by a replayed trace |
+| `tools/route-survey.ts` | surveys a route from OpenStreetMap and the GSI elevation tiles into `web/src/routes/<id>/data/` |
+| `tools/atlas.ts` | cook (places, routes and the atlas with its font), build, deploy over USB, status/capture/profile/sweep/shots/drive, shader lint, standalone VPK |
 | `tools/atlas-psp.ts` | PSP cook/build, PSPLINK serve/run/control/capture/shot measurements, standalone EBOOT package |
 | `vendor/pocketjs` | PocketJS: Vita dev host and wired debug transport; 3DS paired transport and native installer; pinned PSP toolchain resolver |
 
@@ -230,6 +237,22 @@ Suga Shrine Stairs holds 33.3–33.4 ms at step 0 in every shot (`sweep --time 5
 Kamakura-Kōkōmae Crossing holds 30.0 fps at step 0 in every shot with the camera rig and governor running (`shots --seconds 160`): Crossing, Postcard, Platform, Route134, Seawall and Park draw 81–263 draws and 81k–141k triangles, Platform the most. Serialized GPU time is 21.3 ms in Crossing, 20.9 ms in Platform and 23.7 ms in Seawall (main pass 13.4–16.2 ms), with the sun's shadow map drawn once at load.
 
 Radio Kaikan at Blue Hour holds 30.0 fps at step 0 in every shot with the camera rig and governor running (`shots --seconds 130`): Arrival, Facade, Band, Vista, Corner and Clock draw 148–399 draws and 34k–61k triangles. Serialized GPU time (`profile --time 5`) is 17.9–19.5 ms: main pass 10.2–11.7 ms, bloom 4.2 ms, composite 2.1 ms, display scale 1.4 ms.
+
+## Routes
+
+A route is entered from the atlas like a place and driven: left stick or D-pad steers, R or × drives, L or □ brakes (and reverses from rest), △ changes the view, ○ hands the camera to the place rig and back, START pauses. The trip runs from the first stop to the last; stops reached are kept in the data folder and a trip resumes from the last one.
+
+```sh
+bun tools/route-survey.ts --route hokkaido-r237   # once: OSM + GSI elevation → web/src/routes/<id>/data (checked in)
+(cd web && bun scripts/export-place.ts --place hokkaido-r237 --seconds 1 --out ../.pocket-build/routes/hokkaido-r237/kit)
+(cd web && bun scripts/export-route.ts --route hokkaido-r237)
+bun tools/atlas.ts cook-route --route hokkaido-r237   # → .pocket-build/routes/<id>/<id>.route
+bun tools/atlas.ts native                             # syncs the pack's stamp; the device copies the pack to its card
+bun tools/atlas.ts ctl '{"place":"hokkaido-r237","drive":{"km":22.4,"auto":60}}'
+bun tools/atlas.ts drive --from 0 --to 5 --kmh 60     # frame time, draws, triangles and cells per kilometre
+```
+
+How a route is surveyed, generated, compiled and streamed, and what it does not do yet, is in [docs/ROUTES.md](docs/ROUTES.md). On the web: `#/place/hokkaido-r237`, `W`/`S`/`A`/`D` or a gamepad, `V` view, `R` back to the last stop, `C` the cinematic camera; `?km=22.4` starts there, `?auto=60` lets the autopilot drive.
 
 ## License
 

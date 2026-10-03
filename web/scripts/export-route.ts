@@ -16,6 +16,7 @@
  */
 import { closeSync, mkdirSync, openSync, readFileSync, writeFileSync, writeSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { placeById } from "../src/places/registry";
 import { buildCell } from "../src/routes/shared/cell";
 import type { RouteDef, RouteView } from "../src/routes/shared/def";
 import { KEI } from "../src/routes/shared/drive/vehicle";
@@ -133,9 +134,11 @@ writeFileSync(join(out, "line.bin"), new Uint8Array(lineBin.buffer));
 // ---- route.json
 const json = files.route;
 const frame: Frame = { zone: JPRCS_XII, north0: json.frame.north0, east0: json.frame.east0 };
-const stops = def.stops.map((s, i) => {
+const listed = placeById(id)?.route?.stops ?? [];
+if (listed.length < 2) throw new Error(`${id} has no route stops in the registry`);
+const stops = listed.map((s, i) => {
   if (i === 0) return { name: s.name, native: s.native, s: 0 };
-  if (i === def.stops.length - 1) return { name: s.name, native: s.native, s: line.length };
+  if (i === listed.length - 1) return { name: s.name, native: s.native, s: line.length };
   const [x, z] = toLocal(frame, s.lat, s.lon);
   const p = line.project(x, z, 400);
   if (!p) throw new Error(`stop ${s.name} is not within 400 m of the route`);

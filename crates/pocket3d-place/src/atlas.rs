@@ -113,6 +113,19 @@ pub struct AtlasPlace {
     /// in a 2:1 texture.
     #[serde(default)]
     pub preview: Option<u32>,
+    /// A route (a road driven end to end) rather than a single spot.
+    #[serde(default)]
+    pub route: Option<AtlasRoute>,
+}
+
+/// What the browser shows of a route: its ends, its length and its stops' names.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AtlasRoute {
+    pub from: String,
+    pub to: String,
+    pub km: f32,
+    /// (name, native name) of every stop, in driving order.
+    pub stops: Vec<(String, String)>,
 }
 
 /// Camera, sun and shading constants of the web globe, for the fixed atlas view.

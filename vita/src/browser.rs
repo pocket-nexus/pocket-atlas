@@ -601,7 +601,7 @@ impl Browser {
             let loc = if p.country.is_empty() { p.locality.clone() } else { format!("{}  ·  {}", p.locality, p.country) };
             ui.text(gpu, tx, y + 50.0, grey(0.9 * ro), T::Caption, &ui.fit(T::Caption, &loc, tw + 40.0));
             if p.enterable {
-                ui.text_right(gpu, x + w - 6.0, y + 27.0, acc(ro), T::Label, "OPEN");
+                ui.text_right(gpu, x + w - 6.0, y + 27.0, acc(ro), T::Label, if p.route.is_some() { "DRIVE" } else { "OPEN" });
             } else {
                 ui.text_right(gpu, x + w - 6.0, y + 27.0, grey(0.6 * ro), T::Label, "SOON");
             }
@@ -625,7 +625,11 @@ impl Browser {
             }
             // Kind chip and the saved badge.
             if !p.kind.is_empty() {
-                let k = kind_label(&p.kind);
+                // A route's chip carries its length.
+                let k = match &p.route {
+                    Some(r) => format!("{}  ·  {:.1} KM", kind_label(&p.kind), r.km),
+                    None => kind_label(&p.kind),
+                };
                 let kw = ui.width(T::Label, &k);
                 ui.rect(gpu, x + 10.0, y + 10.0, kw + 18.0, 22.0, &Style::fill(11.0, rgb(0x000000, 0.55 * co * fade)));
                 ui.text(gpu, x + 19.0, y + 26.0, white(0.95 * co), T::Label, &k);

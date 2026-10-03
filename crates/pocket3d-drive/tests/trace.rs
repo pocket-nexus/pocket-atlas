@@ -2,7 +2,7 @@
 //! same controls, frame by frame, must put the car, the trip and the camera
 //! where the web put them.
 
-use pocket3d_drive::{Car, Chase, Controls, DriveView, Line, Spec, Stop, Trip};
+use pocket3d_drive::{Car, Chase, Controls, DriveView, Line, Spec, Stop, Traffic, Trip};
 use serde_json::Value;
 
 fn f(v: &Value) -> f64 {
@@ -44,6 +44,8 @@ fn reproduces_the_web_drive() {
     let mut car = Car::start(&line, 12.0, -1.7);
     let mut trip = Trip::new(0);
     let mut chase = Chase::default();
+    let mut traffic = Traffic::new(car.s, line.length);
+    let mut hits = 0.0;
     let mut events = Vec::new();
     let mut frames = t["frames"].as_array().unwrap().iter();
     let mut want = frames.next();
@@ -53,12 +55,19 @@ fn reproduces_the_web_drive() {
         let before = car.odometer;
         car.step(&c, &line, dt, &k);
         trip.step(&car, &stops, dt, car.odometer - before, car.scrape == 0.0 && car.impact > 1.5, &mut events);
+        if traffic.step(&car, line.length, dt) {
+            hits += 1.0;
+            car.vx = 0.0;
+            car.vy = 0.0;
+            car.yaw_rate = 0.0;
+        }
         let eye = chase.step(&car, DriveView::Chase, dt);
         let Some(w) = want else { break };
         if f(&w[0]) as usize != i {
             continue;
         }
-        let got = [car.x, car.z, car.y, car.heading, car.vx, car.vy, car.yaw_rate, car.steer, car.s, car.d, car.odometer, trip.reached as f64, trip.scrapes as f64, trip.metres, eye.pos[0], eye.pos[1], eye.pos[2], eye.fov, if car.reverse { 1.0 } else { 0.0 }];
+        let got = [car.x, car.z, car.y, car.heading, car.vx, car.vy, car.yaw_rate, car.steer, car.s, car.d, car.odometer, trip.reached as f64, trip.scrapes as f64, trip.metres, eye.pos[0], eye.pos[1], eye.pos[2], eye.fov, if car.reverse { 1.0 } else { 0.0 }, hits];
+        let got: Vec<f64> = got.into_iter().chain(traffic.cars.iter().flat_map(|c| [c.s, c.v, c.body as f64])).collect();
         for (k, g) in got.iter().enumerate() {
             let e = (g - f(&w[k + 1])).abs();
             worst = worst.max(e);

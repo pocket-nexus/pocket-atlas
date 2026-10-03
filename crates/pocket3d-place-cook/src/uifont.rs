@@ -21,7 +21,9 @@ pub fn charset(places: &[AtlasPlace]) -> BTreeSet<char> {
     let mut set: BTreeSet<char> = (0x20u32..0x7f).chain(0xa0..0x180).filter_map(char::from_u32).collect();
     set.extend(UI_EXTRA.chars());
     for p in places {
-        for s in [&p.name, &p.native, &p.locality, &p.locality_native, &p.country, &p.weather, &p.author, &p.summary, &p.kind].into_iter().chain(&p.tags) {
+        // A route's display names its stops as the car reaches them.
+        let stops = p.route.iter().flat_map(|r| r.stops.iter().flat_map(|s| [&s.0, &s.1]).chain([&r.from, &r.to]));
+        for s in [&p.name, &p.native, &p.locality, &p.locality_native, &p.country, &p.weather, &p.author, &p.summary, &p.kind].into_iter().chain(&p.tags).chain(stops) {
             // Kind and weather labels are drawn upper-case.
             set.extend(s.chars().flat_map(|c| [c].into_iter().chain(c.to_uppercase())));
         }
@@ -134,7 +136,7 @@ mod tests {
         let set = charset(&[]);
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../vita/src");
         let mut missing = BTreeSet::new();
-        for f in ["browser.rs", "settings.rs", "ui.rs", "main.rs"] {
+        for f in ["browser.rs", "settings.rs", "ui.rs", "main.rs", "drive/mod.rs", "drive/hud.rs"] {
             let src = std::fs::read_to_string(format!("{dir}/{f}")).unwrap();
             // Characters inside "…" literals on lines that are not comments.
             for line in src.lines().filter(|l| !l.trim_start().starts_with("//")) {

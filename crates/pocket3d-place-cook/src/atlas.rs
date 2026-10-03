@@ -175,6 +175,12 @@ pub fn cook(input: &Path, output: &Path, faces: &uifont::Faces) {
             summary: s(p, "summary"),
             featured: p["featured"].as_bool().unwrap_or(false),
             preview: previews.get(&s(p, "id")).copied(),
+            route: p["route"].is_object().then(|| pc::atlas::AtlasRoute {
+                from: s(&p["route"], "from"),
+                to: s(&p["route"], "to"),
+                km: p["route"]["km"].as_f64().unwrap_or(0.0) as f32,
+                stops: p["route"]["stops"].as_array().into_iter().flatten().map(|st| (s(st, "name"), s(st, "native"))).collect(),
+            }),
         })
         .collect();
     let (font, coverage) = uifont::bake(&places, faces);

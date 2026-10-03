@@ -94,7 +94,7 @@ pub unsafe fn draw(ui: &Ui, gpu: &mut Gpu, st: &State) {
     // ---- a stop reached
     if let Some((name, native, left)) = st.notice {
         let o = (left / 0.6).min(1.0).min(1.0);
-        let line = format!("{name}  ·  {native}");
+        let line = if native.is_empty() { name.to_string() } else { format!("{name}  ·  {native}") };
         let w = ui.width(T::Strong, &line) + 44.0;
         ui.rect(gpu, (W - w) * 0.5, 84.0, w, 40.0, &Style::fill(20.0, rgb(0x080c12, 0.6 * o)).stroke(1.0, white(0.12 * o)));
         ui.text(gpu, (W - w) * 0.5 + 22.0, 110.0, white(o), T::Strong, &line);

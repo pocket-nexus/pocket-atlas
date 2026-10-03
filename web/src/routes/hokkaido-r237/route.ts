@@ -5,8 +5,8 @@ import { OVERCAST_SNOW } from "../shared/weather";
  * National Route 237 from the southern edge of Asahikawa to Furano, 50.8 km
  * through Nishi-Kagura, Biei, Miyama Pass, Kami-Furano and Naka-Furano, on a
  * mid-January afternoon in light snow. Surveyed from OpenStreetMap and the
- * GSI elevation tiles (`survey.json`, `tools/route-survey.ts`); the stops
- * are places the road passes.
+ * GSI elevation tiles (`survey.json`, `tools/route-survey.ts`); its stops
+ * are in the registry entry (`places/registry.ts`).
  */
 const data = (name: string) => new URL(`./data/${name}`, import.meta.url).href;
 
@@ -19,19 +19,6 @@ export const ROUTE: RouteDef = {
     demMid: data("dem-mid.bin"),
     demFar: data("dem-far.bin"),
   },
-  stops: [
-    { name: "Nishi-Goryō, Asahikawa", native: "旭川・西御料", lat: 43.7186, lon: 142.3725 },
-    // JR Nishi-Kagura station, beside the road.
-    { name: "Nishi-Kagura", native: "西神楽", lat: 43.6822, lon: 142.3936 },
-    // The junction by the Biei fire station and the 7-Eleven (OSM).
-    { name: "Biei", native: "美瑛", lat: 43.5967, lon: 142.4629 },
-    // The viewpoint at the top of the pass (OSM tourism=viewpoint).
-    { name: "Miyama Pass", native: "深山峠", lat: 43.5182, lon: 142.4477 },
-    // Where the bypass rejoins the old road, by the Lawson.
-    { name: "Kami-Furano", native: "上富良野", lat: 43.4485, lon: 142.4643 },
-    { name: "Naka-Furano", native: "中富良野", lat: 43.4033, lon: 142.4203 },
-    { name: "Furano Marché", native: "フラノマルシェ", lat: 43.3421, lon: 142.3862 },
-  ],
   // Sunset at Biei on 20 January is 16:20; the drive starts with the sun 11° up in the south-west.
   departure: "2026-01-20T15:00:00+09:00",
   weather: OVERCAST_SNOW,

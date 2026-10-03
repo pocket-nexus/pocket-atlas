@@ -92,9 +92,21 @@ export interface PlaceDef {
   featured?: boolean;
   /** Cinematic shot the preview card is captured from. */
   preview?: string;
-  /** A route: a real road driven from one end to the other (`src/routes/<id>`), with its length. */
-  route?: { from: string; to: string; km: number };
+  /**
+   * A route: a real road driven from one end to the other (`src/routes/<id>`).
+   * `stops` are the start, the places on the way where a trip can resume, and
+   * the end, in driving order.
+   */
+  route?: { from: string; to: string; km: number; stops: RouteStop[] };
   load?: () => Promise<PlaceModule>;
+}
+
+/** A place a route passes: its names and where it is (projected onto the driven line). */
+export interface RouteStop {
+  name: string;
+  native: string;
+  lat: number;
+  lon: number;
 }
 
 /** What stages may ask of the app shell. */

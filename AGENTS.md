@@ -1,6 +1,7 @@
 # Repository instructions
 
 - Pocket Atlas owns the places (`web/src/places/<id>`), the cooker, the `.place` pack format and the PS Vita / PSP renderers. PocketJS (pinned in `vendor/pocketjs`) owns the Vita dev host, the wired debug transport (`tools/vita-dev.ts`, `tools/vita-usb.ts`), VPK packaging (`tools/vita-package.ts`) and the pinned PSP toolchain resolver.
+- A route (`web/src/routes/<id>`, a real road driven end to end) is generated cell by cell, compiled by `pocket-atlas-cook route` and streamed on the Vita (`vita/src/drive`); `docs/ROUTES.md` is its contract. Generators (`web/src/routes/shared/gen`) are pure TypeScript (no three.js, no DOM), deterministic, and name kit materials; the car, trip and traffic exist twice (web `drive/*.ts`, `crates/pocket3d-drive`): change both and regenerate the trace (`web/scripts/vehicle-trace.ts`) in the same commit.
 - Do not edit the submodule to fix application behavior. Send reusable changes to PocketJS, then update the pinned revision here.
 - Use Conventional Commits for commits and pull requests (`type(scope): summary`). Publish validated changes as a Draft PR.
 - Keep captures, logs, cooked packs, USB-share contents and build receipts in the ignored `.pocket-build/`. Put reproducible commands, results and limits in the PR description instead of committing them.

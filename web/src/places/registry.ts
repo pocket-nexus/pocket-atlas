@@ -140,7 +140,24 @@ export const PLACES: PlaceDef[] = [
     summary: "National Route 237 from Asahikawa through Biei and over Miyama Pass to Furano, driven in a kei car on a snowy January afternoon.",
     featured: true,
     preview: "Hills",
-    route: { from: "Asahikawa", to: "Furano", km: 50.8 },
+    route: {
+      from: "Asahikawa",
+      to: "Furano",
+      km: 50.8,
+      stops: [
+        { name: "Nishi-Goryō, Asahikawa", native: "旭川・西御料", lat: 43.7186, lon: 142.3725 },
+        // JR Nishi-Kagura station, beside the road.
+        { name: "Nishi-Kagura", native: "西神楽", lat: 43.6822, lon: 142.3936 },
+        // The junction by the 7-Eleven and the petrol stations (OSM).
+        { name: "Biei", native: "美瑛", lat: 43.5967, lon: 142.4629 },
+        // The viewpoint at the top of the pass (OSM tourism=viewpoint).
+        { name: "Miyama Pass", native: "深山峠", lat: 43.5182, lon: 142.4477 },
+        // Where the bypass rejoins the old road, by the Lawson.
+        { name: "Kami-Furano", native: "上富良野", lat: 43.4485, lon: 142.4643 },
+        { name: "Naka-Furano", native: "中富良野", lat: 43.4033, lon: 142.4203 },
+        { name: "Furano Marché", native: "フラノマルシェ", lat: 43.3421, lon: 142.3862 },
+      ],
+    },
     load: () => import("../routes/hokkaido-r237/index"),
   },
   {

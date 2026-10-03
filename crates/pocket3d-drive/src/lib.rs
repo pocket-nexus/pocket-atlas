@@ -11,11 +11,15 @@
 pub mod autopilot;
 pub mod chase;
 pub mod line;
+pub mod sound;
+pub mod traffic;
 pub mod trip;
 pub mod vehicle;
 
 pub use autopilot::autopilot;
 pub use chase::{Chase, DriveView, Eye};
 pub use line::{Line, LinePoint, Projection};
+pub use sound::{drive_sound, DriveSound};
+pub use traffic::{Traffic, TrafficCar, TRAFFIC_BODIES, TRAFFIC_CARS};
 pub use trip::{next_stop, Stop, Trip, TripEvent, TripPhase};
 pub use vehicle::{Car, Controls, Spec};

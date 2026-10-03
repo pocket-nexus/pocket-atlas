@@ -1,11 +1,9 @@
 import type { Weather } from "./weather";
 
-/** What a route provides besides its surveyed data: its stops, its hour, its weather and its named views. */
+/** What a route provides besides its surveyed data and its registry entry (name, stops): its hour, its weather and its named views. */
 export interface RouteDef {
   /** URLs of the files in the route's `data/` folder. */
   files: { route: string; centerline: string; features: string; demNear: string; demMid: string; demFar: string };
-  /** The start, the places on the way where a trip can resume, and the end, in driving order. */
-  stops: { name: string; native: string; lat: number; lon: number }[];
   /** Local date and time of departure (ISO 8601 with offset): the sun's place in the sky. */
   departure: string;
   weather: Weather;

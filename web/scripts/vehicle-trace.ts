@@ -12,6 +12,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { autopilot } from "../src/routes/shared/drive/autopilot";
 import { newChase, stepChase, type Eye } from "../src/routes/shared/drive/chase";
+import { newTraffic, stepTraffic } from "../src/routes/shared/drive/traffic";
 import { newTrip, stepTrip } from "../src/routes/shared/drive/trip";
 import { KEI, startState, stepCar, type Controls, type Surface } from "../src/routes/shared/drive/vehicle";
 import { Line } from "../src/routes/shared/line";
@@ -40,6 +41,8 @@ const stops = [
 const car = startState(surface, 12, -1.7);
 const trip = newTrip();
 const chase = newChase();
+const traffic = newTraffic(car.s, line.length);
+let hits = 0;
 const eye: Eye = { pos: [0, 0, 0], target: [0, 0, 0], fov: 50 };
 const dt = 1 / 30;
 const frames: number[][] = [];
@@ -61,9 +64,15 @@ for (let f = 0; f < 30 * 150; f++) {
   const before = car.odometer;
   stepCar(car, c, surface, dt);
   stepTrip(trip, car, stops, dt, car.odometer - before, car.scrape === 0 && car.impact > 1.5);
+  if (stepTraffic(traffic, car, line.length, dt)) {
+    hits++;
+    car.vx = 0;
+    car.vy = 0;
+    car.yawRate = 0;
+  }
   stepChase(chase, car, "chase", dt, eye);
-  if (f % 15 === 14) frames.push([f, car.x, car.z, car.y, car.heading, car.vx, car.vy, car.yawRate, car.steer, car.s, car.d, car.odometer, trip.reached, trip.scrapes, trip.metres, eye.pos[0], eye.pos[1], eye.pos[2], eye.fov, car.reverse ? 1 : 0]);
+  if (f % 15 === 14) frames.push([f, car.x, car.z, car.y, car.heading, car.vx, car.vy, car.yawRate, car.steer, car.s, car.d, car.odometer, trip.reached, trip.scrapes, trip.metres, eye.pos[0], eye.pos[1], eye.pos[2], eye.fov, car.reverse ? 1 : 0, hits, ...traffic.cars.flatMap((c) => [c.s, c.v, c.body])]);
 }
 const out = join(import.meta.dir, "../../crates/pocket3d-drive/tests/vehicle-trace.json");
-writeFileSync(out, JSON.stringify({ note: "web/scripts/vehicle-trace.ts", dt, spec: KEI, line: { x: xs, y: ys, z: zs, half: 4.25 }, stops: stops.map((s) => s.s), inputs, columns: "frame x z y heading vx vy yawRate steer s d odometer reached scrapes metres eyeX eyeY eyeZ fov reverse", frames }) + "\n");
-console.log(`${frames.length} samples; the car ends at s = ${car.s.toFixed(1)} m, ${trip.scrapes} scrapes, phase ${trip.phase}`);
+writeFileSync(out, JSON.stringify({ note: "web/scripts/vehicle-trace.ts", dt, spec: KEI, line: { x: xs, y: ys, z: zs, half: 4.25 }, stops: stops.map((s) => s.s), inputs, columns: "frame x z y heading vx vy yawRate steer s d odometer reached scrapes metres eyeX eyeY eyeZ fov reverse hits (traffic s v body)×5", frames }) + "\n");
+console.log(`${frames.length} samples; the car ends at s = ${car.s.toFixed(1)} m, ${trip.scrapes} scrapes, ${hits} traffic hits, phase ${trip.phase}`);
