@@ -12,7 +12,7 @@ resolver = "2"
 
 [dependencies]
 pocketjs-vita = { path = "../vendor/pocketjs/hosts/vita", default-features = false }
-pocket3d-gxm = { path = "../crates/pocket3d-gxm" }
+pocket-vita-gxm = { path = "../vendor/pocketjs/devices/vita/pocket-vita-gxm", features = ["runtime-compiler"] }
 pocket3d-place = { path = "../crates/pocket3d-place" }
 glam = "0.33"
 serde_json = "1"

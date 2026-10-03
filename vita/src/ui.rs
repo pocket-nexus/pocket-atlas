@@ -10,8 +10,8 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use pocket3d_gxm::mem::{Arena, Kind, Ring};
-use pocket3d_gxm::target::Msaa;
+use pocket_vita_gxm::mem::{Arena, Kind, Ring};
+use pocket_vita_gxm::target::Msaa;
 use vita2d_sys as g;
 
 use crate::gpu::{bind, tiled_at, tiled_u8, BlendMode, Gpu, Layout, Out, PipeKey, Pipeline, Uniforms, S, U};

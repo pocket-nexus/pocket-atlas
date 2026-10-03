@@ -194,7 +194,7 @@ bool scene_load(const char *path, char *error, size_t capacity) {
   long length;
   fseek(file, 0, SEEK_END);
   length = ftell(file);
-  if (!read_at(file, 0, header, sizeof header) || !atlas_place_header_valid(header) ||
+  if (!read_at(file, 0, header, sizeof header) || !atlas_pack_header_valid(header) ||
       !read_at(file, 16, sect, sizeof sect)) {
     snprintf(error, capacity, "invalid PLCE header");
     fclose(file);
@@ -240,7 +240,7 @@ bool scene_load(const char *path, char *error, size_t capacity) {
       (uint64_t)candidate->shots * sizeof(AtlasShot) +
       (uint64_t)candidate->lights * sizeof(AtlasLight) +
       (uint64_t)candidate->dry_boxes * sizeof(AtlasBox) + candidate->skin_bytes;
-  if (candidate->version != ATLAS_PICA_VERSION || required != ps || candidate->draws > 4096 ||
+  if (candidate->version != ATLAS_PICA_TABLE_VERSION || required != ps || candidate->draws > 4096 ||
       candidate->textures > 512 || candidate->shots == 0 ||
       candidate->shots > 32 || candidate->matrices > 2048 ||
       !candidate->frames ||

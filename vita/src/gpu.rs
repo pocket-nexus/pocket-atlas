@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use pocket3d_gxm::patcher::Patcher;
-use pocket3d_gxm::program::{self, Attr, Blend, Gxp, Output, Registered};
+use pocket_vita_gxm::patcher::Patcher;
+use pocket_vita_gxm::program::{self, Attr, Blend, Gxp, Output, Registered};
 use vita2d_sys as g;
 
 use crate::shaders::{Event, Key, Service};

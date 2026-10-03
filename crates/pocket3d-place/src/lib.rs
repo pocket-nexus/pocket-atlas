@@ -25,11 +25,13 @@ pub mod meta;
 pub use meta::*;
 
 pub const MAGIC: [u8; 4] = *b"PLCE";
+/// Vita schema (PICA owns its independent container/table versions).
 /// 7: solid PBR palettes reinterpret UVs as roughness/metalness and vertex
 /// colour as the combined material tint. A reader without `vertex_pbr`
 /// support must reject these packs rather than silently render them wrong.
 /// 6 added light fields (`Kind::Lights`, `VertexLayout::Lights`) and vista haze.
 pub const VERSION: u32 = 7;
+
 
 pub const TAG_META: [u8; 4] = *b"META";
 pub const TAG_TEXTURES: [u8; 4] = *b"TEXD";
@@ -141,6 +143,12 @@ pub fn write(sections: &[([u8; 4], &[u8], u32)]) -> Vec<u8> {
 
 /// [`write`] with another container magic.
 pub fn write_as(magic: [u8; 4], sections: &[([u8; 4], &[u8], u32)]) -> Vec<u8> {
+    write_versioned(magic, VERSION, sections)
+}
+
+/// Container serialization for a target that owns a separate schema version.
+/// Sharing the section envelope does not couple device payload versions.
+pub fn write_versioned(magic: [u8; 4], version: u32, sections: &[([u8; 4], &[u8], u32)]) -> Vec<u8> {
     let header = 16 + sections.len() * 16;
     let mut offsets = Vec::with_capacity(sections.len());
     let mut at = header;
@@ -152,7 +160,7 @@ pub fn write_as(magic: [u8; 4], sections: &[([u8; 4], &[u8], u32)]) -> Vec<u8> {
     }
     let mut out = vec![0u8; at];
     out[0..4].copy_from_slice(&magic);
-    out[4..8].copy_from_slice(&VERSION.to_le_bytes());
+    out[4..8].copy_from_slice(&version.to_le_bytes());
     out[8..12].copy_from_slice(&(sections.len() as u32).to_le_bytes());
     for (i, ((tag, data, align), off)) in sections.iter().zip(&offsets).enumerate() {
         let h = 16 + i * 16;

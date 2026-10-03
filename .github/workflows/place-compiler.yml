@@ -1,0 +1,33 @@
+name: Place compiler
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  host:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: cargo test --locked --workspace
+      - run: bun install --frozen-lockfile
+        working-directory: web
+      - run: bun test tools/*.test.ts web/scripts/*.test.ts web/src/places/shared/daylight/geometry.test.ts
+      - name: Shadow receiver bounds
+        run: |
+          mkdir -p .pocket-build/validation/ci
+          rustc --edition=2021 --test vita/src/sun_bounds.rs -o .pocket-build/validation/ci/sun-bounds
+          .pocket-build/validation/ci/sun-bounds
+      - run: bun run build
+        working-directory: web

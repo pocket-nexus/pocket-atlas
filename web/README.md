@@ -261,8 +261,9 @@ the shared daylight shadow map near the crossing. Start at
 
 See [the place notes](src/places/sangubashi-crossing/README.md) for real-location
 references, reconstruction limits and the offline Vita export/build workflow.
-The handheld geometry profile and cooked packs have host validation; device
-shader compilation, GPU timing and physical screen acceptance remain pending.
+The handheld geometry and Vita rendering have device compile, capture and timing
+records. Picture quality was accepted with disclosed frame-rate limits; the final
+shared-kernel integration has host/build checks, without another device deployment.
 
 ## Layout
 

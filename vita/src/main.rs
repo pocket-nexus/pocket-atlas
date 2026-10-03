@@ -1,5 +1,5 @@
 //! Pocket Atlas on PS Vita: places rendered on the programmable GXM renderer
-//! (pocket3d-gxm).
+//! (pocket-vita-gxm).
 //!
 //! Development loop over the wired debug transport: the pack and shader
 //! sources are read from the USB share (`host0:atlas/`), shaders compile on
@@ -30,7 +30,7 @@ use camera::{Mode, Rig, View};
 use frame::{Renderer, Weather};
 use glam::Vec3;
 use gpu::Gpu;
-use pocket3d_gxm::target::{Fence, Msaa};
+use pocket_vita_gxm::target::{Fence, Msaa};
 use pocketjs_vita::{dev, dev_protocol::Op, devmenu::Action, graphics, input};
 use scene::Scene;
 use serde_json::{json, Value};

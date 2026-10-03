@@ -1,4 +1,4 @@
-//! `pocket-atlas-cook` — glTF 2.0 place (with `extras.pocketAtlas`) → `.place`.
+//! `pocket-atlas-cook` — web export → PlaceIR → device-specific `.place`.
 //!
 //! ```text
 //! pocket-atlas-cook --in .pocket-build/places/tokyo-konbini --out .pocket-build/places/tokyo-konbini/tokyo-konbini.place
@@ -9,6 +9,8 @@
 //! meshes keep joints and inverse binds. Textures are fitted to powers of two,
 //! mipmapped and block-compressed; animation is resampled uniformly.
 
+mod ir;
+mod source;
 mod atlas;
 mod extras;
 mod uifont;
@@ -38,14 +40,27 @@ struct Args {
     output: PathBuf,
     cell: f32,
     tex_cap: u32,
+    target: ir::Target,
+}
+
+fn fail(message: impl std::fmt::Display) -> ! {
+    eprintln!("error: {message}");
+    std::process::exit(2)
 }
 
 fn args() -> Args {
     let a: Vec<String> = std::env::args().collect();
     let get = |k: &str| a.iter().position(|x| x == k).and_then(|i| a.get(i + 1)).cloned();
     let input = PathBuf::from(get("--in").unwrap_or_else(|| ".pocket-build/places/tokyo-konbini".into()));
-    let output = get("--out").map(PathBuf::from).unwrap_or_else(|| input.join(format!("{}.place", input.file_name().and_then(|n| n.to_str()).unwrap_or("place"))));
+    if a.iter().any(|v| v == "--pica-from") || a.get(1).is_some_and(|v| v == "psp") {
+        fail("device packs are no longer compiler inputs; use --in <PlaceIR or web export directory> --target <vita|3ds|psp>");
+    }
+    let output = get("--out").map(PathBuf::from).unwrap_or_else(|| {
+        if a.get(1).is_some_and(|v| v == "import") { input.join("place.ir") }
+        else { input.join("scene.place") }
+    });
     Args {
+        target: ir::Target::parse(&get("--target").unwrap_or_else(|| "vita".into())).unwrap_or_else(|e| fail(e)),
         input,
         output,
         cell: get("--cell").and_then(|v| v.parse().ok()).unwrap_or(32.0),
@@ -178,6 +193,8 @@ struct Blobs {
     anim: Vec<u8>,
     geom_ranges: HashMap<u64, Vec<pc::Range>>,
     anim_ranges: HashMap<u64, Vec<pc::Range>>,
+    // Float vertices for native target lowering; never serialized as a Vita pack.
+    meshes: Vec<Vec<Vertex>>,
 }
 
 impl Blobs {
@@ -217,6 +234,7 @@ struct Cook<'a> {
     buffers: &'a [gltf::buffer::Data],
     images: &'a [gltf::image::Data],
     tex_cap: u32,
+    target: ir::Target,
     blobs: Blobs,
     textures: Vec<pc::Texture>,
     tex_keys: HashMap<(usize, u8, bool, (u32, u32)), u32>,
@@ -259,7 +277,9 @@ impl<'a> Cook<'a> {
         let mean = mean.map(|m| (m / texels / 255.0) as f32);
         let src = textures::from_rgba8(img.width, img.height, &rgba, role);
         let cap = if img.width.max(img.height) >= 4096 { cap.max(2048) } else { cap };
-        let enc = textures::encode_cells(&src, role, cap, has_alpha, cells);
+        let enc = if self.target == ir::Target::Vita {
+            textures::encode_cells(&src, role, cap, has_alpha, cells)
+        } else { textures::Encoded { format: pc::TexFormat::Rgba8, width: img.width, height: img.height, mips: 1, data: rgba } };
         let data = Blobs::push(&mut self.blobs.tex, &enc.data, 4096);
         let wrap = |m: gltf::texture::WrappingMode| match m {
             gltf::texture::WrappingMode::Repeat => pc::Wrap::Repeat,
@@ -627,7 +647,11 @@ fn accessor_f32(doc: &gltf::Document, buffers: &[gltf::buffer::Data], index: usi
 /// Stores one built draw's buffers and records it.
 #[allow(clippy::too_many_arguments)]
 fn push_draw(b: geometry::Built, material: u32, layout: pc::VertexLayout, node: Option<u32>, skin: Option<u32>, no_reflect: bool, blobs: &mut Blobs, draws: &mut Vec<pc::Draw>) {
-    let vertices = blobs.geometry(&b.vertices);
+    let vertices = if b.source.is_empty() { blobs.geometry(&b.vertices) } else {
+        let id = blobs.meshes.len() as u32;
+        blobs.meshes.push(b.source);
+        pc::Range { offset: id, size: 0 }
+    };
     let indices = blobs.geometry(&b.indices);
     let lods = b.lods.iter().map(|(idx, count, error)| pc::DrawLod { indices: blobs.geometry(idx), index_count: *count, error: *error }).collect();
     draws.push(pc::Draw {
@@ -652,25 +676,19 @@ fn push_draw(b: geometry::Built, material: u32, layout: pc::VertexLayout, node: 
 }
 
 fn main() {
-    if std::env::args().nth(1).as_deref() == Some("psp") {
-        let argv: Vec<String> = std::env::args().collect();
-        let get = |k: &str| argv.iter().position(|x| x == k).and_then(|i| argv.get(i + 1));
-        let input = get("--in").expect("psp --in <cooked.place> --out <psp.place>");
-        let output = get("--out").expect("psp --out <psp.place>");
-        psp::cook(std::path::Path::new(input), std::path::Path::new(output));
-        return;
-    }
     let cli: Vec<String> = std::env::args().collect();
-    if let Some(i) = cli.iter().position(|a| a == "--pica-from") {
-        let get = |k: &str| cli.iter().position(|a| a == k).and_then(|i| cli.get(i + 1));
-        pica::cook(
-            std::path::Path::new(cli.get(i + 1).expect("--pica-from PATH")),
-            std::path::Path::new(get("--out").expect("--out PATH")),
-            get("--tex").and_then(|s| s.parse().ok()).unwrap_or(256),
-        );
+    if cli.get(1).is_some_and(|s| s == "import" || s == "check") {
+        let a = args();
+        if cli[1] == "import" {
+            let m = ir::import(&a.input, &a.output).unwrap_or_else(|e| fail(e));
+            println!("{}", serde_json::to_string_pretty(&m).unwrap());
+        } else {
+            let (_, m) = ir::prepare(&a.input).unwrap_or_else(|e| fail(e));
+            m.check_target(a.target).unwrap_or_else(|e| fail(e));
+            println!("{}: {} supported", m.name, a.target.name());
+        }
         return;
     }
-
     if std::env::args().nth(1).as_deref() == Some("atlas") {
         let argv: Vec<String> = std::env::args().collect();
         let get = |k: &str| argv.iter().position(|x| x == k).and_then(|i| argv.get(i + 1)).cloned();
@@ -681,15 +699,23 @@ fn main() {
         atlas::cook(&input, &output, &faces);
         return;
     }
-    let a = args();
+    let mut a = args();
+    let (root, manifest) = ir::prepare(&a.input).unwrap_or_else(|e| fail(e));
+    manifest.check_target(a.target).unwrap_or_else(|e| fail(e));
+    if !std::env::args().any(|v| v == "--out") {
+        let suffix = match a.target { ir::Target::Vita => "", ir::Target::Pica => ".3ds", ir::Target::Psp => ".psp" };
+        a.output = a.input.join(format!("{}{suffix}.place", manifest.name));
+    }
+    std::fs::create_dir_all(a.output.parent().unwrap_or(std::path::Path::new("."))).expect("output directory");
+    a.input = root;
     let t0 = Instant::now();
-    let glb = a.input.join("scene.glb");
+    let glb = a.input.join("scene.gltf");
     // EXT_mesh_gpu_instancing is listed as required; the crate does not know
     // it, so skip validation and expand instances here.
     let bytes = std::fs::read(&glb).unwrap_or_else(|e| panic!("{}: {e}", glb.display()));
     let gltf::Gltf { document: doc, blob } = gltf::Gltf::from_slice_without_validation(&bytes).unwrap_or_else(|e| panic!("{}: {e}", glb.display()));
-    let buffers = gltf::import_buffers(&doc, None, blob).expect("buffers");
-    let images = gltf::import_images(&doc, None, &buffers).expect("images");
+    let buffers = gltf::import_buffers(&doc, Some(&a.input), blob).expect("buffers");
+    let images = gltf::import_images(&doc, Some(&a.input), &buffers).expect("images");
     println!("loaded {} ({} nodes, {} images) in {} ms", glb.display(), doc.nodes().count(), images.len(), t0.elapsed().as_millis());
     let scene = doc.default_scene().or_else(|| doc.scenes().next()).expect("scene");
     let sx = pc_of(scene.extras());
@@ -730,6 +756,7 @@ fn main() {
         buffers: &buffers,
         images: &images,
         tex_cap: a.tex_cap,
+        target: a.target,
         blobs: Blobs::default(),
         textures: Vec::new(),
         tex_keys: HashMap::new(),
@@ -890,13 +917,16 @@ fn main() {
         cook.log.push(format!("texture {}: LOD bias {:.2}", tex.name, tex.lod_bias));
     }
 
-    // Fold solid materials into a vertex PBR palette before static chunking
-    // and lighting bake. Keep named animated materials on their own path.
-    let material_animation: HashSet<String> = sx["tracks"]["materials"].as_array().into_iter().flatten()
-        .filter_map(|t| t["material"].as_str().map(str::to_owned)).collect();
-    let before = prims.len();
-    palette::batch(&mut prims, &mut cook.materials, &parent, &animated, &world_of, &material_animation);
-    println!("solid PBR palette: {before} → {} primitives", prims.len());
+    // Solid PBR palettes are a Vita vertex encoding, not shared source
+    // analysis: PICA/GE need the authored UVs, tint and material reflectance.
+    // Keep named animated materials on their own path.
+    if a.target == ir::Target::Vita {
+        let material_animation: HashSet<String> = sx["tracks"]["materials"].as_array().into_iter().flatten()
+            .filter_map(|t| t["material"].as_str().map(str::to_owned)).collect();
+        let before = prims.len();
+        palette::batch(&mut prims, &mut cook.materials, &parent, &animated, &world_of, &material_animation);
+        println!("solid PBR palette: {before} → {} primitives", prims.len());
+    }
 
     // ---- node table for moving content (ancestors included for hierarchy)
     let mut node_ids: BTreeMap<usize, u32> = BTreeMap::new();
@@ -1013,7 +1043,10 @@ fn main() {
     let mut skin_ids: HashMap<usize, u32> = HashMap::new();
     for s in doc.skins() {
         let joints: Vec<u32> = s.joints().map(|j| node_ids[&j.index()]).collect();
-        assert!((1..=24).contains(&joints.len()), "skin {} ({:?}) has {} joints; Vita supports 1..=24 per draw, split the source mesh into palettes", s.index(), s.name().unwrap_or(""), joints.len());
+        assert!(!joints.is_empty(), "skin {} ({:?}) has no joints", s.index(), s.name().unwrap_or(""));
+        if a.target == ir::Target::Vita {
+            assert!(joints.len() <= 24, "skin {} ({:?}) has {} joints; Vita supports 1..=24 per draw, split the source mesh into palettes", s.index(), s.name().unwrap_or(""), joints.len());
+        }
         let r = s.reader(|b| Some(&buffers[b.index()]));
         // glTF permits omitted inverse binds and defines them as identity.
         let ibm: Vec<f32> = r.read_inverse_bind_matrices()
@@ -1326,7 +1359,7 @@ fn main() {
         // UVs for material maps. Authored primitives often retain both on
         // plain metal/paint; remove those unused seams before simplification.
         let mut source = verts.to_vec();
-        if m.kind == pc::Kind::Standard {
+        if a.target == ir::Target::Vita && m.kind == pc::Kind::Standard {
             for v in &mut source {
                 if m.normal.is_none() { v.tangent = [1.0, 0.0, 0.0, 1.0]; }
                 if !m.vertex_pbr && m.albedo.is_none() && m.normal.is_none() && m.orm.is_none() && m.emission.is_none() { v.uv = Vec2::ZERO; }
@@ -1354,7 +1387,8 @@ fn main() {
                 for (lock, seam) in locked.iter_mut().zip(geometry::palette_locks(&v)) { *lock |= seam; }
             }
             let levels = geometry::lods(&v, &t, layout, &locked, drop_parts, &bounds, uv_weight).into_iter().map(|(t, e)| (t, (e + base_error) * metric_scale)).collect();
-            let b = geometry::build(&v, &t, layout, levels);
+            let b = geometry::build(&v, &t, layout, levels, a.target == ir::Target::Vita);
+
             push_draw(b, material, layout, node, skin, no_reflect, blobs, draws);
         }
     };
@@ -1388,7 +1422,7 @@ fn main() {
                 let cards = geometry::cache_order(&cards, verts.len());
                 // Cards replace items beyond a few metres (a small nominal
                 // error puts the switch at ~4 m at 640×362).
-                let b = geometry::build(&verts, &tris, pc::VertexLayout::Static, vec![(cards, 0.012)]);
+                let b = geometry::build(&verts, &tris, pc::VertexLayout::Static, vec![(cards, 0.012)], a.target == ir::Target::Vita);
                 push_draw(b, *material, pc::VertexLayout::Static, None, None, true, blobs, draws);
                 start = end;
             }
@@ -1577,7 +1611,10 @@ fn main() {
             let bytes: Vec<u8> = img.px.iter().flat_map(|p| p.map(|c| (c.clamp(0.0, 1.0) * 255.0) as u8)).collect();
             let _ = image::save_buffer(out_dir.join(format!("{name}.png")), &bytes, img.w, img.h, image::ColorType::Rgba8);
         }
-        let enc = textures::encode_as(&img, pc::TexRole::Data, format, 4096, mips);
+        let enc = if a.target == ir::Target::Vita { textures::encode_as(&img, pc::TexRole::Data, format, 4096, mips) } else {
+            textures::Encoded { format: pc::TexFormat::Rgba8, width: img.w, height: img.h, mips: 1,
+                data: img.px.iter().flat_map(|p| p.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)).collect() }
+        };
         let data = Blobs::push(&mut cook.blobs.tex, &enc.data, 4096);
         cook.log.push(format!("effect {name} {:?} {}x{} ×{} ({} KiB)", enc.format, enc.width, enc.height, enc.mips, enc.data.len() / 1024));
         cook.textures.push(pc::Texture {
@@ -1631,7 +1668,6 @@ fn main() {
         "textureBytes": cook.blobs.tex.len(),
         "geometryBytes": cook.blobs.geom.len(),
         "animationBytes": cook.blobs.anim.len(),
-        "cookMs": t0.elapsed().as_millis() as u64,
     });
     // ---- sun, daytime sky, post
     let sun = sx["directionalLights"].as_array().and_then(|a| a.first()).map(|d| {
@@ -1728,7 +1764,7 @@ fn main() {
     } else {
         pc::Post::default()
     };
-    let place = a.input.file_name().and_then(|n| n.to_str()).unwrap_or("place").to_string();
+    let place = manifest.name;
     let meta = pc::Meta {
         version: pc::VERSION,
         name: place,
@@ -1758,6 +1794,16 @@ fn main() {
         vista_haze: extras::vista_haze(&sx["haze"]),
         stats: stats.clone(),
     };
+    if a.target != ir::Target::Vita {
+        let source = source::Scene { meta, blobs: cook.blobs };
+        match a.target {
+            ir::Target::Pica => pica::cook(&source, &a.output, a.tex_cap.min(1024)),
+            ir::Target::Psp => psp::cook(&source, &a.output),
+            ir::Target::Vita => unreachable!(),
+        }
+        std::fs::write(a.output.with_extension("log"), cook.log.join("\n") + "\n").unwrap();
+        return;
+    }
     let meta_json = serde_json::to_vec(&meta).unwrap();
     let pack = pc::write(&[
         (pc::TAG_META, &meta_json, 16),

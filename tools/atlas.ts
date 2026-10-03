@@ -504,7 +504,7 @@ else if (command === "ctl") {
 } else if (command === "cook") {
   const tex = Number(value("--tex", "1024"));
   if (![128, 256, 512, 1024, 2048].includes(tex)) throw new Error("--tex must be 128, 256, 512, 1024 or 2048");
-  await $`cargo run --release -p pocket3d-place-cook -- --in ${PLACE_DIR} --tex ${tex}`.cwd(ROOT);
+  await $`cargo run --release --locked -p pocket3d-place-cook -- --target vita --in ${PLACE_DIR} --tex ${tex}`.cwd(ROOT);
 } else if (command === "cook-atlas") {
   const faces = await fontFaces();
   await $`cargo run --release -p pocket3d-place-cook -- atlas --in ${resolve(ROOT, ".pocket-build/atlas/globe")} --out ${ATLAS_PACK} ${faces}`.cwd(ROOT);

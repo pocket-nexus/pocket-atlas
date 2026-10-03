@@ -91,7 +91,7 @@ The default web geometry remains the full reference. `geometry=handheld`
 selects the shared daytime geometry profile: the train retains all eight
 cars, 32 rotating wheelsets, cab, interior and equipment, with fewer radial
 segments and without hidden edges on thin plates. Its train geometry is
-102,376 triangles instead of 365,224. Foliage card density and railway hardware
+79,536 triangles instead of 365,224. Foliage card density and railway hardware
 tessellation also scale down. Lighting and texture authoring quality remain
 independent of this geometry choice.
 
@@ -125,72 +125,66 @@ geometry and animation storage. The native renderer gives moving rigid
 casters a separate shadow map while retaining the cached street shadows.
 Skinned particle bounds cover every joint, including the short final batch.
 
-The handheld export with a 512 px texture cap cooks to 38.97 MiB: 674 total
-draws, 416,849 LOD0 triangles, 299 animated nodes and 11 skins. The offline
-`vita30` step-0 scan samples 960 times at three camera positions for each of
-the six shots. It peaks at 349 main-pass draws, 215,419 triangles and 48,864
-moving triangles. These remain above the planning guides (250 / 130k / 30k);
-the counts are conservative, omit extra render passes and do not replace GPU
-profiling. Long faces are isolated from local static chunks so rails and
-wires cannot keep distant buildings at near-camera LOD and shader detail.
-Budget and frame-rate acceptance are still open.
+The handheld export uses a 512 px texture cap. The reviewed geometry contains
+674 draws, 358,103 LOD0 triangles, 299 animated nodes and 11 skins, in a roughly
+36.6 MiB Vita pack. The offline `vita30` step-0 scan samples 960 times at three
+camera positions for each of the six shots. It peaks at 349 main-pass draws,
+181,370 triangles and 39,896 moving triangles. These are planning counts, not
+GPU timing. Long faces are isolated from local static chunks so rails and wires
+cannot keep distant buildings at near-camera LOD and shader detail.
 
-`build` produces a Devkit runtime VPK/SELF; the place and atlas packs remain
-separate. On 2026-10-02 the USB deployment entered this place, completed
-SceShaccCg compilation with no shader errors or missing draws, and returned
-960×544 GXM captures including the passing train. This is device evidence;
-physical button and screen acceptance is still separate.
+### Compiler and renderer ownership
 
-At the Train shot's halfway camera, time 19.73 s, `vita30` step 0, 4× MSAA,
-480×272 HDR, the initial serialized GPU total was 60.21 ms (main 50.97 ms).
-The final R32F shader measured 53.83–53.84 ms across two runs (main 44.54 ms,
-moving map 1.72 ms). This still fails the 30 fps target. The wider moving
-shadow bias was checked in device captures and removed the train's stripes.
+The export is sealed as PlaceIR before device lowering, following
+[the compiler architecture](../../../../docs/COMPILER.md). Palette packing of
+solid PBR factors into UVs belongs to the Vita lowering. Native targets use
+source geometry and pixels rather than decoding a Vita pack. The registry
+publishes this place for web and Vita only; 3DS/PSP support is not implied.
 
-The current build stores the same normalized depth in a single-channel R32F
-colour target, recovering the stored-depth trial's additional 17 MiB of
-CDRAM. It retains receiver culling and separates rough non-metal static
-palettes from sun-GGX palettes. Bounded shadow-filter weights and sunlight
-use half precision; light-space coordinates, depth comparisons and GGX
-evaluation retain float precision. This reduced the R32F baseline's 54.69 ms
-to 53.83–53.84 ms. The fixed Train capture's mean absolute RGB change was
-0.57/255, with no pixel changing more than 10/255 (runtime grain also varies).
-A depth-prepass experiment was measured and removed because it increased
-GPU cost. No scene geometry was removed for these renderer optimizations.
+Vita PLCE and ATLS envelopes use version 7, and Vita Place META uses version 7.
+Older readers must reject the new vertex-PBR encoding. PICA keeps its separate
+PLCE v5 envelope and v3 table; PSP keeps PLPS v1. Re-cook the Vita places and
+atlas when updating the runtime.
 
-After USB reconnection, native build `718f9d47cfe832ef1e31e7e7678fb2cd`
-loaded the final shaders in Pocket Devkit with pending=0, missing=0 and no
-reported renderer or shader errors. All six cameras were captured at
-960×544 and reviewed. Crossing captures at 0, 8, 25, 37 and 63.93 seconds
-checked open/lowering/closed/raising states and the loop boundary. The
-same-view endpoint captures differed by a mean 0.64/255, including moving
-petals and grain. These are GXM captures, not a human physical-screen or
-button-input acceptance claim.
+Atlas owns shaders, shared daytime materials, rigid moving shadows and quality
+policy. The pinned PocketJS `pocket-vita-gxm` owns target allocation and GXM
+program/output formats. The static 2048² and moving 512² raw depth targets are
+R32F; an RG16 cache pairs adjacent depths, allowing four PCF comparisons from
+two point reads. It retains the soft-edge weights. Light-space coordinates and
+depth comparisons stay float; bounded weights and sunlight use half precision.
+The target format does not imply that the shader compiler retains FP32 output
+precision. No copied GXM crate or place-ID branch is needed.
 
-Three atlas/place round trips succeeded, with exactly 40,894,464 bytes
-(39 MiB) of free CDRAM after every entry and no cumulative loss in reported
-user or physically contiguous memory. The atlas preview and remotely opened
-settings sheet were captured and checked.
+### Acceptance and recorded measurements
 
-At the six halfway cameras, time 19.73 s and step 0, the frame-time sweep
-reported 45.7 ms Crossing, 44.8 Blossom, 47.3 Tracks, 47.2 Train, 43.4 Lane
-and 46.1 Spring. These paced frame measurements are distinct from the
-serialized GPU timings above. None meets the step-0 30 fps acceptance bar.
+On 2026-10-03 the project owner accepted the scene's picture quality and waived
+the step-0 30 fps requirement for this place. Performance measurements below
+remain disclosed; this is not a claim that every shot holds 30 fps. Further
+Vita work was stopped to release the device for other tasks.
 
-A 146-second continuous camera/governor run completed without reported
-errors. Mean frame rates were 25.1 fps Crossing, 27.2 Blossom, 29.8 Tracks,
-29.2 Train, 25.8 Lane and 26.5 Spring; the governor used steps 2–4, always
-at 480×272. No captures or package transfers ran during this measurement.
-This is stable execution evidence, not 30 fps acceptance.
+Before the architecture integration, the paired-depth path completed device
+compilation and same-camera GXM captures. Six views and crossing phases at
+0, 8, 25, 37 and 63.93 seconds cover the train, gates and loop boundary. The
+capture baseline used native build `3fa13ff1af055acf89266266b0eb181a`.
 
-The standalone `PKAT00001` VPK contains this place, the atlas and 321
-device-compiled programs. Every manifest key was rehashed against current
-expanded shader sources; VPK CRC and eboot/atlas/place/GXP byte readback
-passed. It includes no USB debug driver. Standalone installation and launch
-are separate from the verified Pocket Devkit run. The device acknowledged
-copying all 25,826,343 bytes to
-`ux0:data/pocket-atlas/pocket-atlas-PKAT00001.vpk`, ready for VitaShell
-installation; that copy receipt does not prove standalone execution.
+At the Train halfway camera, t=19.73 s, `vita30` step 0, 480×272 HDR and 4× MSAA,
+serialized GPU time was 46.8–46.9 ms, including approximately 36.2 ms for the
+main pass, 1.7 ms for moving casters and 1.4 ms for their depth pairing. A
+separate fixed-camera sweep recorded these paced frame times:
+
+| Crossing | Blossom | Tracks | Train | Lane | Spring |
+| --- | --- | --- | --- | --- | --- |
+| 40.5 ms | 39.7 ms | 41.3 ms | 40.9 ms | 37.7 ms | 37.3 ms |
+
+An earlier 146-second camera/governor run of the R32F path completed without
+reported errors at 25.1–29.8 fps, using quality steps 2–4. That run is historical
+evidence for its recorded build, not a measurement of the final architecture
+integration. The shared-kernel migration and final recooks have host/build
+validation only; no new Vita deployment was performed after the stop request.
+
+The older standalone package was copied to the device, but installation and
+standalone launch were not established. It is not the final integrated artifact.
+Captures, timings and package receipts remain in ignored validation storage.
 
 To repeat a measurement on an existing USB host (replace the share path):
 
@@ -206,5 +200,5 @@ bun tools/atlas.ts shots --place sangubashi-crossing --seconds 146 \
 
 The measurement tools reject stale status, another native build, shader
 errors and a changed place rather than reporting another task's results.
-The existing native renderer has no audio path; the procedural railway sound
-remains a web feature. The PocketJS pin and transport implementation are unchanged.
+The existing native renderer has no audio path; procedural railway sound remains
+a web feature. Transport stays in PocketJS; this place adds no transport fork.

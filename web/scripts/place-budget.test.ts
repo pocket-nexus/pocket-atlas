@@ -68,12 +68,12 @@ describe('place readback rejects unusable GPU inputs', () => {
       f.meta.version = version;
       expect(() => readPlace(serialize(f))).toThrow('META version differs');
     }
-    // These independent language boundaries must change together.
+    // The Vita budget reader follows Vita; PICA keeps its independent envelope.
     const rust = await Bun.file(new URL('../../crates/pocket3d-place/src/lib.rs', import.meta.url)).text();
     const pica = await Bun.file(new URL('../../n3ds/src/format.h', import.meta.url)).text();
     expect(Number(rust.match(/pub const VERSION: u32 = (\d+);/)![1])).toBe(PLACE_VERSION);
-    expect(Number(pica.match(/ATLAS_PLACE_VERSION = (\d+)/)![1])).toBe(PLACE_VERSION);
-    expect(pica).toContain('ATLAS_PICA_VERSION = 3');
+    expect(Number(pica.match(/#define ATLAS_PICA_CONTAINER_VERSION (\d+)/)![1])).toBe(5);
+    expect(pica).toContain('#define ATLAS_PICA_TABLE_VERSION 3');
   });
 
   test('v6 light records remain readable without counting points as triangles', () => {

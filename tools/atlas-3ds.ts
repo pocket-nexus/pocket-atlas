@@ -15,7 +15,7 @@ import { resolve, join } from "node:path";
 import { crc32 } from "node:zlib";
 import { PLACES } from "../web/src/places/registry";
 import { syncAssets } from "./atlas-3ds-delivery";
-import { readPack } from "./place-container";
+import { readPack, PICA_PACK_VERSION } from "./place-container";
 import {
   runContainer,
   THREE_DS_CONTAINER_IMAGE,
@@ -41,7 +41,7 @@ const place = option("--place", "tokyo-konbini"),
   dir = join(root, ".pocket-build/3ds"),
   romfs = join(dir, "atlas-romfs");
 const nativePlaces = join(dir, "places");
-const livePlaces = PLACES.filter((p) => p.status === "live" && p.load);
+const livePlaces = PLACES.filter((p) => p.status === "live" && p.load && p.targets?.includes("3ds"));
 const receipts = join(root, ".pocket-build/validation/3ds");
 mkdirSync(receipts, { recursive: true });
 const thin = args.includes("--thin");
@@ -214,15 +214,17 @@ async function enterPlace(c: PocketRuntimeClient, id: string) {
 }
 function shotNames(id: string): string[] {
   const data = readFileSync(join(nativePlaces, `${id}.place`));
-  return JSON.parse(readPack(data, "PLCE").section("META").toString("utf8"))
+  return JSON.parse(readPack(data, "PLCE", PICA_PACK_VERSION).section("META").toString("utf8"))
     .camera.shots.map((shot: { name: string }) => shot.name);
 }
 if (command === "cook") {
   mkdirSync(nativePlaces, { recursive: true });
+  if (args.includes("--place") && !livePlaces.some((p) => p.id === place))
+    throw new Error(`${place} is not in the 3DS release catalog; compile its PlaceIR explicitly to check capabilities`);
   for (const p of livePlaces.filter(
     (p) => !args.includes("--place") || p.id === place,
   )) {
-    await $`cargo run --release --locked -p pocket3d-place-cook -- --pica-from ${join(root, `.pocket-build/places/${p.id}/${p.id}.place`)} --out ${join(nativePlaces, `${p.id}.place`)} --tex ${option("--tex", "256")}`.cwd(
+    await $`cargo run --release --locked -p pocket3d-place-cook -- --target 3ds --in ${join(root, `.pocket-build/places/${p.id}`)} --out ${join(nativePlaces, `${p.id}.place`)} --tex ${option("--tex", "256")}`.cwd(
       root,
     );
   }

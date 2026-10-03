@@ -7,6 +7,11 @@ use glam::{Mat4, Quat, Vec3};
 use pocket3d_place as pc;
 use std::{collections::HashMap, path::Path};
 
+// This schema belongs to PICA, independently of Vita's pc::VERSION.
+// tests/pipeline.rs verifies emitted packs against n3ds/src/format.h.
+const CONTAINER_VERSION: u32 = 5;
+const TABLE_VERSION: u32 = 3;
+
 fn u32s(out: &mut Vec<u8>, v: &[u32]) {
     for n in v {
         out.extend(n.to_le_bytes());
@@ -22,9 +27,6 @@ fn align(b: &mut Vec<u8>, n: usize) {
 }
 fn readf(b: &[u8], at: usize) -> f32 {
     f32::from_le_bytes(b[at..at + 4].try_into().unwrap())
-}
-fn q16(b: &[u8], at: usize) -> f32 {
-    i16::from_le_bytes([b[at], b[at + 1]]) as f32 / 32767.0
 }
 fn linear(x: f32) -> f32 {
     if x <= 0.04045 {
@@ -609,11 +611,9 @@ fn push_texture(src: &Rgba, alpha: bool, tex: &mut Vec<u8>, textures: &mut Vec<[
     ]);
     textures.len() as u32 - 1
 }
-fn source_position(d: &pc::Draw, bytes: &[u8], i: usize) -> Vec3 {
-    let p = &bytes[d.vertices.offset as usize + i * d.layout.stride() as usize..];
-    Vec3::from(d.pos_offset) + Vec3::new(q16(p, 0), q16(p, 2), q16(p, 4)) * Vec3::from(d.pos_scale)
-}
-fn sun_occluder(m: &pc::Meta, bytes: &[u8]) -> Option<crate::occlusion::Occluder> {
+fn sun_occluder(scene: &crate::source::Scene) -> Option<crate::occlusion::Occluder> {
+    let m = &scene.meta;
+    let bytes = scene.geometry();
     m.sun.as_ref()?.shadow.as_ref()?;
     let mut tris = Vec::new();
     for d in &m.draws {
@@ -631,7 +631,7 @@ fn sun_occluder(m: &pc::Meta, bytes: &[u8]) -> Option<crate::occlusion::Occluder
         {
             let p: Vec<Vec3> = tri
                 .chunks_exact(2)
-                .map(|v| source_position(d, bytes, u16::from_le_bytes([v[0], v[1]]) as usize))
+                .map(|v| scene.vertex(d, u16::from_le_bytes([v[0], v[1]]) as usize).pos)
                 .collect();
             tris.push(crate::occlusion::Tri {
                 a: p[0],
@@ -653,17 +653,16 @@ fn main_lods<'a>(indices: &'a pc::Range, count: u32, levels: &'a [pc::DrawLod]) 
         .collect()
 }
 
-pub fn cook(input: &Path, output: &Path, cap: u32) {
+pub fn cook(scene: &crate::source::Scene, output: &Path, cap: u32) {
     assert!(
         cap.is_power_of_two() && (64..=1024).contains(&cap),
         "--tex must be a power of two in 64..1024"
     );
-    let bytes = std::fs::read(input).expect("read source place");
-    let pack = pc::Pack::parse(&bytes).unwrap();
-    let m = pack.meta().unwrap();
-    let src_tex = pack.section(pc::TAG_TEXTURES).unwrap();
-    let src_geom = pack.section(pc::TAG_GEOMETRY).unwrap();
-    let src_anim = pack.section(pc::TAG_ANIMATION).unwrap();
+    let m = &scene.meta;
+    assert!(m.materials.iter().all(|m| !m.vertex_pbr), "PICA lowering requires source materials, not Vita PBR palettes");
+    let src_tex = scene.textures();
+    let src_geom = scene.geometry();
+    let src_anim = scene.animation();
     let mut tex = Vec::new();
     let mut geom = Vec::new();
     let mut anim = Vec::new();
@@ -740,8 +739,10 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
                         *p = [v, v, v, 1.0];
                     }
                 }
-                // Text atlases retain 1024 so Japanese lettering survives the 400px display.
-                let limit = if src.w >= 2048
+                // Authored 4K text atlases retain 1024 for the 400px display.
+                // The old Vita intermediate had already reduced these to 2K;
+                // testing 2K here incorrectly promotes ordinary source maps.
+                let limit = if src.w >= 4096
                     || grid[0] > 1
                     || grid[1] > 1
                     || ti.is_some_and(|id| emissive_strips[id as usize])
@@ -936,7 +937,7 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
             );
         }
     }
-    let occluder = sun_occluder(&m, src_geom);
+    let occluder = sun_occluder(scene);
     let baker = crate::bake::Baker::new(
         &m.lights,
         (m.atmosphere.hemisphere_sky, m.atmosphere.hemisphere_ground),
@@ -944,31 +945,21 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
     );
     for d in &m.draws {
         let mat = &m.materials[d.material as usize];
-        let stride = d.layout.stride() as usize;
         align(&mut geom, 16);
         let vo = geom.len();
         let mut positions = Vec::new();
         for i in 0..d.vertex_count as usize {
-            let p = &src_geom[d.vertices.offset as usize + i * stride..][..stride];
-            let pos = Vec3::from(d.pos_offset)
-                + Vec3::new(q16(p, 0), q16(p, 2), q16(p, 4)) * Vec3::from(d.pos_scale);
-            let n = Vec3::new(p[8] as i8 as f32, p[9] as i8 as f32, p[10] as i8 as f32)
-                .normalize_or(Vec3::Y);
-            let mut uv = [
-                q16(p, 16) * d.uv_scale[0] + d.uv_offset[0],
-                q16(p, 18) * d.uv_scale[1] + d.uv_offset[1],
-            ];
-            let mut vc = Vec3::new(
-                linear(p[20] as f32 / 255.0),
-                linear(p[21] as f32 / 255.0),
-                linear(p[22] as f32 / 255.0),
-            );
+            let v = scene.vertex(d, i);
+            let pos = v.pos;
+            let n = v.normal.normalize_or(Vec3::Y);
+            let mut uv = v.uv.to_array();
+            let mut vc = Vec3::from_array(core::array::from_fn(|k| linear(v.color[k] as f32 / 255.0)));
             let world = d
                 .node
                 .map_or(pos, |i| world0[i as usize].transform_point3(pos));
             let mut light = if d.layout == pc::VertexLayout::Baked {
-                let k = p[27] as f32 / 255.0;
-                Vec3::new(p[24] as f32, p[25] as f32, p[26] as f32)
+                let k = v.light[3] as f32 / 255.0;
+                Vec3::new(v.light[0] as f32, v.light[1] as f32, v.light[2] as f32)
                     .map(|v| (v / 255.0 * k).powi(2) * 64.0)
             } else {
                 baker.irradiance(world, n, mat.env_strength, false, 1.0) + Vec3::splat(0.08)
@@ -999,7 +990,7 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
                         ((h2 * 8.0).floor() + 0.08 + uv[1].clamp(0.0, 1.0) * 0.8) / 8.0,
                     ];
                     grade(
-                        Vec3::splat(mat.emissive[0] * (0.78 + 0.22 * p[23] as f32 / 255.0)),
+                        Vec3::splat(mat.emissive[0] * (0.78 + 0.22 * v.color[3] as f32 / 255.0)),
                         &m.post,
                     )
                 }
@@ -1009,8 +1000,7 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
                 }
                 pc::Kind::Skyline => {
                     let tangent =
-                        Vec3::new(p[12] as i8 as f32, p[13] as i8 as f32, p[14] as i8 as f32)
-                            / 127.0;
+                        Vec3::new(v.tangent[0], v.tangent[1], v.tangent[2]);
                     uv = [pos.dot(tangent) / 32.0, pos.y / 52.8];
                     Vec3::ONE
                 }
@@ -1071,7 +1061,7 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
                 byte(color.y),
                 byte(color.z),
                 if mat.vertex_color && (mat.blend != pc::Blend::Opaque || mat.alpha_test > 0.0) {
-                    p[23]
+                    v.color[3]
                 } else {
                     255
                 },
@@ -1130,11 +1120,11 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
         let skoff = if let Some(s) = d.skin {
             let off = skin_data.len();
             for i in 0..d.vertex_count as usize {
-                let p = &src_geom[d.vertices.offset as usize + i * stride..];
-                for &j in &p[24..28] {
+                let v = scene.vertex(d, i);
+                for &j in &v.joints {
                     skin_data.extend(((skin_base[s as usize] + j as usize) as u16).to_le_bytes());
                 }
-                skin_data.extend(&p[28..32]);
+                skin_data.extend(&v.weights);
             }
             off as u32
         } else {
@@ -1365,7 +1355,7 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
     u32s(
         &mut table,
         &[
-            3,
+            TABLE_VERSION,
             textures.len() as u32,
             mats.len() as u32,
             draws.len() as u32,
@@ -1437,9 +1427,18 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
         fs(&mut table, &b[1]);
     }
     table.extend(&skin_data);
-    let summary = serde_json::json!({"target":"3ds","version":3,"name":m.name,"kind":m.kind,"sourceMaterials":m.materials.len(),"textures":textures.len(),"draws":draws.len(),"textureBytes":tex.len(),"geometryBytes":geom.len(),"animationBytes":anim.len(),"matrices":matrices,"frames":frames,"fps":fps,"features":features,"sourceNodes":m.nodes.len(),"camera":m.camera});
+    // Match the loader's per-section limits before publishing an unusable pack.
+    // Actual allocation headroom still needs device validation (skinning, FX,
+    // render targets and the host also consume memory).
+    for (name, bytes, mib) in [("table", table.len(), 4), ("textures", tex.len(), 12),
+        ("geometry", geom.len(), 24), ("animation", anim.len(), 16)] {
+        if bytes > mib * 1024 * 1024 {
+            crate::fail(format!("PICA {name} budget exceeded: {bytes} bytes > {mib} MiB"));
+        }
+    }
+    let summary = serde_json::json!({"target":"3ds","version":TABLE_VERSION,"name":m.name,"kind":m.kind,"sourceMaterials":m.materials.len(),"textures":textures.len(),"draws":draws.len(),"textureBytes":tex.len(),"geometryBytes":geom.len(),"animationBytes":anim.len(),"matrices":matrices,"frames":frames,"fps":fps,"features":features,"sourceNodes":m.nodes.len(),"camera":m.camera});
     let meta = serde_json::to_vec(&summary).unwrap();
-    let out = pc::write(&[
+    let out = pc::write_versioned(pc::MAGIC, CONTAINER_VERSION, &[
         (pc::TAG_META, &meta, 16),
         (*b"PICA", &table, 16),
         (pc::TAG_TEXTURES, &tex, 128),

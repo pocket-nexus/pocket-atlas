@@ -59,6 +59,7 @@ pub fn tangents(pos: &[Vec3], nrm: &[Vec3], uv: &[Vec2], tris: &[[u32; 3]]) -> V
 }
 
 pub struct Built {
+    pub source: Vec<Vertex>,
     pub vertices: Vec<u8>,
     pub indices: Vec<u8>,
     pub vertex_count: u32,
@@ -199,7 +200,7 @@ pub fn simplify(verts: &[Vertex], tris: &[[u32; 3]], keep: f32, max_error: f32, 
 /// Quantizes one draw (≤ 65 536 unique vertices) into the Static (24 B),
 /// Baked (28 B) or Skinned (32 B) layout. `lods`: reduced triangles over the
 /// same vertices and their errors, finest first.
-pub fn build(verts: &[Vertex], tris: &[[u32; 3]], layout: pocket3d_place::VertexLayout, lods: Vec<(Vec<[u32; 3]>, f32)>) -> Built {
+pub fn build(verts: &[Vertex], tris: &[[u32; 3]], layout: pocket3d_place::VertexLayout, lods: Vec<(Vec<[u32; 3]>, f32)>, encode_vita: bool) -> Built {
     let skinned = layout == pocket3d_place::VertexLayout::Skinned;
     let mut min = Vec3::splat(f32::MAX);
     let mut max = Vec3::splat(f32::MIN);
@@ -215,6 +216,25 @@ pub fn build(verts: &[Vertex], tris: &[[u32; 3]], layout: pocket3d_place::Vertex
     let half = ((max - min) * 0.5).max(Vec3::splat(1e-4));
     let uvc = (uvmin + uvmax) * 0.5;
     let uvh = ((uvmax - uvmin) * 0.5).max(Vec2::splat(1e-5));
+    // Native lowerings keep the original float attributes and index space.
+    // Vita's quantized-byte dedup would merge distinct source values and
+    // must never remap this transient source through the packed records.
+    if !encode_vita {
+        return Built {
+            source: verts.to_vec(),
+            vertices: Vec::new(),
+            indices: u16_indices(&cache_order(tris, verts.len())),
+            vertex_count: verts.len() as u32,
+            index_count: (tris.len() * 3) as u32,
+            lods: lods.into_iter().map(|(t, e)| (u16_indices(&cache_order(&t, verts.len())), (t.len() * 3) as u32, e)).collect(),
+            pos_offset: center.to_array(),
+            pos_scale: half.to_array(),
+            uv_offset: uvc.to_array(),
+            uv_scale: uvh.to_array(),
+            min: min.to_array(),
+            max: max.to_array(),
+        };
+    }
     let stride = layout.stride() as usize;
     let mut out = Vec::with_capacity(verts.len() * stride);
     for v in verts {
@@ -255,6 +275,7 @@ pub fn build(verts: &[Vertex], tris: &[[u32; 3]], layout: pocket3d_place::Vertex
     };
     let vertex_count = (packed.len() / stride) as u32;
     Built {
+        source: Vec::new(),
         vertices: packed,
         indices: u16_indices(&cache_order(&remap_tris(tris), vertex_count as usize)),
         vertex_count,
@@ -621,8 +642,8 @@ mod tests {
         // Across every packed layout, the indexed stream fetches exactly the
         // bytes the original soup did. Ignore its unreferenced seventh vertex.
         for layout in [VertexLayout::Static, VertexLayout::Baked, VertexLayout::Skinned] {
-            let old = build(&input[..6], &tris, layout, Vec::new());
-            let new = build(&verts, &indexed, layout, Vec::new());
+            let old = build(&input[..6], &tris, layout, Vec::new(), true);
+            let new = build(&verts, &indexed, layout, Vec::new(), true);
             let stride = layout.stride() as usize;
             for (before, after) in old.indices.chunks_exact(2).zip(new.indices.chunks_exact(2)) {
                 let before = u16::from_le_bytes(before.try_into().unwrap()) as usize;
@@ -644,7 +665,7 @@ mod tests {
         other_joint.joints[0] = 1;
         let verts = [a, vertex(Vec3::X), vertex(Vec3::Z), tangent_noise, other_joint];
         let tris = [[0, 1, 2], [3, 1, 2], [4, 1, 2]];
-        let b = build(&verts, &tris, VertexLayout::Skinned, vec![(vec![[3, 1, 2], [4, 1, 2]], 0.06)]);
+        let b = build(&verts, &tris, VertexLayout::Skinned, vec![(vec![[3, 1, 2], [4, 1, 2]], 0.06)], true);
         assert_eq!(b.vertex_count, 4);
         assert_eq!(b.index_count, 9);
         let lod_indices: Vec<u16> = b.lods[0].0.chunks_exact(2).map(|i| u16::from_le_bytes(i.try_into().unwrap())).collect();
@@ -652,6 +673,35 @@ mod tests {
         // Joint index is the first byte following the 24-byte rigid layout.
         assert_eq!(b.vertices[24], 0);
         assert_eq!(b.vertices[3 * 32 + 24], 1);
+    }
+
+    #[test]
+    fn native_source_keeps_float_attributes_and_lod_index_space() {
+        let a = vertex(Vec3::ZERO);
+        let mut close = a;
+        close.pos.x = 0.0000001;
+        close.normal.x = 0.000001;
+        close.tangent[2] = 0.000001;
+        close.uv.x = 0.0000001;
+        let mut far = vertex(Vec3::X);
+        far.uv = Vec2::ONE;
+        let verts = [a, far, vertex(Vec3::Z), close];
+        let tris = [[0, 1, 2], [3, 1, 2]];
+        let levels = vec![(vec![[3, 1, 2]], 0.06)];
+        let native = build(&verts, &tris, VertexLayout::Skinned, levels.clone(), false);
+        let vita = build(&verts, &tris, VertexLayout::Skinned, levels, true);
+        assert_eq!(vita.vertex_count, 3, "Vita may merge GPU-identical records");
+        assert_eq!(native.vertex_count, 4, "native lowering must retain distinct source floats");
+        assert!(native.vertices.is_empty());
+        for (actual, source) in native.source.iter().zip(verts) {
+            assert_eq!(actual.pos.to_array().map(f32::to_bits), source.pos.to_array().map(f32::to_bits));
+            assert_eq!(actual.normal.to_array().map(f32::to_bits), source.normal.to_array().map(f32::to_bits));
+            assert_eq!(actual.tangent.map(f32::to_bits), source.tangent.map(f32::to_bits));
+            assert_eq!(actual.uv.to_array().map(f32::to_bits), source.uv.to_array().map(f32::to_bits));
+            assert_eq!((actual.color, actual.joints, actual.weights, actual.light), (source.color, source.joints, source.weights, source.light));
+        }
+        let indices: Vec<u16> = native.lods[0].0.chunks_exact(2).map(|i| u16::from_le_bytes(i.try_into().unwrap())).collect();
+        assert_eq!(indices, [3, 1, 2]);
     }
 
     #[test]

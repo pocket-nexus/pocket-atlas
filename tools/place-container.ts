@@ -1,13 +1,14 @@
 /** Shared PLCE/ATLS container gate for host tools. Payload schemas have
  * their own versions (AtlasMeta remains v1; PICA remains v3). */
-export const PACK_VERSION = 7;
+export const VITA_PACK_VERSION = 7;
+export const PICA_PACK_VERSION = 5;
 
-export function readPack(bytes: Buffer, magic: "PLCE" | "ATLS") {
+export function readPack(bytes: Buffer, magic: "PLCE" | "ATLS", expectedVersion: number) {
   if (bytes.length < 16) throw new Error(`Truncated ${magic} header`);
   if (bytes.toString("ascii", 0, 4) !== magic)
     throw new Error(`Expected ${magic} pack`);
   const version = bytes.readUInt32LE(4);
-  if (version !== PACK_VERSION)
+  if (version !== expectedVersion)
     throw new Error(`Unsupported ${magic} version ${version}`);
   const count = bytes.readUInt32LE(8), tableEnd = 16 + count * 16;
   if (!count || tableEnd > bytes.length)

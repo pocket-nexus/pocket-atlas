@@ -5,7 +5,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { PLACES } from "../web/src/places/registry";
-import { readPack } from "./place-container";
+import { readPack, VITA_PACK_VERSION } from "./place-container";
 
 const root = resolve(import.meta.dir, "..");
 const arg = (name: string, fallback: string) => {
@@ -15,7 +15,7 @@ const arg = (name: string, fallback: string) => {
 const source = resolve(arg("atlas", `${root}/.pocket-build/atlas/atlas.pack`));
 const globeDir = resolve(arg("globe", `${root}/.pocket-build/atlas/globe`));
 const out = resolve(arg("out", `${root}/.pocket-build/3ds/romfs/atlas.3ds`));
-const { section } = readPack(readFileSync(source), "ATLS");
+const { section } = readPack(readFileSync(source), "ATLS", VITA_PACK_VERSION);
 const meta = JSON.parse(section("META").toString());
 const coverage = section("FONT"),
   texdata = section("TEXD");
@@ -122,7 +122,7 @@ for (const [i, p] of PLACES.entries()) {
   }
   places.writeFloatLE(p.lat, i * PLACE + 48);
   places.writeFloatLE(p.lon, i * PLACE + 52);
-  places.writeUInt32LE((p.load ? 1 : 0) | (p.featured ? 2 : 0), i * PLACE + 56);
+  places.writeUInt32LE((p.load && p.targets?.includes("3ds") ? 1 : 0) | (p.featured ? 2 : 0), i * PLACE + 56);
   places.writeUInt32LE(parseInt(p.accent.replace("#", ""), 16), i * PLACE + 60);
   places.writeInt32LE(-1, i * PLACE + 64);
 }

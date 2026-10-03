@@ -10,7 +10,7 @@ Places share their assets across the reference and handheld renderers:
 - **`vita/`** renders the same place on a PS Vita with its own GXM pipeline: Cg programs compiled on the device by SceShaccCg, 4× MSAA HDR targets and the effect set the place needs.
 - **`n3ds/`** renders the shared globe, place browser and all four scenes on an Old 3DS, using a PICA200 cook of the same assets, native 400 × 240 output and a 30fps quality budget. See [the 3DS build and debug workflow](n3ds/README.md).
 
-A pack connects the renderers: the web app exports a place as glTF 2.0 with `extras.pocketAtlas`, and the cooker (`crates/pocket3d-place-cook`) turns it into a `.place` pack for the handheld GPU.
+The web app exports glTF 2.0 with `extras.pocketAtlas`. The cooker seals a lossless PlaceIR, then independently lowers it into Vita, PICA or GE assets. See [the compiler boundaries, commands and migration plan](docs/COMPILER.md).
 
 ## Places
 
@@ -20,7 +20,7 @@ A pack connects the renderers: the web app exports a place as glTF 2.0 with `ext
 | Suga Shrine Stairs | `suga-shrine-stairs` | Yotsuya, Tokyo (the 男坂 stairs) | sun with a shadow map, sky occlusion baked into the vertices, alpha-tested foliage, daytime sky with a cloud panorama, ACES grade |
 | Radio Kaikan at Blue Hour | `akihabara-radio-kaikan` | Akihabara, Tokyo (秋葉原ラジオ会館, the 2014 building) | twilight sky (sun below the horizon), animated LED signage (flipbooks and scrolling strips), backlit window artwork, panel lights and lamps baked with sky occlusion, pedestrians and a passing train |
 | Kamakura-Kōkōmae Crossing | `kamakura-koko-mae-crossing` | Shichirigahama, Kamakura (鎌倉高校前1号踏切 on the Enoden) | open water (wave layers, Fresnel sky reflection, glitter path) to a 16 km horizon in FogExp2 haze, scrolling surf strips, flashing crossing lamps and gates driven by material and node tracks, a train, Route 134 traffic |
-| Sangubashi in Bloom | `sangubashi-crossing` | Yoyogi, Tokyo (参宮橋３号踏切) | spring foliage, animated petals, an eight-car commuter train, synchronised barriers and moving sunlight shadows; Vita compile/captures verified, performance acceptance pending |
+| Sangubashi in Bloom | `sangubashi-crossing` | Yoyogi, Tokyo (参宮橋３号踏切) | spring foliage, animated petals, an eight-car commuter train, synchronised barriers and moving sunlight shadows; Vita picture quality accepted; recorded frame-rate limits documented |
 | Griffith Observatory at Blue Hour | `griffith-observatory` | Mount Hollywood, Los Angeles, over the basin (September 2015) | light fields of GXM point sprites (52k city lights, 5k moving), height haze with an inversion layer to a 71 km horizon, floodlit masonry baked into vertices, parallax windows, a resolution boost to 640×362 |
 
 Real places fall into a finite set of kinds; the registry names them (`PlaceKind` in `web/src/core/types.ts`): `night-street`, `daytime-slope`, `dusk-street`, `daytime-coast`, `daytime-street`, `dusk-vista` for the places built so far, and `night-slope`, `dusk-coast`, `night-coast`, `interior` and `rooftop` for the places still to come. Each first-party place brings its kind's rendering to the best quality the handheld holds, and the work goes into the shared renderer and cooker so later places of the same kind reuse it. Glass (`places/shared/glass.ts`) blends premultiplied on the web as on the device. The workflow and quality bar for making a place are in the `pocket-atlas-place` skill (`.claude/skills/pocket-atlas-place/`).
@@ -32,7 +32,7 @@ Real places fall into a finite set of kinds; the registry names them (`PlaceKind
 | `web/` | three.js reference places (`src/places/<id>`, shared code in `src/places/shared`), globe, scripts: `export-place.ts`, `export-atlas.ts`, `preview-place.ts` |
 | `crates/pocket3d-place` | pack formats: `.place` (META JSON + texture, geometry and animation blobs) and `atlas.pack` (globe, place list, preview cards, interface font); sRGB helpers |
 | `crates/pocket3d-place-cook` | glTF → pack: BC1/BC3/BC5 textures with mips, quantized vertices, baked vertex lighting and sky occlusion, low-poly shelf stock, octahedral environment, effect textures; the atlas pack and its baked font (`atlas.rs`, `uifont.rs`); annotation readers (`extras.rs`) |
-| `crates/pocket3d-gxm` | GXM layer: GXP registration and patching, own shader patcher, render targets, texture upload, runtime SceShaccCg |
+| `vendor/pocketjs/devices/vita/pocket-vita-gxm` | Shared GXM memory/program/target/texture mechanisms, optional runtime SceShaccCg; no scene or material policy |
 | `vita/` | Vita app: place loader (`scene.rs`), frame renderer (`frame.rs`), atlas globe (`atlas.rs`), place browser (`browser.rs`), settings sheet (`settings.rs`), interface drawing and text (`ui.rs`), file locations (`paths.rs`), Cg programs (`vita/shaders`), LiveArea art |
 | `psp/` | Native PSP place viewer: GE rendering, animated nodes and skinning, camera controls, procedural rain audio, PSPLINK telemetry |
 | `crates/pocket3d-place-psp` | Validated `PLPS` payload: shared GE vertex buffers, spatial index chunks, swizzled RGBA4444 mip chains, animation and camera data; no JSON on the device |
@@ -60,12 +60,12 @@ Requirements: `usbhostfs_pc` and `pspsh`, PSPLINK running on the console, and Po
 ```sh
 # Export and cook the current checkout, with the web dev server running.
 (cd web && bun scripts/export-place.ts --place tokyo-konbini --seconds 20)
-bun tools/atlas.ts cook --place tokyo-konbini
 bun tools/atlas-psp.ts cook
 bun tools/atlas-psp.ts build
 
 # Keep exactly one PSP USB host running in a terminal.
 bun tools/atlas-psp.ts serve
+# If a host already owns the cable, use --share /its/existing/host0 on later commands.
 # In another terminal:
 bun tools/atlas-psp.ts run --no-build
 bun tools/atlas-psp.ts status
@@ -78,7 +78,7 @@ bun tools/atlas-psp.ts ctl '{}'                  # live clock
 bun tools/atlas-psp.ts package                  # dist/PSP/GAME/PocketAtlas/{EBOOT.PBP,scene.place}
 ```
 
-The PSP cook is a second stage over this checkout's ordinary `.place` output, and writes `<id>.psp.place` with separate `PLPS` magic/version. It rejects unsupported place kinds and packs above 18 MiB. It preserves rigid and skeletal tracks, uses the shared cooker's coarse geometry, bakes the Products material onto world-space shelf cards, shares static vertex buffers across spatial chunks, and combines only visible chunks at draw time. GPU pointers, indices, texture layouts and animation ranges are validated before upload. The current 20-second export follows the existing Vita workflow; it does not contain the web traffic simulation's full, longer schedule.
+The PSP cook starts from the same PlaceIR as Vita and 3DS, and writes `<id>.psp.place` with separate `PLPS` magic/version. It rejects unsupported place kinds and packs above 18 MiB. It preserves rigid and skeletal tracks, uses the shared cooker's coarse geometry, bakes the Products material onto world-space shelf cards, shares static vertex buffers across spatial chunks, and combines only visible chunks at draw time. GPU pointers, indices, texture layouts and animation ranges are validated before upload. The current 20-second export follows the existing Vita workflow; it does not contain the web traffic simulation's full, longer schedule.
 
 This is a fixed-function adaptation: it does not reproduce Vita's HDR/PBR shaders, normal maps, volumetric haze, per-pixel wet ripples, dynamic per-pixel lights or bloom. The PSP's 16-bit depth and reduced texture sizes also limit fine facade detail and lettering. Reflection geometry is limited to lit surfaces and moving objects. The atlas globe and multi-place browser are not part of the PSP viewer. PSP `workMs` includes CPU submission and waiting for the GE; `gpuWaitMs` is only the wait after submission, **not** serialized GPU pass timing. Captures and USB transfers must be kept outside measurement windows. Host build, physical runtime, installed-file readback, manual control feel and listening to the sound are separate evidence.
 
@@ -169,7 +169,7 @@ Rigid moving draws also receive LODs, with additional 1 cm and 2.5 cm candidates
 
 Opaque solid standard materials without maps or special surface effects can share a `vertex_pbr` palette: sRGB vertex colour carries the albedo and UV carries each surface's roughness/metalness. Static geometry keeps its spatial chunks; fixed siblings in an animated hierarchy can share their parent's frame, keeping independent wheel or gate tracks intact. Sidedness, environment strength, depth state and other retained material fields remain batch boundaries. Static palettes separate rough non-metal surfaces from those requiring a sun highlight; moving assemblies keep one palette. The renderer reads these PBR constants in full, distant and reflection variants.
 
-This encoding requires PLCE/ATLS container version 7 (version 6 introduced light fields and vista haze). Readers reject other container versions before interpreting the payload; re-cook every place and the atlas when updating the renderer. Place META uses version 7, while the independent AtlasMeta, PICA and PSP payload schemas retain versions 1, 3 and 1 respectively.
+This Vita encoding requires PLCE/ATLS container version 7 (version 6 introduced light fields and vista haze). Readers reject other container versions before interpreting the payload; re-cook every Vita place and the atlas when updating the renderer. Vita Place META uses version 7, while AtlasMeta remains version 1. PICA independently keeps its PLCE v5 envelope and v3 table; PSP keeps PLPS v1. Native lowerings consume source data from PlaceIR, not the Vita palette or pack.
 
 `bun web/scripts/place-budget.ts --in PACK.place --out REPORT.json` validates a cooked pack and estimates `vita30` step-0 main-pass geometry over the full animation loop at each shot's start, middle and end camera positions. Its draw and triangle counts are CPU planning evidence, not a GPU measurement or frame-rate claim.
 
@@ -177,9 +177,9 @@ Variants that drop a material's ORM map (distant, LITE and mirror programs) scal
 
 ## Daytime places
 
-A place exported with a directional light gets the sun per pixel: the static scene is drawn once from the sun into a 2048² shadow map (normalized distance in a single-channel R32F colour target), and lit materials compare four texels around each point and blend them by the sub-texel position. Only smooth or metallic materials (roughness under 0.6 or metalness over 0.3) evaluate the sun's highlight; draws beyond the detail distance skip the shadow lookup. The sun is not baked.
+A place exported with a directional light gets the sun per pixel: the static scene is drawn once from the sun into a 2048² shadow map (normalized distance in a single-channel R32F colour target). An RG16 cache pairs adjacent depths; lit materials compare four depths from two point reads and blend them by the sub-texel position. Only smooth or metallic materials (roughness under 0.6 or metalness over 0.3) evaluate the sun's highlight; draws beyond the detail distance skip the shadow lookup. The sun is not baked.
 
-Places with rigid moving opaque casters use a separate 512² shadow map, refreshed each frame with sun-frustum culling and shadow-texel LOD selection. Standard materials combine it with the cached static map; distant materials keep the moving lookup so a train's shadow remains visible across the crossing. Glass and skinned particles do not cast into this layer. Shadow coordinates and depth comparisons stay float; bounded filter weights and sunlight use half precision. Sangubashi's R32F build completed device compilation and six-camera capture review, including the corrected train shadows. Performance acceptance remains open (see the place README).
+Places with rigid moving opaque casters use a separate 512² shadow map, refreshed each frame with sun-frustum culling and shadow-texel LOD selection. Standard materials combine it with the cached static map; distant materials keep the moving lookup so a train's shadow remains visible across the crossing. Glass and skinned particles do not cast into this layer. Shadow coordinates and depth comparisons stay float; bounded filter weights and sunlight use half precision. Sangubashi completed device compilation and six-camera capture review, including the corrected train shadows. Its picture quality was accepted with a place-specific waiver of the step-0 30 fps requirement; [the place notes](web/src/places/sangubashi-crossing/README.md) retain measured limits and distinguish pre-integration device evidence from final host builds.
 
 Receiver bounds are projected into the light’s UV/depth space, including the normal offset and PCF footprint. Draws outside every moving caster use a shader without moving-shadow sampling. Both variants are prewarmed; camera and shadow bounds also rely on skin weights quantized to an exact sum of 255.
 

@@ -6,7 +6,7 @@
 //! force (control messages switch it for measurements); the sheet shows and
 //! steps from it.
 
-use pocket3d_gxm::target::Msaa;
+use pocket_vita_gxm::target::Msaa;
 use serde_json::json;
 
 use crate::camera::{Mode, Rig};
