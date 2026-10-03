@@ -81,15 +81,15 @@ impl Sources {
                 .get(d.material as usize)
                 .and_then(|m| m.lights)
                 .ok_or("light LOD material missing field parameters")?;
-            if d.vertex_count as usize > pc::LightPoint::PER_DRAW
-                || d.vertex_count.checked_mul(pc::LightPoint::STRIDE as u32)
+            if d.vertex_count as usize > pc::LIGHT_POINTS_PER_DRAW
+                || d.vertex_count.checked_mul(pc::LIGHT_POINT_STRIDE as u32)
                     != Some(d.vertices.size)
             {
                 return Err("light LOD invalid vertex range".into());
             }
             let first = out.points.len();
             for (vertex, p) in pc::parts::slice(geometry, &d.vertices)?
-                .chunks_exact(pc::LightPoint::STRIDE)
+                .chunks_exact(pc::LIGHT_POINT_STRIDE)
                 .enumerate()
             {
                 let rgb = [p[8], p[9], p[10]];
@@ -615,14 +615,14 @@ mod tests {
         assert!(Sources::new(&meta, &geometry).is_err());
         meta.draws[0].vertex_count = MAX_POINTS as u32 + 1;
         assert!(Sources::new(&meta, &geometry).is_err()); // per-draw bounds still validated
-        meta.draws[0].vertex_count = pc::LightPoint::PER_DRAW as u32;
-        meta.draws[0].vertices.size = (pc::LightPoint::PER_DRAW * pc::LightPoint::STRIDE) as u32;
-        let geometry = geometry[..40].repeat(pc::LightPoint::PER_DRAW);
-        meta.draws = vec![meta.draws[0].clone(); MAX_POINTS / pc::LightPoint::PER_DRAW + 1];
+        meta.draws[0].vertex_count = pc::LIGHT_POINTS_PER_DRAW as u32;
+        meta.draws[0].vertices.size = (pc::LIGHT_POINTS_PER_DRAW * pc::LIGHT_POINT_STRIDE) as u32;
+        let geometry = geometry[..40].repeat(pc::LIGHT_POINTS_PER_DRAW);
+        meta.draws = vec![meta.draws[0].clone(); MAX_POINTS / pc::LIGHT_POINTS_PER_DRAW + 1];
         let oversized = Sources::new(&meta, &geometry).unwrap();
         assert!(oversized.is_empty()); // bounded optional density optimization
         assert_eq!(oversized.points.capacity(), 0);
-        assert_eq!(oversized.color_rows().len(), meta.draws.len() * pc::LightPoint::PER_DRAW);
+        assert_eq!(oversized.color_rows().len(), meta.draws.len() * pc::LIGHT_POINTS_PER_DRAW);
         assert_eq!(oversized.palette(), [[0, 0, 0]]); // appearance and all lights remain usable
     }
     #[test]

@@ -22,14 +22,20 @@ jobs:
           bun-version: 1.3.14
       - run: cargo test --locked --workspace
       - run: cargo check --locked -p pocket3d-place --no-default-features
-      - run: bun test tools/psp-session.test.ts tools/atlas-3ds-delivery.test.ts
       - name: Install host GLES shader tools
         run: sudo apt-get update && sudo apt-get install -y glslang-tools spirv-cross
-      - run: bun test tools/atlas-ipod-*.test.ts
       - run: sh ipod/tests/scene/run.sh
       - run: sh ipod/tests/render_worker.sh
       - run: sh ipod/tests/render_pacing.sh
       - run: bun install --frozen-lockfile
+        working-directory: web
+      - run: bun test tools/*.test.ts web/scripts/*.test.ts web/src/places/shared/daylight/geometry.test.ts
+      - name: Shadow receiver bounds
+        run: |
+          mkdir -p .pocket-build/validation/ci
+          rustc --edition=2021 --test vita/src/sun_bounds.rs -o .pocket-build/validation/ci/sun-bounds
+          .pocket-build/validation/ci/sun-bounds
+      - run: bun test test/texture-usage.test.ts
         working-directory: web
       - run: bun run build
         working-directory: web

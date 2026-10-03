@@ -28,53 +28,95 @@ pub(super) fn vertex(v: &Vertex, layout: pc::VertexLayout, out: &mut Vec<u8>) ->
     Ok(())
 }
 pub(super) fn lower(source: &crate::source::Scene, meta: &mut pc::Meta) -> Result<Vec<u8>> {
+    use crate::source::{Geometry, VertexClass};
     let mut out = Vec::new();
-    for (src, d) in source.meta.draws.iter().zip(&mut meta.draws) {
-        if d.layout == pc::VertexLayout::Lights {
-            d.vertices = super::append(
-                &mut out,
-                pc::parts::slice(source.geometry(), &src.vertices)?,
-                16,
-            )?;
-        } else {
-            let vertices = source
-                .blobs
-                .meshes
-                .get(src.vertices.offset as usize)
-                .ok_or("missing source mesh")?;
-            if vertices.len() != d.vertex_count as usize {
-                return Err("source vertex count mismatch".into());
-            }
-            let mut bytes =
-                Vec::with_capacity(vertices.len() * pc::ipod::stride(d.layout) as usize);
-            for v in vertices {
-                vertex(v, d.layout, &mut bytes)?;
-            }
-            d.vertices = super::append(&mut out, &bytes, 16)?;
-            d.pos_offset = [0.0; 3];
-            d.pos_scale = [1.0; 3];
-            d.uv_offset = [0.0; 2];
-            d.uv_scale = [1.0; 2];
-        }
-        let mut copy = |r: &mut pc::Range, count: u32| -> Result<()> {
-            let bytes = pc::parts::slice(source.geometry(), r)?;
-            if bytes.len() != count as usize * 2
-                || count % 3 != 0
-                || bytes
-                    .chunks_exact(2)
-                    .any(|b| u32::from(u16::from_le_bytes(b.try_into().unwrap())) >= d.vertex_count)
-            {
-                return Err("invalid source triangle indices".into());
-            }
-            *r = super::append(&mut out, bytes, 2)?;
-            Ok(())
+    for src in &source.draws {
+        let layout = match src.class {
+            VertexClass::Static => pc::VertexLayout::Static,
+            VertexClass::Baked => pc::VertexLayout::Baked,
+            VertexClass::Skinned => pc::VertexLayout::Skinned,
+            VertexClass::Lights => pc::VertexLayout::Lights,
         };
-        if d.layout != pc::VertexLayout::Lights {
-            copy(&mut d.indices, d.index_count)?;
-            for lod in &mut d.lods {
-                copy(&mut lod.indices, lod.index_count)?;
+        let mut d = pc::Draw {
+            material: src.material,
+            layout,
+            vertices: pc::Range::default(),
+            vertex_count: src.vertex_count(),
+            indices: pc::Range::default(),
+            index_count: src.index_count(),
+            pos_offset: [0.; 3],
+            pos_scale: [1.; 3],
+            uv_offset: [0.; 2],
+            uv_scale: [1.; 2],
+            min: src.min,
+            max: src.max,
+            node: src.node,
+            skin: src.skin,
+            no_reflect: src.no_reflect,
+            cast_shadow: src.cast_shadow,
+            lods: Vec::new(),
+        };
+        match &src.geometry {
+            Geometry::Triangles {
+                vertices,
+                indices,
+                lods,
+            } => {
+                if layout == pc::VertexLayout::Lights || vertices.len() > 65535 {
+                    return Err("invalid source mesh layout or vertex count".into());
+                }
+                let mut bytes =
+                    Vec::with_capacity(vertices.len() * pc::ipod::stride(layout) as usize);
+                for v in vertices {
+                    vertex(v, layout, &mut bytes)?;
+                }
+                d.vertices = super::append(&mut out, &bytes, 16)?;
+                let mut encode = |indices: &[u32]| -> Result<pc::Range> {
+                    if indices.len() % 3 != 0
+                        || indices.iter().any(|&i| i as usize >= vertices.len())
+                    {
+                        return Err("invalid source triangle indices".into());
+                    }
+                    let bytes: Vec<_> = indices
+                        .iter()
+                        .flat_map(|&i| (i as u16).to_le_bytes())
+                        .collect();
+                    super::append(&mut out, &bytes, 2)
+                };
+                d.indices = encode(indices)?;
+                for l in lods {
+                    d.lods.push(pc::DrawLod {
+                        indices: encode(&l.indices)?,
+                        index_count: u32::try_from(l.indices.len())
+                            .map_err(|_| "LOD index count overflow")?,
+                        error: l.error,
+                    });
+                }
+            }
+            Geometry::LightField(points) => {
+                if layout != pc::VertexLayout::Lights
+                    || points.is_empty()
+                    || points.len() > pc::LIGHT_POINTS_PER_DRAW
+                {
+                    return Err("invalid source light field".into());
+                }
+                let lo = points.iter().fold(glam::Vec3::splat(f32::MAX), |a, l| {
+                    a.min(glam::Vec3::from(l.position))
+                });
+                let hi = points.iter().fold(glam::Vec3::splat(f32::MIN), |a, l| {
+                    a.max(glam::Vec3::from(l.position))
+                });
+                d.pos_offset = ((lo + hi) * 0.5).to_array();
+                d.pos_scale = ((hi - lo) * 0.5).max(glam::Vec3::splat(1e-3)).to_array();
+                let mut bytes = Vec::with_capacity(points.len() * pc::LIGHT_POINT_STRIDE);
+                for point in points {
+                    pc::encode_light_point(point, d.pos_offset, d.pos_scale, &mut bytes);
+                }
+                d.vertices = super::append(&mut out, &bytes, 16)?;
+                d.index_count = d.vertex_count;
             }
         }
+        meta.draws.push(d);
     }
     Ok(out)
 }

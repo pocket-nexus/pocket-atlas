@@ -1590,7 +1590,7 @@ impl Effects {
                             n,
                             kind,
                             normalized,
-                            pc::LightPoint::STRIDE as i32,
+                            pc::LIGHT_POINT_STRIDE as i32,
                             (geometry_offset + offset) as *const _,
                         );
                     }

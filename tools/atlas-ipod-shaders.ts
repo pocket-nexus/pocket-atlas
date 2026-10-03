@@ -88,6 +88,10 @@ export function shader(
   name: string,
   defines: Record<string, number> = {},
 ): string {
+  // PLIP's RGBA8 shadow target keeps the RGB24 contract. Vita's default
+  // R32f/RG16-pair storage is a different backend, not a quality toggle.
+  if (name === "shadow_f" || name === "standard_f")
+    defines = { ...defines, PACKED_SHADOW: 1 };
   const stage = name.endsWith("_v") ? "vert" : "frag";
   const identity =
     "gles2-v6:" +

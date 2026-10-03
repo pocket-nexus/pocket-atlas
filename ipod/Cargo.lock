@@ -57,10 +57,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pocket-atlas-model"
+version = "0.1.0"
+dependencies = [
+ "num-traits",
+ "serde",
+]
+
+[[package]]
 name = "pocket3d-place"
 version = "0.1.0"
 dependencies = [
  "num-traits",
+ "pocket-atlas-model",
  "serde",
  "serde_json",
 ]

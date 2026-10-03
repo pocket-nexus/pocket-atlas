@@ -1,12 +1,12 @@
 # Pocket Atlas on iPod touch 4
 
-Native ARMv7 / OpenGL ES 2.0 renderer with a UIKit directory, rotatable globe and place markers, scene navigation, settings, About, cinematic playback and two-contact walking. The catalog comes from the web registry; all five current live places ship in the same app.
+Native ARMv7 / OpenGL ES 2.0 renderer with a UIKit directory, rotatable globe and place markers, scene navigation, settings, About, cinematic playback and two-contact walking. The catalog includes live web registry entries that explicitly opt into iPod; the five eligible places ship in the same app.
 
 SGX is the default, with a fixed **480×320** scene and drawable; it does not reduce resolution to reach its 30 fps target. Retina Reference uses the full material profile and a 960×640 drawable for detail comparison. A system-memory fallback selects SGX at 480×320. UIKit has an independent Retina container and main-thread display link at both settings. Capture receipts record actual layer scales and PNG dimensions. UI callback rate does not establish the 3D frame rate; use completed render-worker presentation timings below.
 
 ## Ownership
 
-Atlas owns the GLES renderer, UIKit shell and the independent PlaceIR → iPod lowering. The runtime reads its own `PLIP` v1 ABI; Vita and other device packs are rejected as compiler input. Shared geometry, animation, lighting metadata, color grade and material algorithms remain in `pocket3d-place`, the cooker and `vita/shaders`. The pinned PocketJS dependency supplies the ARMv7 target, legacy SDK resolver, startup objects and the MobileInstallation transaction. No PocketJS files are modified.
+Atlas owns the GLES renderer, UIKit shell and the independent PlaceIR → typed scene analysis → iPod lowering. The runtime reads its own `PLIP` v1 ABI; Vita and other device packs are rejected as compiler input. Shared material, lighting, animation and color semantics live in `pocket-atlas-model`; the cooker owns float scene analysis and target lowering, `pocket3d-place` owns byte layouts, and `vita/shaders` supplies shared material algorithms. The versioned `ipod30` profile records the SGX535 target, 480×320 scene, 960×640 physical display and texture recipe. The actual SGX EAGL drawable is 480×320; UIKit uses the independent Retina container. Compiler receipts bind the source, profile, compiler, pack and sidecars; they do not establish device performance. The pinned PocketJS dependency supplies the ARMv7 target, legacy SDK resolver, startup objects and the MobileInstallation transaction. No PocketJS files are modified.
 
 `platform.c` owns UIKit. `render_worker.c` transfers the EAGL context and Rust `App` to one render thread. UI reads copied snapshots and queues input; it never calls Rust concurrently. Background entry drains GL, releases scene/globe render resources and the audio player, discards stale touches and parks the owner. Before releasing resources, the app atomically saves a versioned user checkpoint in its Documents directory. Resume or a cold launch restores the selected scene, camera, playback position and settings; shutdown joins before destroying GL resources. Scene transitions wait for pending GPU work and release the hidden globe before loading a scene, keeping the atlas and scene GPU working sets separate.
 
@@ -42,7 +42,7 @@ bun scripts/export-place.ts --place tokyo-konbini --seconds 120
 bun scripts/preview-place.ts --place tokyo-konbini
 cd ..
 cargo run --release -p pocket3d-place-cook -- import --in .pocket-build/places/tokyo-konbini --out .pocket-build/places/tokyo-konbini/place.ir
-cargo run --release -p pocket3d-place-cook -- --in .pocket-build/places/tokyo-konbini/place.ir --target ipod --out .pocket-build/ipod/assets/tokyo-konbini.place --tex 512
+cargo run --release --locked -p pocket3d-place-cook -- --in .pocket-build/places/tokyo-konbini/place.ir --profile ipod30 --out .pocket-build/ipod/assets/tokyo-konbini.place
 magick .pocket-build/places/tokyo-konbini/preview.png -resize 320x180! .pocket-build/ipod/assets/tokyo-konbini.preview.png
 ```
 

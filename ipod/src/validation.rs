@@ -262,6 +262,11 @@ pub fn validate(meta: &pc::Meta, geom_bytes: usize, tex_bytes: usize, anim: &[f3
     }
     for (i, m) in meta.materials.iter().enumerate() {
         let label = format!("material[{i}]");
+        require(
+            !m.vertex_pbr,
+            &label,
+            "Vita vertex PBR palette encoding is not supported by PLIP",
+        )?;
         finite_fields!(&label; m.color, m.emissive, [m.alpha_test,m.roughness,m.metalness,m.normal_scale,m.ao_strength,m.env_strength,m.drops,m.clearcoat]);
         if let Some(shade) = m.emission_shade {
             finite_fields!(&label; shade.normal, shade.height);
@@ -369,7 +374,7 @@ pub fn validate(meta: &pc::Meta, geom_bytes: usize, tex_bytes: usize, anim: &[f3
         )?;
         if points {
             require(
-                d.vertex_count as usize <= pc::LightPoint::PER_DRAW
+                d.vertex_count as usize <= pc::LIGHT_POINTS_PER_DRAW
                     && d.index_count == d.vertex_count
                     && d.indices.size == 0
                     && d.lods.is_empty()
@@ -663,7 +668,7 @@ pub fn validate_geometry(meta: &pc::Meta, geometry: &[u8]) -> Result {
                 )?;
             }
         } else if d.layout == pc::VertexLayout::Lights {
-            for vertex in geometry[vertices].chunks_exact(pc::LightPoint::STRIDE) {
+            for vertex in geometry[vertices].chunks_exact(pc::LIGHT_POINT_STRIDE) {
                 for value in vertex[12..36].chunks_exact(4) {
                     finite(&[f32::from_le_bytes(value.try_into().unwrap())], &label)?;
                 }
@@ -715,6 +720,16 @@ pub(crate) mod tests {
         let (mut m, g, a) = fixture();
         change(&mut m);
         assert!(validate(&m, g.len(), 64, &a).is_err());
+    }
+    #[test]
+    fn shared_material_model_does_not_enable_vita_vertex_pbr_in_plip() {
+        let (mut meta, geometry, animation) = fixture();
+        // Existing PLIP JSON has no vertex_pbr field and retains source UVs.
+        assert!(!meta.materials[0].vertex_pbr);
+        validate(&meta, geometry.len(), 64, &animation).unwrap();
+        meta.materials[0].vertex_pbr = true;
+        let error = validate(&meta, geometry.len(), 64, &animation).unwrap_err();
+        assert!(error.contains("material[0]") && error.contains("vertex PBR"));
     }
     #[test]
     fn container_checks_actual_lengths_alignment_aliases_and_required_tags() {
@@ -959,14 +974,14 @@ pub(crate) mod tests {
         d.layout = pc::VertexLayout::Lights;
         d.vertices = pc::Range {
             offset: 0,
-            size: pc::LightPoint::STRIDE as u32,
+            size: pc::LIGHT_POINT_STRIDE as u32,
         };
         d.vertex_count = 1;
         d.indices = pc::Range::default();
         d.index_count = 1; // For a point draw the count is vertex count.
         d.node = None;
         d.lods.clear();
-        let mut g = vec![0; pc::LightPoint::STRIDE];
+        let mut g = vec![0; pc::LIGHT_POINT_STRIDE];
         validate(&m, g.len(), 64, &a).unwrap();
         validate_geometry(&m, &g).unwrap();
         g[12..16].copy_from_slice(&f32::NAN.to_le_bytes());

@@ -166,7 +166,7 @@ impl Encoder {
                     source_hash: format!("{:016x}", pc::content_hash::hash(raw)),
                 });
             }
-            println!(
+            crate::progress!(
                 "PVRTC texture {i}: {} ({:.2} dB)",
                 row.reason,
                 row.quality_metrics.as_ref().unwrap().psnr

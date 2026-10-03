@@ -1,8 +1,12 @@
 import type { QualityLevel } from "./quality";
 
+/** Authoring density is independent of lighting, textures and render quality. */
+export type GeometryProfile = "full" | "handheld";
+
 /**
  * URL switches. They exist for development and for deterministic captures:
  *   ?q=low|medium|high|ultra   force a quality preset
+ *   ?geometry=handheld        use geometry intended for the handheld cooker
  *   ?shot                      capture mode: no UI, no intro, fixed clock
  *   ?t=12.5                    start the simulation clock at this time (s)
  *   ?cam=hero|street|door|...  start a place at a named camera shot
@@ -11,6 +15,7 @@ import type { QualityLevel } from "./quality";
  */
 export interface Params {
   quality: QualityLevel | null;
+  geometry: GeometryProfile;
   shot: boolean;
   startTime: number;
   cam: string | null;
@@ -22,14 +27,15 @@ export interface Params {
   exporting: boolean;
 }
 
-export function readParams(): Params {
-  const q = new URLSearchParams(location.search);
+export function readParams(search = location.search): Params {
+  const q = new URLSearchParams(search);
   const level = q.get("q");
   const quality =
     level === "low" || level === "medium" || level === "high" || level === "ultra" ? level : null;
   const t = Number(q.get("t"));
   return {
     quality,
+    geometry: q.get("geometry") === "handheld" ? "handheld" : "full",
     shot: q.has("shot"),
     startTime: Number.isFinite(t) ? t : 0,
     cam: q.get("cam"),

@@ -12,14 +12,6 @@ export const BLOOM_RGBM_RANGE = 128;
 export const BLOOM_RADIANCE_LIMIT = 126;
 export type BloomStorage = "write" | "both" | "read";
 
-export function withoutBloomHaze(source: string): string {
-  // Selected only when no haze pass contributed: remove the texture read
-  // at compile time, including its otherwise wasted scene-HDR decode.
-  const sample = /\batlasDecode\(texture2D\(uHazeTex,\s*vUv\)\)/g;
-  if (!sample.test(source)) throw new Error("Missing bloom haze sample");
-  return source.replace(sample, "vec4(0.0)");
-}
-
 function replaceFunction(source: string, name: string, replacement: string): string {
   const start = source.indexOf(`highp vec4 ${name}(`);
   if (start < 0) throw new Error(`Missing HDR codec ${name}`);
@@ -197,7 +189,7 @@ function writeEffectSource(name: string, source: string): string {
   return key;
 }
 
-type EffectVariant = { bloom?: BloomStorage; noHaze?: boolean; displayDepth?: boolean };
+type EffectVariant = { bloom?: BloomStorage; displayDepth?: boolean };
 
 function effectShader(
   name: string,
@@ -235,7 +227,6 @@ function effectShader(
     if (defines.ATLAS_COVERAGE) source = pointCoverage(source);
   }
   if (variant.bloom) source = bloomStorage(source, variant.bloom);
-  if (variant.noHaze) source = withoutBloomHaze(source);
   if (variant.displayDepth) source = displayHazeDepth(source);
   return writeEffectSource(name, source);
 }
@@ -276,10 +267,10 @@ export function writeEffects(): void {
     haze: post("haze_f", { HAZE_LIGHTS: 6 }),
     haze_ldr: hazeLdr,
     haze_bloom_ldr: [effectShader("post_v"), writeEffectSource("haze_bloom_ldr_f", displayHazeBloomSource())],
-    prefilter: post("prefilter_f", {}, { bloom: "write" }),
-    prefilter_no_haze: post("prefilter_f", {}, { bloom: "write", noHaze: true }),
-    prefilter_points: post("prefilter_f", { PER_PIXEL: 1 }, { bloom: "write" }),
-    prefilter_points_no_haze: post("prefilter_f", { PER_PIXEL: 1 }, { bloom: "write", noHaze: true }),
+    prefilter: post("prefilter_f", { HAZE: 1 }, { bloom: "write" }),
+    prefilter_no_haze: post("prefilter_f", {}, { bloom: "write" }),
+    prefilter_points: post("prefilter_f", { PER_PIXEL: 1, HAZE: 1 }, { bloom: "write" }),
+    prefilter_points_no_haze: post("prefilter_f", { PER_PIXEL: 1 }, { bloom: "write" }),
     tiny_ldr: [effectShader("post_v"), writeEffectSource("bloom_ldr_f", displayBloomSource())],
     down: post("down_f", {}, { bloom: "both" }),
     up: post("up_f", {}, { bloom: "both" }),

@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "ipod30",
+  "revision": 1,
+  "target": "ipod",
+  "host": {
+    "os": "ios",
+    "abi": "armv7-darwin"
+  },
+  "gpu": "sgx535",
+  "presentation": {
+    "targetFps": 30,
+    "renderWidth": 480,
+    "renderHeight": 320,
+    "displayWidth": 960,
+    "displayHeight": 640,
+    "auxiliary": null
+  },
+  "recipe": {
+    "revision": 1,
+    "textureCap": 512,
+    "detailTextureCap": 512,
+    "emissiveTextureCap": 512,
+    "animationPaletteBytes": 10485760,
+    "maxMeshVertices": 65535,
+    "maxFieldPoints": 16384
+  },
+  "budgets": {
+    "maxPackBytes": null,
+    "sections": {}
+  },
+  "disabledFeatures": []
+}

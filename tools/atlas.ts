@@ -2,7 +2,7 @@
 // over PocketJS's wired debug transport (vendor/pocketjs), sync shader
 // sources, fetch captures, and package the standalone VPK.
 //
-//   bun tools/atlas.ts cook [--place ID]            # scene.glb → <place>.place
+//   bun tools/atlas.ts cook [--place ID] [--tex 1024] # scene.glb → <place>.place
 //   bun tools/atlas.ts cook-atlas                   # web export-atlas → atlas.pack (globe + places)
 //   bun tools/atlas.ts serve                         # USB host (keep running)
 //   bun tools/atlas.ts build  [--title P3B1D7273] [--debug]
@@ -20,6 +20,7 @@
 //   (bench, profile, sweep, shots: --render vita30|vita60|cinematic, default vita30;
 //    bench and profile: --shot NAME --time T, else the device's current view;
 //    --place ID picks the place, default tokyo-konbini)
+//   --share DIR reuses an already-running USB host's root directory.
 //
 // The default title is Pocket Devkit (P3B1D7273, PocketJS apps/devkit), the
 // development container installed on the console: its native slots accept
@@ -32,6 +33,7 @@ import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, write
 import { resolve } from "node:path";
 import { packageVitaVpk } from "../vendor/pocketjs/tools/vita-package.ts";
 import { prepareVitaUsb } from "../vendor/pocketjs/tools/vita-usb.ts";
+import { VitaUsbClient } from "../vendor/pocketjs/tools/vita-dev-client.ts";
 
 const ROOT = resolve(import.meta.dir, "..");
 const POCKETJS = resolve(ROOT, "vendor/pocketjs");
@@ -55,6 +57,8 @@ const release = !argv.includes("--debug");
 const output = `pocket-atlas-${title}`;
 /** The place a command cooks, syncs or measures. */
 const PLACE = value("--place", "tokyo-konbini");
+/** Explicitly reuse an existing host without restarting the device's link. */
+const USB_SHARE = resolve(value("--share", resolve(ROOT, ".pocket-build/vita-usb/share")));
 
 interface BuildOptions {
   /** Packaged build: no USB debug driver, pack and GXPs inside the VPK. */
@@ -112,12 +116,12 @@ async function build(options: BuildOptions = {}): Promise<string> {
 // PocketJS's wired debug tool, pointed at this repository's USB share.
 async function dev(...args: string[]): Promise<void> {
   const runtime = `${OUT_DIR}/${output}.runtime.json`;
-  const share = resolve(ROOT, ".pocket-build/vita-usb/share");
+  const share = USB_SHARE;
   mkdirSync(share, { recursive: true });
   await $`bun ${POCKETJS}/tools/vita-dev.ts ${args} --runtime ${runtime} --title ${title} --dir ${share}`.cwd(POCKETJS);
 }
 
-const SHARE = resolve(ROOT, ".pocket-build/vita-usb/share/atlas");
+const SHARE = resolve(USB_SHARE, "atlas");
 const PLACES_DIR = resolve(ROOT, ".pocket-build/places");
 const PLACE_DIR = `${PLACES_DIR}/${PLACE}`;
 const PACK = `${PLACE_DIR}/${PLACE}.place`;
@@ -212,8 +216,13 @@ async function lint(): Promise<void> {
     ["products_f.cg", []], ["skyline_f.cg", []], ["tower_f.cg", []], ["sky_v.cg", []], ["sky_f.cg", []],
     ...["STREAK", "SPLASH", "DRIP", "STEAM", "BEACON"].map((d): [string, string[]] => ["fx_v.cg", [d]]),
     ...["STREAK", "SPLASH", "STEAM", "BEACON"].map((d): [string, string[]] => ["fx_f.cg", [d]]),
+    ...[[], ["BAKED", "TANGENT", "COLOR"], ["SKINNED", "MAX_BONES=24"], ["VISTA"]].map((v): [string, string[]] => ["surface_v.cg", ["SUN", ...v]]),
     ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "SUN_SPEC", "ALBEDO_MAP", "NORMAL_MAP", "ORM_MAP", "FOG"]], ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "ALPHA_TEST", "ALBEDO_MAP", "EMISSION_MAP", "FOG"]],
-    ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "FAR", "ALBEDO_MAP", "FOG"]], ["shadow_f.cg", []], ["shadow_f.cg", ["ALPHA_TEST"]], ["fill_f.cg", []], ["sky_day_f.cg", []], ["sky_day_f.cg", ["TWILIGHT"]],
+    ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "FAR", "ALBEDO_MAP", "FOG"]], ["shadow_f.cg", []], ["shadow_f.cg", ["ALPHA_TEST"]], ["shadow_pair_f.cg", []], ["fill_f.cg", []], ["sky_day_f.cg", []], ["sky_day_f.cg", ["TWILIGHT"]],
+    ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "MOVING_SHADOW", "SUN_SPEC", "ALBEDO_MAP", "NORMAL_MAP", "ORM_MAP", "FOG"]],
+    ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "MOVING_SHADOW", "FAR", "ALBEDO_MAP", "FOG"]],
+    ["standard_f.cg", ["LIGHTS=0", "SUN", "MOVING_SHADOW", "SUN_SPEC", "FOG"]],
+    ...[[], ["FAR"], ["LITE"], ["REFLECTION"]].map((tier): [string, string[]] => ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "MOVING_SHADOW", "SUN_SPEC", "VERTEX_COLOR", "VERTEX_PBR", "FOG", ...tier]]),
     ["globe_v.cg", []], ["globe_f.cg", []], ["marker_v.cg", []], ["marker_f.cg", []], ["ui_v.cg", []], ["ui_f.cg", []], ["ui_f.cg", ["TEX"]], ["text_v.cg", []], ["text_f.cg", []], ["surface_v.cg", ["WAVES"]], ["water_f.cg", ["SUN", "FOG"]], ["water_f.cg", []], ["water_f.cg", ["SUN", "FOG", "SHALLOW"]], ["surface_v.cg", ["WAVES", "COLOR"]], ["surface_v.cg", ["FLAT"]], ["surface_v.cg", ["BAKED", "FLAT"]],
     // Light fields and the vista haze (dusk-vista places).
     ["lights_v.cg", []], ["lights_v.cg", ["VISTA"]], ["lights_f.cg", []],
@@ -221,7 +230,7 @@ async function lint(): Promise<void> {
     ["standard_f.cg", ["LIGHTS=0", "BAKED", "FAR", "ALBEDO_MAP", "VISTA"]], ["standard_f.cg", ["LIGHTS=1", "BAKED", "ALBEDO_MAP", "NORMAL_MAP", "ORM_MAP", "EMISSION_MAP", "VISTA"]],
     ["standard_f.cg", ["LIGHTS=2", "BAKED", "LITE", "WET", "PLANAR", "ALBEDO_MAP", "VISTA"]], ["standard_f.cg", ["LIGHTS=0", "VERTEX_LIGHTS", "ALBEDO_MAP", "VISTA", "BLEND"]],
     ["unlit_f.cg", ["ALBEDO_MAP", "VERTEX_COLOR", "VISTA"]], ["glass_f.cg", ["LIGHTS=0", "BAKED", "VISTA"]], ["window_f.cg", ["VISTA"]], ["water_f.cg", ["VISTA"]],
-    ["post_v.cg", []], ["post_v.cg", ["GRAIN"]], ["haze_f.cg", ["HAZE_LIGHTS=2"]], ["haze_f.cg", ["HAZE_LIGHTS=6"]], ["prefilter_f.cg", []], ["prefilter_f.cg", ["PER_PIXEL"]], ["down_f.cg", []], ["up_f.cg", []], ["composite_f.cg", []], ["composite_f.cg", ["HAZE", "BLOOM"]], ["blit_f.cg", []],
+    ["post_v.cg", []], ["post_v.cg", ["GRAIN"]], ["haze_f.cg", ["HAZE_LIGHTS=2"]], ["haze_f.cg", ["HAZE_LIGHTS=6"]], ["prefilter_f.cg", []], ["prefilter_f.cg", ["PER_PIXEL"]], ["prefilter_f.cg", ["HAZE"]], ["prefilter_f.cg", ["HAZE", "PER_PIXEL"]], ["down_f.cg", []], ["up_f.cg", []], ["composite_f.cg", []], ["composite_f.cg", ["HAZE", "BLOOM"]], ["blit_f.cg", []],
   ];
   const tmp = resolve(ROOT, ".pocket-build/atlas/lint");
   mkdirSync(tmp, { recursive: true });
@@ -243,12 +252,17 @@ async function lint(): Promise<void> {
 // Every measurement names the render profile, which resets the device's
 // switches and governor to the profile's; `settings` then overrides them.
 const RENDER = value("--render", "vita30");
-const STATUS = resolve(ROOT, `.pocket-build/vita-usb/share/pocket-vita/${title}/status.json`);
 
 /** The device's engine status (the USB host replaces the file while it is read). */
 function engine(): any {
   for (let i = 0; ; i++) {
-    try { return JSON.parse(readFileSync(STATUS, "utf8")).engine ?? {}; } catch (e) { if (i > 20) throw e; }
+    try {
+      const status = new VitaUsbClient(USB_SHARE, title).status();
+      const runtime = JSON.parse(readFileSync(`${OUT_DIR}/${output}.runtime.json`, "utf8"));
+      if (status.nativeBuild !== runtime.nativeBuild) throw new Error("another native build owns the Vita; refusing to measure it");
+      if (status.error || status.engine?.renderError || status.engine?.errors?.length) throw new Error(`Vita renderer error: ${JSON.stringify(status.error || status.engine.renderError || status.engine.errors)}`);
+      return status.engine ?? {};
+    } catch (e) { if (i > 20) throw e; }
     Bun.sleepSync(50);
   }
 }
@@ -326,7 +340,9 @@ async function profile(): Promise<void> {
     // Jittered, so samples do not lock onto one parity of alternating frames.
     await Bun.sleep(280 + Math.random() * 90);
     const seen = new Map<string, number>();
-    for (const [name, ms] of engine().passes ?? []) seen.set(name, (seen.get(name) ?? 0) + ms);
+    const e = engine();
+    if (e.stage !== "running" || e.place !== PLACE) throw new Error("requested place changed during GPU profiling");
+    for (const [name, ms] of e.passes ?? []) seen.set(name, (seen.get(name) ?? 0) + ms);
     for (const [name, ms] of seen) {
       const a = sum.get(name) ?? { ms: 0, frames: 0 };
       sum.set(name, { ms: a.ms + ms, frames: a.frames + 1 });
@@ -353,13 +369,13 @@ async function profile(): Promise<void> {
  */
 async function settle(): Promise<void> {
   await Bun.sleep(2000);
-  for (let i = 0; i < 600; i++) {
+  for (let i = 0; i < 1200; i++) {
     const e = engine();
-    if (!(e.main?.missing || e.reflection?.missing || e.pending)) return;
+    if (e.stage === "running" && e.place === PLACE && !(e.main?.missing || e.reflection?.missing || e.pending)) return;
     if (i % 10 === 0) console.log(`waiting for programs: ${e.pending ?? 0} compiling, ${e.main?.missing ?? 0} + ${e.reflection?.missing ?? 0} draws missing`);
     await Bun.sleep(500);
   }
-  throw new Error("programs still compiling after 5 minutes");
+  throw new Error("programs still compiling after 10 minutes");
 }
 
 // Frame time per shot (halfway view, fixed time) at every quality step of
@@ -426,18 +442,19 @@ async function vpk(): Promise<void> {
 async function shots(): Promise<void> {
   const seconds = Number(value("--seconds", "90"));
   await Bun.write(`${SHARE}/control.json`, JSON.stringify({ place: PLACE, renderProfile: RENDER }) + "\n");
-  await Bun.sleep(3000);
+  await settle();
   const acc = new Map<string, { ms: number[]; steps: Set<number>; levels: Set<number> }>();
   const end = Date.now() + seconds * 1000;
   while (Date.now() < end) {
     try {
-      const e = JSON.parse(readFileSync(STATUS, "utf8")).engine;
+      const e = engine();
+      if (e.stage !== "running" || e.place !== PLACE) throw new Error("requested place is not running");
       const a = acc.get(e.view.shot) ?? { ms: [], steps: new Set(), levels: new Set() };
       a.ms.push(e.frameMs);
       a.steps.add(e.settings.step);
       a.levels.add(e.settings.level);
       acc.set(e.view.shot, a);
-    } catch { /* replaced while read */ }
+    } catch (e) { throw new Error(`shot measurement interrupted: ${e}`); }
     await Bun.sleep(500);
   }
   console.log(`render profile ${RENDER}`);
@@ -486,7 +503,9 @@ else if (command === "ctl") {
 } else if (command === "serve") {
   await dev("serve");
 } else if (command === "cook") {
-  await $`cargo run --release --locked -p pocket3d-place-cook -- --target vita --in ${PLACE_DIR}`.cwd(ROOT);
+  const tex = Number(value("--tex", "1024"));
+  if (![128, 256, 512, 1024, 2048].includes(tex)) throw new Error("--tex must be 128, 256, 512, 1024 or 2048");
+  await $`cargo run --release --locked -p pocket3d-place-cook -- --target vita --in ${PLACE_DIR} --tex ${tex}`.cwd(ROOT);
 } else if (command === "cook-atlas") {
   const faces = await fontFaces();
   await $`cargo run --release -p pocket3d-place-cook -- atlas --in ${resolve(ROOT, ".pocket-build/atlas/globe")} --out ${ATLAS_PACK} ${faces}`.cwd(ROOT);

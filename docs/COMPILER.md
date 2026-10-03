@@ -5,7 +5,7 @@ packs and renderers. OpenStrike owns BSP/FPS behavior. Pocket3D names the family
 of techniques used to build these systems. Sharing a device kernel does not
 require sharing a scene engine, material model or runtime ABI.
 
-## Milestone 1
+## Compiler stages
 
 ```mermaid
 flowchart LR
@@ -27,19 +27,30 @@ its quantized vertices. Shared analysis passes still perform world transforms,
 spatial chunking, lighting and animation sampling. PICA / GE now receive float
 positions, normals, tangents and UVs and original material pixels. Their own
 lowerings choose texture sizes/layouts, vertex layouts, lighting approximations,
-batching and runtime data. Vita retains its existing encoding and shaders.
+batching and runtime data. Vita retains its encoding and shaders, including solid PBR palette batching.
 
 `crates/pocket3d-place-cook/src/ir.rs` implements import, integrity checks and
-capability checks. `source.rs` describes transient shared-pass output; it is not
-a serialized interchange format. `main.rs` still orchestrates the existing
-analysis and Vita writer; `pica.rs`, `psp.rs` and `gles.rs` own native lowerings. Existing
-`pocket3d-place::Meta` types are reused internally during this migration. They
-are not the public definition of PlaceIR. Vita/PICA/GE device format names/versions remain unchanged. The iPod target
-owns the separate PLIP v1 contract described below. PICA pins
-its PLCE envelope to v5 and its binary table to v3 independently of Vita v6.
+capability checks. `source.rs` describes typed transient shared-pass output: float vertices,
+logical index lists, original pixels, light points and sampled animation arrays.
+It contains no device version, byte ranges or GPU vertex layouts.
+`pocket-atlas-model` owns Atlas material, lighting and camera semantics; device
+readers re-export those types for compatibility. `analysis.rs` applies scene
+passes, while `vita.rs`, `pica.rs`, `psp.rs` and `gles.rs` own their encodings. `main.rs`
+handles the CLI. The analysis representation is not a serialized interchange
+format or a shared scene language for OpenStrike. Device format names/versions remain
+unchanged so this step does not require a runtime format migration. PICA pins
+its PLCE envelope to v5 and its binary table to v3 independently of Vita v7.
 Previously a Vita version bump leaked into PICA output and the C reader rejected
 it; the integration test now checks cooked output using the runtime's C format
 header and header validator.
+
+The current recipes preserve full-attribute welds, deformation and palette
+seams, bounded rigid simplification, world-scaled motion errors and oversized
+triangle boundaries. Vita alone selects solid PBR palette batching and merges
+GPU-identical encoded vertices; that representation never enters PICA/GE/iPod.
+PICA keeps the two coarsest analysis LODs in its limited main-view slots. Vita
+interns identical geometry/animation buffers at serialization. Unsupported skin
+sizes fail before publication; omitted inverse-bind matrices use identity.
 
 ## PlaceIR v1
 
@@ -94,8 +105,9 @@ folder to the compiler checks its hashes and does not modify it. A device pack
 is never a compiler input. The removed `--pica-from`, `psp --in <pack>` and `gles --in <pack>` forms
 fail with a migration message.
 
-`--tex` retains the Vita/PICA texture cap setting; PSP currently uses its own
-128/512-pixel material policy. Output suffixes do not identify a universal pack:
+`--tex` overrides the selected profile's surface texture cap. PSP defaults to
+128-pixel surfaces and 512-pixel emissive/detail maps. PICA defaults to 256.
+Profiles validate overrides against the selected backend's limits. Output suffixes do not identify a universal pack:
 PICA has its own table and geometry layout; PSP uses the separate PLPS header.
 PICA's higher-resolution exceptions inspect the authored 4K text-atlas
 convention, animation grids and emissive strips. Ordinary 2K source maps obey
@@ -123,9 +135,10 @@ Future device receipts can replace this manually maintained release eligibility.
 A successful cook establishes asset construction and structural checks. A host
 build establishes binding/link compatibility. Console launch, SceShaccCg
 compilation, scene switching, visual fidelity and measured frame budgets are
-separate checks. Native output has changed for PICA/GE because it now retains
-source precision and avoids the BC round trip; existing hardware measurements
-must not be treated as measurements of these new artifacts.
+separate checks. The earlier PlaceIR migration changed PICA/GE output to retain source precision
+and avoid the BC round trip. This typed-analysis refactor preserves the current
+pack bytes for sealed regression inputs. Measurements still belong to the exact
+asset and runtime identities tested.
 
 The regression test `tests/pipeline.rs` imports a small textured scene, deletes
 the web export, compiles iPod, PSP and PICA before Vita, validates the PSP payload,
@@ -152,11 +165,12 @@ the directly encoded 40-byte LightPoint records from shared analysis. Original
 material semantics, source draw identities, full indices, all LODs and complete
 animation tracks are retained. PLIP is not accepted by the Vita reader.
 
-The SGX source-geometry policy adds 1, 2 and 4 cm LOD candidates for static
+The SGX source-geometry policy adds 1, 2 and 4 cm LOD candidates for rigid
 draws before target encoding. It uses the shared simplifier's attribute weights,
 chunk-edge locks and complete-part detail policy, and keeps the original shared
 LOD indices/errors unchanged. Only useful intermediate levels are inserted;
-dynamic geometry and the Vita/PICA/PSP policies are unchanged. The runtime's
+skinned topology is never simplified. Fine bounds are converted through the
+shared world metric and include its base error; Vita/PICA/PSP policies are unchanged. The runtime's
 distance/error threshold is unchanged. These error values retain the shared
 simplifier/detail-removal meaning, not a new strict screen-space error guarantee.
 
@@ -267,6 +281,79 @@ filtering, malformed payloads, display state, precise full/LOD partitioning and
 Products bake/fallback contracts. Hardware acceptance at 480×320 remains a
 separate measurement; older sub-480 renders do not establish this target's budget.
 
+## Profiles, recipes and compile receipts
+
+`profiles/vita30.json`, `old3ds30.json`, `psp30.json` and `ipod30.json` describe the existing
+runtimes: host OS/ABI, GPU family, render/display dimensions, auxiliary display,
+frame target, texture policies, animation palette budget and reader limits.
+`--profile` accepts a built-in ID or a JSON file. A custom profile can tune the
+supported recipe and reduce budgets; it cannot change the implemented host,
+GPU, presentation contract or relax a reader's hard limits. Backend feature
+support is checked independently. Unknown schema/recipe versions fail.
+
+`ipod30` describes the SGX scene and EAGL drawable at 480×320. Its 960×640
+display dimensions describe the physical panel/UI; the separate Reference
+profile may explicitly render at that size. Default surface/detail/emissive
+caps are all 512, with explicit usage selecting its corresponding profile cap.
+PLIP and every supplemental color/cluster/encoder file are returned in the
+common `Artifact`; the compile receipt hashes each published sidecar. Validation
+and budgets precede publication, and file replacement is staged. An interrupted
+set cannot be used silently because runtime sidecars bind the pack inputs.
+There is no extra RECP ABI: versioned target recipes remain in typed PLIP META
+and the effective profile/compiler provenance remains in the compile receipt.
+
+```sh
+cargo run --locked --release -p pocket3d-place-cook -- profiles
+cargo run --locked --release -p pocket3d-place-cook -- check \
+  --in .pocket-build/places/tokyo-konbini/place.ir --profile old3ds30 --json
+cargo run --locked --release -p pocket3d-place-cook -- \
+  --in .pocket-build/places/tokyo-konbini/place.ir --profile old3ds30 \
+  --out .pocket-build/validation/tokyo.3ds.place --json
+```
+
+Every successful cook writes `<output-stem>.compile.json`; `--report` selects
+another path. The report records the sealed source manifest/resources, compiler
+source hash and Rust version, effective profile and hash, analysis settings,
+artifact hash, section sizes, output texture layouts and diagnostics. The
+compiler hash includes the relevant compiler/model/format sources, profiles,
+manifests and dependency lock. Reports contain no timestamps or output paths.
+Repeated builds from the same source and toolchain produce the same receipt.
+
+`check` establishes capability eligibility and does not claim a built asset.
+A cook establishes construction and structural budgets. Its receipt records
+`device.status = "not-recorded"` and a frame budget that requires measurement.
+Physical acceptance needs a separate record tying the pack hash and profile to
+the installed runtime build, device, camera/quality settings, measured frame
+windows and captures. A section-size check does not prove combined allocation
+headroom, visual fidelity or a frame-time bound. No device certificate is
+inferred from a successful compile.
+
+Backends return complete artifacts to the CLI. Profile and reader checks run
+before publication; a rejected budget leaves an existing output pack and its
+receipt intact. `--json` emits a machine-readable result, or a structured error
+on stderr. Normal mode keeps progress and writes the same receipt.
+
+### Texture purpose
+
+Material `extras.pocketAtlas.textureUsage` maps `albedo`, `normal`, `orm` and
+`emission` slots to `surface`, `text-atlas`, `flipbook` or `emissive-strip`.
+These are compiler intents; each backend selects its own size and encoding.
+Explicit usage takes precedence over source dimensions and luminance. A shared
+image can have different purposes in different materials.
+
+```ts
+import { materialTextureUsage, textureUsage } from "./shared/texture-usage";
+textureUsage(letteringTexture, "text-atlas");
+materialTextureUsage(material, { albedo: "surface" }); // overrides image intent
+```
+
+The shared atlas constructor accepts `{ usage: "text-atlas" }`; animated Sign
+flipbooks annotate their purpose. The exporter transfers image defaults into
+material annotations and preserves explicit slot overrides. Legacy exports
+retain the versioned sizing rules and emit `ATLAS_LEGACY_TEXTURE_USAGE`
+diagnostics. Annotating a legacy material can change its chosen resolution;
+review the report and device evidence when adopting an explicit purpose.
+
 ## GXM ownership
 
 `vendor/pocketjs/devices/vita/pocket-vita-gxm` contains the shared GXM memory,
@@ -282,22 +369,44 @@ freeing resources. It does not select lights, materials, visibility, quality
 levels, frames, presentation or an application's device profile. Details and
 lifetime rules are in the kernel's README.
 
-## Next extractions
+## Domain and device ownership
 
-1. Separate the shared analysis result from legacy device metadata completely;
-   move Vita serialization out of the orchestration module. Keep source IR
-   stable and give target recipes/diagnostics explicit versions.
-2. Move BSP/FPS renderer/compiler ownership toward OpenStrike without moving
-   generic animation/mesh code or breaking PocketJS's existing widget consumers.
-   The current BSP renderer still physically lives in PocketJS during this step.
-3. Extract PICA/GE mechanisms from actual consumers when reuse is demonstrated.
-   Do not create empty backends or a mandatory common GPU API first.
-4. Add target profiles made of OS/ABI, GPU capabilities, budgets and presentation
-   requirements. Steam Deck or an Android handheld such as AYN Thor can share
-   suitable mechanisms while selecting different compiler recipes. A product
-   name alone is not a rendering backend. No new device support is implied here.
-5. Publish creator-facing validation, diagnostics and measured capability
-   profiles. New scene kinds need a reviewed lowering and visual/performance
-   evidence; agents may propose changes, while checked-in compiler passes make
-   accepted decisions reproducible. Scene-specific generated patches are not
-   part of the asset build.
+OpenStrike now owns its BSP import, `.p3d` format, collision, cooker and
+GE/GXM/GLES2 renderers under `open-strike/domain`. PocketJS retains generic
+animation, mesh, desktop widget and VRM consumers. Atlas never consumes a BSP
+renderer or converts through an OpenStrike device pack.
+
+Atlas and OpenStrike share these pinned PocketJS mechanisms:
+
+- `devices/psp/pocket-psp-ge`: retained aligned frame storage, GE byte layout and
+  explicit cache writeback. Both cookers use its swizzle; Atlas uses the cache
+  primitive, and PocketJS/OpenStrike use frame storage.
+- `devices/3ds/pocket-3ds-pica`: checked texture allocation, exact complete-mip
+  upload/publication and explicit release. Atlas loads its native payloads into
+  this storage; the PocketJS host used by OpenStrike publishes its tiled images.
+- `devices/vita/pocket-vita-gxm`: the existing GXM mechanisms described above.
+
+Callers own GPU completion before reuse or release. Native types stay visible;
+there is no common GPU API. Compiler fingerprints cover the shared GE source as
+well as Atlas's recipe/format source and dependency lock.
+
+## Creator workflow and next extensions
+
+1. Build a web place using supported material/effect vocabulary. Export Three
+   to GLB plus annotations, then import to the integrity-checked PlaceIR.
+2. Choose a versioned profile, run `check`, and cook directly from PlaceIR. Typed
+   analysis feeds each target writer; one device pack is never another's input.
+3. Inspect the compile receipt's capabilities, dimensions, byte budgets and
+   legacy warnings. Repeated identical inputs produce identical packs/reports
+   with the same compiler/toolchain. Compilation is not a frame-time proof.
+4. Deploy the identified pack and runtime, compare intended visuals, exercise
+   every camera and record device timing against the profile's frame budget.
+   Keep capture, interaction and timing evidence separate from host checks.
+5. When a new scene kind needs a new effect or misses budget, a person or agent
+   reviews the lowering and device evidence, then changes a general recipe,
+   renderer mechanism or authoring intent. The reviewed decision becomes a
+   versioned deterministic pass; manual edits to generated packs are not inputs.
+
+This milestone supports the existing Vita, Old 3DS and PSP targets only. New
+scene kinds still require measured capability records and visual acceptance.
+Steam Deck and AYN Thor are deferred; no renderer or profile for them is added.

@@ -329,3 +329,347 @@ fn pica_does_not_treat_an_ordinary_2k_source_texture_as_a_text_atlas() {
     assert_eq!(word(table + 4), 1, "one texture");
     assert_eq!((word(table + 120), word(table + 124)), (256, 256));
 }
+
+#[test]
+fn vita_palette_encoding_does_not_replace_native_uvs_or_material_factors() {
+    let temp = Temp(std::env::temp_dir().join(format!("atlas-palette-targets-{}", std::process::id())));
+    let export = temp.0.join("solid-materials");
+    let ir = temp.0.join("place.ir");
+    std::fs::create_dir_all(&export).unwrap();
+    let mut bin = Vec::new();
+    let mut views = Vec::new();
+    let mut accessors = Vec::new();
+    let mut attribute = |data: &[f32], kind: &str| {
+        let start = bin.len();
+        bin.extend(data.iter().flat_map(|v| v.to_le_bytes()));
+        let id = views.len();
+        views.push(json!({"buffer":0,"byteOffset":start,"byteLength":bin.len()-start}));
+        accessors.push(json!({"bufferView":id,"componentType":5126,"count":3,"type":kind}));
+        id
+    };
+    let uv = [[0.1234567f32, 0.7654321], [0.3456789, 0.2345678]];
+    let rough_metal = [[0.21f32, 0.73], [0.91, 0.03]];
+    let tint = [[0.27f32, 0.55, 0.8, 1.0], [0.6, 0.12, 0.4, 1.0]];
+    let primitives: Vec<_> = (0..2).map(|i| {
+        let x = i as f32 * 2.0;
+        let pos = attribute(&[x + 0.1234567, 0.0, 0.0, x + 1.0, 0.0, 0.0, x, 0.0, 1.0], "VEC3");
+        let normal = attribute(&[0.0, 1.0, 0.0].repeat(3), "VEC3");
+        let texcoord = attribute(&uv[i].repeat(3), "VEC2");
+        json!({"attributes":{"POSITION":pos,"NORMAL":normal,"TEXCOORD_0":texcoord},"material":i})
+    }).collect();
+    let materials: Vec<_> = (0..2).map(|i| json!({
+        "name":format!("solid-{i}"),
+        "pbrMetallicRoughness":{"baseColorFactor":tint[i],"roughnessFactor":rough_metal[i][0],"metallicFactor":rough_metal[i][1]}
+    })).collect();
+    let shot = json!({"pos":[0,1,3],"target":[0,0,0],"fov":45});
+    let document = json!({
+        "asset":{"version":"2.0"},"scene":0,
+        "scenes":[{"nodes":[0],"extras":{"pocketAtlas":{
+            "kind":"night-street","hemisphere":{"sky":[1,1,1],"ground":[1,1,1]},
+            "camera":{"shots":[{"name":"Front","from":shot,"to":shot,"duration":12}]}
+        }}}],"nodes":[{"mesh":0}],"meshes":[{"primitives":primitives}],"materials":materials,
+        "buffers":[{"byteLength":bin.len()}],"bufferViews":views,"accessors":accessors
+    });
+    let glb = gltf::binary::Glb {
+        header: gltf::binary::Header { magic: *b"glTF", version: 2, length: 0 },
+        json: Cow::Owned(serde_json::to_vec(&document).unwrap()), bin: Some(Cow::Owned(bin)),
+    };
+    std::fs::write(export.join("scene.glb"), glb.to_vec().unwrap()).unwrap();
+    ok(&["import", "--in", export.to_str().unwrap(), "--out", ir.to_str().unwrap()]);
+    std::fs::remove_dir_all(export).unwrap();
+    for target in ["ipod", "psp", "3ds", "vita"] {
+        let output = temp.0.join(format!("{target}.place"));
+        ok(&["--in", ir.to_str().unwrap(), "--out", output.to_str().unwrap(), "--target", target, "--tex", "64"]);
+        let bytes = std::fs::read(output).unwrap();
+        if target == "psp" {
+            let h = pocket3d_place_psp::validate(&bytes).unwrap();
+            assert_eq!(h.materials.count, 2, "GE must receive authored materials");
+            let draws = pocket3d_place_psp::slice::<pocket3d_place_psp::Draw>(&bytes, h.draws).unwrap();
+            for d in draws {
+                let vertices = pocket3d_place_psp::slice::<pocket3d_place_psp::Vertex>(&bytes, d.vertices).unwrap();
+                for v in vertices {
+                    let source = usize::from(v.pos[0] >= 2.0);
+                    assert_eq!(v.uv.map(f32::to_bits), uv[source].map(f32::to_bits));
+                }
+            }
+        } else if target == "ipod" {
+            use pocket3d_place as pc;
+            let p=pc::ipod::parse(&bytes).unwrap(); let m=p.meta().unwrap();
+            assert_eq!(m.materials.len(),2);
+            let g=p.section(pc::TAG_GEOMETRY).unwrap();
+            for d in &m.draws {
+                let source=d.material as usize; let material=&m.materials[source];
+                assert!(!material.vertex_pbr);
+                assert_eq!(material.color,tint[source]);
+                assert_eq!([material.roughness,material.metalness],rough_metal[source]);
+                for vertex in pc::parts::slice(g,&d.vertices).unwrap().chunks_exact(pc::ipod::stride(d.layout) as usize) {
+                    assert_eq!(&vertex[40..48],uv[source].into_iter().flat_map(f32::to_le_bytes).collect::<Vec<_>>());
+                }
+            }
+        } else if target == "3ds" {
+            let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+            let section = |tag: &[u8]| (0..word(8) as usize).map(|i| 16 + i * 16)
+                .find(|&at| &bytes[at..at + 4] == tag).map(|at| word(at + 4) as usize).unwrap();
+            assert_eq!(word(4), 5);
+            let table = section(b"PICA");
+            let geom = section(b"GEOM");
+            assert_eq!(word(table), 3);
+            let meta_section = (0..word(8) as usize).map(|i| 16 + i * 16)
+                .find(|&at| &bytes[at..at + 4] == b"META").unwrap();
+            let meta_at = word(meta_section + 4) as usize;
+            let meta: serde_json::Value = serde_json::from_slice(&bytes[meta_at..meta_at + word(meta_section + 8) as usize]).unwrap();
+            assert_eq!(meta["sourceMaterials"], 2, "PICA must receive authored materials");
+            // Once their tints have been baked, identical fixed-function
+            // states may merge. Roughness is unused on these dry surfaces.
+            assert_eq!(word(table + 8), 1);
+            let material_at = table + 120 + word(table + 4) as usize * 32;
+            let draw_at = material_at + word(table + 8) as usize * 92;
+            let mut colors = [None; 2];
+            for i in 0..word(table + 12) as usize {
+                let d = draw_at + i * 96;
+                let vertices = geom + word(d + 4) as usize;
+                for j in 0..word(d + 8) as usize {
+                    let v = vertices + j * 24;
+                    let source = usize::from(f32::from_bits(word(v)) >= 2.0);
+                    assert_eq!([word(v + 12), word(v + 16)], uv[source].map(f32::to_bits));
+                    colors[source] = Some([bytes[v + 20], bytes[v + 21], bytes[v + 22]]);
+                }
+            }
+            assert!(colors.iter().all(Option::is_some));
+            assert_ne!(colors[0], colors[1], "source tints survive GPU state coalescing");
+        } else {
+            let pack = pocket3d_place::Pack::parse(&bytes).unwrap();
+            let m = pack.meta().unwrap();
+            assert_eq!(m.version, 7);
+            let geom = pack.section(pocket3d_place::TAG_GEOMETRY).unwrap();
+            let mut seen = [false; 2];
+            for d in &m.draws {
+                let material = &m.materials[d.material as usize];
+                assert!(material.vertex_pbr);
+                assert_eq!(material.color, [1.0; 4]);
+                let source = usize::from(d.min[0] >= 2.0);
+                seen[source] = true;
+                for v in geom[d.vertices.offset as usize..(d.vertices.offset + d.vertices.size) as usize].chunks_exact(d.layout.stride() as usize) {
+                    for k in 0..2 {
+                        let q = i16::from_le_bytes(v[16 + k * 2..18 + k * 2].try_into().unwrap());
+                        let factor = d.uv_offset[k] + d.uv_scale[k] * q as f32 / 32767.0;
+                        assert!((factor - rough_metal[source][k]).abs() < 0.00001);
+                    }
+                    assert_eq!(&v[20..23], &tint[source][..3].iter().map(|&c| pocket3d_place::color::encode8(c)).collect::<Vec<_>>());
+                }
+            }
+            assert!(seen.into_iter().all(|v| v));
+        }
+    }
+}
+
+fn skin_fixture(root: &Path, joint_count: usize) {
+    std::fs::create_dir_all(root).unwrap();
+    let positions = [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+    let mut bin: Vec<u8> = positions.into_iter().flat_map(f32::to_le_bytes).collect();
+    // Every vertex uses the last joint, so accepting 25 joints cannot pass
+    // by dropping an unused tail of the palette.
+    let joints_at = bin.len();
+    for _ in 0..3 {
+        for j in [joint_count.saturating_sub(1) as u16, 0, 0, 0] {
+            bin.extend(j.to_le_bytes());
+        }
+    }
+    let weights_at = bin.len();
+    for _ in 0..3 {
+        for w in [1.0f32, 0.0, 0.0, 0.0] { bin.extend(w.to_le_bytes()); }
+    }
+    let mut nodes = vec![json!({"mesh":0,"skin":0})];
+    nodes.extend((0..joint_count).map(|j| json!({
+        "name":format!("joint-{j}"),
+        "translation":[if j + 1 == joint_count { 0.25 } else { 0.0 }, 0.0, 0.0]
+    })));
+    let shot = json!({"pos":[0,1,3],"target":[0,0,0],"fov":45});
+    let document = json!({
+        "asset":{"version":"2.0"},"scene":0,
+        "scenes":[{"nodes":(0..=joint_count).collect::<Vec<_>>(),"extras":{"pocketAtlas":{
+            "kind":"night-street","camera":{"shots":[{"name":"Front","from":shot,"to":shot,"duration":12}]}
+        }}}],"nodes":nodes,"skins":[{"name":"source-skin","joints":(1..=joint_count).collect::<Vec<_>>()}],
+        "meshes":[{"primitives":[{"attributes":{"POSITION":0,"JOINTS_0":1,"WEIGHTS_0":2},"material":0}]}],
+        "materials":[{"extensions":{"KHR_materials_unlit":{}}}],"extensionsUsed":["KHR_materials_unlit"],
+        "buffers":[{"byteLength":bin.len()}],
+        "bufferViews":[{"buffer":0,"byteLength":36},{"buffer":0,"byteOffset":joints_at,"byteLength":24},{"buffer":0,"byteOffset":weights_at,"byteLength":48}],
+        "accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},
+            {"bufferView":1,"componentType":5123,"count":3,"type":"VEC4"},
+            {"bufferView":2,"componentType":5126,"count":3,"type":"VEC4"}]
+    });
+    let glb = gltf::binary::Glb {
+        header: gltf::binary::Header { magic: *b"glTF", version: 2, length: 0 },
+        json: Cow::Owned(serde_json::to_vec(&document).unwrap()), bin: Some(Cow::Owned(bin)),
+    };
+    std::fs::write(root.join("scene.glb"), glb.to_vec().unwrap()).unwrap();
+}
+
+#[test]
+fn skin_with_25_joints_lowers_independently_for_native_targets() {
+    let temp = Temp(std::env::temp_dir().join(format!("atlas-skin-targets-{}", std::process::id())));
+    let export = temp.0.join("skin-25");
+    let ir = temp.0.join("place.ir");
+    skin_fixture(&export, 25);
+    ok(&["import", "--in", export.to_str().unwrap(), "--out", ir.to_str().unwrap()]);
+    std::fs::remove_dir_all(export).unwrap();
+    for target in ["ipod", "psp", "3ds", "vita"] {
+        let output = temp.0.join(format!("{target}.place"));
+        let args = ["--in", ir.to_str().unwrap(), "--out", output.to_str().unwrap(), "--target", target, "--tex", "64"];
+        if target == "vita" {
+            let result = run(&args);
+            assert!(!result.status.success());
+            let error = String::from_utf8_lossy(&result.stderr);
+            assert!(error.contains("has 25 joints") && error.contains("Vita supports 1..=24"), "{error}");
+            assert!(!output.exists(), "rejected input must not publish a Vita pack");
+            continue;
+        }
+        ok(&args);
+        let bytes = std::fs::read(&output).unwrap();
+        if target == "psp" {
+            let h = pocket3d_place_psp::validate(&bytes).unwrap();
+            let draws = pocket3d_place_psp::slice::<pocket3d_place_psp::Draw>(&bytes, h.draws).unwrap();
+            assert_eq!(draws.len(), 1);
+            let d = &draws[0];
+            let joints = pocket3d_place_psp::slice::<pocket3d_place_psp::Joint>(&bytes, d.joints).unwrap();
+            assert_eq!(joints.len(), 25);
+            assert_eq!(joints[24].inverse, [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+            let nodes = pocket3d_place_psp::slice::<pocket3d_place_psp::Node>(&bytes, h.nodes).unwrap();
+            assert_eq!(nodes[joints[24].node as usize].translation, [0.25, 0.0, 0.0]);
+            let weights = pocket3d_place_psp::slice::<pocket3d_place_psp::Weights>(&bytes, d.weights).unwrap();
+            assert_eq!(weights.len(), 3);
+            assert!(weights.iter().all(|w| w.joints[0] == 24 && w.weights == [255, 0, 0, 0]));
+        } else if target == "ipod" {
+            use pocket3d_place as pc;
+            let p=pc::ipod::parse(&bytes).unwrap();let m=p.meta().unwrap();
+            assert_eq!(m.skins.len(),1);assert_eq!(m.skins[0].joints.len(),25);
+            let a=p.section(pc::TAG_ANIMATION).unwrap();
+            let inverse=pc::parts::slice(a,&m.skins[0].inverse_bind).unwrap();
+            assert_eq!(inverse.len(),25*64);
+            assert_eq!(&inverse[24*64..],glam::Mat4::IDENTITY.to_cols_array().into_iter().flat_map(f32::to_le_bytes).collect::<Vec<_>>());
+            assert_eq!(m.nodes[m.skins[0].joints[24] as usize].translation,[0.25,0.,0.]);
+            let g=p.section(pc::TAG_GEOMETRY).unwrap();
+            for d in &m.draws { for v in pc::parts::slice(g,&d.vertices).unwrap().chunks_exact(60) {assert_eq!(&v[52..60],&[24,0,0,0,255,0,0,0]);} }
+        } else {
+            let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+            let section = |tag: &[u8]| (0..word(8) as usize).map(|i| 16 + i * 16)
+                .find(|&at| &bytes[at..at + 4] == tag).map(|at| (word(at + 4) as usize, word(at + 8) as usize)).unwrap();
+            let (table, table_size) = section(b"PICA");
+            let (anim, _) = section(b"ANIM");
+            assert_eq!(word(4), 5);
+            assert_eq!(word(table), 3);
+            assert_eq!(word(table + 12), 1, "one skinned draw");
+            assert_eq!(word(table + 20), 26, "one root transform plus all 25 joints");
+            assert_eq!(word(table + 36), 36, "three 12-byte skin records");
+            let skin = table + table_size - 36;
+            for v in 0..3 {
+                let at = skin + v * 12;
+                assert_eq!(u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap()), 25);
+                assert_eq!(&bytes[at + 8..at + 12], &[255, 0, 0, 0]);
+            }
+            // The last referenced joint retains its transform, not a
+            // truncated/clamped palette entry. Matrices use float 3x4 rows.
+            assert_eq!(f32::from_bits(word(anim + 25 * 48 + 12)), 0.25);
+        }
+    }
+}
+
+#[test]
+fn skin_without_joints_is_rejected_for_every_target() {
+    let temp = Temp(std::env::temp_dir().join(format!("atlas-empty-skin-{}", std::process::id())));
+    let export = temp.0.join("empty-skin");
+    let ir = temp.0.join("place.ir");
+    skin_fixture(&export, 0);
+    ok(&["import", "--in", export.to_str().unwrap(), "--out", ir.to_str().unwrap()]);
+    std::fs::remove_dir_all(export).unwrap();
+    for target in ["ipod", "psp", "3ds", "vita"] {
+        let output = temp.0.join(format!("{target}.place"));
+        let result = run(&["--in", ir.to_str().unwrap(), "--out", output.to_str().unwrap(), "--target", target]);
+        assert!(!result.status.success(), "{target} accepted an empty skin");
+        let error = String::from_utf8_lossy(&result.stderr);
+        assert!(error.contains("has no joints"), "{target}: {error}");
+        assert!(!output.exists());
+    }
+}
+
+#[test]
+fn semantic_texture_intent_overrides_legacy_size_and_luminance_in_each_backend() {
+    let temp = Temp(std::env::temp_dir().join(format!("atlas-intent-{}",std::process::id())));
+    let export = temp.0.join("strip");
+    fixture(&export,2048,16);
+    for (usage,expect) in [("surface",[256,256,128]),("text-atlas",[2048,1024,512])] {
+        annotate_texture(&export,usage);
+        for (target,width) in ["vita","3ds","psp"].into_iter().zip(expect) {
+            let dest=temp.0.join(format!("{usage}-{target}.place"));
+            let mut args=vec!["--in",export.to_str().unwrap(),"--target",target,"--out",dest.to_str().unwrap(),"--json"];
+            if target!="psp" {args.extend(["--tex","256"]);}
+            let result=run(&args);assert!(result.status.success(),"{}",String::from_utf8_lossy(&result.stderr));
+            let report:serde_json::Value=serde_json::from_slice(&result.stdout).unwrap();
+            assert_eq!(report["artifact"]["textures"][0]["width"],width);
+            assert_eq!(report["sourceTextures"][0]["usage"],usage);
+            assert_eq!(report["validation"]["device"]["status"],"not-recorded");
+            assert_eq!(report["validation"]["frameBudget"]["status"],"requires-device-measurement");
+            assert_eq!(report["diagnostics"],json!([]));
+            assert_eq!(report["artifact"]["bytes"].as_u64().unwrap(),std::fs::metadata(dest).unwrap().len());
+        }
+    }
+    annotate_texture(&export,"guess-a-layout");
+    let result=run(&["check","--in",export.to_str().unwrap(),"--json"]);
+    assert!(!result.status.success());
+    let error:serde_json::Value=serde_json::from_slice(&result.stderr).unwrap();
+    assert!(error["diagnostics"][0]["message"].as_str().unwrap().contains("unknown textureUsage"));
+}
+
+#[test]
+fn profile_budget_failure_preserves_old_artifact_and_receipts_are_repeatable() {
+    let temp=Temp(std::env::temp_dir().join(format!("atlas-profile-{}",std::process::id())));
+    let export=temp.0.join("triangle");fixture(&export,13,7);
+    let dest=temp.0.join("scene.place");
+    let args=["--in",export.to_str().unwrap(),"--profile","old3ds30","--out",dest.to_str().unwrap(),"--json"];
+    let first=run(&args);assert!(first.status.success(),"{}",String::from_utf8_lossy(&first.stderr));
+    let second=run(&args);assert!(second.status.success());assert_eq!(first.stdout,second.stdout);
+    let report:serde_json::Value=serde_json::from_slice(&first.stdout).unwrap();
+    let pack=std::fs::read(&dest).unwrap();let receipt=std::fs::read(dest.with_extension("compile.json")).unwrap();
+    let mut profile=report["profile"]["definition"].clone();profile["id"]="tiny-budget".into();profile["budgets"]["sections"]["GEOM"]=1.into();
+    let custom=temp.0.join("tiny.json");std::fs::write(&custom,serde_json::to_vec(&profile).unwrap()).unwrap();
+    let rejected=run(&["--in",export.to_str().unwrap(),"--profile",custom.to_str().unwrap(),"--out",dest.to_str().unwrap(),"--json"]);
+    assert!(!rejected.status.success());assert!(String::from_utf8_lossy(&rejected.stderr).contains("GEOM budget exceeded"));
+    assert_eq!(pack,std::fs::read(&dest).unwrap());assert_eq!(receipt,std::fs::read(dest.with_extension("compile.json")).unwrap());
+    let conflict=run(&["check","--in",export.to_str().unwrap(),"--profile","old3ds30","--target","psp","--json"]);
+    assert!(!conflict.status.success());assert!(String::from_utf8_lossy(&conflict.stderr).contains("conflicts"));
+}
+
+#[test]
+fn ipod_profile_receipt_binds_sidecars_and_rejects_budget_before_publication() {
+    let temp=Temp(std::env::temp_dir().join(format!("atlas-ipod-profile-{}",std::process::id())));
+    let export=temp.0.join("triangle");fixture(&export,13,7);
+    let output=temp.0.join("scene.place");
+    let args=["--in",export.to_str().unwrap(),"--profile","ipod30","--out",output.to_str().unwrap(),"--json"];
+    let first=run(&args);assert!(first.status.success(),"{}",String::from_utf8_lossy(&first.stderr));
+    let report:serde_json::Value=serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(report["profile"]["definition"]["target"],"ipod");
+    assert_eq!(report["profile"]["definition"]["presentation"]["renderWidth"],480);
+    assert_eq!(report["artifact"]["sidecars"].as_array().unwrap().len(),3);
+    for c in report["artifact"]["sidecars"].as_array().unwrap() {
+        use sha2::{Digest,Sha256};
+        let bytes=std::fs::read(output.with_extension(c["extension"].as_str().unwrap())).unwrap();
+        assert_eq!(c["bytes"],bytes.len());assert_eq!(c["sha256"],format!("{:x}",Sha256::digest(bytes)));
+    }
+    let suffixes=["place","compile.json","ipod-color.json","ipod-color.bin","ipod-clusters.bin"];
+    let before:Vec<_>=suffixes.iter().map(|s|std::fs::read(output.with_extension(s)).unwrap()).collect();
+    let repeat=run(&args);assert!(repeat.status.success());assert_eq!(repeat.stdout,first.stdout);
+    let mut profile=report["profile"]["definition"].clone();profile["id"]="ipod-budget-test".into();profile["budgets"]["sections"]["GEOM"]=1.into();
+    let path=temp.0.join("budget.json");std::fs::write(&path,serde_json::to_vec(&profile).unwrap()).unwrap();
+    let rejected=run(&["--in",export.to_str().unwrap(),"--profile",path.to_str().unwrap(),"--out",output.to_str().unwrap(),"--json"]);
+    assert!(!rejected.status.success());assert!(String::from_utf8_lossy(&rejected.stderr).contains("GEOM budget exceeded"));
+    for (suffix,bytes) in suffixes.into_iter().zip(before) {assert_eq!(bytes,std::fs::read(output.with_extension(suffix)).unwrap());}
+}
+
+fn annotate_texture(root: &Path, usage: &str) {
+    let bytes = std::fs::read(root.join("scene.glb")).unwrap();
+    let mut glb = gltf::binary::Glb::from_slice(&bytes).unwrap();
+    let mut doc: serde_json::Value = serde_json::from_slice(&glb.json).unwrap();
+    doc["materials"][0]["extras"] = json!({"pocketAtlas":{"textureUsage":{"albedo":usage}}});
+    glb.json = Cow::Owned(serde_json::to_vec(&doc).unwrap());
+    std::fs::write(root.join("scene.glb"), glb.to_vec().unwrap()).unwrap();
+}

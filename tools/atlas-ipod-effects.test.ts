@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { BLOOM_RADIANCE_LIMIT, BLOOM_RGBM_RANGE, bloomStorage, withoutBloomHaze, pointCoverage, displayHazeDepth, displayBloomSource, displayHazeBloomSource, fieldAppearanceFragment, steamCoverageFragment, displayParticleVertex } from "./atlas-ipod-effects";
+import { BLOOM_RADIANCE_LIMIT, BLOOM_RGBM_RANGE, bloomStorage, pointCoverage, displayHazeDepth, displayBloomSource, displayHazeBloomSource, fieldAppearanceFragment, steamCoverageFragment, displayParticleVertex } from "./atlas-ipod-effects";
 import { shader as compileShader, fieldAppearanceVertex, preparedHazeFragment } from "./atlas-ipod-shaders";
 import { hdrFragment } from "./atlas-ipod-hdr";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -258,12 +258,25 @@ test("codec direction keeps scene inputs and the public bloom output in the main
   expect(final).not.toContain("ceil(m*");
 });
 
-test("no-haze variant removes its sampler read and malformed codec contracts fail explicitly", () => {
-  const lean = withoutBloomHaze(bloomStorage(shader, "write"));
-  expect(lean).not.toContain("texture2D(uHazeTex");
-  expect(lean).toContain("texture2D(uScene");
+test("shared bloom HAZE variants preserve optional haze before RGBM encoding", () => {
+  const directory = resolve(import.meta.dir, "../.pocket-build/validation/ipod-effects-tests/prefilter");
+  mkdirSync(directory, { recursive: true });
+  const vertex = compileShader("post_v");
+  const vert = join(directory, "post.vert");
+  writeFileSync(vert, readFileSync(resolve(import.meta.dir, `../.pocket-build/ipod/assets/shaders/${vertex}.glsl`), "utf8"));
+  for (const points of [false, true]) for (const haze of [false, true]) {
+    const key = compileShader("prefilter_f", { ...(points ? { PER_PIXEL: 1 } : {}), ...(haze ? { HAZE: 1 } : {}) });
+    const compiled = bloomStorage(readFileSync(resolve(import.meta.dir, `../.pocket-build/ipod/assets/shaders/${key}.glsl`), "utf8"), "write");
+    expect(compiled.includes("texture2D(uHazeTex")).toBe(haze);
+    expect(compiled.includes("uniform mediump sampler2D uHazeTex")).toBe(haze);
+    expect(compiled).toContain("texture2D(uScene");
+    expect(compiled).toContain("ceil(m*");
+    const frag = join(directory, `${+points}-${+haze}.frag`);
+    writeFileSync(frag, compiled);
+    const linked = Bun.spawnSync(["glslangValidator", "-l", vert, frag], { stdout: "pipe", stderr: "pipe" });
+    expect(linked.exitCode, linked.stdout.toString() + linked.stderr.toString()).toBe(0);
+  }
   expect(() => bloomStorage("void main(){}", "both")).toThrow("Missing HDR codec");
-  expect(() => withoutBloomHaze(bloomStorage(shader.replace("uHazeTex, vUv", "anotherSampler, vUv"), "write"))).toThrow("Missing bloom haze sample");
 });
 
 test("LDR point coverage preserves the shared radial profile and fails on changed output", () => {

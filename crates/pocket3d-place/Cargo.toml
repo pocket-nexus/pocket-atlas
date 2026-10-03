@@ -7,9 +7,10 @@ description = "Pocket Atlas place packs: GPU-ready geometry, textures, lights an
 
 [features]
 default = ["std"]
-std = ["serde/std", "serde_json/std"]
+std = ["serde/std", "serde_json/std", "pocket-atlas-model/std"]
 
 [dependencies]
+pocket-atlas-model = { path = "../pocket-atlas-model", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 num-traits = { version = "0.2", default-features = false, features = ["libm"] }

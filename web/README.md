@@ -4,7 +4,7 @@ A standalone three.js app: a night-side globe where you pick a place, a
 rain-soaked Tokyo backstreet with a 24-hour konbini, the stairs of Suga
 Shrine in Yotsuya on a summer afternoon, the street in front of
 Akihabara Radio Kaikan at blue hour, and the Enoden crossing at
-Kamakura-Kōkōmae above Sagami Bay. It does not use any PocketJS runtime, build tooling or packages — it is
+Kamakura-Kōkōmae above Sagami Bay, and Sangubashi No. 3 crossing beneath spring blossoms. It does not use any PocketJS runtime, build tooling or packages — it is
 a plain Vite + TypeScript project with its own lockfile.
 
 Every asset is generated at load time: Earth textures are rasterised from
@@ -40,8 +40,10 @@ Requires WebGL 2. Tested in Chrome on Apple silicon (ANGLE / Metal).
 | --- | --- |
 | `#/place/<id>` | open a place directly (`#/place/tokyo-konbini`, `#/place/suga-shrine-stairs`) |
 | `?q=low\|medium\|high\|ultra` | force a quality preset (otherwise picked from the GPU, persisted when changed in the UI) |
+| `?geometry=full\|handheld` | daytime authoring density for train, railway and foliage; defaults to full, independent of lighting quality |
 | `?shot` | capture mode: no UI, no intro, muted |
 | `?cam=Konbini\|Puddles\|Vending\|Crossing\|Inside\|Wires` | start at a named shot (konbini) |
+| `?cam=Crossing\|Blossom\|Tracks\|Train\|Lane\|Spring` | start at a named shot (Sangubashi in Bloom) |
 | `?cam=Stairs\|Rails\|Below\|Lane\|Canopy` | start at a named shot (Suga Shrine Stairs) |
 | `?cam=Arrival\|Facade\|Band\|Vista\|Corner\|Clock` | start at a named shot (Radio Kaikan at Blue Hour) |
 | `?cam=Crossing\|Postcard\|Platform\|Route134\|Seawall\|Park` | start at a named shot (Kamakura-Kōkōmae Crossing) |
@@ -225,6 +227,43 @@ bun scripts/shot.ts "/?shot&stats&q=high&cam=Puddles#/place/tokyo-konbini" out.p
   (`world/train.ts`, `world/traffic.ts`, `world/people.ts`).
 - **Sound.** Surf in sets, the road, cicadas, the electronic bell while the
   crossing rings, the train's motor (`audio.ts`).
+
+## How Sangubashi in Bloom is put together
+
+Open `/?q=high&cam=Crossing#/place/sangubashi-crossing`. The six camera buttons,
+free orbit, keyboard movement, cinematic mode and globe entry use the normal
+place shell. `?cam` also skips the intro when the HUD is visible.
+
+The photo-based site has two 1,067 mm tracks, sleepers and rail fasteners,
+crossing infill and check rails, two diagonal signal assemblies with hooded
+lamps and animated gates, overhead contact wires and gantries, and a short lane
+descending to the shuttered house and its outside stair. Housing, garden
+walls, utility poles, service drops, a convex mirror, gutters and vegetation
+surround the crossing, including the reverse view.
+
+`shared/daylight/` provides the daylight recipe, material baker, house kit
+and foliage helpers. It uses the common `PlaceStage` lifecycle, sky baker
+and post chain; Suga also reuses its materials, geometry and foliage. Its reusable tree builder grows tapered limbs
+and alpha-tested branch sprays; a seeded canvas atlas draws each cherry
+flower with five notched petals and stamens. Instanced curved petals settle
+in gutters; ordinary 24-joint skin batches carry the windborne petals through
+the glTF animation path. Spring audio is synthesised wind, city
+hum and occasional birds, with a timed crossing bell and wheel rumble.
+
+An eight-car, photo-based Odakyu 1000-series local passes every 64 seconds.
+The reusable commuter builder supplies open window apertures and glazed
+interiors, sliding-door leaves, brushed panels, cabs and wipers, 32 rotating
+wheelsets, sprung bogies, underfloor services, gangways, roof coolers and
+pantographs. The same clock drives the train, warning lamps, barrier arms and
+sound; gates stay closed until the last car clears. Moving casters invalidate
+the shared daylight shadow map near the crossing. Start at
+`/?q=high&cam=Train&t=16#/place/sangubashi-crossing` to review the arrival.
+
+See [the place notes](src/places/sangubashi-crossing/README.md) for real-location
+references, reconstruction limits and the offline Vita export/build workflow.
+The handheld geometry and Vita rendering have device compile, capture and timing
+records. Picture quality was accepted with disclosed frame-rate limits; the final
+shared-kernel integration has host/build checks, without another device deployment.
 
 ## Layout
 

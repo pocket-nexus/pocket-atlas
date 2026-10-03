@@ -127,6 +127,8 @@ pub struct PassStats {
     /// without baked lighting.
     pub lights: [u32; 3],
     pub unbaked: u32,
+    /// Draws whose light-space bounds can receive a moving caster's shadow.
+    pub moving_receivers: u32,
     /// Light-field draws and the lights they drew.
     pub fields: u32,
     pub points: u32,
@@ -236,7 +238,7 @@ struct Mat {
 }
 
 /// `vista`: the place has the vista haze, which replaces the fog.
-fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: bool, vista: bool) -> Mat {
+fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: bool, moving_shadow: bool, vista: bool) -> Mat {
     let orm_mean = if m.kind == pc::Kind::Standard { m.orm.map(|t| textures[t as usize].mean) } else { None };
     let mut defines: Vec<&'static str> = Vec::new();
     let mut tex = [None; 4];
@@ -256,6 +258,9 @@ fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: boo
         defines.push("ALBEDO_MAP");
     }
     if m.kind == pc::Kind::Standard {
+        if m.vertex_pbr {
+            defines.push("VERTEX_PBR");
+        }
         if let Some(t) = m.normal {
             tex[1] = Some(t as usize);
             defines.push("NORMAL_MAP");
@@ -288,6 +293,9 @@ fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: boo
         }
         if sun && !m.interior {
             defines.push("SUN");
+            if moving_shadow {
+                defines.push("MOVING_SHADOW");
+            }
             // The sun's highlight only shows on smooth or metallic surfaces.
             let rough = m.orm.map_or(m.roughness, |t| m.roughness * textures[t as usize].mean[1]);
             let metal = m.orm.map_or(m.metalness, |t| m.metalness * textures[t as usize].mean[2]);
@@ -560,11 +568,12 @@ impl VistaConsts {
     }
 }
 
-/// The sun's shadow map: the static scene rendered once from the sun, its
-/// distance along the light packed into RGB (`shadow_f.cg`).
+/// Orthographic sunlight depth: cached static geometry and moving casters.
 struct SunPass {
     target: Target,
-    /// Point-sampled view of the map (the packed depth must not be filtered).
+    /// Two neighbouring depth texels per RG16_UNORM pixel. The material
+    /// performs four comparisons from two point samples.
+    pair: Target,
     map: g::SceGxmTexture,
     vp: [f32; 16],
     dir: [f32; 4],
@@ -572,17 +581,30 @@ struct SunPass {
     mat: [f32; 8],
     k: [f32; 4],
     ready: bool,
+    /// Rigid moving casters use a separate map; the streets stay cached.
+    moving: Option<(Target, Target, g::SceGxmTexture)>,
+    moving_ready: bool,
+    moving_k: [f32; 4],
+    receiver_rows: [[f32; 4]; 3],
+    moving_bounds: Vec<crate::sun_bounds::SunBounds>,
+    planes: [Vec4; 6],
+    moving_error: f32,
 }
 
 impl SunPass {
-    unsafe fn new(vram: &mut Arena, mem: &mut Arena, sun: &pc::Sun) -> Result<Self, String> {
+    unsafe fn new(vram: &mut Arena, mem: &mut Arena, sun: &pc::Sun, moving: bool) -> Result<Self, String> {
         let l = Vec3::from(sun.direction).normalize_or(Vec3::Y);
         let sh = sun.shadow.clone().unwrap_or(pc::SunShadow { position: (l * 80.0).to_array(), ortho: [-40.0, 40.0, -40.0, 40.0, 1.0, 160.0], map_size: 2048, bias: 0.0, normal_bias: 0.02, radius: 1.0 });
         let size = sh.map_size.clamp(512, 2048);
-        let target = Target::new(vram, mem, size, size, ColorFormat::Rgba8, Msaa::None, Depth::Transient)?;
-        let mut map = target.texture;
+        let mut target = Target::new(vram, mem, size, size, ColorFormat::R32f, Msaa::None, Depth::Transient)?;
+        g::sceGxmTextureSetMinFilter(&mut target.texture, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_POINT);
+        g::sceGxmTextureSetMagFilter(&mut target.texture, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_POINT);
+        let pair = Target::new(vram, mem, size, size, ColorFormat::Rg16Unorm, Msaa::None, Depth::None)?;
+        let mut map = pair.texture;
         g::sceGxmTextureSetMinFilter(&mut map, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_POINT);
         g::sceGxmTextureSetMagFilter(&mut map, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_POINT);
+        g::sceGxmTextureSetUAddrMode(&mut map, g::SceGxmTextureAddrMode_SCE_GXM_TEXTURE_ADDR_CLAMP);
+        g::sceGxmTextureSetVAddrMode(&mut map, g::SceGxmTextureAddrMode_SCE_GXM_TEXTURE_ADDR_CLAMP);
         let pos = Vec3::from(sh.position);
         let up = if l.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
         let view = glam::camera::rh::view::look_at_mat4(pos, pos - l, up);
@@ -596,8 +618,21 @@ impl SunPass {
         let vrow = ry * -0.5 + rw * 0.5;
         let near = pos.dot(-l) + o[4];
         let range = (o[5] - o[4]).max(1.0);
+        let moving = if moving {
+            let mut target = Target::new(vram, mem, 512, 512, ColorFormat::R32f, Msaa::None, Depth::Transient)?;
+            g::sceGxmTextureSetMinFilter(&mut target.texture, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_POINT);
+            g::sceGxmTextureSetMagFilter(&mut target.texture, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_POINT);
+            let pair = Target::new(vram, mem, 512, 512, ColorFormat::Rg16Unorm, Msaa::None, Depth::None)?;
+            let mut map = pair.texture;
+            g::sceGxmTextureSetMinFilter(&mut map, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_POINT);
+            g::sceGxmTextureSetMagFilter(&mut map, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_POINT);
+            g::sceGxmTextureSetUAddrMode(&mut map, g::SceGxmTextureAddrMode_SCE_GXM_TEXTURE_ADDR_CLAMP);
+            g::sceGxmTextureSetVAddrMode(&mut map, g::SceGxmTextureAddrMode_SCE_GXM_TEXTURE_ADDR_CLAMP);
+            Some((target, pair, map))
+        } else { None };
         Ok(Self {
             target,
+            pair,
             map,
             vp: rows4x4(&vp),
             dir: [l.x, l.y, l.z, 0.0],
@@ -606,6 +641,15 @@ impl SunPass {
             // Bias: the authored depth bias over the range, at least ~2 cm.
             k: [near, 1.0 / range, sh.bias.abs().max(0.02 / range), size as f32],
             ready: false,
+            moving,
+            moving_ready: false,
+            // Scale the depth bias with this coarser map's texel footprint.
+            // A fixed 4 cm bias striped oblique train panels on the device.
+            moving_k: [near, 1.0 / range, sh.bias.abs().max(1.5 * (o[1] - o[0]).max(o[3] - o[2]) / 512.0 / range), 512.0],
+            receiver_rows: [urow.to_array(), vrow.to_array(), [-l.x / range, -l.y / range, -l.z / range, -near / range]],
+            moving_bounds: Vec::new(),
+            planes: [r.w_axis + r.x_axis, r.w_axis - r.x_axis, r.w_axis + r.y_axis, r.w_axis - r.y_axis, r.z_axis, r.w_axis - r.z_axis],
+            moving_error: (o[1] - o[0]).max(o[3] - o[2]) / 512.0,
         })
     }
 }
@@ -754,16 +798,17 @@ impl Renderer {
         // A sun below the horizon (blue hour) lights nothing directly.
         let lit_sun = scene.meta.sun.as_ref().filter(|s| s.direction[1] > 0.0);
         let has_sun = lit_sun.is_some();
+        let moving_shadow = has_sun && scene.meta.draws.iter().any(|d| d.node.is_some() && d.cast_shadow && scene.meta.materials[d.material as usize].blend == pc::Blend::Opaque);
         let vista = scene.meta.vista_haze.as_ref().map(|h| VistaConsts::new(h, scene));
-        let mats: Vec<Mat> = scene.meta.materials.iter().map(|m| material(m, env_scene, &scene.meta.textures, has_sun, vista.is_some())).collect();
+        let mats: Vec<Mat> = scene.meta.materials.iter().map(|m| material(m, env_scene, &scene.meta.textures, has_sun, moving_shadow, vista.is_some())).collect();
         let sun = match lit_sun {
-            Some(s) => Some(SunPass::new(&mut vram, &mut mem, s)?),
+            Some(s) => Some(SunPass::new(&mut vram, &mut mem, s, moving_shadow)?),
             None => None,
         };
         let has_fields = scene.draws.iter().any(|d| d.lights);
         let field_ib = if has_fields {
-            let ib = mem.alloc(pc::LightPoint::PER_DRAW * 2, 16)?.cast::<u16>();
-            for i in 0..pc::LightPoint::PER_DRAW {
+            let ib = mem.alloc(pc::LIGHT_POINTS_PER_DRAW * 2, 16)?.cast::<u16>();
+            for i in 0..pc::LIGHT_POINTS_PER_DRAW {
                 *ib.add(i) = i as u16;
             }
             ib as *const u16
@@ -805,7 +850,7 @@ impl Renderer {
             // Words 0..2 belong to the frame fence in main.rs.
             timeline: Timeline::new(8, 32),
             order: Vec::new(),
-            pipe_cache: vec![core::ptr::null(); scene.meta.materials.len() * 54],
+            pipe_cache: vec![core::ptr::null(); scene.meta.materials.len() * 108],
             pipe_epoch: u32::MAX,
             pipe_mode: (Msaa::X4, false, false),
             tick: 0,
@@ -834,6 +879,8 @@ impl Renderer {
         let Self { refls, mains, hazes, prefilters, finals, down, up, _vram, _mem, sun, .. } = self;
         if let Some(s) = sun {
             s.target.destroy();
+            s.pair.destroy();
+            if let Some((moving, pair, _)) = s.moving { moving.destroy(); pair.destroy(); }
         }
         for (a, b) in refls {
             a.destroy();
@@ -876,9 +923,9 @@ impl Renderer {
                     if vlit && *n > 0 {
                         let vs = surface_key(v, false, vs_needs(m, *tier, false));
                         gpu.want(&vs.with(if *n == 2 { "VERTEX_LIGHTS=2" } else { "VERTEX_LIGHTS=4" }));
-                        gpu.want(&frag_key(m, 0, false, baked, *tier).with("VERTEX_LIGHTS"));
+                        want_frag(gpu, frag_key(m, 0, false, baked, *tier).with("VERTEX_LIGHTS"));
                     } else {
-                        gpu.want(&frag_key(m, *n, false, baked, *tier));
+                        want_frag(gpu, frag_key(m, *n, false, baked, *tier));
                     }
                 }
             }
@@ -886,9 +933,9 @@ impl Renderer {
                 for n in if !m.lit { &[0usize][..] } else if baked { &[0usize, 1][..] } else { &[0usize, 2][..] } {
                     if vlit && *n > 0 {
                         gpu.want(&surface_key(v, false, vs_needs(m, 0, true)).with("VERTEX_LIGHTS=2"));
-                        gpu.want(&frag_key(m, 0, true, baked, 0).with("VERTEX_LIGHTS"));
+                        want_frag(gpu, frag_key(m, 0, true, baked, 0).with("VERTEX_LIGHTS"));
                     } else {
-                        gpu.want(&frag_key(m, *n, true, baked, 0));
+                        want_frag(gpu, frag_key(m, *n, true, baked, 0));
                     }
                 }
             }
@@ -968,7 +1015,7 @@ impl Renderer {
                 u.set(p, U::VistaEye, &f.vista_eye);
             }
             g::sceGxmSetVertexStream(ctx, 0, d.vb.cast());
-            g::sceGxmDraw(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_POINTS, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, self.field_ib.cast(), d.count.min(pc::LightPoint::PER_DRAW as u32));
+            g::sceGxmDraw(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_POINTS, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, self.field_ib.cast(), d.count.min(pc::LIGHT_POINTS_PER_DRAW as u32));
             st.fields += 1;
             st.points += d.count;
         }
@@ -977,11 +1024,11 @@ impl Renderer {
         }
     }
 
-    /// Shadow-pass programs for a draw that casts: static, opaque or cut out.
+    /// Shadow-pass programs for static or rigid opaque/cut-out casters.
     fn shadow_keys(&self, d: &crate::scene::DrawGpu) -> Option<(Key, Key, Layout)> {
         let m = &self.mats[d.material as usize];
         let v = variant(d);
-        if v == 1 || d.node.is_some() || m.transparent || m.class == 2 || m.class == 3 || m.water.is_some() {
+        if v == 1 || m.transparent || m.class == 2 || m.class == 3 || m.water.is_some() {
             return None;
         }
         let vs = surface_key(v, !m.alpha_test, VsNeeds::default());
@@ -989,22 +1036,40 @@ impl Renderer {
         Some((vs, fs, [Layout::Static, Layout::Skinned, Layout::Baked][v]))
     }
 
-    /// Draws the sun's shadow map once every program it needs is ready.
-    unsafe fn shadow_pass(&mut self, ctx: *mut g::SceGxmContext, gpu: &mut Gpu, scene: &Scene) -> Result<(), String> {
+    /// Cached static map or the smaller per-frame map of rigid moving casters.
+    unsafe fn shadow_pass(&mut self, ctx: *mut g::SceGxmContext, gpu: &mut Gpu, scene: &Scene, moving: bool) -> Result<(), String> {
         let Some(sp) = self.sun.as_mut().map(|s| s as *mut SunPass) else { return Ok(()) };
-        let fill = PipeKey { vs: key_v("post_v.cg", &[]), fs: Key::new("fill_f.cg", &[]), layout: Layout::Pos2, blend: BlendMode::Opaque, output: Out::Uchar4, msaa: Msaa::None.gxm() };
+        let fill = PipeKey { vs: key_v("post_v.cg", &[]), fs: Key::new("fill_f.cg", &[]), layout: Layout::Pos2, blend: BlendMode::Opaque, output: Out::Float, msaa: Msaa::None.gxm() };
         let Some(fill) = gpu.pipeline(&fill).map(|p| p as *const Pipeline) else { return Ok(()) };
+        let pair_key = PipeKey { vs: key_v("post_v.cg", &[]), fs: Key::new("shadow_pair_f.cg", &[]), layout: Layout::Pos2, blend: BlendMode::Opaque, output: Out::Ushort2, msaa: Msaa::None.gxm() };
+        let Some(pair_program) = gpu.pipeline(&pair_key).map(|p| p as *const Pipeline) else { return Ok(()) };
         let mut draws = Vec::new();
+        let mut moving_bounds = Vec::new();
         for (i, d) in scene.draws.iter().enumerate() {
+            if d.node.is_some() != moving || !scene.meta.draws[i].cast_shadow { continue; }
+            if moving {
+                let (lo, hi) = scene.bounds(d);
+                if (*sp).planes.iter().any(|p| {
+                    let v = Vec3::new(if p.x >= 0.0 { hi.x } else { lo.x }, if p.y >= 0.0 { hi.y } else { lo.y }, if p.z >= 0.0 { hi.z } else { lo.z });
+                    p.truncate().dot(v) + p.w < 0.0
+                }) { continue; }
+            }
             let Some((vs, fs, layout)) = self.shadow_keys(d) else { continue };
-            let key = PipeKey { vs, fs, layout, blend: BlendMode::Opaque, output: Out::Uchar4, msaa: Msaa::None.gxm() };
+            let key = PipeKey { vs, fs, layout, blend: BlendMode::Opaque, output: Out::Float, msaa: Msaa::None.gxm() };
             match gpu.pipeline(&key) {
-                Some(p) => draws.push((i, p as *const Pipeline)),
+                Some(p) => {
+                    draws.push((i, p as *const Pipeline));
+                    if moving {
+                        let (lo, hi) = scene.bounds(d);
+                        moving_bounds.push(crate::sun_bounds::project(&(*sp).receiver_rows, lo.to_array(), hi.to_array(), 0.0));
+                    }
+                },
                 None => return Ok(()),
             }
         }
-        let size = (*sp).target.width;
-        (*sp).target.begin(ctx, 1.0)?;
+        let target = if moving { &mut (*sp).moving.as_mut().unwrap().0 } else { &mut (*sp).target } as *mut Target;
+        let size = (*target).width;
+        (*target).begin(ctx, 1.0)?;
         Self::viewport(ctx, size, size);
         g::sceGxmSetCullMode(ctx, g::SceGxmCullMode_SCE_GXM_CULL_NONE);
         g::sceGxmSetFrontDepthBias(ctx, 0, 0);
@@ -1037,10 +1102,32 @@ impl Renderer {
                 bind(ctx, p, S::Albedo, &scene.textures[t].gxm);
             }
             g::sceGxmSetVertexStream(ctx, 0, d.vb.cast());
-            g::sceGxmDraw(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, d.ib.cast(), d.count);
+            let lod = if moving { d.lods.iter().rev().find(|l| l.2 <= (*sp).moving_error) } else { None };
+            let (ib, count) = lod.map_or((d.ib, d.count), |l| (l.0, l.1));
+            if count > 0 {
+                g::sceGxmDraw(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, ib.cast(), count);
+            }
         }
-        (*sp).target.end(ctx, None);
-        (*sp).ready = true;
+        self.timeline.end(ctx, &*target, if moving { "moving-shadow" } else { "sun-shadow" });
+        // Cache two neighbouring raw depths in one 32-bit texel. The
+        // static pass runs only on invalidation; moving casters refresh it.
+        let pair = if moving { &mut (*sp).moving.as_mut().unwrap().1 } else { &mut (*sp).pair } as *mut Target;
+        (*pair).begin(ctx, 0.0)?;
+        Self::viewport(ctx, size, size);
+        g::sceGxmSetCullMode(ctx, g::SceGxmCullMode_SCE_GXM_CULL_NONE);
+        g::sceGxmSetFrontDepthFunc(ctx, g::SceGxmDepthFunc_SCE_GXM_DEPTH_FUNC_ALWAYS);
+        g::sceGxmSetFrontDepthWriteEnable(ctx, g::SceGxmDepthWriteMode_SCE_GXM_DEPTH_WRITE_DISABLED);
+        self.use_pipeline(ctx, &*pair_program);
+        let u = Uniforms::reserve(ctx, &*pair_program);
+        u.set(&*pair_program, U::ShadowK, &[0.0, 0.0, 0.0, size as f32]);
+        bind(ctx, &*pair_program, S::Shadow, &(*target).texture);
+        g::sceGxmSetVertexStream(ctx, 0, self.tri_vb.cast());
+        g::sceGxmDraw(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, self.tri_ib.cast(), 3);
+        self.timeline.end(ctx, &*pair, if moving { "moving-pair" } else { "sun-pair" });
+        if moving {
+            (*sp).moving_ready = true;
+            (*sp).moving_bounds = moving_bounds;
+        } else { (*sp).ready = true; }
         Ok(())
     }
 
@@ -1208,7 +1295,10 @@ impl Renderer {
 
         // ---------------------------------------------------- sun shadow
         if self.sun.as_ref().is_some_and(|s| !s.ready) {
-            self.shadow_pass(ctx, gpu, scene)?;
+            self.shadow_pass(ctx, gpu, scene, false)?;
+        }
+        if self.sun.as_ref().is_some_and(|s| s.moving.is_some()) {
+            self.shadow_pass(ctx, gpu, scene, true)?;
         }
 
         // ---------------------------------------------------- reflection
@@ -1303,14 +1393,15 @@ impl Renderer {
             let full = step.bloom_full;
             let pre = &mut self.prefilters[if full { 0 } else { 1 }] as *mut Target;
             let a = &self.main_t(mi).texture as *const _;
-            // Without haze buffers the prefilter's haze input is weighted out.
+            // The HAZE variant reads this buffer only while haze is active.
             let b = self.hazes.get(hi).map_or(a, |t| &t.texture as *const _);
             // Places with light fields threshold each scene pixel (PER_PIXEL):
             // at a 2×2 block per output pixel the taps sit on pixel centres,
             // at larger blocks they average 2×2 each.
             let ratio = self.main_t(mi).width as f32 / (*pre).width as f32;
             let texel = [1.0 / self.main_t(mi).width as f32, 1.0 / self.main_t(mi).height as f32, if ratio <= 2.0 { 0.5 } else { 1.0 }, 0.0];
-            let fs = if self.has_fields { Key::new("prefilter_f.cg", &["PER_PIXEL"]) } else { Key::new("prefilter_f.cg", &[]) };
+            let mut fs = if self.has_fields { Key::new("prefilter_f.cg", &["PER_PIXEL"]) } else { Key::new("prefilter_f.cg", &[]) };
+            if haze_on { fs = fs.with("HAZE"); }
             self.post_keyed(
                 ctx,
                 gpu,
@@ -1595,7 +1686,12 @@ impl Renderer {
                 1 | 2 => 1,
                 _ => 2,
             };
-            let slot = (((mi * 3 + v) * 2 + mirror as usize) * 3 + tier) * 3 + lc;
+            let moving_shadow = self.mats[mi].defines.contains(&"MOVING_SHADOW") && self.sun.as_ref().is_some_and(|s| {
+                if !s.moving_ready { return true; }
+                let receiver = crate::sun_bounds::project(&s.receiver_rows, lo.to_array(), hi.to_array(), s.rad[3]);
+                s.moving_bounds.iter().any(|caster| crate::sun_bounds::may_receive(&receiver, caster, 1.0 / s.moving_k[3]))
+            });
+            let slot = ((((mi * 3 + v) * 2 + mirror as usize) * 3 + tier) * 3 + lc) * 2 + moving_shadow as usize;
             let mut pp = self.pipe_cache[slot];
             if pp.is_null() {
                 // Moving and skinned standard meshes: lights per vertex.
@@ -1606,6 +1702,7 @@ impl Renderer {
                     vs = vs.with(if n == 2 { "VERTEX_LIGHTS=2" } else { "VERTEX_LIGHTS=4" });
                     fs = fs.with("VERTEX_LIGHTS");
                 }
+                if !moving_shadow { fs.defines.retain(|d| d != "MOVING_SHADOW"); }
                 let key = PipeKey {
                     vs,
                     fs,
@@ -1650,7 +1747,9 @@ impl Renderer {
                 let mut bones = core::mem::take(&mut self.bones);
                 scene.bone_rows(s, &mut bones);
                 // The skinned program holds MAX_BONES = 24 bones (3 rows each).
-                u.set(p, U::Bones, &bones[..bones.len().min(24 * 12)]);
+                // Upload the declared array length, including a short final batch.
+                bones.resize(24 * 12, 0.0);
+                u.set(p, U::Bones, &bones);
                 self.bones = bones;
             }
             let gain = scene.emissive_gain[mi];
@@ -1711,6 +1810,10 @@ impl Renderer {
                 u.set(p, U::SunMat, &sp.mat);
                 u.set(p, U::ShadowK, &sp.k);
                 bind(ctx, p, S::Shadow, &sp.map);
+                if let Some((_, _, map)) = &sp.moving {
+                    u.set(p, U::MovingShadowK, if sp.moving_ready { &sp.moving_k } else { &sp.k });
+                    bind(ctx, p, S::MovingShadow, if sp.moving_ready { map } else { &sp.map });
+                }
             }
             if n > 0 {
                 let k = n * 4;
@@ -1739,6 +1842,7 @@ impl Renderer {
             let (ib, count) = lod.map_or((d.ib, d.count), |l| (l.0, l.1));
             g::sceGxmDraw(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, ib.cast(), count);
             st.draws += 1;
+            st.moving_receivers += moving_shadow as u32;
             st.tris += count / 3;
             st.lod += lod.is_some() as u32;
             if self.mats[mi].lit {
@@ -1829,12 +1933,14 @@ struct VsNeeds {
     waves: bool,
     /// The vista haze (inscatter, transmittance).
     vista: bool,
+    /// Affine world-to-shadow projection, shared by both sun maps.
+    sun: bool,
 }
 
 fn vs_needs(m: &Mat, tier: usize, mirror: bool) -> VsNeeds {
     let has = |d: &str| m.defines.contains(&d);
     let n = match m.kind {
-        pc::Kind::Standard => VsNeeds { tangent: has("NORMAL_MAP") && tier == 0 && !mirror, color: has("VERTEX_COLOR"), screen: has("PLANAR") && !mirror, ..VsNeeds::default() },
+        pc::Kind::Standard => VsNeeds { tangent: has("NORMAL_MAP") && tier == 0 && !mirror, color: has("VERTEX_COLOR"), screen: has("PLANAR") && !mirror, sun: has("SUN"), ..VsNeeds::default() },
         pc::Kind::InteriorWindow | pc::Kind::Skyline => VsNeeds { tangent: true, color: true, ..VsNeeds::default() },
         pc::Kind::Unlit | pc::Kind::Products => VsNeeds { color: true, ..VsNeeds::default() },
         pc::Kind::Water => VsNeeds { color: has("SHALLOW"), waves: true, ..VsNeeds::default() },
@@ -1854,13 +1960,21 @@ fn surface_key(variant: usize, flat: bool, n: VsNeeds) -> Key {
     if flat {
         defs.push("FLAT");
     } else {
-        for (on, d) in [(n.tangent, "TANGENT"), (n.color, "COLOR"), (n.screen, "SCREEN"), (n.waves, "WAVES"), (n.vista, "VISTA")] {
+        for (on, d) in [(n.tangent, "TANGENT"), (n.color, "COLOR"), (n.screen, "SCREEN"), (n.waves, "WAVES"), (n.vista, "VISTA"), (n.sun, "SUN")] {
             if on {
                 defs.push(d);
             }
         }
     }
     Key::new("surface_v.cg", &defs)
+}
+
+fn want_frag(gpu: &mut Gpu, mut key: Key) {
+    gpu.want(&key);
+    if key.defines.iter().any(|d| d == "MOVING_SHADOW") {
+        key.defines.retain(|d| d != "MOVING_SHADOW");
+        gpu.want(&key);
+    }
 }
 
 /// `tier`: 0 full detail, 1 LITE (no normal, ORM or streak maps), 2 FAR.
@@ -1904,6 +2018,8 @@ fn fixed_keys() -> Vec<Key> {
         Key::new("haze_f.cg", &["HAZE_LIGHTS=6"]),
         Key::new("prefilter_f.cg", &[]),
         Key::new("prefilter_f.cg", &["PER_PIXEL"]),
+        Key::new("prefilter_f.cg", &["HAZE"]),
+        Key::new("prefilter_f.cg", &["HAZE", "PER_PIXEL"]),
         Key::new("down_f.cg", &[]),
         Key::new("up_f.cg", &[]),
         Key::new("post_v.cg", &["GRAIN"]),
@@ -1912,6 +2028,7 @@ fn fixed_keys() -> Vec<Key> {
         Key::new("composite_f.cg", &["HAZE", "BLOOM"]),
         Key::new("blit_f.cg", &[]),
         Key::new("debug_f.cg", &[]),
+        Key::new("shadow_pair_f.cg", &[]),
     ];
     for d in ["STREAK", "DRIP", "SPLASH", "STEAM", "BEACON"] {
         v.push(Key::new("fx_v.cg", &[d]));

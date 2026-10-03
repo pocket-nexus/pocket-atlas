@@ -122,7 +122,7 @@ pub const fn stride(layout: VertexLayout) -> u32 {
         VertexLayout::Static => 52,
         VertexLayout::Baked => 56,
         VertexLayout::Skinned => 60,
-        VertexLayout::Lights => crate::LightPoint::STRIDE as u32,
+        VertexLayout::Lights => crate::LIGHT_POINT_STRIDE as u32,
     }
 }
 

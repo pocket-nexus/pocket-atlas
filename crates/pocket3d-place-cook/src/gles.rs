@@ -27,13 +27,35 @@ type Result<T> = std::result::Result<T, String>;
 pub(crate) fn source_lods(
     vertices: &[crate::geometry::Vertex],
     triangles: &[[u32; 3]],
+    layout: crate::source::VertexClass,
     locked: &[bool],
     drop_parts: bool,
     shared_bounds: &[f32],
+    uv_weight: f32,
+    metric_scale: f32,
 ) -> Vec<(Vec<[u32; 3]>, f32)> {
-    let shared = crate::geometry::lods(vertices, triangles, locked, drop_parts, shared_bounds);
-    let mut fine =
-        crate::geometry::lods(vertices, triangles, locked, drop_parts, &[0.01, 0.02, 0.04]);
+    let shared = crate::geometry::lods(
+        vertices,
+        triangles,
+        layout,
+        locked,
+        drop_parts,
+        shared_bounds,
+        uv_weight,
+    );
+    let mut fine = crate::geometry::lods(
+        vertices,
+        triangles,
+        layout,
+        locked,
+        drop_parts,
+        &[
+            0.01 / metric_scale,
+            0.02 / metric_scale,
+            0.04 / metric_scale,
+        ],
+        uv_weight,
+    );
     // An inserted level must reduce the finer tier and remain finer than the
     // next shared one. A shared tier with a smaller measured error dominates
     // an otherwise promising fine candidate; never weaken that existing tier.
@@ -55,43 +77,80 @@ pub(crate) fn source_lods(
 
 pub fn cook(
     source: &crate::source::Scene,
+    profile: &crate::profile::Profile,
     output: &Path,
-    cap: u32,
     pvrtctool: Option<&Path>,
-) -> Result<()> {
+) -> Result<crate::artifact::Artifact> {
     let encoder = pvrtctool
         .map(|path| gles_pvrtc::Encoder::new(path, output.parent().unwrap_or(Path::new("."))))
         .transpose()?;
-    let (bytes, recipe, receipt) = lower(source, cap, encoder.as_ref())?;
-    // Validate/bake every sidecar before publishing any file.
+    let (bytes, recipe, receipt) = lower(source, profile, encoder.as_ref())?;
     let colors = gles_colors::adapt_with_recipe(&bytes, &recipe)?;
     let clusters = gles_clusters::adapt(&bytes)?;
-    if let Some(parent) = output.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    std::fs::write(output, &bytes).map_err(|e| e.to_string())?;
-    std::fs::write(output.with_extension("ipod-color.bin"), &colors.bytes)
-        .map_err(|e| e.to_string())?;
-    std::fs::write(output.with_extension("ipod-color.json"), &colors.json)
-        .map_err(|e| e.to_string())?;
-    std::fs::write(output.with_extension("ipod-clusters.bin"), &clusters)
-        .map_err(|e| e.to_string())?;
-    if let Some(receipt) = receipt {
-        std::fs::write(
-            output.with_extension("ipod-texture-receipt.json"),
-            serde_json::to_vec_pretty(&receipt).map_err(|e| e.to_string())?,
+    let p = pc::ipod::parse(&bytes).map_err(|e| e.to_string())?;
+    let meta = p.meta().map_err(|e| e.to_string())?;
+    let sections = [
+        pc::TAG_META,
+        pc::TAG_TEXTURES,
+        pc::TAG_GEOMETRY,
+        pc::TAG_ANIMATION,
+        pc::ipod::TAG_PVRTC,
+        pc::ipod::TAG_DISPLAY_CUBES,
+    ]
+    .into_iter()
+    .map(|tag| {
+        (
+            String::from_utf8_lossy(&tag).into_owned(),
+            p.section(tag).map_or(0, |s| s.len()),
         )
-        .map_err(|e| e.to_string())?;
-    } else if let Err(error) =
-        std::fs::remove_file(output.with_extension("ipod-texture-receipt.json"))
-    {
-        if error.kind() != std::io::ErrorKind::NotFound {
-            return Err(format!("remove obsolete PVRTC receipt: {error}"));
+    })
+    .collect();
+    let textures=meta.textures.iter().enumerate().map(|(id,t)|serde_json::json!({"id":id,"name":t.name,"width":t.width,"height":t.height,"levels":t.mips,"bytes":t.data.size,"format":t.format})).collect();
+    let mut summary = meta.stats.clone();
+    summary["displayDraws"] = colors.draws.into();
+    summary["displayBytes"] = colors.bytes.len().into();
+    summary["clusterBytes"] = clusters.len().into();
+    use crate::artifact::Sidecar;
+    Ok(crate::artifact::Artifact {
+        bytes,
+        summary,
+        sections,
+        textures,
+        sidecars: vec![
+            Sidecar {
+                extension: "ipod-color.bin".into(),
+                bytes: Some(colors.bytes),
+            },
+            Sidecar {
+                extension: "ipod-color.json".into(),
+                bytes: Some(colors.json),
+            },
+            Sidecar {
+                extension: "ipod-clusters.bin".into(),
+                bytes: Some(clusters),
+            },
+            Sidecar {
+                extension: "ipod-texture-receipt.json".into(),
+                bytes: receipt
+                    .map(|r| serde_json::to_vec_pretty(&r))
+                    .transpose()
+                    .map_err(|e| e.to_string())?,
+            },
+        ],
+    })
+}
+#[derive(Clone, Copy)]
+struct TexturePolicy {
+    cells: (u32, u32),
+    max_mips: u32,
+}
+impl Default for TexturePolicy {
+    fn default() -> Self {
+        Self {
+            cells: (1, 1),
+            max_mips: 32,
         }
     }
-    let p = pc::ipod::parse(&bytes).map_err(|e| e.to_string())?;
-    println!("iPod PLIP v1: {} bytes, GEOM {} bytes, TEXD {} bytes, {} display draws / {} color bytes, {} cluster bytes", bytes.len(),p.section(pc::TAG_GEOMETRY).unwrap().len(),p.section(pc::TAG_TEXTURES).unwrap().len(),colors.draws,colors.bytes.len(),clusters.len());
-    Ok(())
 }
 fn append(out: &mut Vec<u8>, data: &[u8], align: usize) -> Result<pc::Range> {
     let start = out.len().checked_add(align - 1).ok_or("payload overflow")? / align * align;
@@ -108,22 +167,22 @@ fn append(out: &mut Vec<u8>, data: &[u8], align: usize) -> Result<pc::Range> {
 }
 fn lower(
     source: &crate::source::Scene,
-    cap: u32,
+    profile: &crate::profile::Profile,
     encoder: Option<&gles_pvrtc::Encoder>,
 ) -> Result<(Vec<u8>, gles_products::Recipe, Option<gles_pvrtc::Receipt>)> {
-    if cap == 0 {
-        return Err("texture cap must be positive".into());
+    if source.materials.iter().any(|m| m.vertex_pbr) {
+        return Err("iPod source does not accept the Vita vertex-PBR palette recipe".into());
     }
-    let mut meta = source.meta.clone();
-    meta.version = pc::ipod::VERSION;
+    let (mut meta, animation) = metadata(source)?;
     let geometry = gles_geometry::lower(source, &mut meta)?;
     let mut pixels = Vec::new();
-    for (i, t) in meta.textures.iter_mut().enumerate() {
+    for (i, t) in source.textures.iter().enumerate() {
+        let (texture, raw, policy) = texture_input(t)?;
         let (mut texture, bytes) =
-            lower_texture(t, source.textures(), cap, source.texture_policy(i))
+            lower_texture(&texture, &raw, profile.ipod_texture_cap(t), policy)
                 .map_err(|e| format!("texture {i} ({}): {e}", t.name))?;
         texture.data = append(&mut pixels, &bytes, 16)?;
-        *t = texture;
+        meta.textures.push(texture);
     }
     let recipe = gles_products::bake(source, &mut meta, &mut pixels)?;
     let mut ipod_recipes = gles_effects::bake(&mut meta, &mut pixels)?;
@@ -138,6 +197,9 @@ fn lower(
     } else {
         None
     };
+    meta.stats["geometryBytes"] = geometry.len().into();
+    meta.stats["textureBytes"] = pixels.len().into();
+    meta.stats["animationBytes"] = animation.len().into();
     let json = serde_json::to_vec(&pc::ipod::Metadata {
         scene: meta,
         ipod_recipes,
@@ -147,7 +209,7 @@ fn lower(
         (pc::TAG_META, json.as_slice(), 16),
         (pc::TAG_TEXTURES, pixels.as_slice(), 16),
         (pc::TAG_GEOMETRY, geometry.as_slice(), 16),
-        (pc::TAG_ANIMATION, source.animation(), 16),
+        (pc::TAG_ANIMATION, animation.as_slice(), 16),
     ];
     if !compressed.is_empty() {
         sections.push((pc::ipod::TAG_PVRTC, compressed.as_slice(), 16));
@@ -172,6 +234,149 @@ fn lower(
         receipt,
     ))
 }
+/// The iPod writer owns byte ranges; shared analysis remains typed.
+fn metadata(s: &crate::source::Scene) -> Result<(pc::Meta, Vec<u8>)> {
+    let mut animation = Vec::new();
+    let mut floats = |values: Vec<f32>| -> Result<pc::Range> {
+        if values.iter().any(|v| !v.is_finite()) {
+            return Err("non-finite animation sample".into());
+        }
+        append(
+            &mut animation,
+            &values
+                .into_iter()
+                .flat_map(f32::to_le_bytes)
+                .collect::<Vec<_>>(),
+            16,
+        )
+    };
+    let nodes = s
+        .nodes
+        .iter()
+        .map(|n| {
+            Ok(pc::Node {
+                name: n.name.clone(),
+                parent: n.parent,
+                translation: n.translation,
+                rotation: n.rotation,
+                scale: n.scale,
+                track: n
+                    .track
+                    .as_ref()
+                    .map(|t| floats(t.iter().flatten().copied().collect()))
+                    .transpose()?,
+            })
+        })
+        .collect::<Result<_>>()?;
+    let skins = s
+        .skins
+        .iter()
+        .map(|v| {
+            Ok(pc::Skin {
+                joints: v.joints.clone(),
+                inverse_bind: floats(v.inverse_bind.iter().flatten().copied().collect())?,
+            })
+        })
+        .collect::<Result<_>>()?;
+    let fog_tracks = s
+        .fog_tracks
+        .iter()
+        .map(|v| {
+            Ok(pc::FogTrack {
+                data: floats(v.samples.iter().flatten().copied().collect())?,
+            })
+        })
+        .collect::<Result<_>>()?;
+    let material_tracks = s
+        .material_tracks
+        .iter()
+        .map(|v| {
+            Ok(pc::MaterialTrack {
+                data: floats(v.samples.clone())?,
+            })
+        })
+        .collect::<Result<_>>()?;
+    Ok((
+        pc::Meta {
+            version: pc::ipod::VERSION,
+            name: s.name.clone(),
+            kind: s.kind.clone(),
+            min: s.min,
+            max: s.max,
+            textures: Vec::new(),
+            materials: s.materials.clone(),
+            draws: Vec::new(),
+            nodes,
+            skins,
+            lights: s.lights.clone(),
+            fog_lights: s.fog_lights.clone(),
+            fog_tracks,
+            material_tracks,
+            fps: s.fps,
+            frames: s.frames,
+            atmosphere: s.atmosphere.clone(),
+            rain: s.rain.clone(),
+            camera: s.camera.clone(),
+            doors: s.doors.clone(),
+            beacons: s.beacons.clone(),
+            effects: s.effects.clone(),
+            sun: s.sun.clone(),
+            day_sky: s.day_sky.clone(),
+            post: s.post.clone(),
+            vista_haze: s.vista_haze.clone(),
+            stats: s.stats.clone(),
+        },
+        animation,
+    ))
+}
+fn texture_input(t: &crate::source::Texture) -> Result<(pc::Texture, Vec<u8>, TexturePolicy)> {
+    use crate::source::Pixels;
+    let (format, mips, bytes, policy) = match &t.pixels {
+        Pixels::Image { rgba, cells } => (
+            pc::TexFormat::Rgba8,
+            1,
+            rgba.clone(),
+            TexturePolicy {
+                cells: *cells,
+                max_mips: 32,
+            },
+        ),
+        Pixels::Lookup { levels, .. } => (
+            pc::TexFormat::Rgba8,
+            1,
+            t.rgba8(),
+            TexturePolicy {
+                cells: (1, 1),
+                max_mips: *levels,
+            },
+        ),
+        Pixels::Environment { rgba16f, levels } => (
+            pc::TexFormat::Rgba16f,
+            *levels,
+            rgba16f.clone(),
+            TexturePolicy::default(),
+        ),
+    };
+    let size = u32::try_from(bytes.len()).map_err(|_| "source texture exceeds u32")?;
+    Ok((
+        pc::Texture {
+            name: t.name.clone(),
+            role: t.role,
+            width: t.width,
+            height: t.height,
+            mips,
+            format,
+            data: pc::Range { offset: 0, size },
+            wrap_s: t.wrap_s,
+            wrap_t: t.wrap_t,
+            has_alpha: t.has_alpha,
+            mean: t.mean,
+            lod_bias: t.lod_bias,
+        },
+        bytes,
+        policy,
+    ))
+}
 fn level_bytes(format: pc::TexFormat, w: u32, h: u32) -> Result<usize> {
     let stride = match format {
         pc::TexFormat::Rgba8 => 4,
@@ -191,7 +396,7 @@ fn lower_texture(
     t: &pc::Texture,
     blob: &[u8],
     cap: u32,
-    policy: crate::source::TexturePolicy,
+    policy: TexturePolicy,
 ) -> Result<(pc::Texture, Vec<u8>)> {
     if cap == 0
         || t.width == 0
@@ -415,8 +620,25 @@ mod tests {
             .iter()
             .map(|v| v.pos.x == 0.0 || v.pos.x == 4.0)
             .collect();
-        let shared = geometry::lods(&vertices, &triangles, &locks, false, &[0.06, 0.25]);
-        let result = source_lods(&vertices, &triangles, &locks, false, &[0.06, 0.25]);
+        let shared = geometry::lods(
+            &vertices,
+            &triangles,
+            crate::source::VertexClass::Static,
+            &locks,
+            false,
+            &[0.06, 0.25],
+            0.02,
+        );
+        let result = source_lods(
+            &vertices,
+            &triangles,
+            crate::source::VertexClass::Static,
+            &locks,
+            false,
+            &[0.06, 0.25],
+            0.02,
+            1.0,
+        );
         assert!(
             result.len() > shared.len(),
             "fixture needs a useful fine tier"
@@ -471,7 +693,7 @@ mod tests {
             &t,
             &src,
             8,
-            crate::source::TexturePolicy {
+            TexturePolicy {
                 cells: (2, 1),
                 max_mips: 32,
             },

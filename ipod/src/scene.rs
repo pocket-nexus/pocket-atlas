@@ -123,7 +123,7 @@ impl LightPhases {
                 offsets.push(None);
                 continue;
             }
-            if d.vertex_count.checked_mul(pc::LightPoint::STRIDE as u32) != Some(d.vertices.size) {
+            if d.vertex_count.checked_mul(pc::LIGHT_POINT_STRIDE as u32) != Some(d.vertices.size) {
                 return Err("invalid light phase vertex range".into());
             }
             let range = pc::parts::slice(geometry, &d.vertices)?;
@@ -148,7 +148,7 @@ impl LightPhases {
         data.try_reserve_exact(bytes as usize / 8)
             .map_err(|_| "light phase data allocation failed")?;
         for page in pages {
-            for vertex in page.chunks_exact(pc::LightPoint::STRIDE) {
+            for vertex in page.chunks_exact(pc::LIGHT_POINT_STRIDE) {
                 data.push(Self::pair(i16::from_le_bytes([vertex[6], vertex[7]])));
             }
         }
@@ -3914,10 +3914,10 @@ mod tests {
         d.index_count = 4;
         d.vertex_count = 4;
         d.vertices.offset = geometry.len() as u32;
-        d.vertices.size = 4 * pc::LightPoint::STRIDE as u32;
+        d.vertices.size = 4 * pc::LIGHT_POINT_STRIDE as u32;
         let phases = [i16::MIN, -32767, 15843, i16::MAX];
         for phase in phases {
-            let mut vertex = [0u8; pc::LightPoint::STRIDE];
+            let mut vertex = [0u8; pc::LIGHT_POINT_STRIDE];
             vertex[6..8].copy_from_slice(&phase.to_le_bytes());
             vertex[11] = 123;
             vertex[24..28].copy_from_slice(&(-3.25f32).to_le_bytes());
@@ -3985,7 +3985,7 @@ mod tests {
             .filter(|d| d.layout == pc::VertexLayout::Lights)
         {
             for vertex in geometry[draw.vertices.offset as usize..][..draw.vertices.size as usize]
-                .chunks_exact_mut(pc::LightPoint::STRIDE)
+                .chunks_exact_mut(pc::LIGHT_POINT_STRIDE)
             {
                 vertex[36] = 0;
                 vertex[37] = 255;
@@ -4038,7 +4038,7 @@ mod tests {
         draw.node = None;
         draw.vertices = pc::Range {
             offset: geometry.len() as u32,
-            size: 4 * pc::LightPoint::STRIDE as u32,
+            size: 4 * pc::LIGHT_POINT_STRIDE as u32,
         };
         draw.vertex_count = 4;
         draw.indices = pc::Range::default();
@@ -4049,7 +4049,7 @@ mod tests {
             [255, 128, 32],
             [89, 17, 201],
         ] {
-            let mut vertex = [0u8; pc::LightPoint::STRIDE];
+            let mut vertex = [0u8; pc::LIGHT_POINT_STRIDE];
             vertex[8..11].copy_from_slice(&rgb);
             vertex[11] = 123;
             vertex[16..20].copy_from_slice(&0.5f32.to_le_bytes());

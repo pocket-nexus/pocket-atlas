@@ -1,7 +1,8 @@
 //! Static Products appearance recipe. Bake the material function, retaining
 //! every original mesh/LOD triangle; this is not a shelf impostor.
+use super::TexturePolicy;
 use super::{pc, Result};
-use crate::source::{Scene, TexturePolicy};
+use crate::source::{Pixels, Scene, VertexClass};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -21,7 +22,7 @@ fn decode(s: f32) -> f32 {
     s * (s * (s * 0.305306011 + 0.682171111) + 0.012522878)
 }
 struct Art<'a> {
-    texture: &'a pc::Texture,
+    texture: &'a crate::source::Texture,
     bytes: &'a [u8],
 }
 impl Art<'_> {
@@ -89,7 +90,7 @@ fn shade(
 
 pub(super) fn bake(source: &Scene, meta: &mut pc::Meta, pixels: &mut Vec<u8>) -> Result<Recipe> {
     let mut recipe = Recipe::default();
-    for (mi, m) in source.meta.materials.iter().enumerate() {
+    for (mi, m) in source.materials.iter().enumerate() {
         if m.kind != pc::Kind::Products
             || m.blend != pc::Blend::Opaque
             || !m.depth_write
@@ -103,11 +104,10 @@ pub(super) fn bake(source: &Scene, meta: &mut pc::Meta, pixels: &mut Vec<u8>) ->
             continue;
         }
         let Some(ti) = m.albedo else { continue };
-        let t = &source.meta.textures[ti as usize];
-        if t.format != pc::TexFormat::Rgba8 || t.mips != 1 {
+        let t = &source.textures[ti as usize];
+        let Pixels::Image { rgba: data, .. } = &t.pixels else {
             return Err("Products requires original RGBA source".into());
-        }
-        let data = pc::parts::slice(source.textures(), &t.data)?;
+        };
         if data.len() != t.width as usize * t.height as usize * 4 {
             return Err("Products source texture range".into());
         }
@@ -117,15 +117,15 @@ pub(super) fn bake(source: &Scene, meta: &mut pc::Meta, pixels: &mut Vec<u8>) ->
         };
         let mut draws = Vec::new();
         let mut seeds = BTreeSet::new();
-        for (di, d) in source.meta.draws.iter().enumerate() {
+        for (di, d) in source.draws.iter().enumerate() {
             if d.material as usize != mi
                 || d.node.is_some()
                 || d.skin.is_some()
-                || d.layout != pc::VertexLayout::Static
+                || d.class != VertexClass::Static
             {
                 continue;
             }
-            let vertices = &source.blobs.meshes[d.vertices.offset as usize];
+            let vertices = d.vertices();
             // The recipe has two surface parameters, u and normalized item
             // height. Reject arbitrary authored Products meshes that need an
             // independent third alpha coordinate or cross-seed interpolation.
@@ -139,11 +139,11 @@ pub(super) fn bake(source: &Scene, meta: &mut pc::Meta, pixels: &mut Vec<u8>) ->
                 continue;
             }
             let mut valid = true;
-            for range in core::iter::once(&d.indices).chain(d.lods.iter().map(|l| &l.indices)) {
-                for tri in pc::parts::slice(source.geometry(), range)?.chunks_exact(6) {
-                    let ids: [usize; 3] = core::array::from_fn(|k| {
-                        u16::from_le_bytes([tri[k * 2], tri[k * 2 + 1]]) as usize
-                    });
+            for indices in
+                core::iter::once(d.indices()).chain(d.lods().iter().map(|l| l.indices.as_slice()))
+            {
+                for tri in indices.chunks_exact(3) {
+                    let ids = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
                     let seed = vertices[ids[0]].color[..3].to_vec();
                     if ids.iter().any(|&i| vertices[i].color[..3] != seed) {
                         valid = false;
@@ -221,7 +221,7 @@ pub(super) fn bake(source: &Scene, meta: &mut pc::Meta, pixels: &mut Vec<u8>) ->
                 }
             }
         }
-        let mut texture = t.clone();
+        let (mut texture, _, _) = super::texture_input(t)?;
         texture.name = format!("products-appearance-v1-{mi}");
         texture.width = w;
         texture.height = h;
@@ -246,8 +246,8 @@ pub(super) fn bake(source: &Scene, meta: &mut pc::Meta, pixels: &mut Vec<u8>) ->
         let texture_index = meta.textures.len() as u32;
         meta.textures.push(texture);
         for &di in &draws {
-            let d = &source.meta.draws[di];
-            let vertices = &source.blobs.meshes[d.vertices.offset as usize];
+            let d = &source.draws[di];
+            let vertices = d.vertices();
             let uv = vertices
                 .iter()
                 .map(|v| {
@@ -276,7 +276,7 @@ pub(super) fn bake(source: &Scene, meta: &mut pc::Meta, pixels: &mut Vec<u8>) ->
 mod tests {
     use super::*;
     fn source() -> Scene {
-        let (mut meta, _, mut geometry) = super::super::gles_geometry::tests::fixture();
+        let (mut meta, _, geometry) = super::super::gles_geometry::tests::fixture();
         meta.nodes.clear();
         meta.draws.truncate(1);
         let m = &mut meta.materials[0];
@@ -303,18 +303,148 @@ mod tests {
                 ..Default::default()
             });
         }
-        d.vertices = pc::Range { offset: 0, size: 0 };
-        // Existing indices/LODs remain byte-for-byte source analysis output.
-        let mut blobs = crate::Blobs::default();
-        blobs.geom = core::mem::take(&mut geometry);
-        blobs.meshes.push(vertices);
-        blobs.tex = [230, 90, 40, 255].repeat(16);
-        Scene { meta, blobs }
+        let texture = crate::source::Texture {
+            usage: None,
+            name: t.name.clone(),
+            role: t.role,
+            width: 4,
+            height: 4,
+            pixels: Pixels::Image {
+                rgba: [230, 90, 40, 255].repeat(16),
+                cells: (1, 1),
+            },
+            wrap_s: t.wrap_s,
+            wrap_t: t.wrap_t,
+            has_alpha: false,
+            mean: t.mean,
+            lod_bias: t.lod_bias,
+        };
+        let decode = |range: &pc::Range| {
+            pc::parts::slice(&geometry, range)
+                .unwrap()
+                .chunks_exact(2)
+                .map(|v| u16::from_le_bytes(v.try_into().unwrap()) as u32)
+                .collect()
+        };
+        let draw = crate::source::Draw {
+            material: 0,
+            class: VertexClass::Static,
+            geometry: crate::source::Geometry::Triangles {
+                vertices,
+                indices: decode(&d.indices),
+                lods: d
+                    .lods
+                    .iter()
+                    .map(|l| crate::source::Lod {
+                        indices: decode(&l.indices),
+                        error: l.error,
+                    })
+                    .collect(),
+            },
+            min: d.min,
+            max: d.max,
+            node: None,
+            skin: None,
+            no_reflect: d.no_reflect,
+            cast_shadow: d.cast_shadow,
+        };
+        Scene {
+            name: meta.name,
+            kind: meta.kind,
+            min: meta.min,
+            max: meta.max,
+            textures: vec![texture],
+            materials: meta.materials,
+            draws: vec![draw],
+            nodes: vec![],
+            skins: vec![],
+            lights: meta.lights,
+            fog_lights: meta.fog_lights,
+            fog_tracks: vec![],
+            material_tracks: vec![],
+            fps: meta.fps,
+            frames: meta.frames,
+            atmosphere: meta.atmosphere,
+            rain: meta.rain,
+            camera: meta.camera,
+            doors: meta.doors,
+            beacons: meta.beacons,
+            effects: meta.effects,
+            sun: meta.sun,
+            day_sky: meta.day_sky,
+            post: meta.post,
+            vista_haze: meta.vista_haze,
+            stats: meta.stats,
+        }
+    }
+    #[test]
+    fn typed_animation_serialization_keeps_all_samples_and_rejects_nonfinite() {
+        use crate::source::{FogTrack, MaterialTrack, Node, Skin};
+        let mut src = source();
+        let track = vec![[1., 2., 3., 0., 0., 0., 1.], [4., 5., 6., 0., 1., 0., 0.]];
+        src.nodes = vec![Node {
+            name: "moving".into(),
+            parent: None,
+            translation: [0.; 3],
+            rotation: [0., 0., 0., 1.],
+            scale: [1.; 3],
+            track: Some(track.clone()),
+        }];
+        src.skins = vec![Skin {
+            joints: vec![0],
+            inverse_bind: vec![glam::Mat4::IDENTITY.to_cols_array()],
+        }];
+        src.fog_tracks = vec![FogTrack {
+            samples: vec![[1., 2., 3., 4.], [5., 6., 7., 8.]],
+        }];
+        src.material_tracks = vec![MaterialTrack {
+            samples: vec![0.25, 0.75],
+        }];
+        let (meta, bytes) = super::super::metadata(&src).unwrap();
+        let expected = [
+            track.into_iter().flatten().collect::<Vec<_>>(),
+            src.skins[0]
+                .inverse_bind
+                .iter()
+                .flatten()
+                .copied()
+                .collect(),
+            src.fog_tracks[0]
+                .samples
+                .iter()
+                .flatten()
+                .copied()
+                .collect(),
+            src.material_tracks[0].samples.clone(),
+        ];
+        let ranges = [
+            meta.nodes[0].track.as_ref().unwrap(),
+            &meta.skins[0].inverse_bind,
+            &meta.fog_tracks[0].data,
+            &meta.material_tracks[0].data,
+        ];
+        for (range, values) in ranges.into_iter().zip(expected) {
+            assert_eq!(range.offset % 16, 0);
+            assert_eq!(
+                pc::parts::slice(&bytes, range).unwrap(),
+                values
+                    .into_iter()
+                    .flat_map(f32::to_le_bytes)
+                    .collect::<Vec<_>>()
+            );
+        }
+        src.fog_tracks[0].samples[1][3] = f32::NAN;
+        assert!(super::super::metadata(&src).is_err());
     }
     #[test]
     fn products_preserve_mesh_and_lods_with_declared_uv_recipe() {
         let src = source();
-        let (bytes, recipe, _) = super::super::lower(&src, 512, None).unwrap();
+        let (bytes, recipe, _) = super::super::lower(
+            &src,
+            &crate::profile::Profile::builtin(crate::ir::Target::Ipod),
+            None,
+        )
+        .unwrap();
         assert_eq!(recipe.draws.len(), 1);
         let pack = pc::ipod::parse(&bytes).unwrap();
         let meta = pack.meta().unwrap();
@@ -323,18 +453,20 @@ mod tests {
         for i in 0..d.vertex_count {
             assert_eq!(
                 pc::ipod::position(d, geom, i as u16).unwrap(),
-                src.vertex(&src.meta.draws[0], i as usize).pos.to_array()
+                src.vertex(&src.draws[0], i as usize).pos.to_array()
             );
         }
-        for (a, b) in core::iter::once((&d.indices, &src.meta.draws[0].indices)).chain(
+        for (a, b) in core::iter::once((&d.indices, src.draws[0].indices())).chain(
             d.lods
                 .iter()
-                .zip(&src.meta.draws[0].lods)
-                .map(|(a, b)| (&a.indices, &b.indices)),
+                .zip(src.draws[0].lods())
+                .map(|(a, b)| (&a.indices, b.indices.as_slice())),
         ) {
             assert_eq!(
                 pc::parts::slice(geom, a).unwrap(),
-                pc::parts::slice(src.geometry(), b).unwrap()
+                b.iter()
+                    .flat_map(|i| (*i as u16).to_le_bytes())
+                    .collect::<Vec<_>>()
             );
         }
         let colors = super::super::gles_colors::adapt_with_recipe(&bytes, &recipe).unwrap();
@@ -352,16 +484,17 @@ mod tests {
         let texture = &meta.textures[recipe.draws[&0].texture as usize];
         let atlas =
             pc::parts::slice(pack.section(pc::TAG_TEXTURES).unwrap(), &texture.data).unwrap();
+        let rgba = src.textures[0].rgba8();
         let art = Art {
-            texture: &src.meta.textures[0],
-            bytes: src.textures(),
+            texture: &src.textures[0],
+            bytes: &rgba,
         };
         // At all stored tile centers, exact material shade + tone is the
         // texel definition. Top and bottom caps do not sample packaging art.
         for (x, y) in [(0, 0), (7, 13), (27, 27)] {
             let exact = shade(
                 [80, 160, 210],
-                &src.meta.materials[0],
+                &src.materials[0],
                 &art,
                 x as f32 / 27.,
                 y as f32 / 27.,
@@ -379,14 +512,18 @@ mod tests {
     fn unsupported_parameter_or_animation_uses_original_material() {
         for mode in 0..3 {
             let mut src = source();
+            let crate::source::Geometry::Triangles { vertices, .. } = &mut src.draws[0].geometry
+            else {
+                unreachable!()
+            };
             if mode == 0 {
-                src.blobs.meshes[0][0].color[3] = 128;
+                vertices[0].color[3] = 128;
             } else if mode == 1 {
-                src.meta.materials[0].emissive_track = Some(0);
+                src.materials[0].emissive_track = Some(0);
             } else {
-                src.blobs.meshes[0][0].color[0] = 5;
+                vertices[0].color[0] = 5;
             }
-            let mut meta = src.meta.clone();
+            let (mut meta, _) = super::super::metadata(&src).unwrap();
             let mut pixels = Vec::new();
             assert!(bake(&src, &mut meta, &mut pixels).unwrap().draws.is_empty());
             assert!(pixels.is_empty());

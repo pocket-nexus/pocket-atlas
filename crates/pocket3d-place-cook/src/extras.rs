@@ -1,7 +1,7 @@
 //! Readers for the `extras.pocketAtlas` annotations of a place export (see
 //! README: Signage, Dusk places, Daytime places, Water).
 
-use pocket3d_place as pc;
+use pocket_atlas_model as pc;
 use serde_json::Value;
 
 /// A number, or `d` when absent.

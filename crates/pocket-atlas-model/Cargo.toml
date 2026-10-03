@@ -1,0 +1,17 @@
+[package]
+name = "pocket-atlas-model"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Atlas material, lighting and camera semantics, independent of device pack layouts"
+
+[features]
+default = ["std"]
+std = ["serde/std"]
+
+[dependencies]
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+num-traits = { version = "0.2", default-features = false, features = ["libm"] }
+
+[dev-dependencies]
+serde_json = "1"

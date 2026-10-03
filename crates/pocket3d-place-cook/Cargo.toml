@@ -10,6 +10,8 @@ name = "pocket-atlas-cook"
 path = "src/main.rs"
 
 [dependencies]
+pocket-psp-ge = { path = "../../vendor/pocketjs/devices/psp/pocket-psp-ge" }
+pocket-atlas-model = { path = "../pocket-atlas-model" }
 pocket3d-place = { path = "../pocket3d-place" }
 pocket3d-place-psp = { path = "../pocket3d-place-psp" }
 bytemuck = "1"
@@ -24,3 +26,6 @@ serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 meshopt = "0.6"
 ab_glyph = "0.2"
+
+[build-dependencies]
+sha2 = "0.10"

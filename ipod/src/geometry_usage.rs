@@ -305,7 +305,7 @@ mod tests {
         meta.draws[1].vertices.offset = 168;
         meta.draws[1].layout = pc::VertexLayout::Lights;
         meta.draws[1].vertex_count = 3;
-        meta.draws[1].vertices.size = 3 * pc::LightPoint::STRIDE as u32;
+        meta.draws[1].vertices.size = 3 * pc::LIGHT_POINT_STRIDE as u32;
         // A raw triangle shares retained source vertices with a display draw,
         // while its index halfword begins two bytes into a four-byte word.
         let mut raw = meta.draws[0].clone();
