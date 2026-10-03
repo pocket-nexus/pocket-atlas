@@ -12,7 +12,9 @@ function visit(value: unknown): void {
       pairs.set(value.join(":"), value as [string, string]);
     } else value.forEach(visit);
   } else if (value && typeof value === "object")
-    Object.values(value).forEach(visit);
+    Object.entries(value).forEach(([key, child]) => {
+      if (key !== "texture_usage") visit(child); // Metadata repeats program names and adds sampler lists.
+    });
 }
 for (const file of readdirSync(assets)) {
   if (

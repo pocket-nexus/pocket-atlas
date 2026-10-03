@@ -5,10 +5,16 @@ mod effects;
 mod gl;
 mod globe;
 mod gpu;
+mod light_lod;
+mod mesh_batch;
+mod mesh_clusters;
+mod performance;
+mod pipelines;
 mod renderer;
 mod scene;
 mod shadow;
 mod state;
+mod texture_usage;
 mod validation;
 use alloc::{ffi::CString, format, string::String, vec, vec::Vec};
 use core::{
@@ -102,6 +108,30 @@ pub unsafe extern "C" fn atlas_frame(dt: f32, w: i32, h: i32, fbo: u32) {
     }
 }
 #[no_mangle]
+pub unsafe extern "C" fn atlas_frame_completed(render_ms: f32, present_ms: f32, interval_ms: f32) {
+    if let Some(a) = &mut *APP.0.get() {
+        a.frame_completed(render_ms, present_ms, interval_ms);
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn atlas_drawable_changed() {
+    if let Some(a) = &mut *APP.0.get() {
+        a.drawable_changed();
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn atlas_hdr_target(fbo: *mut u32, width: *mut i32, height: *mut i32) -> i32 {
+    if fbo.is_null() || width.is_null() || height.is_null() { return 0; }
+    if let Some((target,w,h,performance)) = (*APP.0.get()).as_ref().and_then(|a|a.hdr_target()) {
+        // Preserve the C signature: 0 absent, 1 full HDR, 2 display-prelit.
+        *fbo=target; *width=w; *height=h; if performance {2} else {1}
+    } else {0}
+}
+#[no_mangle]
+pub unsafe extern "C" fn atlas_memory_warning() {
+    if let Some(a) = &mut *APP.0.get() { a.memory_warning(); }
+}
+#[no_mangle]
 pub unsafe extern "C" fn atlas_suspend() {
     if let Some(a) = &mut *APP.0.get() {
         a.suspend();
@@ -109,10 +139,12 @@ pub unsafe extern "C" fn atlas_suspend() {
 }
 #[no_mangle]
 pub unsafe extern "C" fn atlas_status() -> *const c_char {
-    (*APP.0.get())
-        .as_ref()
-        .map(|a| a.status.as_ptr())
-        .unwrap_or(b"{}\0".as_ptr() as _)
+    if let Some(a) = &mut *APP.0.get() {
+        a.refresh_status();
+        a.status.as_ptr()
+    } else {
+        b"{}\0".as_ptr() as _
+    }
 }
 #[no_mangle]
 pub unsafe extern "C" fn atlas_text(i: i32, field: i32) -> *const c_char {

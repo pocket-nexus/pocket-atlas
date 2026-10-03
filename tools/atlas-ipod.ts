@@ -11,7 +11,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   ipodtouch4CacheRoot,
   ipodtouch4CsuPath,
@@ -26,6 +26,7 @@ import {
   userDeploymentScript,
 } from "../vendor/pocketjs/tools/ipodtouch4-installation";
 import { PLACES } from "../web/src/places/registry";
+import { validateDrawableCapture } from "./atlas-ipod-capture";
 const root = resolve(import.meta.dir, "..");
 const args = Bun.argv.slice(2),
   command = args[0] ?? "build";
@@ -469,12 +470,19 @@ else if (command === "launch")
     console.log(ssh(`cat ${shellQuote(app.Container + "/tmp/gpu.json")}`));
     console.log(ssh(`cat ${shellQuote(app.Container + "/tmp/status.json")}`));
   });
-else if (command === "status")
-  await device((ssh) => {
+else if (command === "status") {
+  const quiet = Number(opt("--quiet", "0"));
+  if (!Number.isFinite(quiet) || quiet < 0 || quiet > 30)
+    throw new Error("Use status --quiet 0..30 seconds");
+  await device(async (ssh) => {
     const app = installed(ssh);
     const file = args.includes("--ui") ? "ui-status.json" : "status.json";
+    // Device identity queries and installer lookup can preempt the A4 render
+    // worker. Settle after those operations, before reading its saved window.
+    if (quiet) await Bun.sleep(quiet * 1000);
     console.log(ssh(`cat ${shellQuote(app.Container + "/tmp/" + file)}`));
   });
+}
 else if (command === "ctl")
   await device(async (ssh, scp) => {
     const c = {
@@ -504,53 +512,89 @@ else if (command === "ctl")
 else if (command === "capture-ui")
   await device(async (ssh, scp) => {
     const app = installed(ssh);
+    const remote = app.Container + "/tmp/";
     ssh(
-      `rm -f ${shellQuote(app.Container + "/tmp/frame-ui.png")}; touch ${shellQuote(app.Container + "/tmp/capture-ui")}`,
+      `rm -f ${["frame-ui.png", "frame-ui.json", "capture-ui-error.txt"].map((name) => shellQuote(remote + name)).join(" ")}; touch ${shellQuote(remote + "capture-ui")}`,
     );
     for (let i = 0; i < 60; i++) {
       await Bun.sleep(500);
-      if (
-        ssh(
-          `test -f ${shellQuote(app.Container + "/tmp/frame-ui.png")} && echo ready || true`,
-        ) === "ready"
-      )
-        break;
+      const result = ssh(
+        `if test -f ${shellQuote(remote + "capture-ui-error.txt")}; then cat ${shellQuote(remote + "capture-ui-error.txt")}; elif test -f ${shellQuote(remote + "frame-ui.json")}; then echo ready; fi`,
+      );
+      if (result === "ready") break;
+      if (result) throw new Error(result);
       if (i === 59) throw new Error("No fresh UI capture within 30s");
     }
     const output = resolve(
       opt("--out", join(root, ".pocket-build/validation/ipod/interface.png")),
     );
-    scp(app.Container + "/tmp/frame-ui.png", output, true);
+    scp(remote + "frame-ui.png", output, true);
+    scp(remote + "frame-ui.json", output + ".json", true);
     console.log(output);
+  });
+else if (command === "capture-hdr")
+  await device(async (ssh, scp) => {
+    const app = installed(ssh);
+    const remote = app.Container + "/tmp/";
+    ssh(
+      `rm -f ${["frame-hdr.rgba", "frame-hdr.json", "capture-hdr-error.txt"].map((name) => shellQuote(remote + name)).join(" ")}; touch ${shellQuote(remote + "capture-hdr")}`,
+    );
+    for (let i = 0; i < 60; i++) {
+      await Bun.sleep(500);
+      const result = ssh(
+        `if test -f ${shellQuote(remote + "capture-hdr-error.txt")}; then cat ${shellQuote(remote + "capture-hdr-error.txt")}; elif test -f ${shellQuote(remote + "frame-hdr.json")}; then echo ready; fi`,
+      );
+      if (result === "ready") break;
+      if (result) throw new Error(result);
+      if (i === 59) throw new Error("No fresh HDR capture within 30s");
+    }
+    const prefix = resolve(
+      opt("--out", join(root, ".pocket-build/validation/ipod/capture-hdr")),
+    );
+    mkdirSync(dirname(prefix), { recursive: true });
+    scp(remote + "frame-hdr.rgba", prefix + ".rgba", true);
+    scp(remote + "frame-hdr.json", prefix + ".json", true);
+    const metadata = JSON.parse(readFileSync(prefix + ".json", "utf8"));
+    const knownEncoding =
+      (metadata.renderingProfile === "full-hdr" && metadata.encoding === "sqrt(c/(1+c))" && metadata.depth === "log") ||
+      (metadata.renderingProfile === "display-prelit" && metadata.encoding === "display-srgb" && metadata.depth === "inverse-distance-when-used/zero-when-unused");
+    if (!Number.isInteger(metadata.width) || metadata.width <= 0 || metadata.width > 4096 ||
+        !Number.isInteger(metadata.height) || metadata.height <= 0 || metadata.height > 4096 ||
+        metadata.format !== "rgba8" || !knownEncoding || metadata.origin !== "bottom-left" ||
+        readFileSync(prefix + ".rgba").byteLength !== metadata.width * metadata.height * 4)
+      throw new Error("Invalid HDR capture metadata or raw buffer length");
+    console.log(JSON.stringify({ raw: prefix + ".rgba", metadata: prefix + ".json", ...metadata }));
   });
 else if (command === "capture")
   await device(async (ssh, scp) => {
     const app = installed(ssh);
-    const s = JSON.parse(
-      ssh(`cat ${shellQuote(app.Container + "/tmp/status.json")}`),
-    );
+    const remote = app.Container + "/tmp/";
     ssh(
-      `rm -f ${shellQuote(app.Container + "/tmp/frame.rgba")}; touch ${shellQuote(app.Container + "/tmp/capture")}`,
+      `rm -f ${["frame.rgba", "frame.json", "capture-error.txt"].map((name) => shellQuote(remote + name)).join(" ")}; touch ${shellQuote(remote + "capture")}`,
     );
     for (let i = 0; i < 60; i++) {
       await Bun.sleep(500);
-      if (
-        ssh(
-          `test -f ${shellQuote(app.Container + "/tmp/frame.rgba")} && echo ready || true`,
-        ) === "ready"
-      )
-        break;
-      if (i === 59) throw new Error("No fresh frame within30s");
+      const result = ssh(
+        `if test -f ${shellQuote(remote + "capture-error.txt")}; then cat ${shellQuote(remote + "capture-error.txt")}; elif test -f ${shellQuote(remote + "frame.json")}; then echo ready; fi`,
+      );
+      if (result === "ready") break;
+      if (result) throw new Error(result);
+      if (i === 59) throw new Error("No fresh frame within 30s");
     }
     const raw = join(out, "frame.rgba");
-    scp(app.Container + "/tmp/frame.rgba", raw, true);
+    scp(remote + "frame.rgba", raw, true);
     const output = resolve(
       opt("--out", join(root, ".pocket-build/validation/ipod/capture.png")),
+    );
+    mkdirSync(dirname(output), { recursive: true });
+    scp(remote + "frame.json", output + ".json", true);
+    const metadata = validateDrawableCapture(
+      JSON.parse(readFileSync(output + ".json", "utf8")), readFileSync(raw).byteLength,
     );
     run([
       "magick",
       "-size",
-      `${s.width}x${s.height}`,
+      `${metadata.width}x${metadata.height}`,
       "-depth",
       "8",
       `rgba:${raw}`,

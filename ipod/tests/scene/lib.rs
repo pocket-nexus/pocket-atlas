@@ -6,8 +6,16 @@ extern crate alloc;
 
 #[path = "../../src/gl.rs"]
 mod gl;
+#[path = "../../src/light_lod.rs"]
+mod light_lod;
+#[path = "../../src/mesh_batch.rs"]
+mod mesh_batch;
+#[path = "../../src/mesh_clusters.rs"]
+mod mesh_clusters;
 #[path = "../../src/scene.rs"]
 mod scene;
+#[path = "../../src/texture_usage.rs"]
+mod texture_usage;
 #[path = "../../src/validation.rs"]
 mod validation;
 #[path = "../../src/gpu.rs"]
@@ -16,6 +24,19 @@ mod gpu;
 mod effects;
 #[path = "../../src/state.rs"]
 mod state;
+#[path = "../../src/performance.rs"]
+mod performance;
+#[path = "../../src/pipelines.rs"]
+mod pipelines;
+#[path = "../../src/globe.rs"]
+mod globe;
+#[path = "../../src/shadow.rs"]
+mod shadow;
+#[path = "../../src/renderer.rs"]
+mod renderer;
+// Globe GPU methods are typechecked here; this host harness does not execute
+// them or claim device timing. Its pure target-size test needs no GL context.
+unsafe fn atlas_seconds() -> f64 { 0.0 }
 #[cfg(test)]
 mod state_tests;
 fn read(path: &str) -> Result<alloc::vec::Vec<u8>,alloc::string::String> {

@@ -13,6 +13,14 @@
 
 uniform sampler2D uNormalMap;
 uniform sampler2D uEnv;
+#ifdef DISPLAY_COLOR
+uniform sampler2D uDisplayEnv;
+uniform half4 uDisplayBody;
+uniform half4 uDisplayShallow;
+uniform half4 uDisplaySun;
+uniform half4 uDisplayFog;
+uniform half4 uDisplayHaze;
+#endif
 
 uniform float4 uPbr;     // roughness near the camera, wave-face slope toward the eye, wave slope scale, -
 uniform float4 uEnvK;    // environment intensity, -, -, -
@@ -34,13 +42,83 @@ half4 main(
 #ifdef SHALLOW
     half4 vColor : COLOR0,
 #endif
-#ifdef VISTA
+#if defined(VISTA) && !defined(DISPLAY_COLOR)
     half4 vHaze : TEXCOORD7,
 #endif
     float2 vUv2 : TEXCOORD6) : COLOR
 {
     float3 toEye = uEye.xyz - vWorld;
     float dist = length(toEye);
+#ifdef LITE
+    // Keep the two moving wave layers and the sun's moving highlight. Only the
+    // world-space subtraction/distance need full precision; unit directions,
+    // Fresnel and colours stay bounded in half precision on older GPUs.
+    half3 V = (half3)(toEye / max(dist, 0.001));
+    half2 n1 = tex2D(uNormalMap, vUv).rg * (half)2.0 - (half)1.0;
+    half2 n2 = tex2D(uNormalMap, vUv2).rg * (half)2.0 - (half)1.0;
+    half spread = (half)min(dist * uWaterK.w, 64.0);
+    half a2 = max((half)(uPbr.x * uPbr.x) + spread, (half)0.002);
+    half calm = (half)1.0 / ((half)1.0 + spread * (half)40.0);
+    half2 slope = (n1 + n2) * ((half)uPbr.z * calm);
+    slope += V.xz * ((half)uPbr.y / max(length(V.xz), (half)0.001));
+    half3 N = normalize(half3(slope.x, (half)1.0, slope.y));
+    half nv = max(dot(N, V), (half)0.001);
+    half fv = (half)1.0 - saturate(nv);
+    half F = (half)0.02 + (half)0.98 * fv * fv * fv * fv * fv;
+    half3 R = reflect(-V, N);
+    R.y = abs(R.y);
+    half2 envUv = R.xz / (abs(R.x) + R.y + abs(R.z)) * (half)0.5 + (half)0.5;
+#ifdef DISPLAY_COLOR
+    half3 sky = tex2D(uDisplayEnv, envUv).rgb;
+    half3 body = uDisplayBody.rgb;
+#ifdef SHALLOW
+    body = lerp(body, uDisplayShallow.rgb, saturate(srgbToLinear(vColor.rgb).r));
+#endif
+#else
+    half3 sky = tex2D(uEnv, envUv).rgb * (half)uEnvK.x;
+    half3 body = (half3)uWaterK.rgb;
+#ifdef SHALLOW
+    body = lerp(body, (half3)uWaterShallow.rgb, saturate(srgbToLinear(vColor.rgb).r));
+#endif
+    body *= (half3)uHemiSky.rgb;
+#endif
+    half3 color = lerp(body, sky, F);
+#ifdef SUN
+    half3 L = (half3)uSunDir.xyz;
+    half3 H = normalize(L + V);
+    half nl = saturate(dot(N, L)), nh = saturate(dot(N, H));
+    half vh = (half)1.0 - saturate(dot(V, H));
+    half Fs = (half)0.02 + (half)0.98 * vh * vh * vh * vh * vh;
+#ifdef DISPLAY_COLOR
+    // Bounded Blinn approximation in the display profile. Keep moving
+    // wave highlights while avoiding a second full HDR BRDF and tone pass.
+    half exponent = min((half)2.0 / a2, (half)512.0);
+    half highlight = exp2(exponent * (half)1.442695 * (nh - (half)1.0));
+    color += uDisplaySun.rgb * (nl * Fs * highlight * ((exponent + (half)8.0) * (half)0.039788736));
+#else
+    half gv = nl * sqrt(a2 + ((half)1.0 - a2) * nv * nv);
+    half gl = nv * sqrt(a2 + ((half)1.0 - a2) * nl * nl);
+    half visibility = (half)0.5 / max(gv + gl, (half)0.001);
+    half den = nh * nh * (a2 - (half)1.0) + (half)1.0;
+    half lobe = sqrt(a2) / max(den, (half)0.002);
+    color += (half3)uSunRad.rgb * (nl * Fs * visibility * lobe * lobe * (half)INV_PI);
+#endif
+#endif
+#if defined(VISTA)
+#ifdef DISPLAY_COLOR
+    color = lerp(uDisplayHaze.rgb, color, uDisplayHaze.a);
+#else
+    color = color * vHaze.a + vHaze.rgb;
+#endif
+#elif defined(FOG)
+#ifdef DISPLAY_COLOR
+    color = lerp(color, uDisplayFog.rgb, (half)fogFactor(dist, uFog.w));
+#else
+    color = lerp(color, (half3)uFog.rgb, (half)fogFactor(dist, uFog.w));
+#endif
+#endif
+    return half4(color, (half)dist);
+#else
     float3 V = toEye / dist;
     half2 n1 = tex2D(uNormalMap, vUv).rg * 2.0 - 1.0;
     half2 n2 = tex2D(uNormalMap, vUv2).rg * 2.0 - 1.0;
@@ -80,4 +158,5 @@ half4 main(
     color = lerp(color, uFog.rgb, fogFactor(dist, uFog.w));
 #endif
     return half4((half3)color, (half)dist);
+#endif
 }

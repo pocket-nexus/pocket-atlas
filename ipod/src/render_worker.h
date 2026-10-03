@@ -22,11 +22,19 @@ const char *atlas_worker_catalog_text(int index, int field);
 unsigned long atlas_worker_action(int action);
 void atlas_worker_touch(int phase, float x, float y, int contact);
 void atlas_worker_command(const char *json);
+/* Allocation-free, coalesced pressure notification. A parked/background owner
+ * retains it until resume; UIKit never calls App or reactivates GL itself. */
+void atlas_worker_memory_warning(void);
 void atlas_worker_request_frame(void);
 unsigned atlas_worker_pending_events(void);
 /* Pausing waits until the current frame ends and GL has finished/unbound.
  * Resuming is asynchronous; both audio and EAGL changes happen on the owner. */
 void atlas_worker_active(int active);
+/* Stop at a GL-complete frame boundary without unloading App. The main thread
+ * may then change only the drawable layer's scale. Storage is rebuilt by the
+ * GL owner; logical UIKit coordinates and all scene resources are preserved. */
+int atlas_worker_surface_pause(void);
+int atlas_worker_surface_resize(void *layer, unsigned depth, int *width, int *height);
 /* Join first, then temporarily reacquire the context to destroy Rust/GL state. */
 void atlas_worker_stop(void);
 

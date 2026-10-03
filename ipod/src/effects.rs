@@ -1,7 +1,7 @@
 //! Scene-driven GLES effects using the same light fields, rain, analytic
 //! scattering and thresholded bloom shaders as the Vita renderer.
 use alloc::{format, string::String, vec::Vec};
-use core::{mem::size_of, ptr};
+use core::ptr;
 use glam::{Mat4, Vec2, Vec3, Vec4};
 use pocket3d_place as pc;
 use serde::Deserialize;
@@ -22,18 +22,28 @@ const GL_NEAREST: i32 = 0x2600;
 
 extern "C" {
     fn glGetFloatv(parameter: u32, value: *mut f32);
+    fn glColorMask(red: u8, green: u8, blue: u8, alpha: u8);
 }
 
 #[derive(Deserialize)]
 struct Pipelines {
     field: [String; 2],
     field_vista: [String; 2],
+    field_ldr: [String; 2],
+    field_vista_ldr: [String; 2],
     particles: [[String; 2]; 5],
+    particles_ldr: [[String; 2]; 5],
     haze: [String; 2],
+    haze_ldr: [String; 2],
+    haze_bloom_ldr: [String; 2],
     prefilter: [String; 2],
+    prefilter_no_haze: [String; 2],
     prefilter_points: [String; 2],
+    prefilter_points_no_haze: [String; 2],
+    tiny_ldr: [String; 2],
     down: [String; 2],
     up: [String; 2],
+    up_final: [String; 2],
 }
 
 /// Cached, place-constant vista tables. The eye-dependent density is small
@@ -92,6 +102,29 @@ impl VistaUniforms {
         program.v("uVistaSky", &self.sky);
         program.v("uVistaSunSky", &self.sun_sky);
     }
+
+    /// Display-space approximation for a prelit draw's centre. The sky/glow
+    /// are deliberately not multiplied by (1-T): the caller mixes display
+    /// haze and display surface by T. Full HDR uses `bind` per vertex.
+    pub fn display_at(&self, eye: Vec3, center: Vec3, post: &pc::Post) -> [f32; 4] {
+        let delta = center - eye;
+        let t = self.haze.transmittance(eye.to_array(), center.to_array());
+        let horizontal = Vec2::new(delta.x, delta.z);
+        let h = horizontal / libm::sqrtf(horizontal.length_squared().max(1e-8));
+        let azimuth = h.dot(Vec2::new(self.sun[0], self.sun[1]));
+        let u = libm::sqrtf((0.5 - 0.5 * azimuth).clamp(0.0, 1.0))
+            * (pc::VistaHaze::SKY_KNOTS - 1) as f32;
+        let k = (u as usize).min(pc::VistaHaze::SKY_KNOTS - 2);
+        let f = u - k as f32;
+        let sample = |table: &[f32; pc::VistaHaze::SKY_KNOTS * 4]| {
+            Vec3::from_slice(&table[k * 4..]).lerp(Vec3::from_slice(&table[(k + 1) * 4..]), f)
+        };
+        let inscatter = sample(&self.sky)
+            + sample(&self.sun_sky) * self.haze.sun_weight(t)
+            + Vec3::from_slice(&self.glow) * self.haze.relative_density(center.y);
+        let c = pc::color::tone(inscatter.to_array(), post);
+        [c[0], c[1], c[2], t]
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -104,6 +137,8 @@ pub struct EffectsStats {
 /// Post textures are valid until the Effects object is resized or dropped.
 /// Disabled effects return the supplied scene texture with a zero weight;
 /// the composite shader must use these weights and never a stale buffer.
+/// Display rendering returns the combined contribution through `bloom`;
+/// `bloom_weight` also reverses its bounded linear storage scale.
 pub struct EffectTextures {
     pub bloom: u32,
     pub haze: u32,
@@ -123,10 +158,161 @@ struct ParticleBuffer {
     vertices: u32,
     indices: [u32; 3],
     index_slot: usize,
+    index_valid: bool,
+    colors: [u32; 3],
+    color_slot: usize,
+    display_colors: Vec<u8>,
+    display_key: Option<[u32; 11]>,
+    selection_key: Option<ParticleViewKey>,
     seeds: Vec<ParticleSeed>,
     visible: Vec<u16>,
+    light_samples: Vec<Option<Vec3>>,
     scratch: Vec<u16>,
     count: i32,
+}
+
+/// CPU sampling of exactly the display LUT used by the old fragment path.
+/// Keeps grading out of heavily overdrawn steam/rain fragments without
+/// approximating the shared tone curve with a second analytic formula.
+struct ParticleGrade {
+    pixels: Vec<u8>,
+    black: Vec3,
+}
+impl ParticleGrade {
+    fn new(post: &pc::Post) -> Self {
+        let pixels = crate::gpu::tone_lut_pixels(post, 16, true);
+        let black = Vec3::new(pixels[0] as f32, pixels[1] as f32, pixels[2] as f32) / 255.0;
+        Self { pixels, black }
+    }
+    fn sample(&self, color: Vec3) -> Vec3 {
+        let c = color.max(Vec3::ZERO);
+        let q = c / (Vec3::ONE + c);
+        let cell = Vec3::new(libm::sqrtf(q.x), libm::sqrtf(q.y), libm::sqrtf(q.z)) * 15.0;
+        let lo = [cell.x as usize, cell.y as usize, cell.z as usize];
+        let f = cell - Vec3::new(lo[0] as f32, lo[1] as f32, lo[2] as f32);
+        let mut result = Vec3::ZERO;
+        for b in 0..2 {
+            for g in 0..2 {
+                for r in 0..2 {
+                    let at = (((lo[1] + g).min(15) * 256
+                        + (lo[2] + b).min(15) * 16
+                        + (lo[0] + r).min(15))
+                        * 4) as usize;
+                    let w = (if r == 0 { 1.0 - f.x } else { f.x })
+                        * (if g == 0 { 1.0 - f.y } else { f.y })
+                        * (if b == 0 { 1.0 - f.z } else { f.z });
+                    result += Vec3::new(
+                        self.pixels[at] as f32,
+                        self.pixels[at + 1] as f32,
+                        self.pixels[at + 2] as f32,
+                    ) * (w / 255.0);
+                }
+            }
+        }
+        result
+    }
+    fn color(&self, kind: usize, radiance: Vec3) -> [u8; 4] {
+        if kind != 3 && radiance == Vec3::ZERO {
+            // Additive display grading subtracts the LUT's black. Inactive
+            // splash falloff therefore has an exactly black byte result.
+            return [0, 0, 0, 255];
+        }
+        // Shared steam returns RGB=.28*a and coverage=.16*a. Grading the
+        // unpremultiplied ratio then undoing it keeps that fragment unchanged.
+        let c = if kind == 3 {
+            self.sample(radiance * 1.75) / 1.75
+        } else {
+            (self.sample(radiance) - self.black).max(Vec3::ZERO)
+        };
+        let b = |x: f32| (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+        [b(c.x), b(c.y), b(c.z), 255]
+    }
+}
+
+fn smooth(a: f32, b: f32, x: f32) -> f32 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+fn particle_hash(p: Vec2) -> f32 {
+    let mut v = Vec3::new(frac(p.x * 0.1031), frac(p.y * 0.1031), frac(p.x * 0.1031));
+    v += Vec3::splat(v.dot(Vec3::new(v.y, v.z, v.x) + Vec3::splat(33.33)));
+    frac((v.x + v.y) * v.z)
+}
+
+/// The lighting samples from fx_v.cg, once per particle instead of once per
+/// corner. Geometry/lifetime/coverage still execute in the shared shader.
+fn particle_light(
+    kind: usize,
+    particle: &ParticleSeed,
+    view: &ParticleView<'_>,
+    positions: &[f32; 32],
+    colors: &[f32; 32],
+    sample: Option<Vec3>,
+) -> Vec3 {
+    let seed = particle.values();
+    if kind == 4 {
+        let on = frac(view.time * 0.55 + particle.a.x * 0.0003) >= 0.45;
+        return Vec3::new(6.0, 0.48, 0.24) * if on { 1.0 } else { 0.35 };
+    }
+    let (p, gain) = if let Some(p) = sample {
+        (p, if kind == 1 { 1.4 } else { 1.0 })
+    } else {
+        match kind {
+            0 => {
+                let size = Vec3::new(30.0, 18.0, 30.0);
+                let origin = view.eye - Vec3::new(15.0, 5.4, 15.0);
+                let velocity = Vec3::new(view.wind[0], -9.5 * (0.85 + 0.3 * seed[3]), view.wind[2]);
+                let r = Vec3::from_slice(&seed) * size + velocity * view.time - origin;
+                let q = r / size;
+                (
+                    origin + r
+                        - size * Vec3::new(libm::floorf(q.x), libm::floorf(q.y), libm::floorf(q.z)),
+                    1.0,
+                )
+            }
+            1 => {
+                let edge = particle.a.lerp(particle.b, seed[0]);
+                let period = 0.35 + seed[1] * 1.1;
+                let age = frac(view.time / period + seed[2] * 7.0) * period;
+                (Vec3::new(edge.x, edge.y - 4.9 * age * age, edge.z), 1.4)
+            }
+            2 => {
+                let id = libm::floorf(view.time * (1.1 + seed[2] * 1.3) + seed[3] * 17.0);
+                let r = Vec2::new(
+                    particle_hash(Vec2::new(seed[0], seed[1]) * 131.7 + Vec2::splat(id)),
+                    particle_hash(Vec2::new(seed[1], seed[0]) * 71.3 + Vec2::splat(id * 1.7)),
+                );
+                let p = Vec3::new(
+                    view.center.x + (r.x - 0.5) * 26.0,
+                    0.0,
+                    view.center.z + (r.y - 0.5) * 26.0,
+                );
+                (
+                    p + Vec3::Y * 0.1,
+                    smooth(26.0 * 0.55, 26.0 * 0.3, p.distance(view.eye)),
+                )
+            }
+            _ => {
+                let life = 3.2 + seed[1] * 1.6;
+                let age = frac(view.time / life + seed[0]) * life;
+                let mut p = particle.a + particle.b * (1.0 - libm::expf(-age * 2.2)) * 0.55;
+                p.y += age * 0.42 + age * age * 0.04;
+                p.x += libm::sinf(age * 1.3 + seed[2] * 6.28) * 0.12 * age + age * 0.18;
+                p.z += libm::cosf(age * 1.1 + seed[3] * 6.28) * 0.08 * age;
+                (p, 1.0)
+            }
+        }
+    };
+    if gain == 0.0 {
+        return Vec3::ZERO;
+    }
+    let mut color = Vec3::new(0.05, 0.06, 0.08);
+    for k in 0..PARTICLE_LIGHTS {
+        let d = Vec3::from_slice(&positions[k * 4..]) - p;
+        let r2 = positions[k * 4 + 3] * positions[k * 4 + 3];
+        color += Vec3::from_slice(&colors[k * 4..]) * (r2 / (d.length_squared() + r2));
+    }
+    color * gain
 }
 
 #[derive(Clone, Copy)]
@@ -139,6 +325,20 @@ struct ParticleSeed {
 impl ParticleSeed {
     fn values(&self) -> [f32; 4] {
         self.seed.map(|v| v as f32 / 65535.0)
+    }
+
+    fn rain_sample(&self, divisor: u32) -> bool {
+        if divisor == 1 {
+            return true;
+        }
+        // A fixed seed hash keeps exactly the same subset while the camera
+        // and rain box move; never alternate drops between render frames.
+        let mut hash = self.seed[0] as u32 | ((self.seed[1] as u32) << 16);
+        hash ^= (self.seed[2] as u32 | ((self.seed[3] as u32) << 16)).rotate_left(13);
+        hash ^= hash >> 16;
+        hash = hash.wrapping_mul(0x7feb_352d);
+        hash ^= hash >> 15;
+        hash % divisor == 0
     }
 }
 
@@ -153,6 +353,23 @@ struct ParticleView<'a> {
     wind: [f32; 4],
     pixel: f32,
     dry: &'a [[[f32; 3]; 2]],
+    rain_divisor: u32,
+}
+
+/// Exact inputs to conservative selection. Fixed inspection frames can reuse
+/// their index list; animated frames still re-evaluate every source seed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ParticleViewKey {
+    kind: usize,
+    planes: [[u32; 4]; 6],
+    eye: [u32; 3],
+    center: [u32; 3],
+    time: u32,
+    wind: [u32; 4],
+    pixel: u32,
+    dry: [[[u32; 3]; 2]; 2],
+    dry_count: usize,
+    rain_divisor: u32,
 }
 
 fn frac(value: f32) -> f32 {
@@ -160,6 +377,25 @@ fn frac(value: f32) -> f32 {
 }
 
 impl ParticleView<'_> {
+    fn key(&self, kind: usize) -> ParticleViewKey {
+        let mut dry = [[[0; 3]; 2]; 2];
+        for (out, bounds) in dry.iter_mut().zip(self.dry.iter()) {
+            *out = bounds.map(|p| p.map(f32::to_bits));
+        }
+        ParticleViewKey {
+            kind,
+            planes: self.planes.map(|p| p.to_array().map(f32::to_bits)),
+            eye: self.eye.to_array().map(f32::to_bits),
+            center: self.center.to_array().map(f32::to_bits),
+            time: self.time.to_bits(),
+            wind: self.wind.map(f32::to_bits),
+            pixel: self.pixel.to_bits(),
+            dry,
+            dry_count: self.dry.len().min(2),
+            rain_divisor: self.rain_divisor,
+        }
+    }
+
     fn sphere_visible(&self, center: Vec3, radius: f32) -> bool {
         self.planes
             .iter()
@@ -175,7 +411,18 @@ impl ParticleView<'_> {
         })
     }
 
+    #[cfg(test)]
     fn bounds(&self, kind: usize, particle: &ParticleSeed) -> Option<(Vec3, f32)> {
+        self.bounds_and_light(kind, particle, &mut None)
+    }
+
+    fn bounds_and_light(
+        &self,
+        kind: usize,
+        particle: &ParticleSeed,
+        light: &mut Option<Vec3>,
+    ) -> Option<(Vec3, f32)> {
+        *light = None;
         let seed = particle.values();
         match kind {
             0 => {
@@ -183,14 +430,18 @@ impl ParticleView<'_> {
                 let origin = self.eye - Vec3::new(15.0, 5.4, 15.0);
                 let velocity = Vec3::new(self.wind[0], -9.5 * (0.85 + 0.3 * seed[3]), self.wind[2]);
                 let unwrapped = Vec3::from_slice(&seed) * box_size + velocity * self.time;
-                let cells = (unwrapped - origin) / box_size;
-                let p = unwrapped
-                    - box_size
-                        * Vec3::new(
-                            libm::floorf(cells.x),
-                            libm::floorf(cells.y),
-                            libm::floorf(cells.z),
-                        );
+                let relative = unwrapped - origin;
+                let cells = relative / box_size;
+                let wrap = box_size
+                    * Vec3::new(
+                        libm::floorf(cells.x),
+                        libm::floorf(cells.y),
+                        libm::floorf(cells.z),
+                    );
+                let p = unwrapped - wrap;
+                // Preserve both existing operation orders: the conservative
+                // bounds omit the cancellation while lighting matches fx_v.
+                *light = Some(origin + relative - wrap);
                 let local = p - origin;
                 if local.cmplt(Vec3::splat(0.03)).any()
                     || local.cmpgt(box_size - Vec3::splat(0.03)).any()
@@ -212,11 +463,12 @@ impl ParticleView<'_> {
                 let edge = particle.a.lerp(particle.b, seed[0]);
                 let period = 0.35 + seed[1] * 1.1;
                 let age = frac(self.time / period + seed[2] * 7.0) * period;
+                let p = Vec3::new(edge.x, edge.y - 4.9 * age * age, edge.z);
+                *light = Some(p);
                 if age < 0.002 || period - age < 0.002 {
                     let fall = 4.9 * period * period;
                     return Some((edge - Vec3::Y * (fall * 0.5), fall * 0.5 + 0.5));
                 }
-                let p = Vec3::new(edge.x, edge.y - 4.9 * age * age, edge.z);
                 let distance = p.distance(self.eye);
                 if p.y < -0.02 || distance > 30.02 || distance < 0.28 {
                     return None;
@@ -243,10 +495,19 @@ impl ParticleView<'_> {
                         + 0.025;
                     return Some((particle.a, radius));
                 }
-                let mut p = particle.a + particle.b * ((1.0 - libm::expf(-age * 2.2)) * 0.55);
-                p.y += age * 0.42 + age * age * 0.04;
-                p.x += libm::sinf(age * 1.3 + seed[2] * 6.28) * 0.12 * age + age * 0.18;
-                p.z += libm::cosf(age * 1.1 + seed[3] * 6.28) * 0.08 * age;
+                let decay = 1.0 - libm::expf(-age * 2.2);
+                let mut p = particle.a + particle.b * (decay * 0.55);
+                let mut sample = particle.a + particle.b * decay * 0.55;
+                let y = age * 0.42 + age * age * 0.04;
+                let x = libm::sinf(age * 1.3 + seed[2] * 6.28) * 0.12 * age + age * 0.18;
+                let z = libm::cosf(age * 1.1 + seed[3] * 6.28) * 0.08 * age;
+                p.y += y;
+                p.x += x;
+                p.z += z;
+                sample.y += y;
+                sample.x += x;
+                sample.z += z;
+                *light = Some(sample);
                 Some((p, (0.18 + age * 0.34) * core::f32::consts::SQRT_2 + 0.025))
             }
             _ => {
@@ -271,24 +532,86 @@ fn normalized_planes(vp: Mat4) -> [Vec4; 6] {
     .map(|p| p / p.truncate().length().max(1e-8))
 }
 
+#[cfg(test)]
 fn select_particles(
     seeds: &[ParticleSeed],
     kind: usize,
     view: &ParticleView<'_>,
     indices: &mut Vec<u16>,
 ) {
+    select_particle_samples(seeds, kind, view, indices, &mut Vec::new());
+}
+
+fn select_particle_samples(
+    seeds: &[ParticleSeed],
+    kind: usize,
+    view: &ParticleView<'_>,
+    indices: &mut Vec<u16>,
+    samples: &mut Vec<Option<Vec3>>,
+) {
     indices.clear();
+    samples.clear();
     for (i, particle) in seeds.iter().enumerate() {
-        let Some((center, radius)) = view.bounds(kind, particle) else {
+        if kind == 0 && !particle.rain_sample(view.rain_divisor) {
+            continue;
+        }
+        let mut light = None;
+        let Some((center, radius)) = view.bounds_and_light(kind, particle, &mut light) else {
             continue;
         };
         if !view.sphere_visible(center, radius) {
             continue;
         }
+        samples.push(light);
         for corner in [0u16, 1, 2, 0, 2, 3] {
             indices.push(i as u16 * 4 + corner);
         }
     }
+}
+
+fn select_particles_cached(
+    seeds: &[ParticleSeed],
+    kind: usize,
+    view: &ParticleView<'_>,
+    visible: &mut Vec<u16>,
+    scratch: &mut Vec<u16>,
+    last_view: &mut Option<ParticleViewKey>,
+    samples: &mut Vec<Option<Vec3>>,
+) -> bool {
+    let key = view.key(kind);
+    if *last_view == Some(key) {
+        return false;
+    }
+    // Refresh samples even when the visible seed IDs did not change: their
+    // animated positions still did. A fixed-view cache hit preserves both.
+    select_particle_samples(seeds, kind, view, scratch, samples);
+    *last_view = Some(key);
+    if scratch == visible {
+        return false;
+    }
+    core::mem::swap(visible, scratch);
+    true
+}
+
+unsafe fn upload_effect_buffer<T>(
+    target: u32,
+    buffer: u32,
+    data: &[T],
+    usage: u32,
+    context: &str,
+) -> Result<(), String> {
+    glBindBuffer(target, buffer);
+    glBufferData(
+        target,
+        core::mem::size_of_val(data) as _,
+        data.as_ptr() as _,
+        usage,
+    );
+    let error = glGetError();
+    if buffer == 0 || error != 0 {
+        return Err(format!("{context}: GL {error:x}"));
+    }
+    Ok(())
 }
 
 impl ParticleBuffer {
@@ -296,7 +619,7 @@ impl ParticleBuffer {
         count: usize,
         corners: [[f32; 2]; 4],
         mut seed: impl FnMut(usize) -> ([f32; 4], [f32; 3], [f32; 3]),
-    ) -> Self {
+    ) -> Result<Self, String> {
         let count = count.min(16383);
         let mut vertices = Vec::with_capacity(count * 4);
         let mut seeds = Vec::with_capacity(count);
@@ -317,47 +640,166 @@ impl ParticleBuffer {
                 });
             }
         }
-        let mut ids = [0; 4];
-        glGenBuffers(4, ids.as_mut_ptr());
-        glBindBuffer(GL_ARRAY_BUFFER, ids[0]);
-        glBufferData(
-            GL_ARRAY_BUFFER,
-            (vertices.len() * size_of::<ParticleVertex>()) as _,
-            vertices.as_ptr() as _,
-            GL_STATIC_DRAW,
-        );
-        Self {
+        let mut ids = [0; 7];
+        glGenBuffers(7, ids.as_mut_ptr());
+        // Own every generated name before any fallible GPU allocation.
+        let result = Self {
             vertices: ids[0],
             indices: [ids[1], ids[2], ids[3]],
             index_slot: 0,
+            index_valid: false,
+            colors: [ids[4], ids[5], ids[6]],
+            color_slot: 0,
+            display_colors: alloc::vec![0; count*16],
+            display_key: None,
+            selection_key: None,
             seeds,
             visible: Vec::with_capacity(count * 6),
+            light_samples: Vec::new(),
             scratch: Vec::with_capacity(count * 6),
             count: 0,
+        };
+        if ids.iter().any(|&id| id == 0) {
+            return Err(format!("particle buffer allocation: GL {:x}", glGetError()));
         }
+        upload_effect_buffer(
+            GL_ARRAY_BUFFER,
+            ids[0],
+            &vertices,
+            GL_STATIC_DRAW,
+            "particle vertices",
+        )?;
+        Ok(result)
     }
 
-    unsafe fn prepare(&mut self, kind: usize, view: &ParticleView<'_>) {
-        select_particles(&self.seeds, kind, view, &mut self.scratch);
-        self.count = self.scratch.len() as i32;
-        if self.scratch == self.visible {
-            return;
-        }
-        core::mem::swap(&mut self.visible, &mut self.scratch);
-        if self.count == 0 {
-            return;
-        }
-        // Rotate and orphan the small index stream; never overwrite a
-        // buffer still consumed by the deferred tile renderer. The much
-        // larger seeded vertex stream remains immutable and shared.
-        self.index_slot = (self.index_slot + 1) % self.indices.len();
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.indices[self.index_slot]);
-        glBufferData(
-            GL_ELEMENT_ARRAY_BUFFER,
-            (self.visible.len() * 2) as _,
-            self.visible.as_ptr() as _,
-            GL_DYNAMIC_DRAW,
+    unsafe fn prepare(&mut self, kind: usize, view: &ParticleView<'_>) -> Result<bool, String> {
+        let buffers = self.indices;
+        self.prepare_with_upload(kind, view, |slot, indices| {
+            upload_effect_buffer(
+                GL_ELEMENT_ARRAY_BUFFER,
+                buffers[slot],
+                indices,
+                GL_DYNAMIC_DRAW,
+                "particle indices",
+            )
+        })
+    }
+
+    fn prepare_with_upload(
+        &mut self,
+        kind: usize,
+        view: &ParticleView<'_>,
+        mut upload: impl FnMut(usize, &[u16]) -> Result<(), String>,
+    ) -> Result<bool, String> {
+        let changed = select_particles_cached(
+            &self.seeds,
+            kind,
+            view,
+            &mut self.visible,
+            &mut self.scratch,
+            &mut self.selection_key,
+            &mut self.light_samples,
         );
+        if !changed && self.index_valid {
+            return Ok(false);
+        }
+        let count = self.visible.len() as i32;
+        if count == 0 {
+            self.count = 0;
+            self.index_valid = true;
+            return Ok(true);
+        }
+        // Rotate and orphan, then commit only a successful upload. A failed
+        // upload can leave the previous slot size/data intact; never draw it
+        // with this frame's count or cache it as a valid fixed view.
+        let slot = (self.index_slot + 1) % self.indices.len();
+        if let Err(error) = upload(slot, &self.visible) {
+            self.index_valid = false;
+            self.count = 0;
+            self.selection_key = None;
+            self.display_key = None;
+            return Err(error);
+        }
+        self.index_slot = slot;
+        self.count = count;
+        self.index_valid = true;
+        Ok(true)
+    }
+
+    unsafe fn grade(
+        &mut self,
+        kind: usize,
+        view: &ParticleView<'_>,
+        positions: &[f32; 32],
+        colors: &[f32; 32],
+        grade: &ParticleGrade,
+        changed: bool,
+    ) -> Result<(), String> {
+        let buffers = self.colors;
+        self.grade_with_upload(
+            kind,
+            view,
+            positions,
+            colors,
+            grade,
+            changed,
+            |slot, bytes| {
+                upload_effect_buffer(
+                    GL_ARRAY_BUFFER,
+                    buffers[slot],
+                    bytes,
+                    GL_DYNAMIC_DRAW,
+                    "particle colors",
+                )
+            },
+        )
+    }
+
+    fn grade_with_upload(
+        &mut self,
+        kind: usize,
+        view: &ParticleView<'_>,
+        positions: &[f32; 32],
+        colors: &[f32; 32],
+        grade: &ParticleGrade,
+        changed: bool,
+        mut upload: impl FnMut(usize, &[u8]) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let key = [
+            view.time,
+            view.eye.x,
+            view.eye.y,
+            view.eye.z,
+            view.center.x,
+            view.center.y,
+            view.center.z,
+            view.wind[0],
+            view.wind[1],
+            view.wind[2],
+            view.wind[3],
+        ]
+        .map(f32::to_bits);
+        if !changed && self.display_key == Some(key) {
+            return Ok(());
+        }
+        for (quad, &sample) in self.visible.chunks_exact(6).zip(&self.light_samples) {
+            let i = quad[0] as usize / 4;
+            let color = grade.color(
+                kind,
+                particle_light(kind, &self.seeds[i], view, positions, colors, sample),
+            );
+            for corner in self.display_colors[i * 16..i * 16 + 16].chunks_exact_mut(4) {
+                corner.copy_from_slice(&color);
+            }
+        }
+        let slot = (self.color_slot + 1) % self.colors.len();
+        if let Err(error) = upload(slot, &self.display_colors) {
+            self.display_key = None;
+            return Err(error);
+        }
+        self.color_slot = slot;
+        self.display_key = Some(key);
+        Ok(())
     }
 
     unsafe fn draw(&self, program: &Program) {
@@ -378,6 +820,11 @@ impl ParticleBuffer {
                 glVertexAttribPointer(slot, n, kind, normalized, 40, offset as *const _);
             }
         }
+        if program.attrs[4] {
+            glBindBuffer(GL_ARRAY_BUFFER, self.colors[self.color_slot]);
+            glEnableVertexAttribArray(4);
+            glVertexAttribPointer(4, 4, GL_UNSIGNED_BYTE, 1, 4, ptr::null());
+        }
         glDrawElements(GL_TRIANGLES, self.count, GL_UNSIGNED_SHORT, ptr::null());
     }
 }
@@ -386,12 +833,15 @@ impl Drop for ParticleBuffer {
     fn drop(&mut self) {
         unsafe {
             glDeleteBuffers(
-                4,
+                7,
                 [
                     self.vertices,
                     self.indices[0],
                     self.indices[1],
                     self.indices[2],
+                    self.colors[0],
+                    self.colors[1],
+                    self.colors[2],
                 ]
                 .as_ptr(),
             );
@@ -400,7 +850,7 @@ impl Drop for ParticleBuffer {
 }
 
 struct ParticlePass {
-    program: Program,
+    program: [Program; 2],
     buffer: ParticleBuffer,
 }
 
@@ -483,7 +933,7 @@ fn v4(value: Vec3, w: f32) -> [f32; 4] {
     [value.x, value.y, value.z, w]
 }
 
-fn in_frustum(vp: Mat4, lo: Vec3, hi: Vec3) -> bool {
+pub(crate) fn in_frustum(vp: Mat4, lo: Vec3, hi: Vec3) -> bool {
     let r = vp.transpose();
     [
         r.w_axis + r.x_axis,
@@ -509,6 +959,32 @@ struct PostTargets {
     levels: Vec<Target>,
     up: Vec<Target>,
     spread: f32,
+    performance: bool,
+}
+
+fn display_bloom_threshold(post: &pc::Post, haze_weight: f32) -> [f32; 4] {
+    let luminance = |radiance: f32| {
+        Vec3::from(pc::color::tone([radiance.max(0.0); 3], post))
+            .dot(Vec3::new(0.2126, 0.7152, 0.0722))
+    };
+    // LDR has no super-white energy. Translate the authored neutral-light
+    // threshold through its exact grade, with a 5% allowance for clipped
+    // highlights; the remaining display headroom bounds additive glow.
+    let low = (luminance(post.bloom_threshold) * 0.95).clamp(0.0, 0.9);
+    let high = luminance(post.bloom_threshold + post.bloom_smoothing.max(0.0)) * 0.95;
+    [
+        low,
+        (high - low).max(0.025).min(1.0 - low),
+        haze_weight,
+        (1.0 - low).max(0.08),
+    ]
+}
+
+/// Both old display targets are clamped RGBA8. This scale contains their
+/// weighted sum without clipping and commutes with bilinear reconstruction.
+/// The one additional quantization is bounded by scale / 510 per channel.
+fn display_effect_scale(bloom_intensity: f32) -> f32 {
+    1.0 + bloom_intensity.max(0.0)
 }
 
 #[derive(Clone, Copy)]
@@ -519,7 +995,19 @@ struct BloomPlan {
 }
 
 impl BloomPlan {
-    fn new(w: i32, h: i32, has_fields: bool) -> Self {
+    fn new(w: i32, h: i32, has_fields: bool, performance: bool) -> Self {
+        if performance {
+            // On SGX535 each dependent FBO adds a tile store/load. Keep
+            // the threshold pass alone, at <=80 pixels on the longest
+            // edge; linear composite sampling provides the small halo.
+            // Light fields retain twice the sampling density so isolated
+            // peaks have a better chance of surviving the prefilter.
+            return Self {
+                divisor: (if has_fields { 4 } else { 8 }).max((w.max(h) + 79) / 80),
+                levels: 1,
+                spread: 1.0,
+            };
+        }
         // Preserve isolated point-light peaks before any downsampling.
         let divisor = if has_fields { 2 } else { 4 };
         // A tiny final mip carries no useful spatial detail. At these
@@ -532,10 +1020,36 @@ impl BloomPlan {
             spread: if levels == 2 { 2.0 } else { 1.0 },
         }
     }
+
+    fn texel(&self, w: i32, h: i32, first_w: i32, first_h: i32) -> [f32; 4] {
+        if self.levels == 1 {
+            // Four quadrant samples cover the tiny output pixel. Their
+            // normalized shared kernel preserves uniform-source energy;
+            // bilinear composite sampling spreads the result continuously.
+            [0.25 / first_w as f32, 0.25 / first_h as f32, 1.0, 0.0]
+        } else {
+            [
+                1.0 / w as f32,
+                1.0 / h as f32,
+                if w as f32 / first_w as f32 <= 2.0 {
+                    0.5
+                } else {
+                    1.0
+                },
+                0.0,
+            ]
+        }
+    }
 }
 impl PostTargets {
-    unsafe fn new(w: i32, h: i32, haze: bool, has_fields: bool) -> Result<Self, String> {
-        let plan = BloomPlan::new(w, h, has_fields);
+    unsafe fn new(
+        w: i32,
+        h: i32,
+        haze: bool,
+        has_fields: bool,
+        performance: bool,
+    ) -> Result<Self, String> {
+        let plan = BloomPlan::new(w, h, has_fields, performance);
         let size = |d: i32| ((w / d).max(1), (h / d).max(1));
         let target = |d| {
             let (w, h) = size(d);
@@ -550,21 +1064,40 @@ impl PostTargets {
             }
         }
         Ok(Self {
-            haze: if haze { Some(target(4)?) } else { None },
+            haze: if haze {
+                Some(target(if performance {
+                    8.max((w.max(h) + 39) / 40)
+                } else {
+                    4
+                })?)
+            } else {
+                None
+            },
             levels,
             up,
             spread: plan.spread,
+            performance,
         })
     }
 }
 
 pub struct Effects {
-    fields: [Option<Program>; 2],
+    /// Opt-in density/resolution budget. Change this before `resize`, even
+    /// if dimensions stay the same, to recreate the post targets. Dense
+    /// subpixel static fields and rain use stable display sampling; moving,
+    /// blinking and sparse fields, splashes, drips, steam and beacons remain.
+    pub performance: bool,
+    fields: [Option<[Program; 2]>; 2],
+    light_lod: Option<crate::light_lod::LightLod>,
     particles: [Option<ParticlePass>; 5],
-    haze: Option<Program>,
-    prefilter: Program,
+    particle_grade: Option<ParticleGrade>,
+    haze: Option<[Program; 2]>,
+    haze_bloom: Option<Program>,
+    prefilter: [Program; 2],
+    tiny: Program,
     down: Program,
     up: Program,
+    up_final: Program,
     vista: Option<VistaUniforms>,
     targets: PostTargets,
     triangle: u32,
@@ -592,14 +1125,24 @@ impl Effects {
             let m = &scene.meta.materials[d.material as usize];
             let index = (m.fog && scene.meta.vista_haze.is_some()) as usize;
             if fields[index].is_none() {
-                fields[index] = Some(Program::new(
-                    root,
-                    if index == 1 {
-                        &cfg.field_vista
-                    } else {
-                        &cfg.field
-                    },
-                )?);
+                fields[index] = Some([
+                    Program::new(
+                        root,
+                        if index == 1 {
+                            &cfg.field_vista
+                        } else {
+                            &cfg.field
+                        },
+                    )?,
+                    Program::new(
+                        root,
+                        if index == 1 {
+                            &cfg.field_vista_ldr
+                        } else {
+                            &cfg.field_ldr
+                        },
+                    )?,
+                ]);
             }
         }
         let has_fields = fields.iter().any(Option::is_some);
@@ -612,15 +1155,21 @@ impl Effects {
             if scene.meta.rain.active { 1.0 } else { 0.0 },
         );
         let mut particles: [Option<ParticlePass>; 5] = core::array::from_fn(|_| None);
+        let particle_programs = |i: usize| -> Result<[Program; 2], String> {
+            Ok([
+                Program::new(root, &cfg.particles[i])?,
+                Program::new(root, &cfg.particles_ldr[i])?,
+            ])
+        };
         let mut rng = Rng(0x2545_f491);
         let streak_corners = [[-0.5, 0.0], [0.5, 0.0], [0.5, 1.0], [-0.5, 1.0]];
         let full_corners = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]];
         if scene.meta.rain.active {
             particles[0] = Some(ParticlePass {
-                program: Program::new(root, &cfg.particles[0])?,
+                program: particle_programs(0)?,
                 buffer: ParticleBuffer::new(STREAKS, streak_corners, |_| {
                     (rng.seed(), [0.0; 3], [0.0; 3])
-                }),
+                })?,
             });
             let mut edges = Vec::new();
             for edge in &scene.meta.rain.drip_edges {
@@ -630,75 +1179,97 @@ impl Effects {
             }
             if !edges.is_empty() {
                 particles[1] = Some(ParticlePass {
-                    program: Program::new(root, &cfg.particles[1])?,
+                    program: particle_programs(1)?,
                     buffer: ParticleBuffer::new(edges.len(), streak_corners, |i| {
                         (rng.seed(), edges[i][0], edges[i][1])
-                    }),
+                    })?,
                 });
             }
             particles[2] = Some(ParticlePass {
-                program: Program::new(root, &cfg.particles[2])?,
+                program: particle_programs(2)?,
                 buffer: ParticleBuffer::new(
                     SPLASHES,
                     [[-1.0, 0.0], [1.0, 0.0], [1.0, 1.0], [-1.0, 1.0]],
                     |_| (rng.seed(), [0.0; 3], [0.0; 3]),
-                ),
+                )?,
             });
             let vents = &scene.meta.rain.steam_vents;
             if !vents.is_empty() {
                 particles[3] = Some(ParticlePass {
-                    program: Program::new(root, &cfg.particles[3])?,
+                    program: particle_programs(3)?,
                     buffer: ParticleBuffer::new(vents.len() * 26, full_corners, |i| {
                         let mut seed = rng.seed();
                         seed[0] = (i % 26) as f32 / 26.0 + seed[0] * 0.02;
                         (seed, vents[i / 26][0], vents[i / 26][1])
-                    }),
+                    })?,
                 });
             }
         }
         if !scene.meta.beacons.is_empty() {
             particles[4] = Some(ParticlePass {
-                program: Program::new(root, &cfg.particles[4])?,
+                program: particle_programs(4)?,
                 buffer: ParticleBuffer::new(scene.meta.beacons.len(), full_corners, |i| {
                     ([0.0; 4], scene.meta.beacons[i], [0.0; 3])
-                }),
+                })?,
             });
         }
         let haze = if has_haze {
-            Some(Program::new(root, &cfg.haze)?)
+            Some([
+                Program::new(root, &cfg.haze)?,
+                Program::new(root, &cfg.haze_ldr)?,
+            ])
         } else {
             None
         };
-        let prefilter = Program::new(
-            root,
-            if has_fields {
-                &cfg.prefilter_points
-            } else {
-                &cfg.prefilter
-            },
-        )?;
+        let prefilter = [
+            Program::new(
+                root,
+                if has_fields {
+                    &cfg.prefilter_points_no_haze
+                } else {
+                    &cfg.prefilter_no_haze
+                },
+            )?,
+            Program::new(
+                root,
+                if has_fields {
+                    &cfg.prefilter_points
+                } else {
+                    &cfg.prefilter
+                },
+            )?,
+        ];
+        let tiny = Program::new(root, &cfg.tiny_ldr)?;
+        let haze_bloom = if has_haze {
+            Some(Program::new(root, &cfg.haze_bloom_ldr)?)
+        } else {
+            None
+        };
         let down = Program::new(root, &cfg.down)?;
         let up = Program::new(root, &cfg.up)?;
-        let targets = PostTargets::new(width, height, has_haze, has_fields)?;
+        let up_final = Program::new(root, &cfg.up_final)?;
+        let targets = PostTargets::new(width, height, has_haze, has_fields, false)?;
         let mut triangle = 0;
         glGenBuffers(1, &mut triangle);
-        glBindBuffer(GL_ARRAY_BUFFER, triangle);
-        let vertices = [-1.0f32, -1.0, 3.0, -1.0, -1.0, 3.0];
-        glBufferData(
-            GL_ARRAY_BUFFER,
-            size_of::<[f32; 6]>() as _,
-            vertices.as_ptr() as _,
-            GL_STATIC_DRAW,
-        );
+
         let mut range = [1.0, 1.0];
         glGetFloatv(0x846d, range.as_mut_ptr()); // GL_ALIASED_POINT_SIZE_RANGE
-        Ok(Self {
+        let result = Self {
+            performance: false,
             fields,
+            light_lod: None,
+            particle_grade: particles
+                .iter()
+                .any(Option::is_some)
+                .then(|| ParticleGrade::new(&scene.meta.post)),
             particles,
             haze,
+            haze_bloom,
             prefilter,
+            tiny,
             down,
             up,
+            up_final,
             vista: VistaUniforms::new(scene),
             targets,
             triangle,
@@ -706,19 +1277,43 @@ impl Effects {
             has_fields,
             width,
             height,
-        })
+        };
+        upload_effect_buffer(
+            GL_ARRAY_BUFFER,
+            triangle,
+            &[-1.0f32, -1.0, 3.0, -1.0, -1.0, 3.0],
+            GL_STATIC_DRAW,
+            "effect fullscreen vertices",
+        )?;
+        Ok(result)
     }
 
     pub unsafe fn resize(&mut self, width: i32, height: i32) -> Result<(), String> {
         if width <= 0 || height <= 0 {
             return Err("effect target dimensions".into());
         }
-        if (self.width, self.height) != (width, height) {
-            self.targets = PostTargets::new(width, height, self.haze.is_some(), self.has_fields)?;
+        if !self.performance {
+            self.light_lod = None;
+        }
+        if (self.width, self.height) != (width, height)
+            || self.targets.performance != self.performance
+        {
+            self.targets = PostTargets::new(
+                width,
+                height,
+                self.haze.is_some(),
+                self.has_fields,
+                self.performance,
+            )?;
             self.width = width;
             self.height = height;
         }
         Ok(())
+    }
+
+    /// Separate from Scene's immutable payload accounting: GPU, CPU bytes.
+    pub fn light_lod_bytes(&self) -> (usize, usize) {
+        self.light_lod.as_ref().map_or((0, 0), |lod| lod.bytes())
     }
 
     /// Draw into the bound main HDR framebuffer after opaque/transparent
@@ -732,7 +1327,8 @@ impl Effects {
         fov_degrees: f32,
         time: f32,
         rain_enabled: bool,
-    ) -> EffectsStats {
+        display_lut: u32,
+    ) -> Result<EffectsStats, String> {
         let mut stats = EffectsStats::default();
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(GL_LEQUAL);
@@ -742,166 +1338,301 @@ impl Effects {
                            // SGX535 stores reversible HDR in RGBA8. The shared shader adapter
                            // composites in linear radiance with framebuffer fetch, retaining
                            // the destination's depth alpha; hardware blending must stay off.
-        glDisable(GL_BLEND);
-        let tan_half = libm::tanf(fov_degrees * core::f32::consts::PI / 360.0);
-        for d in scene
-            .meta
-            .draws
-            .iter()
-            .filter(|d| d.layout == pc::VertexLayout::Lights)
-        {
-            if !in_frustum(vp, Vec3::from(d.min), Vec3::from(d.max)) {
-                continue;
+        if self.performance {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_ONE, GL_ONE);
+            glColorMask(1, 1, 1, 0);
+        } else {
+            glDisable(GL_BLEND);
+        }
+        let result = (|| -> Result<EffectsStats, String> {
+            let black = crate::gpu::tone_black(&scene.meta.post);
+            let tan_half = libm::tanf(fov_degrees * core::f32::consts::PI / 360.0);
+            let use_lod = self.performance
+                && !scene.light_lod_source.is_empty()
+                && self.fields.iter().flatten().all(|p| p[1].attrs[3]);
+            if use_lod {
+                if self.light_lod.is_none() {
+                    self.light_lod =
+                        Some(crate::light_lod::LightLod::new(&scene.light_lod_source)?);
+                }
+                self.light_lod.as_mut().unwrap().prepare(
+                    &scene.light_lod_source,
+                    crate::light_lod::View {
+                        vp,
+                        eye,
+                        width: self.width,
+                        height: self.height,
+                        tan_half,
+                        point_limit: self.point_limit,
+                    },
+                    |draw| {
+                        let d = &scene.meta.draws[draw];
+                        in_frustum(vp, Vec3::from(d.min), Vec3::from(d.max))
+                    },
+                )?;
             }
-            let material = &scene.meta.materials[d.material as usize];
-            let Some(field) = material.lights else {
-                continue;
-            };
-            let program = self.fields[(material.fog && self.vista.is_some()) as usize]
-                .as_ref()
-                .unwrap();
-            program.bind();
-            program.v("uBlend", &[2.0, 0.0, 0.0, 0.0]);
-            program.mat("uViewProj", vp);
-            program.v("uEye", &v4(eye, time));
-            program.v(
-                "uDequant",
-                &[
-                    d.pos_scale[0],
-                    d.pos_scale[1],
-                    d.pos_scale[2],
-                    0.0,
-                    d.pos_offset[0],
-                    d.pos_offset[1],
-                    d.pos_offset[2],
-                    0.0,
-                ],
-            );
-            let scale = self.height as f32 / 272.0;
-            let min = (field.min_pixels * scale).max(2.0).min(self.point_limit);
-            let max = (field.max_pixels * scale).max(min).min(self.point_limit);
-            let period = field.period.max(0.001);
-            let t = time - libm::floorf(time / period) * period;
-            program.v(
-                "uField",
-                &[self.height as f32 / tan_half, min, max, field.gain],
-            );
-            program.v(
-                "uFieldT",
-                &[
+            let mut current_field = None;
+            let mut field_globals = [false; 2];
+            let mut field_parameters = [None; 2];
+            for (draw, d) in scene
+                .meta
+                .draws
+                .iter()
+                .enumerate()
+                .filter(|(_, d)| d.layout == pc::VertexLayout::Lights)
+            {
+                if !in_frustum(vp, Vec3::from(d.min), Vec3::from(d.max)) {
+                    continue;
+                }
+                let material = &scene.meta.materials[d.material as usize];
+                let Some(field) = material.lights else {
+                    continue;
+                };
+                let field_kind = (material.fog && self.vista.is_some()) as usize;
+                let program = &self.fields[field_kind].as_ref().unwrap()[self.performance as usize];
+                // Older shader tables still use the original sine/angle
+                // contract. Only the cached-phase attribute changes it.
+                let phase_cached = self.performance && program.attrs[1];
+                let lod_draw = if use_lod {
+                    Some(
+                        self.light_lod
+                            .as_ref()
+                            .unwrap()
+                            .draw(&scene.light_lod_source, draw)
+                            .ok_or_else(|| format!("missing light LOD draw {draw}"))?,
+                    )
+                } else {
+                    None
+                };
+                if lod_draw.is_some_and(|d| d.count == 0) {
+                    continue;
+                }
+                let program_changed = current_field != Some(field_kind);
+                if program_changed {
+                    program.bind();
+                    current_field = Some(field_kind);
+                    glBindBuffer(GL_ARRAY_BUFFER, scene.geometry);
+                    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+                    for i in 0..8 {
+                        glDisableVertexAttribArray(i);
+                    }
+                }
+                // These depend only on this frame/program, not on a field's
+                // quantized vertex page. Avoid resending both 17-knot Vista tables
+                // for every static field chunk.
+                if !field_globals[field_kind] {
+                    if self.performance {
+                        program.tex("uAtlasLut", display_lut, 7);
+                        program.v("uAtlasBlack", &black);
+                    }
+                    program.v("uBlend", &[2.0, 0.0, 0.0, 0.0]);
+                    program.mat("uViewProj", vp);
+                    program.v("uEye", &v4(eye, time));
+                    if field_kind != 0 {
+                        self.vista.as_ref().unwrap().bind(program, eye);
+                    }
+                    field_globals[field_kind] = true;
+                }
+                program.v(
+                    "uDequant",
+                    &[
+                        d.pos_scale[0],
+                        d.pos_scale[1],
+                        d.pos_scale[2],
+                        0.0,
+                        d.pos_offset[0],
+                        d.pos_offset[1],
+                        d.pos_offset[2],
+                        0.0,
+                    ],
+                );
+                let scale = self.height as f32 / 272.0;
+                let min = (field.min_pixels * scale).max(2.0).min(self.point_limit);
+                let max = (field.max_pixels * scale).max(min).min(self.point_limit);
+                let period = field.period.max(0.001);
+                let t = time - libm::floorf(time / period) * period;
+                let angle = (t * 4.0 - libm::floorf(t * 4.0)) * core::f32::consts::TAU;
+                let mut parameters = [
+                    self.height as f32 / tan_half,
+                    min,
+                    max,
+                    field.gain,
                     t / period,
-                    (t * 4.0 - libm::floorf(t * 4.0)) * core::f32::consts::TAU,
+                    angle,
                     field.depth_pull * 0.001,
                     0.0,
-                ],
-            );
-            if let Some(vista) = &self.vista {
-                vista.bind(program, eye);
-            }
-            glBindBuffer(GL_ARRAY_BUFFER, scene.geometry);
-            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
-            for i in 0..8 {
-                glDisableVertexAttribArray(i);
-            }
-            for (slot, n, kind, normalized, offset) in [
-                (0, 4, 0x1402, 1, 0),
-                (4, 4, GL_UNSIGNED_BYTE, 1, 8),
-                (5, 2, GL_FLOAT, 0, 12),
-                (2, 4, GL_FLOAT, 0, 20),
-                (7, 4, GL_UNSIGNED_BYTE, 0, 36),
-            ] {
-                if program.attrs[slot as usize] {
-                    glEnableVertexAttribArray(slot);
-                    glVertexAttribPointer(
-                        slot,
-                        n,
-                        kind,
-                        normalized,
-                        pc::LightPoint::STRIDE as i32,
-                        (d.vertices.offset as usize + offset) as *const _,
-                    );
+                ];
+                let key = parameters.map(f32::to_bits);
+                if field_parameters[field_kind] != Some(key) {
+                    if phase_cached {
+                        parameters[5] = libm::sinf(angle);
+                        parameters[7] = libm::cosf(angle);
+                    }
+                    program.v("uField", &parameters[..4]);
+                    program.v("uFieldT", &parameters[4..]);
+                    field_parameters[field_kind] = Some(key);
                 }
+                // Slot 1 below has a separate immutable VBO. Rebind GEOM
+                // every draw before defining its packed attributes.
+                glBindBuffer(GL_ARRAY_BUFFER, scene.geometry);
+                for (slot, n, kind, normalized, offset) in [
+                    (0, 4, 0x1402, 1, 0),
+                    (4, 4, GL_UNSIGNED_BYTE, 1, 8),
+                    (5, 2, GL_FLOAT, 0, 12),
+                    (2, 4, GL_FLOAT, 0, 20),
+                    (7, 4, GL_UNSIGNED_BYTE, 0, 36),
+                ] {
+                    if program.attrs[slot as usize] {
+                        if program_changed {
+                            glEnableVertexAttribArray(slot);
+                        }
+                        glVertexAttribPointer(
+                            slot,
+                            n,
+                            kind,
+                            normalized,
+                            pc::LightPoint::STRIDE as i32,
+                            (d.vertices.offset as usize + offset) as *const _,
+                        );
+                    }
+                }
+                if phase_cached {
+                    let offset = scene
+                        .light_phase_offsets
+                        .get(draw)
+                        .copied()
+                        .flatten()
+                        .filter(|_| scene.light_phase_buffer != 0)
+                        .ok_or_else(|| format!("missing light phases for draw {draw}"))?;
+                    glBindBuffer(GL_ARRAY_BUFFER, scene.light_phase_buffer);
+                    if program_changed {
+                        glEnableVertexAttribArray(1);
+                    }
+                    glVertexAttribPointer(1, 2, GL_FLOAT, 0, 8, offset as usize as *const _);
+                }
+                if let Some(draw) = lod_draw {
+                    let (indices, weights) = self.light_lod.as_ref().unwrap().buffers();
+                    glBindBuffer(GL_ARRAY_BUFFER, weights);
+                    glEnableVertexAttribArray(3);
+                    glVertexAttribPointer(3, 1, GL_FLOAT, 0, 4, draw.weight_offset as *const _);
+                    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, indices);
+                    glDrawElements(
+                        GL_POINTS,
+                        draw.count,
+                        GL_UNSIGNED_SHORT,
+                        draw.index_offset as *const _,
+                    );
+                    stats.light_points += draw.count as u32;
+                } else {
+                    if program.attrs[3] {
+                        glDisableVertexAttribArray(3);
+                        glVertexAttrib4f(3, 1.0, 0.0, 0.0, 1.0);
+                    }
+                    glDrawArrays(GL_POINTS, 0, d.vertex_count as i32);
+                    stats.light_points += d.vertex_count;
+                }
+                stats.draws += 1;
             }
-            glDrawArrays(GL_POINTS, 0, d.vertex_count as i32);
-            stats.draws += 1;
-            stats.light_points += d.vertex_count;
-        }
-        let (intensity, wind) = weather(time);
-        let view = ParticleView {
-            planes: normalized_planes(vp),
-            eye,
-            center: (eye + target) * 0.5,
-            time,
-            wind,
-            pixel: 2.0 * tan_half / self.height as f32,
-            dry: &scene.meta.rain.dry_boxes,
-        };
-        let mut lights = fog_lights(scene, time);
-        lights.retain(|l| l.gain > 1e-3);
-        lights.sort_unstable_by(|a, b| {
-            a.pos
-                .distance_squared(eye)
-                .total_cmp(&b.pos.distance_squared(eye))
-        });
-        let mut positions = [0.0; PARTICLE_LIGHTS * 4];
-        let mut colors = positions;
-        for k in 0..PARTICLE_LIGHTS {
-            let (p, c) = lights
-                .get(k)
-                .map(|l| {
-                    (
-                        v4(l.pos, (l.radius * 2.5).max(0.8)),
-                        v4(l.color * (l.gain * 2.2 * intensity), 0.0),
-                    )
-                })
-                .unwrap_or(([0.0, -1000.0, 0.0, 1.0], [0.0; 4]));
-            positions[k * 4..k * 4 + 4].copy_from_slice(&p);
-            colors[k * 4..k * 4 + 4].copy_from_slice(&c);
-        }
-        let mut dry = [0.0; 16];
-        for (k, b) in scene.meta.rain.dry_boxes.iter().take(2).enumerate() {
-            dry[k * 8..k * 8 + 4].copy_from_slice(&v4(Vec3::from(b[0]), 0.0));
-            dry[k * 8 + 4..k * 8 + 8].copy_from_slice(&v4(Vec3::from(b[1]), 0.0));
-        }
-        for (k, pass) in self.particles.iter_mut().enumerate() {
-            let Some(pass) = pass else { continue };
-            if k < 4 && !rain_enabled {
-                continue;
-            }
-            pass.buffer.prepare(k, &view);
-            if pass.buffer.count == 0 {
-                continue;
-            }
-            let p = &pass.program;
-            p.bind();
-            p.v("uBlend", &[if k == 3 { 3.0 } else { 2.0 }, 0.0, 0.0, 0.0]);
-            p.mat("uViewProj", vp);
-            p.v("uCam", &v4(eye, 2.0 * tan_half / self.height as f32));
-            p.v("uTime", &[time, 9.5, 0.55, 0.0045]);
-            p.v("uBox", &[30.0, 18.0, 30.0, 0.0]);
-            p.v("uWind", &wind);
-            p.v("uCenter", &v4((eye + target) * 0.5, 26.0));
-            p.v("uAmbient", &[0.05, 0.06, 0.08, 0.0]);
-            p.v("uDry", &dry);
-            p.v("uFogPos", &positions);
-            p.v("uFogCol", &colors);
-            let opacity = match k {
-                0 => 0.9 * intensity,
-                1 => 1.2,
-                2 => 1.3 * intensity,
-                _ => 1.0,
+            let (intensity, wind) = weather(time);
+            let view = ParticleView {
+                planes: normalized_planes(vp),
+                eye,
+                center: (eye + target) * 0.5,
+                time,
+                wind,
+                pixel: 2.0 * tan_half / self.height as f32,
+                dry: &scene.meta.rain.dry_boxes,
+                rain_divisor: if self.performance { 3 } else { 1 },
             };
-            p.v("uOpacity", &[opacity, 0.0, 0.0, 0.0]);
-            if let Some(texture) = scene.meta.effects.puddles {
-                p.tex("uPuddles", scene.textures[texture as usize], 0);
+            let mut lights = if rain_enabled && self.particles[..4].iter().any(Option::is_some) {
+                fog_lights(scene, time)
+            } else {
+                Vec::new()
+            };
+            lights.retain(|l| l.gain > 1e-3);
+            lights.sort_unstable_by(|a, b| {
+                a.pos
+                    .distance_squared(eye)
+                    .total_cmp(&b.pos.distance_squared(eye))
+            });
+            let mut positions = [0.0; PARTICLE_LIGHTS * 4];
+            let mut colors = positions;
+            for k in 0..PARTICLE_LIGHTS {
+                let (p, c) = lights
+                    .get(k)
+                    .map(|l| {
+                        (
+                            v4(l.pos, (l.radius * 2.5).max(0.8)),
+                            v4(l.color * (l.gain * 2.2 * intensity), 0.0),
+                        )
+                    })
+                    .unwrap_or(([0.0, -1000.0, 0.0, 1.0], [0.0; 4]));
+                positions[k * 4..k * 4 + 4].copy_from_slice(&p);
+                colors[k * 4..k * 4 + 4].copy_from_slice(&c);
             }
-            pass.buffer.draw(p);
-            stats.draws += 1;
-            stats.particle_quads += (pass.buffer.count / 6) as u32;
-        }
+            let mut dry = [0.0; 16];
+            for (k, b) in scene.meta.rain.dry_boxes.iter().take(2).enumerate() {
+                dry[k * 8..k * 8 + 4].copy_from_slice(&v4(Vec3::from(b[0]), 0.0));
+                dry[k * 8 + 4..k * 8 + 8].copy_from_slice(&v4(Vec3::from(b[1]), 0.0));
+            }
+            for (k, pass) in self.particles.iter_mut().enumerate() {
+                let Some(pass) = pass else { continue };
+                if k < 4 && !rain_enabled {
+                    continue;
+                }
+                let changed = pass.buffer.prepare(k, &view)?;
+                if pass.buffer.count == 0 {
+                    continue;
+                }
+                let p = &pass.program[self.performance as usize];
+                p.bind();
+                if self.performance {
+                    pass.buffer.grade(
+                        k,
+                        &view,
+                        &positions,
+                        &colors,
+                        self.particle_grade.as_ref().unwrap(),
+                        changed,
+                    )?;
+                    glBlendFunc(GL_ONE, if k == 3 { 0x0303 } else { GL_ONE }); // ONE_MINUS_SRC_ALPHA
+                }
+                p.v("uBlend", &[if k == 3 { 3.0 } else { 2.0 }, 0.0, 0.0, 0.0]);
+                p.mat("uViewProj", vp);
+                p.v("uCam", &v4(eye, 2.0 * tan_half / self.height as f32));
+                p.v("uTime", &[time, 9.5, 0.55, 0.0045]);
+                p.v("uBox", &[30.0, 18.0, 30.0, 0.0]);
+                p.v("uWind", &wind);
+                p.v("uCenter", &v4((eye + target) * 0.5, 26.0));
+                p.v("uAmbient", &[0.05, 0.06, 0.08, 0.0]);
+                p.v("uDry", &dry);
+                p.v("uFogPos", &positions);
+                p.v("uFogCol", &colors);
+                let opacity = match k {
+                    // Streak blending is additive. Compensate expected light
+                    // energy for the stable subset, without changing width,
+                    // trajectory or the near/far coverage functions.
+                    0 => 0.9 * intensity * view.rain_divisor as f32,
+                    1 => 1.2,
+                    2 => 1.3 * intensity,
+                    _ => 1.0,
+                };
+                p.v("uOpacity", &[opacity, 0.0, 0.0, 0.0]);
+                if let Some(texture) = scene.meta.effects.puddles {
+                    p.tex("uPuddles", scene.textures[texture as usize], 0);
+                }
+                pass.buffer.draw(p);
+                stats.draws += 1;
+                stats.particle_quads += (pass.buffer.count / 6) as u32;
+            }
+            Ok(stats)
+        })();
+        // Restore pass state even when an upload aborted the draw sequence.
         glDepthMask(1);
         glDisable(GL_BLEND);
-        stats
+        glColorMask(1, 1, 1, 1);
+        result
     }
 
     unsafe fn fullscreen(&self) {
@@ -928,11 +1659,13 @@ impl Effects {
         rain_enabled: bool,
         bloom_enabled: bool,
         haze_enabled: bool,
+        display_lut: u32,
     ) -> EffectTextures {
         glDisable(GL_DEPTH_TEST);
         glDepthMask(0);
         glDisable(GL_CULL_FACE);
         glDisable(GL_BLEND);
+        glColorMask(1, 1, 1, 1);
         let mut output = EffectTextures {
             bloom: scene_texture,
             haze: scene_texture,
@@ -967,9 +1700,53 @@ impl Effects {
                 ranked.len(),
                 curtain,
             );
-        if let (true, Some(program), Some(haze)) = (visible_haze, &self.haze, &self.targets.haze) {
+        let bloom = bloom_enabled && scene.meta.post.bloom_intensity > 0.0;
+        let fused = self.performance && visible_haze && bloom;
+        if let (true, Some(programs), Some(haze)) = (visible_haze, &self.haze, &self.targets.haze) {
+            let (program, haze) = if fused {
+                (self.haze_bloom.as_ref().unwrap(), &self.targets.levels[0])
+            } else {
+                (&programs[self.performance as usize], haze)
+            };
             haze.bind();
             program.bind();
+            if self.performance {
+                program.tex("uAtlasLut", display_lut, 7);
+                program.v("uAtlasBlack", &crate::gpu::tone_black(&scene.meta.post));
+            }
+            if fused {
+                program.v(
+                    "uTexel",
+                    &BloomPlan::new(self.width, self.height, self.has_fields, true).texel(
+                        self.width,
+                        self.height,
+                        haze.w,
+                        haze.h,
+                    ),
+                );
+                program.v(
+                    "uThreshold",
+                    &display_bloom_threshold(&scene.meta.post, 1.0),
+                );
+                program.v(
+                    "uEffectMix",
+                    &[
+                        scene.meta.post.bloom_intensity,
+                        1.0 / display_effect_scale(scene.meta.post.bloom_intensity),
+                        0.0,
+                        0.0,
+                    ],
+                );
+                program.v(
+                    "uSceneTexel",
+                    &[
+                        1.0 / self.width as f32,
+                        1.0 / self.height as f32,
+                        self.width as f32,
+                        self.height as f32,
+                    ],
+                );
+            }
             let fwd = (target - eye).normalize_or(Vec3::NEG_Z);
             let right = fwd.cross(Vec3::Y).normalize_or(Vec3::X);
             let up = right.cross(fwd);
@@ -1018,39 +1795,62 @@ impl Effects {
             program.v("uFogDir", &dirs);
             program.v("uCurtain", &[0.55, 0.6, 0.72, curtain]);
             program.tex("uScene", scene_texture, 0);
-            // Bilinear depth would leak haze across foreground silhouettes.
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            // The fused shader snaps only its depth sample to a source texel
+            // centre, leaving the same texture's four bloom samples linear.
+            if !fused {
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            }
             self.fullscreen();
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            output.haze = haze.texture;
-            output.haze_weight = 1.0;
+            if !fused {
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            }
+            if self.performance {
+                output.bloom = haze.texture;
+                output.bloom_weight = if fused {
+                    display_effect_scale(scene.meta.post.bloom_intensity)
+                } else {
+                    1.0
+                };
+            } else {
+                output.haze = haze.texture;
+                output.haze_weight = 1.0;
+            }
         }
-        if bloom_enabled && scene.meta.post.bloom_intensity > 0.0 {
+        if bloom && !fused {
             let levels = &self.targets.levels;
             levels[0].bind();
-            self.prefilter.bind();
-            self.prefilter.tex("uScene", scene_texture, 0);
-            self.prefilter.tex("uHazeTex", output.haze, 1);
-            let ratio = self.width as f32 / levels[0].w as f32;
-            self.prefilter.v(
+            let prefilter = if self.targets.performance {
+                &self.tiny
+            } else {
+                &self.prefilter[(output.haze_weight > 0.0) as usize]
+            };
+            prefilter.bind();
+            prefilter.tex("uScene", scene_texture, 0);
+            prefilter.tex("uHazeTex", output.haze, 1);
+            prefilter.v(
                 "uTexel",
-                &[
-                    1.0 / self.width as f32,
-                    1.0 / self.height as f32,
-                    if ratio <= 2.0 { 0.5 } else { 1.0 },
-                    0.0,
-                ],
+                &BloomPlan::new(
+                    self.width,
+                    self.height,
+                    self.has_fields,
+                    self.targets.performance,
+                )
+                .texel(self.width, self.height, levels[0].w, levels[0].h),
             );
-            self.prefilter.v(
+            prefilter.v(
                 "uThreshold",
-                &[
-                    scene.meta.post.bloom_threshold,
-                    scene.meta.post.bloom_smoothing,
-                    output.haze_weight,
-                    0.0,
-                ],
+                &if self.targets.performance {
+                    display_bloom_threshold(&scene.meta.post, output.haze_weight)
+                } else {
+                    [
+                        scene.meta.post.bloom_threshold,
+                        scene.meta.post.bloom_smoothing,
+                        output.haze_weight,
+                        0.0,
+                    ]
+                },
             );
             self.fullscreen();
             let spread = self.targets.spread;
@@ -1072,16 +1872,19 @@ impl Effects {
                     &self.targets.up[i + 1]
                 };
                 self.targets.up[i].bind();
-                self.up.bind();
-                self.up.tex("uSource", src.texture, 0);
-                self.up.tex("uSupport", levels[i].texture, 1);
-                self.up.v(
+                // Only the public final bloom texture uses the main HDR
+                // codec; all private filter inputs/outputs remain RGBM8.
+                let up = if i == 0 { &self.up_final } else { &self.up };
+                up.bind();
+                up.tex("uSource", src.texture, 0);
+                up.tex("uSupport", levels[i].texture, 1);
+                up.v(
                     "uTexel",
                     &[spread / src.w as f32, spread / src.h as f32, 0.7, 0.0],
                 );
                 self.fullscreen();
             }
-            output.bloom = self.targets.up[0].texture;
+            output.bloom = self.targets.up.first().unwrap_or(&levels[0]).texture;
             output.bloom_weight = scene.meta.post.bloom_intensity;
         }
         glDepthMask(1);
@@ -1113,6 +1916,7 @@ mod tests {
             wind: weather(time).1,
             pixel: 2.0 * libm::tanf(30.0f32.to_radians()) / height as f32,
             dry: &[],
+            rain_divisor: 1,
         }
     }
 
@@ -1125,6 +1929,399 @@ mod tests {
                 b: Vec3::ZERO,
             })
             .collect()
+    }
+
+    fn stream_fixture() -> ParticleBuffer {
+        // Zero GL names make Drop harmless; upload callbacks exercise the
+        // production transaction/cache logic without a real GLES context.
+        ParticleBuffer {
+            vertices: 0,
+            indices: [0; 3],
+            index_slot: 0,
+            index_valid: false,
+            colors: [0; 3],
+            color_slot: 0,
+            display_colors: alloc::vec![0; 32],
+            display_key: None,
+            selection_key: None,
+            seeds: alloc::vec![
+                ParticleSeed {
+                    seed: [0; 4],
+                    a: Vec3::new(0.0, 1.7, -3.0),
+                    b: Vec3::ZERO
+                },
+                ParticleSeed {
+                    seed: [0; 4],
+                    a: Vec3::new(100.0, 1.7, -3.0),
+                    b: Vec3::ZERO
+                },
+            ],
+            visible: Vec::new(),
+            light_samples: Vec::new(),
+            scratch: Vec::new(),
+            count: 0,
+        }
+    }
+
+    #[test]
+    fn particle_index_upload_failure_never_commits_and_fixed_view_retries() {
+        let mut buffer = stream_fixture();
+        let mut v = view(Vec3::new(0.0, 1.7, 0.0), Vec3::NEG_Z, 213, 25.0);
+        let fail = |_: usize, _: &[u16]| Err(String::from("injected index GL 505"));
+        assert!(buffer.prepare_with_upload(4, &v, fail).is_err());
+        assert_eq!((buffer.index_slot, buffer.count), (0, 0));
+        assert!(!buffer.index_valid && buffer.selection_key.is_none());
+        let mut attempts = 0;
+        assert!(buffer
+            .prepare_with_upload(4, &v, |slot, indices| {
+                attempts += 1;
+                assert_eq!(slot, 1);
+                assert_eq!(indices, [0, 1, 2, 0, 2, 3]);
+                Ok(())
+            })
+            .unwrap());
+        assert_eq!(attempts, 1);
+        assert_eq!((buffer.index_slot, buffer.count), (1, 6));
+        assert!(!buffer
+            .prepare_with_upload(4, &v, |_, _| panic!("valid fixed view uploaded again"))
+            .unwrap());
+
+        // Fail after a valid slot when a new visible count is larger. Drawing
+        // that new count against the old data is specifically forbidden.
+        v.planes = [Vec4::ZERO; 6];
+        assert!(buffer.prepare_with_upload(4, &v, fail).is_err());
+        assert_eq!((buffer.index_slot, buffer.count), (1, 0));
+        assert!(!buffer.index_valid && buffer.selection_key.is_none());
+        assert!(buffer
+            .prepare_with_upload(4, &v, |slot, indices| {
+                assert_eq!((slot, indices.len()), (2, 12));
+                Ok(())
+            })
+            .unwrap());
+        assert_eq!((buffer.index_slot, buffer.count), (2, 12));
+    }
+
+    #[test]
+    fn particle_color_upload_failure_invalidates_key_and_keeps_previous_slot() {
+        let mut buffer = stream_fixture();
+        let v = view(Vec3::new(0.0, 1.7, 0.0), Vec3::NEG_Z, 213, 25.0);
+        buffer.prepare_with_upload(4, &v, |_, _| Ok(())).unwrap();
+        let grade = ParticleGrade::new(&pc::Post::default());
+        let data = [0.0; 32];
+        let fail = |_: usize, _: &[u8]| Err(String::from("injected color GL 505"));
+        assert!(buffer
+            .grade_with_upload(4, &v, &data, &data, &grade, true, fail)
+            .is_err());
+        assert_eq!(buffer.color_slot, 0);
+        assert!(buffer.display_key.is_none());
+        assert!(!buffer
+            .prepare_with_upload(4, &v, |_, _| panic!("valid index slot uploaded again"))
+            .unwrap());
+        buffer
+            .grade_with_upload(4, &v, &data, &data, &grade, false, |slot, bytes| {
+                assert_eq!((slot, bytes.len()), (1, 32));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(buffer.color_slot, 1);
+        assert!(buffer.display_key.is_some());
+        buffer
+            .grade_with_upload(4, &v, &data, &data, &grade, false, |_, _| {
+                panic!("valid colors uploaded again")
+            })
+            .unwrap();
+        // A forced update can have the same time/eye key but different selected
+        // primitives; failure must invalidate even that previously valid key.
+        assert!(buffer
+            .grade_with_upload(4, &v, &data, &data, &grade, true, fail)
+            .is_err());
+        assert_eq!(buffer.color_slot, 1);
+        assert!(buffer.display_key.is_none());
+        buffer
+            .grade_with_upload(4, &v, &data, &data, &grade, false, |slot, _| {
+                assert_eq!(slot, 2);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn fixed_particle_view_reuses_selection_and_every_visibility_input_invalidates_it() {
+        let seeds = random_seeds(STREAKS);
+        let mut v = view(Vec3::new(0.0, 1.7, 0.0), Vec3::NEG_Z, 213, 25.0);
+        let mut visible = Vec::new();
+        let mut scratch = Vec::new();
+        let mut last = None;
+        let mut samples = Vec::new();
+        assert!(select_particles_cached(
+            &seeds,
+            0,
+            &v,
+            &mut visible,
+            &mut scratch,
+            &mut last,
+            &mut samples
+        ));
+        let original = visible.clone();
+        scratch.clear();
+        scratch.push(u16::MAX);
+        assert!(!select_particles_cached(
+            &seeds,
+            0,
+            &v,
+            &mut visible,
+            &mut scratch,
+            &mut last,
+            &mut samples
+        ));
+        assert_eq!(visible, original);
+        // A hit does not even scan/rewrite the staging list.
+        assert_eq!(scratch, [u16::MAX]);
+
+        let mut check = |v: &ParticleView<'_>, kind| {
+            assert_ne!(last, Some(v.key(kind)));
+            let mut expected = Vec::new();
+            select_particles(&seeds, kind, v, &mut expected);
+            let changed = expected != visible;
+            assert_eq!(
+                select_particles_cached(
+                    &seeds,
+                    kind,
+                    v,
+                    &mut visible,
+                    &mut scratch,
+                    &mut last,
+                    &mut samples
+                ),
+                changed
+            );
+            assert_eq!(visible, expected);
+            assert_eq!(last, Some(v.key(kind)));
+        };
+        v.time += 0.01;
+        check(&v, 0);
+        v.eye.x += 0.01;
+        check(&v, 0);
+        v.center.z -= 0.01;
+        check(&v, 0);
+        v.wind[2] += 0.01;
+        check(&v, 0);
+        v.pixel *= 2.0; // Internal render resolution.
+        check(&v, 0);
+        v.planes[0].w += 0.01; // FOV, aspect, orientation or clipping planes.
+        check(&v, 0);
+        v.rain_divisor = 3;
+        check(&v, 0);
+        let dry = [[[0.0, 0.0, 0.0], [5.0, 4.0, 5.0]]];
+        v.dry = &dry;
+        check(&v, 0);
+        let key = v.key(0);
+        let mut moved_dry = dry;
+        moved_dry[0][1][0] += 0.01;
+        v.dry = &moved_dry;
+        assert_ne!(key, v.key(0));
+        check(&v, 0);
+        check(&v, 2);
+    }
+
+    #[test]
+    fn selection_reuses_motion_without_changing_eight_light_results() {
+        let mut rng = Rng(0x7281_43a9);
+        let positions = core::array::from_fn(|k| {
+            if k % 4 == 3 {
+                0.8 + rng.next() * 5.0
+            } else {
+                rng.next() * 24.0 - 12.0
+            }
+        });
+        let colors = core::array::from_fn(|_| rng.next() * 6.0);
+        let mut reused = [0; 5];
+        for time in [0.0, 0.0001, 0.5, 3.2, 25.0, 120.0] {
+            let v = view(Vec3::new(1.0, 1.7, -2.0), Vec3::NEG_Z, 213, time);
+            for _ in 0..1024 {
+                let p = ParticleSeed {
+                    seed: rng.seed().map(|x| (x * 65535.0) as u16),
+                    a: Vec3::new(
+                        rng.next() * 20.0 - 10.0,
+                        rng.next() * 4.0,
+                        -rng.next() * 20.0,
+                    ),
+                    b: Vec3::new(rng.next(), rng.next(), rng.next()),
+                };
+                for kind in 0..5 {
+                    let mut sample = None;
+                    v.bounds_and_light(kind, &p, &mut sample);
+                    if sample.is_some() {
+                        reused[kind] += 1;
+                    }
+                    let original = particle_light(kind, &p, &v, &positions, &colors, None);
+                    let reused = particle_light(kind, &p, &v, &positions, &colors, sample);
+                    assert_eq!(
+                        original.to_array().map(f32::to_bits),
+                        reused.to_array().map(f32::to_bits)
+                    );
+                }
+            }
+        }
+        assert!(reused[0] > 6000 && reused[1] > 6000 && reused[3] > 6000);
+        // Splash positions remain GPU-hash conservative; beacons have no
+        // position-dependent lighting. Neither needs a fabricated sample.
+        assert_eq!(reused[2], 0);
+        assert_eq!(reused[4], 0);
+    }
+
+    #[test]
+    fn unchanged_visible_ids_still_refresh_animated_lighting_samples() {
+        let seeds = [ParticleSeed {
+            seed: [0, 32768, 0, 0],
+            a: Vec3::new(0.0, 2.0, -3.0),
+            b: Vec3::new(1.0, 2.0, -3.0),
+        }];
+        let mut v = view(Vec3::new(0.0, 1.7, 0.0), Vec3::NEG_Z, 213, 0.1);
+        let (mut visible, mut scratch, mut samples, mut last) =
+            (Vec::new(), Vec::new(), Vec::new(), None);
+        assert!(select_particles_cached(
+            &seeds,
+            1,
+            &v,
+            &mut visible,
+            &mut scratch,
+            &mut last,
+            &mut samples
+        ));
+        let original_indices = visible.clone();
+        let original_sample = samples[0];
+        v.time += 0.001;
+        assert!(!select_particles_cached(
+            &seeds,
+            1,
+            &v,
+            &mut visible,
+            &mut scratch,
+            &mut last,
+            &mut samples
+        ));
+        assert_eq!(visible, original_indices);
+        assert_ne!(samples[0], original_sample);
+        assert_eq!(samples.len() * 6, visible.len());
+        let refreshed = samples.clone();
+        assert!(!select_particles_cached(
+            &seeds,
+            1,
+            &v,
+            &mut visible,
+            &mut scratch,
+            &mut last,
+            &mut samples
+        ));
+        assert_eq!(samples, refreshed);
+    }
+
+    #[test]
+    fn cpu_particle_table_matches_two_bilinear_gpu_lookups() {
+        for tone in [pc::ToneCurve::Agx, pc::ToneCurve::Aces] {
+            let grade = ParticleGrade::new(&pc::Post {
+                tone,
+                ..pc::Post::default()
+            });
+            for r in [0.0f32, 0.001, 0.02, 0.2, 0.65, 0.9, 0.998] {
+                for g in [0.0f32, 0.04, 0.4, 0.85, 0.99] {
+                    for b in [0.0f32, 0.001, 0.1, 0.6, 0.96] {
+                        let encoded = Vec3::new(r, g, b);
+                        let q = encoded * encoded;
+                        let radiance = q / (Vec3::ONE - q);
+                        let cell = encoded * 15.0;
+                        let z = cell.z as usize;
+                        let bilinear = |z: usize| {
+                            let x = cell.x as usize;
+                            let y = cell.y as usize;
+                            let texel = |x: usize, y: usize| {
+                                let at = (y.min(15) * 256 + z.min(15) * 16 + x.min(15)) * 4;
+                                Vec3::new(
+                                    grade.pixels[at] as f32,
+                                    grade.pixels[at + 1] as f32,
+                                    grade.pixels[at + 2] as f32,
+                                ) / 255.0
+                            };
+                            texel(x, y).lerp(texel(x + 1, y), cell.x - x as f32).lerp(
+                                texel(x, y + 1).lerp(texel(x + 1, y + 1), cell.x - x as f32),
+                                cell.y - y as f32,
+                            )
+                        };
+                        let expected = bilinear(z).lerp(bilinear(z + 1), cell.z - z as f32);
+                        assert!((expected - grade.sample(radiance)).abs().max_element() < 1e-6);
+                    }
+                }
+            }
+            assert_eq!(grade.color(0, Vec3::ZERO), [0, 0, 0, 255]);
+        }
+    }
+
+    #[test]
+    fn cpu_particle_grade_preserves_additive_and_steam_coverage_with_bounded_quantization() {
+        let grade = ParticleGrade::new(&pc::Post::default());
+        for color in [
+            Vec3::ZERO,
+            Vec3::splat(0.01),
+            Vec3::new(0.1, 0.3, 0.8),
+            Vec3::new(6.0, 0.48, 0.24),
+        ] {
+            for kind in 0..5 {
+                let b = grade.color(kind, color);
+                let c = Vec3::new(b[0] as f32, b[1] as f32, b[2] as f32) / 255.;
+                for coverage in [0.0f32, 0.01, 0.1, 0.5, 1.0, 3.0] {
+                    let actual = c * coverage * if kind == 3 { 0.28 } else { 1.0 };
+                    let expected = if kind == 3 {
+                        grade.sample(color * 1.75) * coverage * 0.16
+                    } else {
+                        (grade.sample(color) - grade.black).max(Vec3::ZERO) * coverage
+                    };
+                    let bound = coverage * if kind == 3 { 0.28 } else { 1.0 } / 510.0 + 1e-6;
+                    assert!((actual - expected).abs().max_element() <= bound);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cpu_particle_lighting_matches_shared_eight_light_gain_and_sample_positions() {
+        let mut v = view(Vec3::new(0.0, 1.0, 0.0), Vec3::NEG_Z, 213, 0.0);
+        v.center = Vec3::new(13.0, 0.0, 13.0);
+        let particle = ParticleSeed {
+            seed: [0; 4],
+            a: Vec3::ZERO,
+            b: Vec3::ZERO,
+        };
+        let mut positions = [0.0; 32];
+        let mut colors = [0.0; 32];
+        for k in 0..8 {
+            positions[k * 4 + 3] = 1.0;
+            colors[k * 4..k * 4 + 3].copy_from_slice(&[0.2, 0.3, 0.4]);
+        }
+        let ambient = Vec3::new(0.05, 0.06, 0.08);
+        let sum = Vec3::new(0.2, 0.3, 0.4) * 8.0;
+        for (kind, expected) in [
+            (0, ambient + sum),
+            (1, (ambient + sum) * 1.4),
+            (2, ambient + sum / 1.01),
+            (3, ambient + sum),
+            (4, Vec3::new(6.0, 0.48, 0.24) * 0.35),
+        ] {
+            assert!(
+                (particle_light(kind, &particle, &v, &positions, &colors, None) - expected)
+                    .abs()
+                    .max_element()
+                    < 1e-5
+            );
+        }
+        v.time = 1.0;
+        assert!(
+            (particle_light(4, &particle, &v, &positions, &colors, None)
+                - Vec3::new(6.0, 0.48, 0.24))
+            .abs()
+            .max_element()
+                < 1e-6
+        );
     }
 
     #[test]
@@ -1223,6 +2420,41 @@ mod tests {
     }
 
     #[test]
+    fn performance_rain_is_a_stable_subset_with_compensated_mean_energy() {
+        let seeds = random_seeds(STREAKS);
+        let retained = seeds.iter().filter(|seed| seed.rain_sample(3)).count();
+        assert!((2200..2470).contains(&retained));
+        assert!(seeds.iter().all(|seed| seed.rain_sample(1)));
+        let mut full = Vec::new();
+        let mut reduced = Vec::new();
+        let mut full_total = 0;
+        let mut reduced_total = 0;
+        for (forward, time) in [(Vec3::NEG_Z, 0.0), (Vec3::X, 25.0), (Vec3::Z, 79.99)] {
+            let mut v = view(Vec3::new(0.0, 1.7, 0.0), forward, 320, time);
+            select_particles(&seeds, 0, &v, &mut full);
+            v.rain_divisor = 3;
+            select_particles(&seeds, 0, &v, &mut reduced);
+            let expected: Vec<_> = full
+                .chunks_exact(6)
+                .filter(|quad| seeds[quad[0] as usize / 4].rain_sample(3))
+                .flat_map(|quad| quad.iter().copied())
+                .collect();
+            assert_eq!(reduced, expected);
+            full_total += full.len();
+            reduced_total += reduced.len();
+        }
+        let energy = reduced_total as f32 * 3.0 / full_total as f32;
+        assert!((0.85..1.15).contains(&energy), "mean rain energy {energy}");
+        // Profile changes must not reduce the splash field.
+        let mut v = view(Vec3::new(0.0, 1.7, 0.0), Vec3::NEG_Z, 320, 25.0);
+        select_particles(&seeds[..SPLASHES], 2, &v, &mut full);
+        v.rain_divisor = 3;
+        select_particles(&seeds[..SPLASHES], 2, &v, &mut reduced);
+        assert!(!full.is_empty());
+        assert_eq!(full, reduced);
+    }
+
+    #[test]
     fn dry_boundaries_and_all_effect_types_stay_conservative() {
         let boxes = [[[0.0, 0.0, 0.0], [2.0, 3.0, 2.0]]];
         let mut v = view(Vec3::new(0.0, 1.7, 5.0), Vec3::NEG_Z, 213, 0.0);
@@ -1282,7 +2514,7 @@ mod tests {
             (320, 213, true, 2, 3),
             (1, 1, true, 2, 2),
         ] {
-            let plan = BloomPlan::new(w, h, fields);
+            let plan = BloomPlan::new(w, h, fields, false);
             assert_eq!((plan.divisor, plan.levels), (divisor, levels));
             assert_eq!(plan.spread, if levels == 2 { 2.0 } else { 1.0 });
             for level in 0..levels {
@@ -1293,11 +2525,176 @@ mod tests {
     }
 
     #[test]
+    fn performance_bloom_has_one_target_and_a_resolution_bounded_footprint() {
+        for (w, h) in [
+            (1, 1),
+            (320, 213),
+            (480, 320),
+            (640, 426),
+            (960, 640),
+            (640, 960),
+        ] {
+            for fields in [false, true] {
+                let plan = BloomPlan::new(w, h, fields, true);
+                let bw = (w / plan.divisor).max(1);
+                let bh = (h / plan.divisor).max(1);
+                assert_eq!(plan.levels, 1); // no downsample/upsample targets or passes
+                assert!(bw <= 80 && bh <= 80);
+                let texel = plan.texel(w, h, bw, bh);
+                assert!(texel.iter().all(|v| v.is_finite()));
+                // The four taps stay at output-pixel quadrant centres,
+                // including portrait and nonintegral scaling factors.
+                assert!((texel[0] * bw as f32 - 0.25).abs() < 1e-6);
+                assert!((texel[1] * bh as f32 - 0.25).abs() < 1e-6);
+                assert_eq!(texel[2], 1.0);
+            }
+        }
+        assert_eq!(320 / BloomPlan::new(320, 213, false, true).divisor, 40);
+        assert_eq!(320 / BloomPlan::new(320, 213, true, true).divisor, 80);
+    }
+
+    #[test]
     fn empty_haze_is_skipped_but_each_independent_source_is_retained() {
         assert!(!haze_contributes(0.0, 0.0, Vec3::ONE, 6, 0.0));
         assert!(!haze_contributes(1.0, 1.0, Vec3::ZERO, 0, 0.0));
         assert!(haze_contributes(1.0, 0.0, Vec3::ZERO, 1, 0.0));
         assert!(haze_contributes(0.0, 0.1, Vec3::ONE, 0, 0.0));
         assert!(haze_contributes(0.0, 0.0, Vec3::ZERO, 0, 0.1));
+    }
+
+    #[test]
+    fn display_bloom_tracks_the_authored_grade_and_has_finite_headroom() {
+        for tone in [pc::ToneCurve::Agx, pc::ToneCurve::Aces] {
+            for exposure in [0.1, 0.94, 1.0, 4.0] {
+                let post = pc::Post {
+                    tone,
+                    exposure,
+                    ..pc::Post::default()
+                };
+                let threshold = display_bloom_threshold(&post, 0.75);
+                let display = Vec3::from(pc::color::tone([post.bloom_threshold; 3], &post))
+                    .dot(Vec3::new(0.2126, 0.7152, 0.0722));
+                assert!(threshold.iter().all(|x| x.is_finite()));
+                assert!((threshold[0] - (display * 0.95).min(0.9)).abs() < 1e-6);
+                assert!(threshold[1] >= 0.025 && threshold[0] + threshold[1] <= 1.0);
+                assert_eq!(threshold[2], 0.75);
+                assert!(threshold[3] > 0.0 && threshold[0] + threshold[3] <= 1.000001);
+                let black = crate::gpu::tone_black(&post);
+                let exact = pc::color::tone([0.0; 3], &post);
+                for k in 0..3 {
+                    assert_eq!(black[k], (exact[k] * 255.0) as u8 as f32 / 255.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn combined_display_storage_cannot_clip_and_bounds_reconstructed_error() {
+        let byte = |x: f32| libm::floorf(x * 255.0 + 0.5) / 255.0;
+        for intensity in [0.0, 0.35, 0.4, 0.85, 0.95, 4.0] {
+            let scale = display_effect_scale(intensity);
+            for h in [0.0, 0.01, 0.3, 0.8, 1.0] {
+                for b in [0.0, 0.025, 0.2, 0.7, 1.0] {
+                    // Four already-rounded old target texels. Interpolation
+                    // must commute with the new linear packing scale.
+                    let haze = [byte(h), byte(b), 0.0, 1.0];
+                    let bloom = [byte(b), byte(h), 1.0, 0.0];
+                    let sum: [f32; 4] = core::array::from_fn(|i| haze[i] + bloom[i] * intensity);
+                    let packed = sum.map(|v| v / scale);
+                    assert!(packed.iter().all(|&v| (0.0..=1.0).contains(&v)));
+                    let unpacked = packed.map(|v| byte(v) * scale);
+                    for weights in [[0.25; 4], [0.06, 0.14, 0.24, 0.56]] {
+                        let expected: f32 = sum.iter().zip(weights).map(|(v, w)| v * w).sum();
+                        let actual: f32 = unpacked.iter().zip(weights).map(|(v, w)| v * w).sum();
+                        assert!((actual - expected).abs() <= scale / 510.0 + 1e-6);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn display_vista_matches_shader_knots_extinction_and_unweighted_inscatter() {
+        let haze = pc::VistaHaze {
+            density: 1.6e-4,
+            inversion: -60.0,
+            scale: 60.0,
+            gain: 1.0,
+            glow: [0.03, 0.018, 0.009],
+            band: 0.25,
+        };
+        let mut vista = VistaUniforms {
+            density: [
+                haze.density,
+                haze.inversion,
+                1.0 / (haze.scale * core::f32::consts::LN_2),
+                haze.density * haze.scale,
+            ],
+            sun: [1.0, 0.0, 0.0, 0.0],
+            glow: [haze.glow[0], haze.glow[1], haze.glow[2], haze.band],
+            haze,
+            sky: [0.0; pc::VistaHaze::SKY_KNOTS * 4],
+            sun_sky: [0.0; pc::VistaHaze::SKY_KNOTS * 4],
+        };
+        for k in 0..pc::VistaHaze::SKY_KNOTS {
+            vista.sky[k * 4..k * 4 + 3].copy_from_slice(&[0.01 + 0.003 * k as f32, 0.04, 0.06]);
+            vista.sun_sky[k * 4..k * 4 + 3].copy_from_slice(&[0.14 / (k + 1) as f32, 0.01, 0.003]);
+        }
+        let post = pc::Post::default();
+        for y in [-120.0, -60.0, 0.0, 300.0] {
+            let eye = Vec3::new(0.0, y, 0.0);
+            for dy in [-150.0, 0.0, 0.005, 240.0] {
+                for distance in [0.0, 1.0, 500.0, 12000.0] {
+                    for azimuth in 0..=32 {
+                        let angle = azimuth as f32 * core::f32::consts::TAU / 32.0;
+                        let center = eye
+                            + Vec3::new(
+                                libm::cosf(angle) * distance,
+                                dy,
+                                libm::sinf(angle) * distance,
+                            );
+                        // Independent translation of vista.cgh using its
+                        // exp2 uniforms and flattened table indexing.
+                        let d = center.distance(eye);
+                        let rho =
+                            libm::exp2f(-(center.y - vista.density[1]).max(0.0) * vista.density[2]);
+                        let column = if center.y > vista.density[1] {
+                            vista.density[0] * vista.density[1] + vista.density[3] * (1.0 - rho)
+                        } else {
+                            vista.density[0] * center.y
+                        };
+                        let delta = center.y - eye.y;
+                        let tau = if delta.abs() < 0.01 {
+                            d * vista.haze.density * vista.haze.relative_density(eye.y)
+                        } else {
+                            d * (column - vista.haze.column(eye.y)) / delta
+                        };
+                        let t = libm::exp2f(-tau.max(0.0) * 1.442695);
+                        let horizontal = Vec2::new(center.x - eye.x, center.z - eye.z);
+                        let h = horizontal / libm::sqrtf(horizontal.length_squared().max(1e-8));
+                        let u = libm::sqrtf((0.5 - 0.5 * h.x).clamp(0.0, 1.0)) * 16.0;
+                        let k = (libm::floorf(u) as usize).min(15);
+                        let f = u - k as f32;
+                        let w = vista.glow[3] + (1.0 - vista.glow[3]) * (1.0 - t);
+                        let scatter = core::array::from_fn(|c| {
+                            let a =
+                                vista.sky[k * 4 + c] * (1.0 - f) + vista.sky[(k + 1) * 4 + c] * f;
+                            let b = vista.sun_sky[k * 4 + c] * (1.0 - f)
+                                + vista.sun_sky[(k + 1) * 4 + c] * f;
+                            a + w * b + vista.glow[c] * rho
+                        });
+                        let expected = pc::color::tone(scatter, &post);
+                        let actual = vista.display_at(eye, center, &post);
+                        assert!((actual[3] - t).abs() < 1e-4);
+                        for c in 0..3 {
+                            assert!((actual[c] - expected[c]).abs() < 2e-5);
+                        }
+                    }
+                }
+            }
+        }
+        let same = vista.display_at(Vec3::ZERO, Vec3::ZERO, &post);
+        assert_eq!(same[3], 1.0);
+        assert!(same[..3].iter().all(|c| *c > 0.0)); // no accidental (1-T)
     }
 }

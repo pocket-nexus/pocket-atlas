@@ -45,7 +45,7 @@ export function shader(
   // Very smooth glass can exceed the finite half range before the HDR
   // encoder clamps highlights. Keep its BRDF accumulation and varyings full
   // precision on SGX535 to avoid inf * 0 producing coloured NaN fragments.
-  if (name === "glass_f")
+  if (name === "glass_f" && (defines.LIGHTS ?? 0) > 0)
     source = source.replace(/\bmin16float([234]?)\b/g, "float$1");
   // The iPod color table is sampled over the render-target encoding. This
   // avoids a per-pixel log2 on SGX535; the CPU still evaluates the shared grade.
@@ -96,7 +96,7 @@ export function shader(
   }
   // Link varyings by the common semantic rather than stage-local spelling.
   glsl = glsl.replace(
-    /\bo(World|Normal|Tangent|Uv2?|Screen|Color|Light|Haze|Ray|Grain|Local|ShadowUv|N|East|North|V|SunE|CloudE|Package)\b/g,
+    /\bo(World|Normal|Tangent|Uv2?|Screen|Color|Light|Haze|Ray|Grain|Fog|Depth|Local|ShadowUv|N|East|North|V|SunE|CloudE|Package)\b/g,
     "v$1",
   );
   if (name === "glass_f")
@@ -104,6 +104,10 @@ export function shader(
       /^varying highp (vec[34] v(?:Normal|Light|Haze));$/gm,
       "varying mediump $1;",
     );
+  // RGBA8 texture samples and material colors need half precision; keeping
+  // them highp promotes otherwise-half shared lighting on Series5.
+  glsl = glsl.replace(/uniform highp sampler2D/g, "uniform mediump sampler2D");
+  glsl = glsl.replace(/uniform highp vec4 (u(?:Base|Emissive|Pbr|EnvK|Wet2?|ReflOn|HemiSky|HemiGround))\b/g, "uniform mediump vec4 $1");
   // Cg POSITION uses depth [0,1]; the surface uses an OpenGL projection and
   // needs no fixup. SPIRV-Cross's default output leaves the position unchanged.
   if (stage === "frag") glsl = hdrFragment(glsl, name, defines);

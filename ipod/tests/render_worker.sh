@@ -9,6 +9,7 @@ compiler=${CC:-clang}
 mkdir -p "$out_dir"
 "$compiler" -std=c11 -D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE -Wall -Wextra -Werror \
   -Wno-cast-function-type -Dcalloc=worker_test_calloc \
+  -Dmalloc=worker_test_malloc -Dfwrite=worker_test_fwrite \
   -I"$repo_dir/ipod/src" -c "$repo_dir/ipod/src/render_worker.c" -o "$out_dir/worker.o"
 "$compiler" -std=c11 -D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE -Wall -Wextra -Werror \
   -I"$repo_dir/ipod/src" "$out_dir/worker.o" "$script_dir/render_worker.c" \

@@ -12,6 +12,7 @@ use serde::Deserialize;
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Meta {
+    framing: Framing,
     camera: Camera,
     sun: [f32; 3],
     sun_i: f32,
@@ -26,6 +27,13 @@ struct Meta {
     cloud_drift_per_s: f32,
     sun_curve: Vec<[f32; 4]>,
     files: Vec<Texture>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Framing {
+    width: f32,
+    height: f32,
+    radius_px: f32,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -48,10 +56,21 @@ struct Texture {
 struct Pipelines {
     globe: [String; 2],
     post: [String; 2],
+    post_performance: [String; 2],
     background: [String; 2],
     marker: [String; 2],
+    blit: [String; 2],
 }
 pub struct Globe {
+    pub profile: bool,
+    pub performance: bool,
+    /// Background, Earth surface, place markers, and final grade/composite.
+    pub timings: [f32; 4],
+    pub draws: u32,
+    pub triangles: u32,
+    pub sphere_step: u32,
+    /// Grade, then display blit. The complete direct path has no blit pass.
+    pub post_steps_ms: [f32; 2],
     _objects: Objects,
     marker: Program,
     quad: u32,
@@ -59,31 +78,58 @@ pub struct Globe {
     meta: Meta,
     program: Program,
     post: Program,
+    post_names: [[String; 2]; 2],
+    root: String,
+    bounded_background: bool,
+    blit: Program,
     background: Program,
     textures: BTreeMap<String, u32>,
     target: Target,
+    grade_target: Option<Target>,
     vb: u32,
     ib: u32,
     tri: u32,
-    count: i32,
+    sphere_levels: [SphereLevel; 3],
     lut: u32,
     white: u32,
     grain: u32,
 }
+struct SphereLevel {
+    step: u32,
+    count: i32,
+    offset: usize,
+}
 impl Globe {
-    pub unsafe fn new(root: &str) -> Result<Self, String> {
+    pub unsafe fn new(root: &str, width: i32, performance: bool) -> Result<Self, String> {
+        let (width, height) = target_size(width)?;
         let meta: Meta = serde_json::from_slice(&read(&format!("{root}/globe/globe.json"))?)
             .map_err(|e| format!("globe metadata {e}"))?;
+        if ![
+            meta.framing.width,
+            meta.framing.height,
+            meta.framing.radius_px,
+        ]
+        .iter()
+        .all(|v| v.is_finite() && *v > 0.0)
+            || !meta.camera.distance.is_finite()
+            || meta.camera.distance <= 1.0
+        {
+            return Err("globe framing".into());
+        }
         let pipelines: Pipelines =
             serde_json::from_slice(&read(&format!("{root}/globe.pipelines.json"))?)
                 .map_err(|e| format!("globe pipelines {e}"))?;
         let mut objects = Objects::default();
         let mut textures = BTreeMap::new();
+        let mut bounded_background = false;
         for t in &meta.files {
             if t.file.ends_with(".f32") {
                 continue;
             }
             let data = read(&format!("{root}/globe/{}", t.file))?;
+            if t.name == "space" {
+                bounded_background = fast_grade_background(&data);
+            }
             let mut texture = 0;
             glGenTextures(1, &mut texture);
             objects.textures.push(texture);
@@ -144,13 +190,7 @@ impl Globe {
                 ]);
             }
         }
-        for y in 0..ny {
-            for x in 0..nx {
-                let a = (y * (nx + 1) + x) as u16;
-                let b = a + (nx + 1) as u16;
-                indices.extend([a, b, a + 1, a + 1, b, b + 1]);
-            }
-        }
+        let sphere_levels = [1, 2, 4].map(|step| append_sphere_level(&mut indices, step));
         let vb = objects.buffer();
         let ib = objects.buffer();
         let tri = objects.buffer();
@@ -187,25 +227,83 @@ impl Globe {
         let lut = crate::gpu::tone_lut(&grade);
         objects.textures.push(lut);
         let (white, grain) = crate::gpu::grade_textures(&mut objects, 0.3);
+        let post_names = [pipelines.post, pipelines.post_performance];
+        let post = Program::new(
+            root,
+            &post_names[usize::from(performance && bounded_background)],
+        )?;
         Ok(Self {
+            profile: false,
+            performance,
+            timings: [0.0; 4],
+            draws: 0,
+            triangles: 0,
+            sphere_step: 1,
+            post_steps_ms: [0.0; 2],
             _objects: objects,
             quad,
             hits: Vec::new(),
             marker: Program::new(root, &pipelines.marker)?,
             meta,
             program: Program::new(root, &pipelines.globe)?,
-            post: Program::new(root, &pipelines.post)?,
+            post,
+            post_names,
+            root: root.into(),
+            bounded_background,
+            blit: Program::new(root, &pipelines.blit)?,
             background: Program::new(root, &pipelines.background)?,
             textures,
-            target: Target::new(480, 272, true)?,
+            target: Target::new(width, height, true)?,
+            grade_target: if performance {
+                Some(Target::new(width, height, false)?)
+            } else {
+                None
+            },
             vb,
             ib,
             tri,
-            count: indices.len() as _,
+            sphere_levels,
             lut,
             white,
             grain,
         })
+    }
+    pub fn dimensions(&self) -> (i32, i32) {
+        (self.target.w, self.target.h)
+    }
+    pub unsafe fn resize(&mut self, width: i32, performance: bool) -> Result<(), String> {
+        let (width, height) = target_size(width)?;
+        // Keep the usable target if allocation fails. The App latches failures
+        // until an explicit retry, just as it does for a place renderer.
+        let target = if self.dimensions() != (width, height) {
+            Some(Target::new(width, height, true)?)
+        } else {
+            None
+        };
+        let grade_target = if performance {
+            Some(Target::new(width, height, false)?)
+        } else {
+            None
+        };
+        let post = if self.performance != performance {
+            Some(Program::new(
+                &self.root,
+                &self.post_names[usize::from(performance && self.bounded_background)],
+            )?)
+        } else {
+            None
+        };
+        if let Some(target) = target {
+            self.target = target;
+        }
+        self.grade_target = grade_target;
+        if let Some(post) = post {
+            // A direct full-quality grade may still be the current program.
+            glUseProgram(0);
+            self.post = post;
+        }
+        self.performance = performance;
+        Ok(())
     }
     unsafe fn triangle(&self) {
         for i in 0..8 {
@@ -225,6 +323,11 @@ impl Globe {
         w: i32,
         h: i32,
     ) {
+        let mut timings = [0.0; 4];
+        let mut stamp = crate::atlas_seconds();
+        self.draws = 0;
+        self.triangles = 0;
+        self.post_steps_ms = [0.0; 2];
         let m = &self.meta;
         self.target.bind();
         glDepthMask(1);
@@ -236,6 +339,9 @@ impl Globe {
         self.background.bind();
         self.background.tex("uSource", self.textures["space"], 0);
         self.triangle();
+        self.draws += 1;
+        self.triangles += 1;
+        stamp = finish_pass(self.profile, &mut timings, 0, stamp);
         let p = &self.program;
         p.bind();
         let eye = Vec3::new(0.0, 0.0, m.camera.distance);
@@ -292,6 +398,12 @@ impl Globe {
         }
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(GL_LEQUAL);
+        if self.performance {
+            // The indexed sphere is counter-clockwise from outside. GL_BACK
+            // is the context's default cull mode and is never changed here.
+            glFrontFace(0x0901);
+            glEnable(GL_CULL_FACE);
+        }
         glBindBuffer(GL_ARRAY_BUFFER, self.vb);
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.ib);
         for i in 0..8 {
@@ -301,14 +413,22 @@ impl Globe {
         glVertexAttribPointer(0, 3, GL_FLOAT, 0, 20, core::ptr::null());
         glEnableVertexAttribArray(3);
         glVertexAttribPointer(3, 2, GL_FLOAT, 0, 20, 12usize as _);
+        let radius = m.framing.radius_px
+            * (self.target.w as f32 / m.framing.width).max(self.target.h as f32 / m.framing.height);
+        let level = &self.sphere_levels[sphere_level(radius, m.camera.distance, self.performance)];
+        self.sphere_step = level.step;
         glDrawElements(
             GL_TRIANGLES,
-            self.count,
+            level.count,
             GL_UNSIGNED_SHORT,
-            core::ptr::null(),
+            level.offset as _,
         );
+        self.draws += 1;
+        self.triangles += level.count as u32 / 3;
+        stamp = finish_pass(self.profile, &mut timings, 1, stamp);
         self.hits.clear();
         glDisable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
         let p = &self.marker;
         p.bind();
         glBindBuffer(GL_ARRAY_BUFFER, self.quad);
@@ -358,13 +478,16 @@ impl Globe {
                 &[0.16, 0.2 + 0.7 * pulse, 0.07, 0.9 * (1.0 - pulse)],
             );
             glDrawArrays(GL_TRIANGLES, 0, 6);
+            self.draws += 1;
+            self.triangles += 2;
         }
-        glBindFramebuffer(0x8d40, fbo);
-        glViewport(0, 0, w, h);
-        glClearColor(0.015, 0.025, 0.045, 1.0);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        stamp = finish_pass(self.profile, &mut timings, 2, stamp);
         glDisable(GL_DEPTH_TEST);
-        glViewport(-58 * w / 960, 40 * h / 640, 936 * w / 960, 530 * h / 640);
+        if let Some(target) = &self.grade_target {
+            target.bind();
+        } else {
+            composite_target(fbo, w, h);
+        }
         let p = &self.post;
         p.bind();
         p.tex("uScene", self.target.texture, 0);
@@ -378,7 +501,227 @@ impl Globe {
             &[7.5, 4.25, time * 0.618034 % 1.0, time * 0.414214 % 1.0],
         );
         self.triangle();
+        self.draws += 1;
+        self.triangles += 1;
+        if self.profile {
+            glFinish();
+        }
+        let grade_done = crate::atlas_seconds();
+        self.post_steps_ms[0] = ((grade_done - stamp) * 1000.0) as f32;
+        if let Some(target) = &self.grade_target {
+            composite_target(fbo, w, h);
+            self.blit.bind();
+            self.blit.tex("uSource", target.texture, 0);
+            self.triangle();
+            self.draws += 1;
+            self.triangles += 1;
+        }
         glViewport(0, 0, w, h);
+        let post_done = finish_pass(self.profile, &mut timings, 3, stamp);
+        if self.grade_target.is_some() {
+            self.post_steps_ms[1] = ((post_done - grade_done) * 1000.0) as f32;
+        }
+        self.timings = timings;
+    }
+}
+
+unsafe fn composite_target(fbo: u32, width: i32, height: i32) {
+    glBindFramebuffer(0x8d40, fbo);
+    glViewport(0, 0, width, height);
+    glClearColor(0.015, 0.025, 0.045, 1.0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glViewport(
+        -58 * width / 960,
+        40 * height / 640,
+        936 * width / 960,
+        530 * height / 640,
+    );
+}
+
+fn fast_grade_background(rgba: &[u8]) -> bool {
+    !rgba.is_empty()
+        && rgba.len() % 4 == 0
+        && rgba
+            .chunks_exact(4)
+            .all(|pixel| pixel[..3].iter().all(|&c| c <= 254))
+}
+
+fn append_sphere_level(indices: &mut Vec<u16>, step: u32) -> SphereLevel {
+    let start = indices.len();
+    for y in (0..64).step_by(step as usize) {
+        for x in (0..128).step_by(step as usize) {
+            let a = (y * 129 + x) as u16;
+            let b = ((y + step) * 129 + x) as u16;
+            let across = step as u16;
+            indices.extend([a, b, a + across, a + across, b, b + across]);
+        }
+    }
+    SphereLevel {
+        step,
+        count: (indices.len() - start) as i32,
+        offset: start * 2,
+    }
+}
+
+fn silhouette_error(radius_px: f32, distance: f32, step: u32) -> f32 {
+    // Latitude and longitude each span 2*pi*step/128. The mesh contains
+    // a concentric sphere of radius cos(half-step)^2; using both axes also
+    // bounds a diagonal facet at arbitrary globe rotation. Project that
+    // inner sphere with the same perspective camera, rather than assuming
+    // orthographic chords. This bounds the silhouette in target pixels.
+    let half = core::f64::consts::PI * step as f64 / 128.0;
+    let cosine = libm::cos(half);
+    let inner = cosine * cosine;
+    let distance2 = (distance as f64) * (distance as f64);
+    let ratio = inner * libm::sqrt((distance2 - 1.0) / (distance2 - inner * inner));
+    (radius_px as f64 * (1.0 - ratio)) as f32
+}
+
+fn sphere_level(radius_px: f32, distance: f32, performance: bool) -> usize {
+    if performance {
+        for (index, step) in [(2, 4), (1, 2)] {
+            if silhouette_error(radius_px, distance, step) <= 0.25 {
+                return index;
+            }
+        }
+    }
+    0
+}
+
+fn target_size(width: i32) -> Result<(i32, i32), String> {
+    if !(1..=4096).contains(&width) {
+        return Err("globe target width".into());
+    }
+    // Preserve the authored globe projection and composite viewport at every
+    // quality level. Resize resolution, never UIKit coordinates or markers.
+    Ok((width, ((width * 272 + 240) / 480).max(1)))
+}
+
+unsafe fn finish_pass(profile: bool, timings: &mut [f32; 4], pass: usize, start: f64) -> f64 {
+    if profile {
+        glFinish();
+    }
+    let now = crate::atlas_seconds();
+    timings[pass] = ((now - start) * 1000.0) as f32;
+    now
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sphere_lods_reuse_full_vertices_with_same_winding_and_bounded_indices() {
+        let mut indices = Vec::new();
+        let levels = [1, 2, 4].map(|step| append_sphere_level(&mut indices, step));
+        for (level, triangles) in levels.iter().zip([16384, 4096, 1024]) {
+            assert_eq!(level.count / 3, triangles);
+            let first = level.offset / 2;
+            let slice = &indices[first..first + level.count as usize];
+            assert!(slice.iter().all(|&i| i < 129 * 65));
+            for quad in slice.chunks_exact(6) {
+                assert_eq!(quad[2] - quad[0], level.step as u16);
+                assert_eq!(quad[1] - quad[0], 129 * level.step as u16);
+                assert_eq!(quad[3], quad[2]);
+                assert_eq!(quad[4], quad[1]);
+                assert_eq!(quad[5] - quad[1], level.step as u16);
+            }
+        }
+        assert_eq!(levels[0].offset, 0);
+        assert_eq!(levels[1].offset, levels[0].count as usize * 2);
+        assert_eq!(
+            levels[2].offset,
+            (levels[0].count + levels[1].count) as usize * 2
+        );
+    }
+
+    #[test]
+    fn sphere_lod_respects_quarter_pixel_bound_and_full_quality() {
+        let distance = 5.141497;
+        for width in [160, 192, 256, 320, 400, 480, 640, 960] {
+            let (_, height) = target_size(width).unwrap();
+            let radius = 201.28 * (width as f32 / 960.0).max(height as f32 / 544.0);
+            let level = sphere_level(radius, distance, true);
+            let step = [1, 2, 4][level];
+            assert!(silhouette_error(radius, distance, step) <= 0.25);
+            assert_eq!(sphere_level(radius, distance, false), 0);
+            if level < 2 {
+                assert!(silhouette_error(radius, distance, step * 2) > 0.25);
+            }
+        }
+        assert_eq!(sphere_level(201.28 / 3.0, distance, true), 1);
+        assert_eq!(sphere_level(201.28 / 6.0, distance, true), 1);
+        assert_eq!(sphere_level(20.0, distance, true), 2);
+    }
+
+    #[test]
+    fn silhouette_bound_contains_the_actual_mesh_facets() {
+        let point = |index: u16| {
+            let lat = core::f64::consts::PI * (0.5 - (index as usize / 129) as f64 / 64.0);
+            let lon = ((index as usize % 129) as f64 / 128.0 - 0.5) * core::f64::consts::TAU;
+            [
+                libm::cos(lat) * libm::sin(lon),
+                libm::sin(lat),
+                libm::cos(lat) * libm::cos(lon),
+            ]
+        };
+        for step in [1, 2, 4] {
+            let mut indices = Vec::new();
+            append_sphere_level(&mut indices, step);
+            let cosine = libm::cos(core::f64::consts::PI * step as f64 / 128.0);
+            let inner_radius = cosine * cosine;
+            for triangle in indices.chunks_exact(3) {
+                let a = point(triangle[0]);
+                let b = point(triangle[1]);
+                let c = point(triangle[2]);
+                let ab: [f64; 3] = core::array::from_fn(|k| b[k] - a[k]);
+                let ac: [f64; 3] = core::array::from_fn(|k| c[k] - a[k]);
+                let normal = [
+                    ab[1] * ac[2] - ab[2] * ac[1],
+                    ab[2] * ac[0] - ab[0] * ac[2],
+                    ab[0] * ac[1] - ab[1] * ac[0],
+                ];
+                let norm2 = normal.iter().map(|n| n * n).sum::<f64>();
+                // One triangle per polar quad collapses at the common pole.
+                if norm2 < 1e-20 {
+                    continue;
+                }
+                let plane_distance =
+                    normal.iter().zip(a).map(|(n, p)| n * p).sum::<f64>() / libm::sqrt(norm2);
+                assert!(
+                    plane_distance > 0.0,
+                    "all nondegenerate triangles must face outwards (CCW)"
+                );
+                assert!(
+                    plane_distance + 1e-12 >= inner_radius,
+                    "facet at step {step} violates the claimed inner sphere"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fast_grade_requires_bounded_rgb_but_not_bounded_alpha() {
+        for byte in 0..=254 {
+            assert!(fast_grade_background(&[byte, byte, byte, 255]));
+        }
+        for channel in 0..3 {
+            let mut pixel = [254, 254, 254, 255];
+            pixel[channel] = 255;
+            assert!(!fast_grade_background(&pixel));
+        }
+        assert!(!fast_grade_background(&[]));
+        assert!(!fast_grade_background(&[0; 3]));
+    }
+
+    #[test]
+    fn resolution_preserves_authored_aspect_and_full_quality_target() {
+        assert_eq!(super::target_size(480).unwrap(), (480, 272));
+        assert_eq!(super::target_size(320).unwrap(), (320, 181));
+        assert_eq!(super::target_size(160).unwrap(), (160, 91));
+        assert_eq!(super::target_size(640).unwrap(), (640, 363));
+        assert!(super::target_size(0).is_err());
+        assert!(super::target_size(4097).is_err());
     }
 }
 pub struct Marker {

@@ -24,7 +24,11 @@ use alloc::{vec, vec::Vec, string::{String, ToString}};
 
 pub mod atlas;
 pub mod color;
+pub mod content_hash;
+pub mod display;
 pub mod meta;
+pub mod parts;
+pub mod products;
 
 pub use meta::*;
 

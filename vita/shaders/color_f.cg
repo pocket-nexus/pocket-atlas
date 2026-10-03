@@ -1,0 +1,92 @@
+// Display-referred forward path for prelit handheld geometry. The cooker
+// supplies graded vertex colours; detail textures modulate them in sRGB.
+// This deliberately trades per-fragment HDR lighting for a small shader.
+uniform sampler2D uAlbedo;
+uniform sampler2D uEmission;
+uniform half4 uDisplayEmission;
+uniform half4 uBase;
+uniform half4 uEmissive;
+uniform half4 uDisplayFog;
+uniform half4 uDisplayHaze;
+uniform half4 uAtlasBlack;
+#ifdef WET
+uniform sampler2D uPuddles;
+uniform sampler2D uRipples;
+uniform sampler2D uDisplayReflSharp;
+uniform sampler2D uDisplayReflBlur;
+uniform half4 uWet;
+uniform half4 uWet2;
+uniform half4 uPbr;
+uniform half4 uEnvK;
+uniform half4 uReflOn;
+uniform float4 uEye;
+uniform float4 uRipple;
+#endif
+
+half4 main(
+    half4 vColor : COLOR0,
+#ifdef WET
+    float3 vWorld : TEXCOORD0,
+    float4 vScreen : TEXCOORD4,
+#endif
+    float2 vUv : TEXCOORD3,
+#ifdef FOG
+    half vFog : TEXCOORD6,
+#endif
+    half vDepth : TEXCOORD5) : COLOR
+{
+    half4 c = vColor;
+#ifdef ALBEDO_MAP
+    c *= tex2D(uAlbedo, vUv);
+#endif
+    c.a *= uBase.a;
+#ifdef EMISSION_MAP
+    c.rgb += tex2D(uEmission, vUv).rgb * uDisplayEmission.rgb;
+#endif
+#ifdef ALPHA_TEST
+    if (c.a < uEmissive.w) discard;
+#endif
+#ifdef WET
+    // Preserve the authored puddle field and animated ripple atlas while
+    // mixing the lower-resolution reflection directly in display space.
+    half2 pf = tex2D(uPuddles, vWorld.xz * uWet2.x).rg;
+    half field = pf.r * (half)0.8 + pf.g * (half)0.2;
+    half threshold = (half)0.71 - uWet.x * (half)0.25;
+    half puddle = smoothstep(threshold - (half)0.012, threshold + (half)0.03, field)
+        * uEnvK.w * (half)step((half)0.001, uWet.x);
+    c.rgb *= lerp((half)1.0, uWet.y, uEnvK.w) * lerp((half)1.0, (half)0.67, puddle);
+    half rough = lerp(uPbr.x, uPbr.x * uWet.z, uEnvK.w);
+    rough = lerp(rough, (half)0.02, puddle);
+    float2 ruv = vScreen.xy / vScreen.w * float2(0.5, -0.5) + 0.5;
+    float2 cell = float2(fmod(uRipple.x, 4.0), floor(uRipple.x * 0.25));
+    float2 local = clamp(frac(vWorld.xz * uRipple.w), 0.004, 0.996);
+    half2 ripple = tex2D(uRipples, (cell + local) * 0.25).rg * (half)2.0 - (half)1.0;
+    ruv += (float2)((pf - (half)0.5) * (half)0.006 + ripple * (uWet.w * puddle * (half)0.005));
+    half3 reflected = rough < (half)0.15
+        ? tex2D(uDisplayReflSharp, ruv).rgb : tex2D(uDisplayReflBlur, ruv).rgb;
+    half2 edge = (half2)saturate(min(ruv, 1.0 - ruv) * 33.3);
+    half facing = (half)saturate(normalize(uEye.xyz - vWorld).y);
+    half k = (half)1.0 - facing;
+    half fresnel = (half)0.04 + (half)0.96 * k * k * k * k;
+    half weight = uReflOn.x * ((half)1.0 - smoothstep((half)0.5, (half)0.8, rough))
+        * lerp((half)0.35, (half)1.0, edge.x * edge.y);
+    c.rgb += reflected * (fresnel * weight);
+#endif
+#ifdef VISTA
+    c.rgb = lerp(uDisplayHaze.rgb, c.rgb, uDisplayHaze.a);
+#elif defined(FOG)
+    c.rgb = lerp(c.rgb, uDisplayFog.rgb, vFog);
+#endif
+#ifdef ADDITIVE
+    c.rgb = max(c.rgb - uAtlasBlack.rgb, (half)0.0);
+#endif
+#ifdef PREMULTIPLIED
+    return half4(c.rgb * c.a, c.a);
+#elif defined(BLEND)
+    return c;
+#elif defined(DEPTH_UNUSED)
+    return half4(c.rgb, (half)0.0);
+#else
+    return half4(c.rgb, vDepth);
+#endif
+}

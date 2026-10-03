@@ -3,6 +3,8 @@
 // haze lights with a soft 1 / (d² + r²) falloff.
 //
 // Defines (one of): STREAK, SPLASH, DRIP, STEAM, BEACON.
+// DISPLAY_COLOR receives one prelit, graded colour per particle. Geometry,
+// lifetime and coverage remain shared; the unused light loop is not compiled.
 
 #define FX_LIGHTS 8
 
@@ -12,10 +14,14 @@ uniform float4 uTime;     // time, speed, length, width
 uniform float4 uBox;      // streak box size, -
 uniform float4 uWind;     // wind velocity (m/s), -
 uniform float4 uCenter;   // splash area centre, area size
+#ifndef DISPLAY_COLOR
 uniform float4 uAmbient;  // ambient light on drops
+#endif
 uniform float4 uDry[4];   // two dry boxes: min, max, min, max
+#ifndef DISPLAY_COLOR
 uniform float4 uFogPos[FX_LIGHTS];
 uniform float4 uFogCol[FX_LIGHTS];
+#endif
 
 float rHash(float2 p)
 {
@@ -24,6 +30,7 @@ float rHash(float2 p)
     return frac((p3.x + p3.y) * p3.z);
 }
 
+#ifndef DISPLAY_COLOR
 float3 lightAt(float3 p)
 {
     float3 c = uAmbient.rgb;
@@ -34,6 +41,7 @@ float3 lightAt(float3 p)
     }
     return c;
 }
+#endif
 
 bool isDry(float3 p)
 {
@@ -45,6 +53,9 @@ bool isDry(float3 p)
 void main(
     float4 aSeed,
     float2 aCorner,
+#ifdef DISPLAY_COLOR
+    half4 aColor,
+#endif
 #if defined(DRIP) || defined(STEAM)
     float3 aA,
     float3 aB,
@@ -64,7 +75,9 @@ void main(
     float alpha = 1.0;
     float life = 0.0;
     float2 uv = aCorner;
+#ifndef DISPLAY_COLOR
     float3 color;
+#endif
 #ifdef STREAK
     {
         float sp = uTime.y * (0.85 + 0.3 * aSeed.w);
@@ -83,7 +96,9 @@ void main(
         float len = uTime.z * (0.7 + 0.6 * aSeed.w);
         wp = p + side * aCorner.x * wdt + axis * (aCorner.y - 0.5) * len;
         uv = float2(aCorner.x + 0.5, aCorner.y);
+#ifndef DISPLAY_COLOR
         color = lightAt(p);
+#endif
         alpha = (uTime.w / wdt) * smoothstep(0.35, 1.4, dist) * (1.0 - smoothstep(box.x * 0.32, box.x * 0.5, dist));
     }
 #endif
@@ -103,7 +118,9 @@ void main(
         wp = p + right * aCorner.x * size * 2.0 + float3(0.0, 1.0, 0.0) * aCorner.y * size * 1.4;
         float d = length(toCam);
         hidden = isDry(p + float3(0.0, 0.05, 0.0)) || d > area * 0.55;
+#ifndef DISPLAY_COLOR
         color = lightAt(p + float3(0.0, 0.1, 0.0)) * smoothstep(area * 0.55, area * 0.3, d);
+#endif
     }
 #endif
 #ifdef DRIP
@@ -123,7 +140,9 @@ void main(
         wp = p + side * aCorner.x * wdt + axis * (aCorner.y - 0.5) * len;
         hidden = y < 0.0;
         uv = float2(aCorner.x + 0.5, aCorner.y);
+#ifndef DISPLAY_COLOR
         color = lightAt(p) * 1.4;
+#endif
         alpha = (0.006 / wdt) * smoothstep(0.3, 1.0, dist) * (1.0 - smoothstep(18.0, 30.0, dist));
     }
 #endif
@@ -143,7 +162,9 @@ void main(
         float rot = aSeed.w * 6.28 + age * 0.4;
         float2 q = float2(cos(rot) * aCorner.x - sin(rot) * aCorner.y, sin(rot) * aCorner.x + cos(rot) * aCorner.y);
         wp = p + (right * q.x + up * q.y) * size;
+#ifndef DISPLAY_COLOR
         color = lightAt(p);
+#endif
         alpha = smoothstep(0.0, 0.08, tt) * (1.0 - tt) * (1.0 - tt);
     }
 #endif
@@ -155,12 +176,18 @@ void main(
         float3 up = normalize(cross(toCam, right));
         float size = clamp(900.0 / dist, 1.5, 6.0) * dist * uCam.w * 0.5;
         wp = aA + (right * aCorner.x + up * aCorner.y) * size;
+#ifndef DISPLAY_COLOR
         color = float3(1.0, 0.08, 0.04) * 6.0 * (0.35 + 0.65 * step(0.45, frac(t * 0.55 + aA.x * 0.0003)));
+#endif
     }
 #endif
     oPosition = mul(uViewProj, float4(wp, 1.0));
     if (hidden) oPosition = float4(2.0, 2.0, 2.0, 1.0);
+#ifdef DISPLAY_COLOR
+    oColor = aColor.rgb;
+#else
     oColor = (half3)color;
+#endif
     oUv = (half2)uv;
     oLife = half2(life, alpha);
 }

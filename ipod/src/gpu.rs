@@ -136,6 +136,9 @@ impl Program {
             attrs,
         })
     }
+    pub fn has(&self, name: &str) -> bool {
+        self.uniforms.contains_key(name)
+    }
     pub unsafe fn bind(&self) {
         glUseProgram(self.id);
     }
@@ -226,8 +229,9 @@ impl Target {
             h,
         };
         let status = glCheckFramebufferStatus(0x8d40);
-        if status != 0x8cd5 {
-            return Err(format!("render target {w}x{h}: {status:x}"));
+        let error = glGetError();
+        if status != 0x8cd5 || error != 0 || fbo == 0 || texture == 0 || (with_depth && depth == 0) {
+            return Err(format!("render target {w}x{h}: framebuffer {status:x}, GL {error:x}"));
         }
         Ok(target)
     }
@@ -270,29 +274,53 @@ pub unsafe fn rgba(w: i32, h: i32, pixels: &[u8]) -> u32 {
 }
 
 pub unsafe fn tone_lut(post: &pocket3d_place::Post) -> u32 {
-    let mut table = vec![0u8; 1024 * 32 * 4];
+    tone_lut_sized(post, 32, false)
+}
+fn quantize_tone_byte(c: f32) -> u8 {
+    (c * 255.0) as u8
+}
+/// The exact black texel of the display LUT. Additive effects subtract this
+/// baseline so authored shadow lift cannot turn zero coverage into light.
+pub fn tone_black(post: &pocket3d_place::Post) -> [f32; 4] {
+    let c = pocket3d_place::color::tone([0.0; 3], post);
+    [
+        quantize_tone_byte(c[0]) as f32 / 255.0,
+        quantize_tone_byte(c[1]) as f32 / 255.0,
+        quantize_tone_byte(c[2]) as f32 / 255.0,
+        0.0,
+    ]
+}
+pub unsafe fn tone_lut_sized(post: &pocket3d_place::Post, size: usize, exposure: bool) -> u32 {
+    let table = tone_lut_pixels(post, size, exposure);
+    rgba((size * size) as i32, size as i32, &table)
+}
+/// Shared byte-identical table for GPU materials and CPU particle grading.
+pub fn tone_lut_pixels(post: &pocket3d_place::Post, size: usize, exposure: bool) -> Vec<u8> {
+    let mut table = vec![0u8; size * size * size * 4];
     let mut cfg = post.clone();
-    cfg.exposure = 1.0;
-    for b in 0..32 {
-        for g in 0..32 {
-            for r in 0..32 {
+    if !exposure {
+        cfg.exposure = 1.0;
+    }
+    for b in 0..size {
+        for g in 0..size {
+            for r in 0..size {
                 let a = |i| {
-                    let e = i as f32 / 31.0;
+                    let e = i as f32 / (size - 1) as f32;
                     let q = e * e;
                     (q / (1.0 - q).max(1.0 / 255.0)).min(126.0)
                 };
                 let c = pocket3d_place::color::tone([a(r), a(g), a(b)], &cfg);
-                let at = (g * 1024 + b * 32 + r) * 4;
+                let at = (g * size * size + b * size + r) * 4;
                 table[at..at + 4].copy_from_slice(&[
-                    (c[0] * 255.0) as u8,
-                    (c[1] * 255.0) as u8,
-                    (c[2] * 255.0) as u8,
+                    quantize_tone_byte(c[0]),
+                    quantize_tone_byte(c[1]),
+                    quantize_tone_byte(c[2]),
                     255,
                 ]);
             }
         }
     }
-    rgba(1024, 32, &table)
+    table
 }
 
 /// Own partially uploaded resources as well as successful renderer lifetimes.

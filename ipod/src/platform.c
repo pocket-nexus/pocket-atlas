@@ -7,6 +7,44 @@
 #include <sys/time.h>
 #include <unistd.h>
 #include <dlfcn.h>
+#include <math.h>
+
+typedef struct {
+    int hz, armed;
+    double origin, next, last;
+} RenderPacing;
+
+static void pacing_reset(RenderPacing *pacing) {
+    pacing->armed = 0;
+    pacing->origin = pacing->next = pacing->last = 0;
+}
+
+static int pacing_rate(RenderPacing *pacing, double hz) {
+    if (hz != 30.0 && hz != 60.0) return 0;
+    pacing->hz = (int)hz;
+    pacing_reset(pacing);
+    return 1;
+}
+
+static int pacing_due(RenderPacing *pacing, double timestamp) {
+    if (!isfinite(timestamp) || timestamp < 0) return 0;
+    if (!pacing->armed || timestamp < pacing->last) {
+        pacing->armed = 1;
+        pacing->origin = pacing->next = timestamp;
+    }
+    pacing->last = timestamp;
+    /* Only absorb floating-point equality noise, not a late display tick.
+     * Preserve the absolute phase when callbacks are skipped. After a long
+     * pause, advance directly to a future deadline instead of catching up. */
+    const double epsilon = 0.000001;
+    if (timestamp + epsilon < pacing->next) return 0;
+    double slot = floor((timestamp - pacing->origin + epsilon) * pacing->hz) + 1.0;
+    pacing->next = pacing->origin + slot / pacing->hz;
+    return 1;
+}
+
+/* Host tests include only the scheduling helper above, without UIKit/GL. */
+#ifndef ATLAS_PACING_HOST_TEST
 
 typedef void *id, *Class, *SEL;
 typedef signed char BOOL;
@@ -49,12 +87,15 @@ enum { ACTION_BACK = 0, ACTION_SETTINGS = 2, ACTION_PREVIOUS = 3,
        ACTION_REFLECTION = 10, ACTION_BLOOM = 11, ACTION_SOUND = 12,
        ACTION_RESTART = 13, ACTION_ABOUT = 14, ACTION_PLACE = 100 };
 
-static id window, view, context, display_link, delegate, overlay;
+static id window, root_view, view, context, display_link, delegate, overlay;
+static id scale_probe_label;
+static float screen_scale = 1;
 static id place_title, shot_label, pause_button, walk_button, hint_label;
 static id settings_scroll;
 static id page_scroll;
 static unsigned fbo, color, depth;
 static int width, height, active = 1;
+static int drawable_scale = 2, rejected_scale;
 static int page = PAGE_ATLAS, return_page = PAGE_ATLAS;
 static int last_values[VALUE_COUNT];
 static int requested_place = -1;
@@ -62,6 +103,8 @@ static Point settings_offset;
 static double last;
 static unsigned long frames;
 static char bundle[1024], tmp[1024];
+static RenderPacing render_pacing = { .hz = 60 };
+static int pacing_status_dirty;
 
 _Static_assert(VALUE_COUNT == ATLAS_UI_VALUE_COUNT, "UI snapshot ABI");
 static AtlasUiSnapshot ui_snapshot;
@@ -109,6 +152,10 @@ static int get_int(id receiver, const char *name) {
 
 static void send_float(id receiver, const char *name, float value) {
     ((void (*)(id, SEL, float))objc_msgSend)(receiver, selector(name), value);
+}
+
+static float get_float(id receiver, const char *name) {
+    return ((float (*)(id, SEL))objc_msgSend)(receiver, selector(name));
 }
 
 static id string(const char *value) {
@@ -187,8 +234,12 @@ static id font(float size, int bold) {
 }
 
 static id make(const char *name, Rect frame) {
-    return ((id (*)(id, SEL, Rect))objc_msgSend)(send(klass(name), "alloc"),
+    id result = ((id (*)(id, SEL, Rect))objc_msgSend)(send(klass(name), "alloc"),
         selector("initWithFrame:"), frame);
+    /* UIKit retains its native Retina backing even when the independent GL
+     * drawable is reduced to one pixel per logical point. */
+    send_float(result, "setContentScaleFactor:", screen_scale);
+    return result;
 }
 
 static void add(id parent, id child) { send_object(parent, "addSubview:", child); }
@@ -204,6 +255,7 @@ static void round_corners(id receiver, float radius) {
 
 static id label(id parent, Rect frame, const char *text, float size, int bold) {
     id result = make("UILabel", frame);
+    if (!scale_probe_label) scale_probe_label = result;
     send_object(result, "setText:", string(text));
     background(result, color_rgba(0, 0, 0, 0));
     send_object(result, "setTextColor:", color_rgba(.94f, .96f, 1, 1));
@@ -232,6 +284,7 @@ static id button(id parent, Rect frame, const char *text, int action, int promin
     background(result, prominent ? color_rgba(.08f, .35f, .36f, .97f)
                                 : color_rgba(.06f, .10f, .14f, .94f));
     send_object(send(result, "titleLabel"), "setFont:", font(13, 1));
+    send_float(send(result, "titleLabel"), "setContentScaleFactor:", screen_scale);
     ((void (*)(id, SEL, id, unsigned))objc_msgSend)(result,
         selector("setTitleColor:forState:"), color_rgba(.48f, .90f, .81f, 1), 1);
     ((void (*)(id, SEL, id, SEL, unsigned))objc_msgSend)(result,
@@ -279,9 +332,9 @@ static float wrapped_label(id parent, float x, float y, float w,
 
 static const char *quality_name(int quality) {
     switch (quality) {
-        case 1: return "Retina";
-        case 2: return "Balanced";
-        default: return "Adaptive";
+        case 1: return "Retina · Full";
+        case 2: return "Performance · 480";
+        default: return "Adaptive · 30 fps";
     }
 }
 
@@ -440,7 +493,7 @@ static void draw_settings(float w, float h) {
     float y = 0;
     y = setting_row(settings_scroll, y, row_width, "Image quality",
                     quality_name(ui_value(VALUE_QUALITY)),
-                    "Adaptive adjusts resolution to the scene workload.", ACTION_QUALITY);
+                    "Adaptive targets 30 fps; low memory restores Adaptive.", ACTION_QUALITY);
     y = setting_row(settings_scroll, y, row_width, "Rain",
                     ui_value(VALUE_RAIN) ? "On" : "Off",
                     "Rainfall in wet-weather places.", ACTION_RAIN);
@@ -519,19 +572,21 @@ static void show_ui(void) {
     if (settings_scroll) settings_offset = get_point(settings_scroll, "contentOffset");
     settings_scroll = NULL;
     page_scroll = NULL;
+    scale_probe_label = NULL;
     place_title = shot_label = pause_button = walk_button = hint_label = NULL;
     if (overlay) {
         send(overlay, "removeFromSuperview");
         send(overlay, "release");
     }
-    Rect frame = bounds(view);
+    Rect frame = bounds(root_view);
     overlay = make("AtlasOverlay", frame);
+    send_float(send(overlay, "layer"), "setContentsScale:", screen_scale);
     background(overlay, color_rgba(0, 0, 0, 0));
     send_int(overlay, "setMultipleTouchEnabled:", 1);
     /* Modal sheets consume empty-space touches. Scene/atlas chrome passes them
      * through to the EAGL view so multiple gestures can coexist with buttons. */
     send_int(overlay, "setTag:", page >= PAGE_SETTINGS);
-    add(view, overlay);
+    add(root_view, overlay);
     float w = frame.size.width, h = frame.size.height;
     switch (page) {
         case PAGE_SETTINGS: draw_settings(w, h); break;
@@ -591,6 +646,12 @@ static void interface_command(const char *json) {
     BOOL is_dictionary = ((BOOL (*)(id, SEL, id))objc_msgSend)(
         dictionary, selector("isKindOfClass:"), klass("NSDictionary"));
     if (!is_dictionary) return;
+    id rate_value = send_object(dictionary, "objectForKey:", string("renderRequestHz"));
+    BOOL is_rate = ((BOOL (*)(id, SEL, id))objc_msgSend)(
+        rate_value, selector("isKindOfClass:"), klass("NSNumber"));
+    if (is_rate && pacing_rate(&render_pacing,
+            ((double (*)(id, SEL))objc_msgSend)(rate_value, selector("doubleValue"))))
+        pacing_status_dirty = 1;
     id action_value = send_object(dictionary, "objectForKey:", string("uiAction"));
     BOOL is_number = ((BOOL (*)(id, SEL, id))objc_msgSend)(
         action_value, selector("isKindOfClass:"), klass("NSNumber"));
@@ -667,15 +728,17 @@ static double now(void) {
     return (double)mach_absolute_time() * (double)rate.numer / (double)rate.denom * 1e-9;
 }
 
-static void atomic_text(const char *name, const char *text) {
+static int atomic_text(const char *name, const char *text) {
     char destination[1100], staging[1108];
     snprintf(destination, sizeof destination, "%s/%s", tmp, name);
     snprintf(staging, sizeof staging, "%s.new", destination);
     FILE *file = fopen(staging, "w");
-    if (file) {
-        fputs(text, file);
-        if (fclose(file) == 0) rename(staging, destination);
-    }
+    if (!file) return 0;
+    int written = fputs(text, file) >= 0;
+    if (fclose(file) != 0) written = 0;
+    if (written && rename(staging, destination) == 0) return 1;
+    unlink(staging);
+    return 0;
 }
 
 static int consume_request(const char *name) {
@@ -684,18 +747,38 @@ static int consume_request(const char *name) {
     return unlink(path) == 0;
 }
 
-/* UIGetScreenImage includes both the EAGL surface and UIKit subviews. Rendering
- * a CALayer into a bitmap alone loses EAGL content. Keep the raw GL mailbox for
- * renderer comparisons and write this second, composited capture separately. */
+/* Read layer configuration independently of screenshot pixels. A native scale
+ * setting does not establish the resolution returned by UIGetScreenImage. */
+static void display_metrics(char *result, size_t capacity) {
+    id screen = send(klass("UIScreen"), "mainScreen");
+    Rect screen_bounds = bounds(screen), root_bounds = bounds(root_view);
+    snprintf(result, capacity,
+             "{\"screenScale\":%.3f,\"screenWidth\":%.1f,\"screenHeight\":%.1f,"
+             "\"rootWidth\":%.1f,\"rootHeight\":%.1f,\"windowScale\":%.3f,"
+             "\"rootScale\":%.3f,\"rootLayerScale\":%.3f,\"glScale\":%.3f,\"glLayerScale\":%.3f,"
+             "\"overlayScale\":%.3f,\"overlayLayerScale\":%.3f,\"labelScale\":%.3f,\"labelLayerScale\":%.3f}",
+             get_float(screen, "scale"), screen_bounds.size.width, screen_bounds.size.height,
+             root_bounds.size.width, root_bounds.size.height, get_float(window, "contentScaleFactor"),
+             get_float(root_view, "contentScaleFactor"), get_float(send(root_view, "layer"), "contentsScale"),
+             get_float(view, "contentScaleFactor"), get_float(send(view, "layer"), "contentsScale"),
+             get_float(overlay, "contentScaleFactor"), get_float(send(overlay, "layer"), "contentsScale"),
+             get_float(scale_probe_label, "contentScaleFactor"), get_float(send(scale_probe_label, "layer"), "contentsScale"));
+}
+
+/* Preserve the original screen image without resizing or redrawing its UI.
+ * Its pixel dimensions are evidence separate from configured layer scales. */
 static void capture_interface(void) {
     typedef void *(*ScreenImage)(void);
     typedef id (*PNGRepresentation)(id);
     typedef void (*ReleaseImage)(void *);
+    typedef size_t (*ImageDimension)(void *);
     void *handle = (void *)(intptr_t)-2; /* Darwin RTLD_DEFAULT. */
     ScreenImage screen_image = (ScreenImage)dlsym(handle, "UIGetScreenImage");
     PNGRepresentation png = (PNGRepresentation)dlsym(handle, "UIImagePNGRepresentation");
     ReleaseImage release_image = (ReleaseImage)dlsym(handle, "CGImageRelease");
-    if (!screen_image || !png || !release_image) {
+    ImageDimension image_width = (ImageDimension)dlsym(handle, "CGImageGetWidth");
+    ImageDimension image_height = (ImageDimension)dlsym(handle, "CGImageGetHeight");
+    if (!screen_image || !png || !release_image || !image_width || !image_height) {
         atomic_text("capture-ui-error.txt", "Screen capture is unavailable on this iOS runtime.");
         return;
     }
@@ -706,13 +789,22 @@ static void capture_interface(void) {
     }
     id ui_image = ((id (*)(id, SEL, void *))objc_msgSend)(
         klass("UIImage"), selector("imageWithCGImage:"), image);
+    char metrics[768], metadata[1100];
+    display_metrics(metrics, sizeof metrics);
+    snprintf(metadata, sizeof metadata,
+             "{\"source\":\"UIGetScreenImage\",\"width\":%lu,\"height\":%lu,"
+             "\"imageScale\":%.3f,\"resampled\":false,\"display\":%s}",
+             (unsigned long)image_width(image), (unsigned long)image_height(image),
+             get_float(ui_image, "scale"), metrics);
     id data = png(ui_image);
     char path[1100];
     snprintf(path, sizeof path, "%s/frame-ui.png", tmp);
     BOOL written = ((BOOL (*)(id, SEL, id, BOOL))objc_msgSend)(
         data, selector("writeToFile:atomically:"), string(path), 1);
     release_image(image);
-    if (!written) atomic_text("capture-ui-error.txt", "Writing the UIKit capture failed.");
+    /* The sidecar is the completion marker and describes this exact CGImage. */
+    if (!written || !atomic_text("frame-ui.json", metadata))
+        atomic_text("capture-ui-error.txt", "Writing the UIKit capture or metadata failed.");
     else {
         snprintf(path, sizeof path, "%s/capture-ui-error.txt", tmp);
         unlink(path);
@@ -755,8 +847,35 @@ static void refresh_ui(void) {
     for (int i = 0; i < VALUE_COUNT; ++i) last_values[i] = ui_value(i);
 }
 
+static void update_drawable_scale(void) {
+    int desired = ui_value(VALUE_QUALITY) == 1 ? 2 : 1;
+    if (desired == drawable_scale) { rejected_scale = 0; return; }
+    if (desired == rejected_scale || !atlas_worker_surface_pause()) return;
+    id layer = send(view, "layer");
+    send_float(view, "setContentScaleFactor:", (float)desired);
+    send_float(layer, "setContentsScale:", (float)desired);
+    if (!atlas_worker_surface_resize(layer, depth, &width, &height)) {
+        /* Keep the old drawable usable if allocation fails. The worker stays
+         * parked until this rollback has rebuilt matching color/depth storage. */
+        send_float(view, "setContentScaleFactor:", (float)drawable_scale);
+        send_float(layer, "setContentsScale:", (float)drawable_scale);
+        rejected_scale = desired;
+        if (!atlas_worker_surface_resize(layer, depth, &width, &height))
+            atomic_text("error.txt", "EAGL drawable resize and rollback failed.");
+        return;
+    }
+    drawable_scale = desired;
+    rejected_scale = 0;
+    char status[1024], metrics[768];
+    display_metrics(metrics, sizeof metrics);
+    snprintf(status, sizeof status,
+             "{\"scale\":%d,\"width\":%d,\"height\":%d,\"display\":%s}",
+             drawable_scale, width, height, metrics);
+    atomic_text("surface.json", status);
+}
+
 static void tick(id self, SEL command, id timer) {
-    (void)self; (void)command; (void)timer;
+    (void)self; (void)command;
     if (!active) return;
     double time = now();
     static double ui_ms = 33.333, last_status;
@@ -777,17 +896,23 @@ static void tick(id self, SEL command, id timer) {
         interface_command(data);
     }
     refresh_ui();
-    atlas_worker_request_frame();
+    update_drawable_scale();
+    double display_time = ((double (*)(id, SEL))objc_msgSend)(timer, selector("timestamp"));
+    if (pacing_due(&render_pacing, display_time)) atlas_worker_request_frame();
     if (consume_request("capture-ui")) capture_interface();
     ++frames;
-    if (time - last_status > .5) {
-        char status[512];
+    if (pacing_status_dirty || time - last_status > .5) {
+        char status[1280], metrics[768];
+        display_metrics(metrics, sizeof metrics);
         snprintf(status, sizeof status,
                  "{\"thread\":\"main\",\"uiFrame\":%lu,\"uiFrameMs\":%.3f,"
-                 "\"renderSnapshot\":%lu,\"appliedEvent\":%lu,\"queuedEvents\":%u,\"page\":%d,\"scrollY\":%.1f}",
+                 "\"renderSnapshot\":%lu,\"appliedEvent\":%lu,\"queuedEvents\":%u,\"page\":%d,\"scrollY\":%.1f,"
+                 "\"renderRequestHz\":%d,\"drawableScale\":%d,\"uiScale\":%.3f,\"drawableWidth\":%d,\"drawableHeight\":%d,\"display\":%s}",
                  frames, ui_ms, ui_snapshot.generation, ui_snapshot.applied_event,
-                 atlas_worker_pending_events(), page, page_scroll ? get_point(page_scroll, "contentOffset").y : 0);
+                 atlas_worker_pending_events(), page, page_scroll ? get_point(page_scroll, "contentOffset").y : 0,
+                 render_pacing.hz, drawable_scale, get_float(overlay, "contentScaleFactor"), width, height, metrics);
         atomic_text("ui-status.json", status);
+        pacing_status_dirty = 0;
         last_status = time;
     }
 }
@@ -798,15 +923,21 @@ static BOOL launch(id self, SEL command, id application, id options) {
     snprintf(bundle, sizeof bundle, "%s", utf8(send(send(klass("NSBundle"), "mainBundle"), "bundlePath")));
     const char *home = getenv("HOME");
     snprintf(tmp, sizeof tmp, "%s/tmp", home ? home : ".");
-    Rect screen = bounds(send(klass("UIScreen"), "mainScreen"));
+    id main_screen = send(klass("UIScreen"), "mainScreen");
+    Rect screen = bounds(main_screen);
+    screen_scale = get_float(main_screen, "scale");
     window = make("UIWindow", screen);
-    view = make("AtlasView", rectangle(0, 0, 480, 320));
+    /* UIKit and the adjustable EAGL drawable are siblings. Reducing the GL
+     * backing never reduces the backing of an ancestor of the native UI. */
+    root_view = make("UIView", rectangle(0, 0, 480, 320));
     Transform rotation = {0, 1, -1, 0, 0, 0};
-    ((void (*)(id, SEL, Transform))objc_msgSend)(view, selector("setTransform:"), rotation);
-    set_point(view, "setCenter:", (Point){160, 240});
+    ((void (*)(id, SEL, Transform))objc_msgSend)(root_view, selector("setTransform:"), rotation);
+    set_point(root_view, "setCenter:", (Point){160, 240});
+    add(window, root_view);
+    view = make("AtlasView", bounds(root_view));
     send_int(view, "setMultipleTouchEnabled:", 1);
     send_float(view, "setContentScaleFactor:", 2);
-    add(window, view);
+    add(root_view, view);
     send(window, "makeKeyAndVisible");
     send_int(application, "setIdleTimerDisabled:", 1);
     send_int(application, "setStatusBarHidden:", 1);
@@ -847,13 +978,17 @@ static BOOL launch(id self, SEL command, id application, id options) {
         return 1;
     }
     atlas_worker_snapshot(&ui_snapshot);
+    update_drawable_scale();
     atomic_text("startup.txt", "Places ready; constructing native interface");
     show_ui();
     atomic_text("startup.txt", "Interface ready; scheduling display link");
     last = now();
     display_link = ((id (*)(id, SEL, id, SEL))objc_msgSend)(
         klass("CADisplayLink"), selector("displayLinkWithTarget:selector:"), self, selector("tick:"));
-    send_int(display_link, "setFrameInterval:", 2);
+    /* Keep UIKit at every display refresh. The independent request deadline
+     * defaults to 60 Hz and can be switched to 30 for an in-binary A/B;
+     * immediate input and the owner's busy-request coalescing stay unchanged. */
+    send_int(display_link, "setFrameInterval:", 1);
     /* Use Foundation's actual common-mode object, including its identity.
      * Fall back to the default mode on a runtime without that export. */
     id *common_mode = (id *)dlsym((void *)(intptr_t)-2, "NSRunLoopCommonModes");
@@ -877,6 +1012,7 @@ static void resumed(id self, SEL command, id application) {
     (void)self; (void)command; (void)application;
     clear_contacts();
     last = now();
+    pacing_reset(&render_pacing);
     active = 1; atlas_worker_active(1);
     send_int(display_link, "setPaused:", 0);
 }
@@ -886,6 +1022,11 @@ static void terminated(id self, SEL command, id application) {
     clear_contacts();
     send(display_link, "invalidate");
     atlas_worker_stop();
+}
+
+static void memory_warning(id self, SEL command, id application) {
+    (void)self; (void)command; (void)application;
+    atlas_worker_memory_warning();
 }
 
 void atlas_log(const char *text) {
@@ -916,6 +1057,8 @@ int main(int argc, char **argv) {
     class_addMethod(app_delegate, selector("applicationDidEnterBackground:"), (void (*)(void))inactive, "v@:@");
     class_addMethod(app_delegate, selector("applicationDidBecomeActive:"), (void (*)(void))resumed, "v@:@");
     class_addMethod(app_delegate, selector("applicationWillTerminate:"), (void (*)(void))terminated, "v@:@");
+    class_addMethod(app_delegate, selector("applicationDidReceiveMemoryWarning:"),
+                    (void (*)(void))memory_warning, "v@:@");
     objc_registerClassPair(app_delegate);
     int result = UIApplicationMain(argc, argv, NULL, string("AtlasDelegate"));
     send(pool, "release");
@@ -929,3 +1072,4 @@ unsigned atlas_resident_bytes(void) {
     mach_msg_type_number_t count=TASK_BASIC_INFO_COUNT;
     return task_info(mach_task_self(),TASK_BASIC_INFO,(task_info_t)&info,&count)==KERN_SUCCESS ? (unsigned)info.resident_size : 0;
 }
+#endif /* ATLAS_PACING_HOST_TEST */

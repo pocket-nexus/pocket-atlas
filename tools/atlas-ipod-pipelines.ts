@@ -1,13 +1,16 @@
-import { readFileSync, writeFileSync, readdirSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, readdirSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { writeShadowPipelines } from "./atlas-ipod-shadow";
 import { writeEffects } from "./atlas-ipod-effects";
+import { ldrPostShader } from "./atlas-ipod-post";
+import { globeGradeShader } from "./atlas-ipod-globe";
+import { textureUsage } from "./atlas-ipod-textures";
 import { shader } from "./atlas-ipod-shaders";
 import { PLACES } from "../web/src/places/registry";
 const root = resolve(import.meta.dir, "..");
 function meta(place: string) {
   const b = readFileSync(
-    join(root, `.pocket-build/places/${place}/${place}.place`),
+    join(root, `.pocket-build/ipod/assets/${place}.place`),
   );
   const n = b.readUInt32LE(8);
   for (let i = 0; i < n; i++) {
@@ -120,21 +123,98 @@ function pair(scene: any, d: any, mirror: boolean, tier: number) {
     if (scene.sun) f.SUN = 1;
     if (m.water?.shallow && m.vertex_color) f.SHALLOW = 1;
   }
+  if (tier === 3) {
+    if (m.kind === "products" && d.layout === "static") v.PRODUCTS_CACHED = 1;
+    if (d.layout === "skinned") v.SKIP_ZERO_WEIGHTS = 1;
+    f.ATLAS_LDR = 1;
+    if (d.node == null && d.skin == null) v.STATIC_WORLD = 1;
+    if (m.kind === "glass") {
+      f.LIGHTS = 0;
+      f.LITE = 1;
+    }
+    if (m.kind === "water") {
+      f.LITE = 1;
+      f.DISPLAY_COLOR = 1;
+      f.ATLAS_OUTPUT_LDR = 1;
+      delete v.VISTA;
+    }
+    if (v.VERTEX_LIGHTS) {
+      v.OBJECT_LIGHTS = v.VERTEX_LIGHTS;
+      delete v.VERTEX_LIGHTS;
+    }
+    // Keep baked diffuse, material color, emission and wet reflections. The
+    // throughput profile uses the shared far/lite equations at all distances.
+    if (m.kind === "standard") {
+      f[m.wet ? "LITE" : "FAR"] = 1;
+      if (d.layout === "baked") f.LIGHTS = 0;
+      if (m.fog && !m.interior && !scene.vista_haze) {
+        v.VERTEX_FOG = 1;
+        f.VERTEX_FOG = 1;
+      }
+      if (!scene.rain.active && !scene.fog_lights?.length && !scene.atmosphere.haze_ambient?.some((x: number) => x > 0))
+        f.DEPTH_UNUSED = 1;
+    }
+  }
   return [
     shader(m.kind === "lights" ? "lights_v" : "surface_v", v),
     shader(fragments[m.kind], f),
   ];
 }
+function colorPair(scene: any, d: any, color: { texture: number | null; flags: number; page?: number | null }) {
+  const m = scene.materials[d.material];
+  const v: Record<string, number> = { COLOR: 1, DISPLAY_COLOR: 1 };
+  const f: Record<string, number> = {};
+  const depth = scene.rain.active || scene.fog_lights?.length || scene.atmosphere.haze_ambient?.some((x: number) => x > 0);
+  if (color.page != null) v.FLOAT_VERTEX = 1;
+  if (depth) v.LDR_COLOR = 1;
+  else f.DEPTH_UNUSED = 1;
+  if (d.node == null && d.skin == null) v.STATIC_WORLD = 1;
+  if (d.layout === "skinned") {
+    v.SKINNED = 1;
+    v.SKIP_ZERO_WEIGHTS = 1;
+    v.MAX_BONES = Math.max(scene.skins[d.skin].joints.length, 1);
+  }
+  if (color.texture != null) f.ALBEDO_MAP = 1;
+  if (color.flags & 8) f.EMISSION_MAP = 1;
+  if (color.flags & 16) { f.WET = 1; v.SCREEN = 1; }
+  if (color.flags & 32) {
+    v.DISPLAY_NORMAL = 1;
+    if (!scene.rain.active || Math.max(m.clearcoat, m.drops) <= 0) f.NO_DROPS = 1;
+    f.DISPLAY_COLOR = 1; f.LITE = 1; f.LIGHTS = 0;
+    f.ATLAS_LDR = 1; f.ATLAS_OUTPUT_LDR = 1; f.ATLAS_BLEND = 3;
+  }
+  if (m.alpha_test > 0) f.ALPHA_TEST = 1;
+  if (m.blend !== "opaque") f.BLEND = 1;
+  if (m.blend === "additive") f.ADDITIVE = 1;
+  if (m.blend === "premultiplied") f.PREMULTIPLIED = 1;
+  if (m.fog && !m.interior) {
+    if (scene.vista_haze) f.VISTA = 1;
+    else { if (!(color.flags & 32)) v.VERTEX_FOG = 1; f.FOG = 1; }
+  }
+  return [shader("surface_v", v), shader(color.flags & 32 ? "glass_f" : "color_f", f)];
+}
 for (const place of PLACES.filter((p) => p.status === "live" && p.load)) {
   const m = meta(place.id);
+  const colorPath = join(root, `.pocket-build/ipod/assets/${place.id}.ipod-color.json`);
+  const colors = new Map<number, { texture: number | null; flags: number; page?: number | null }>();
+  if (existsSync(colorPath)) {
+    const color = JSON.parse(readFileSync(colorPath, "utf8"));
+    if (color.version !== 2) throw new Error(`Unsupported display color version: ${place.id}`);
+    for (const draw of color.draws) colors.set(draw.draw, draw);
+  }
   writeShadowPipelines(place.id, m);
-  const pairs = m.draws.map((d: any) =>
+  const pairs = m.draws.map((d: any, i: number) =>
     d.layout === "lights"
       ? null
       : {
+          display_color: colors.has(i),
+          display_float: colors.get(i)?.page != null,
+          display_texture: colors.get(i)?.texture != null,
+          display_flags: colors.get(i)?.flags ?? 0,
           detail: pair(m, d, false, 0),
           far: pair(m, d, false, m.materials[d.material].wet ? 1 : 2),
           reflection: pair(m, d, true, 2),
+          performance: colors.has(i) ? colorPair(m, d, colors.get(i)!) : pair(m, d, false, 3),
         },
   );
   const fixed = {
@@ -145,16 +225,26 @@ for (const place of PLACES.filter((p) => p.status === "live" && p.load)) {
         m.day_sky?.twilight ? { TWILIGHT: 1 } : {},
       ),
     ],
+    sky_performance: [
+      shader("sky_v"),
+      shader(m.day_sky ? "sky_day_f" : "sky_f",
+        { ATLAS_LDR: 1, ...(m.day_sky?.twilight ? { TWILIGHT: 1 } : {}) }),
+    ],
     post: [
       shader("post_v", { GRAIN: 1 }),
       shader("composite_f", { BLOOM: 1, HAZE: 1 }),
     ],
+    post_performance: [shader("post_v", { GRAIN: 1 }), ldrPostShader({ bloom: true, haze: !!m.rain.active || !!m.fog_lights?.length || !!m.atmosphere.haze_ambient?.some((x: number) => x > 0) })],
     blit: [shader("post_v"), shader("blit_f")],
+    copy: [shader("post_v"), shader("blit_f", { PRESERVE_ALPHA: 1 })],
     down: [shader("post_v"), shader("down_f")],
   };
   writeFileSync(
     join(root, `.pocket-build/ipod/assets/${place.id}.pipelines.json`),
-    JSON.stringify({ draws: pairs, ...fixed }),
+    JSON.stringify({ draws: pairs, ...fixed, texture_usage: textureUsage(
+      pairs, fixed.sky_performance,
+      name => readFileSync(join(root, `.pocket-build/ipod/assets/shaders/${name}.glsl`), "utf8"),
+    ) }),
   );
   console.log(place.id, pairs.length);
 }
@@ -176,7 +266,9 @@ writeFileSync(
     marker: [shader("marker_v"), shader("marker_f", { ATLAS_BLEND: 2 })],
     globe: [shader("globe_v"), shader("globe_f")],
     post: [shader("post_v", { GRAIN: 1 }), shader("composite_f")],
+    post_performance: [shader("post_v", { GRAIN: 1 }), globeGradeShader()],
     background: [shader("post_v"), background + "-globe"],
+    blit: [shader("post_v"), shader("blit_f")],
   }),
 );
 
@@ -187,7 +279,9 @@ function visit(value: unknown) {
   if (typeof value === "string") live.add(value + ".glsl");
   else if (Array.isArray(value)) value.forEach(visit);
   else if (value && typeof value === "object")
-    Object.values(value).forEach(visit);
+    Object.entries(value).forEach(([key, child]) => {
+      if (key !== "texture_usage") visit(child); // Metadata repeats program names and adds sampler lists.
+    });
 }
 for (const entry of readdirSync(assetRoot))
   if (

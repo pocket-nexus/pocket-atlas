@@ -4,5 +4,9 @@ uniform sampler2D uSource;
 
 half4 main(float2 vUv : TEXCOORD0) : COLOR
 {
+#ifdef PRESERVE_ALPHA
+    return tex2D(uSource, vUv);
+#else
     return half4(tex2D(uSource, vUv).rgb, 1.0);
+#endif
 }

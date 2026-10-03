@@ -53,6 +53,7 @@ unsafe extern "C" {
     pub fn glBindBuffer(target: GLenum, buffer: GLuint);
     pub fn glBindTexture(target: GLenum, texture: GLuint);
     pub fn glBlendFunc(source: GLenum, destination: GLenum);
+    pub fn glColorMask(red: GLboolean, green: GLboolean, blue: GLboolean, alpha: GLboolean);
     pub fn glBufferData(target: GLenum, size: GLsizeiptr, data: *const c_void, usage: GLenum);
     pub fn glBufferSubData(target: GLenum, offset: isize, size: GLsizeiptr, data: *const c_void);
     pub fn glClear(mask: GLbitfield);
@@ -124,6 +125,7 @@ extern "C" {
 
 extern "C" {
     pub fn glFinish();
+    pub fn glDiscardFramebufferEXT(target: GLenum, count: GLsizei, attachments: *const GLenum);
 }
 extern "C" {
     pub fn glUniform4fv(location: i32, count: i32, data: *const f32);

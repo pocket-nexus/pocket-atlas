@@ -65,6 +65,27 @@ fn catalog_reordering_uses_stable_ids_and_removed_places_fall_back() {
 }
 
 #[test]
+fn legacy_retina_default_migrates_once_without_losing_user_view() {
+    let (directory, store) = fixture("quality-migration");
+    let mut legacy = saved_view();
+    legacy.version = 1;
+    legacy.quality = 1;
+    fs::write(
+        directory.join("pocket-atlas-state.json"),
+        serde_json::to_vec(&legacy).unwrap(),
+    )
+    .unwrap();
+    let migrated = store.load().unwrap().unwrap();
+    legacy.version = UserState::VERSION;
+    legacy.quality = 0;
+    assert_eq!(migrated, legacy);
+    let mut explicit_retina = migrated;
+    explicit_retina.quality = 1;
+    store.save(&explicit_retina).unwrap();
+    assert_eq!(store.load().unwrap().unwrap(), explicit_retina);
+}
+
+#[test]
 fn malformed_future_and_oversized_documents_are_rejected() {
     let (directory, store) = fixture("bad-documents");
     let path = directory.join("pocket-atlas-state.json");

@@ -592,7 +592,15 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some("gles") {
         let argv: Vec<String> = std::env::args().collect();
         let get = |k: &str| argv.iter().position(|x| x == k).and_then(|i| argv.get(i + 1));
-        gles::cook(std::path::Path::new(get("--in").expect("gles --in PATH")), std::path::Path::new(get("--out").expect("gles --out PATH")), get("--tex").and_then(|s| s.parse().ok()).unwrap_or(1024));
+        let input = std::path::Path::new(get("--in").expect("gles --in PATH"));
+        let output = std::path::Path::new(get("--out").expect("gles --out PATH"));
+        let cap = get("--tex").and_then(|s| s.parse().ok()).unwrap_or(1024);
+        if let Some(profile) = get("--geometry") {
+            let profile = gles::GeometryProfile::parse(profile).unwrap_or_else(|e| panic!("{e}"));
+            gles::cook_with_profile(input, output, cap, profile);
+        } else {
+            gles::cook(input, output, cap);
+        }
         return;
     }
     if std::env::args().nth(1).as_deref() == Some("psp") {

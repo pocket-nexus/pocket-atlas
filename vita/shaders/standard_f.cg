@@ -127,6 +127,9 @@ half4 main(
 #ifdef VISTA
     half4 vHaze : TEXCOORD7,
 #endif
+#ifdef VERTEX_FOG
+    half vFog : TEXCOORD6,
+#endif
     float2 vUv : TEXCOORD3) : COLOR
 {
     // World positions, texture coordinates and distances stay float; the
@@ -171,7 +174,11 @@ half4 main(
 #if defined(VISTA)
         color = color * vHaze.a + vHaze.rgb;
 #elif defined(FOG)
+#ifdef VERTEX_FOG
+        color = lerp(color, (half3)uFog.rgb, vFog);
+#else
         color = lerp(color, (half3)uFog.rgb, (half)fogFactor(dist, uFog.w));
+#endif
 #endif
 #ifdef BLEND
         return half4(color, a.a);
@@ -396,11 +403,15 @@ half4 main(
 #if defined(VISTA) && !defined(INTERIOR)
     color = color * vHaze.a + vHaze.rgb;
 #elif defined(FOG) && !defined(INTERIOR)
-    color = lerp(color, (half3)uFog.rgb, (half)fogFactor(dist, uFog.w));
+#ifdef VERTEX_FOG
+        color = lerp(color, (half3)uFog.rgb, vFog);
+#else
+        color = lerp(color, (half3)uFog.rgb, (half)fogFactor(dist, uFog.w));
+#endif
 #endif
 #if defined(BLEND)
     return half4(color, albedo.a);
-#elif defined(REFLECTION)
+#elif defined(REFLECTION) || defined(DEPTH_UNUSED)
     return half4(color, 1.0);
 #else
     return half4(color, (half)dist);

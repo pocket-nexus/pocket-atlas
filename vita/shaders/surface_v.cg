@@ -16,10 +16,19 @@
 #include "vista.cgh"
 #endif
 
+// The display profile requests only the attributes its fragment stage uses.
+#if !defined(DISPLAY_COLOR) || defined(DISPLAY_NORMAL)
+#define SURFACE_NORMAL 1
+#endif
+
 void main(
     float4 aPosition,
+#ifdef SURFACE_NORMAL
     float4 aNormal,
+#endif
+#ifndef DISPLAY_COLOR
     float4 aTangent,
+#endif
     float2 aUv,
     float4 aColor,
 #ifdef SKINNED
@@ -27,8 +36,16 @@ void main(
     float4 aWeights,
     uniform float4 uBones[3 * MAX_BONES],
 #endif
+#ifdef PRODUCTS_CACHED
+    float2 aLight, // CPU-prepared package coordinates on static product vertices
+#endif
 #if defined(BAKED) && !defined(FLAT)
     float4 aLight,
+    out half3 oLight : TEXCOORD5,
+#endif
+#if defined(OBJECT_LIGHTS) && !defined(FLAT)
+    uniform float4 uObjectLightDir[OBJECT_LIGHTS],
+    uniform float4 uObjectLightCol[OBJECT_LIGHTS],
     out half3 oLight : TEXCOORD5,
 #endif
 #if defined(VERTEX_LIGHTS) && !defined(FLAT)
@@ -40,23 +57,39 @@ void main(
     out half3 oLight : TEXCOORD5,
 #endif
     uniform float4 uModel[3],
+#ifdef STATIC_WORLD
+    uniform float4 uWorldScale, // identity, or reflected Y for static geometry
+#endif
+#ifndef FLOAT_VERTEX
     uniform float4 uDequant[2],
+#endif
     uniform float4x4 uViewProj,
     uniform float4 uUv,
 #ifdef WAVES
     uniform float4 uWave[2], // repeats per metre, -, offset
     out float2 oUv2 : TEXCOORD6,
 #endif
-#if defined(VISTA) && !defined(FLAT)
+#if (defined(VISTA) && !defined(FLAT)) || defined(VERTEX_FOG) || defined(LDR_COLOR)
     uniform float4 uEye,
+#endif
+#if defined(VISTA) && !defined(FLAT)
     out half4 oHaze : TEXCOORD7,
+#endif
+#ifdef VERTEX_FOG
+    uniform float4 uFog,
+    out half oFog : TEXCOORD6,
+#endif
+#ifdef LDR_COLOR
+    out half oDepth : TEXCOORD5,
 #endif
 #ifdef PRODUCTS
     out float2 oPackage : TEXCOORD6,
 #endif
     out float4 oPosition : POSITION,
 #ifndef FLAT
+#ifdef SURFACE_NORMAL
     out half3 oNormal : TEXCOORD1,
+#endif
     out float2 oUv : TEXCOORD3,
 #ifdef TANGENT
     out half4 oTangent : TEXCOORD2,
@@ -70,34 +103,87 @@ void main(
 #endif
     out float3 oWorld : TEXCOORD0)
 {
+#ifdef FLOAT_VERTEX
+    float4 local = float4(aPosition.xyz, 1.0);
+#else
     float4 local = float4(aPosition.xyz * uDequant[0].xyz + uDequant[1].xyz, 1.0);
+#endif
+#ifdef SURFACE_NORMAL
     float3 n = aNormal.xyz;
+#endif
+#ifndef DISPLAY_COLOR
     float3 t = aTangent.xyz;
+#endif
 #ifdef SKINNED
     float3 sp = 0.0;
+#ifdef SURFACE_NORMAL
     float3 sn = 0.0;
+#endif
+#ifndef DISPLAY_COLOR
     float3 st = 0.0;
+#endif
     for (int k = 0; k < 4; k++) {
-        int j = (int)aJoints[k] * 3;
         float w = aWeights[k];
+#ifdef SKIP_ZERO_WEIGHTS
+        // The throughput profile keeps every nonzero influence. Zero-weight
+        // slots need no bone fetch or transform on the legacy mobile GPU.
+        if (w > 0.0) {
+#endif
+        int j = (int)aJoints[k] * 3;
         float4 r0 = uBones[j];
         float4 r1 = uBones[j + 1];
         float4 r2 = uBones[j + 2];
         sp += w * float3(dot(r0, local), dot(r1, local), dot(r2, local));
+#ifdef SURFACE_NORMAL
         sn += w * float3(dot(r0.xyz, n), dot(r1.xyz, n), dot(r2.xyz, n));
+#endif
+#ifndef DISPLAY_COLOR
         st += w * float3(dot(r0.xyz, t), dot(r1.xyz, t), dot(r2.xyz, t));
+#endif
+#ifdef SKIP_ZERO_WEIGHTS
+        }
+#endif
     }
     local = float4(sp, 1.0);
+#ifdef SURFACE_NORMAL
     n = sn;
+#endif
+#ifndef DISPLAY_COLOR
     t = st;
 #endif
+#endif
+#ifdef STATIC_WORLD
+    float3 world = local.xyz * uWorldScale.xyz;
+#ifdef SURFACE_NORMAL
+    n *= uWorldScale.xyz;
+#endif
+#ifndef DISPLAY_COLOR
+    t *= uWorldScale.xyz;
+#endif
+#else
     float3 world = float3(dot(uModel[0], local), dot(uModel[1], local), dot(uModel[2], local));
+#ifdef SURFACE_NORMAL
     n = float3(dot(uModel[0].xyz, n), dot(uModel[1].xyz, n), dot(uModel[2].xyz, n));
+#endif
+#ifndef DISPLAY_COLOR
     t = float3(dot(uModel[0].xyz, t), dot(uModel[1].xyz, t), dot(uModel[2].xyz, t));
+#endif
+#endif
     float4 clipPos = mul(uViewProj, float4(world, 1.0));
     oPosition = clipPos;
     oWorld = world;
+#ifdef LDR_COLOR
+    oDepth = (half)(1.0 / (1.0 + length(world - uEye.xyz) / 32.0));
+#endif
+#ifdef VERTEX_FOG
+    float3 fogDelta = world - uEye.xyz;
+    float fogDistance2 = dot(fogDelta, fogDelta) * (uFog.w * uFog.w);
+    oFog = (half)(1.0 - exp(-fogDistance2));
+#endif
 #ifdef PRODUCTS
+#ifdef PRODUCTS_CACHED
+    oPackage = aLight;
+#else
     // Instance colour is constant over each product. Choose the package once
     // per vertex: interpolator rounding must not perturb a fragment hash.
     float3 seed = floor(aColor.rgb * 255.0 + 0.5) / 255.0;
@@ -107,8 +193,11 @@ void main(
     float band = floor(frac(sin((runSeed * 0.71 + 7.0) * 12.9898) * 43758.5453) * 8.0);
     oPackage = float2(h1, band);
 #endif
+#endif
 #ifndef FLAT
+#ifdef SURFACE_NORMAL
     oNormal = (half3)normalize(n);
+#endif
 #ifdef WAVES
     oUv = world.xz * uWave[0].x + uWave[0].zw;
     oUv2 = world.xz * uWave[1].x + uWave[1].zw;
@@ -157,4 +246,14 @@ void main(
         oLight = (half3)(acc * 0.31830989);
     }
 #endif
+#if defined(OBJECT_LIGHTS) && !defined(FLAT)
+    // A distant moving mesh samples attenuation at its bounds centre. Keep
+    // directional Lambert shading per vertex without repeating range/spot
+    // and rectangular-emitter closest-point work for every vertex.
+    half3 objectLight = 0.0;
+    for (int i = 0; i < OBJECT_LIGHTS; i++)
+        objectLight += (half3)uObjectLightCol[i].rgb * saturate(dot((half3)normalize(n), (half3)uObjectLightDir[i].xyz));
+    oLight = objectLight;
+#endif
+
 }

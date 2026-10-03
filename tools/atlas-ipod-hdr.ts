@@ -42,15 +42,18 @@ export function hdrFragment(
       ")" +
       source.slice(end);
   const final =
-    name === "composite_f" || name === "blit_f" || name.startsWith("shadow");
+    name === "composite_f" || name === "color_f" || name === "blit_f" || name.startsWith("shadow");
   const codec = `
 highp vec4 atlasDecode(highp vec4 c) {
- highp vec3 q=c.rgb*c.rgb;
- return vec4(q / max(vec3(1.0)-q,vec3(1.0/255.0)), exp2(c.a*16.0)-1.0);
+ mediump vec3 rgb=c.rgb;
+ mediump vec3 q=rgb*rgb;
+ mediump vec3 radiance=q / max(vec3(1.0)-q,vec3(1.0/255.0));
+ return vec4(radiance, exp2(c.a*16.0)-1.0);
 }
 highp vec4 atlasEncode(highp vec4 c) {
- highp vec3 rgb=clamp(c.rgb,vec3(0.0),vec3(126.0));
- return vec4(sqrt(rgb/(vec3(1.0)+rgb)), clamp(log2(1.0+max(c.a,0.0))/16.0,0.0,1.0));
+ mediump vec3 rgb=clamp(c.rgb,vec3(0.0),vec3(126.0));
+ mediump vec3 encoded=sqrt(rgb/(vec3(1.0)+rgb));
+ return vec4(encoded, clamp(log2(1.0+max(c.a,0.0))/16.0,0.0,1.0));
 }
 `;
   const start = source.indexOf("void main(");
@@ -66,6 +69,32 @@ highp vec4 atlasEncode(highp vec4 c) {
         : name === "lights_f" || name === "tower_f"
           ? 2
           : 0);
+    if (defines.ATLAS_LDR) {
+      source = source.replace("void main(", "void atlasMaterial(")
+        .replace(/gl_FragData\[0\]/g, "atlasColor")
+        .replace("void atlasMaterial(", "highp vec4 atlasColor;\nvoid atlasMaterial(");
+      if (defines.ATLAS_OUTPUT_LDR)
+        return source + `\nvoid main() { atlasMaterial(); gl_FragColor=vec4(atlasColor.rgb,${mode === 0 ? "1.0/(1.0+max(atlasColor.a,0.0)/32.0)" : "clamp(atlasColor.a,0.0,1.0)"}); }\n`;
+      return source + `
+uniform mediump sampler2D uAtlasLut;
+uniform mediump vec4 uAtlasBlack;
+mediump vec3 atlasDisplay(highp vec3 c) {
+ mediump vec3 cell=sqrt(max(c,vec3(0.0))/(1.0+max(c,vec3(0.0))))*15.0;
+ mediump float b=floor(cell.b);
+ mediump vec2 uv=vec2((b*16.0+cell.r+0.5)/256.0,(cell.g+0.5)/16.0);
+ return mix(texture2D(uAtlasLut,uv).rgb,
+   texture2D(uAtlasLut,uv+vec2(min(b+1.0,15.0)-b,0.0)/16.0).rgb,cell.b-b);
+}
+void main() {
+ atlasMaterial();
+ ${mode === 3 ? "mediump float a=clamp(atlasColor.a,0.0,1.0); gl_FragColor=vec4(atlasDisplay(atlasColor.rgb/max(a,0.001))*a,a);" :
+  mode === 0 ? "gl_FragColor=vec4(atlasDisplay(atlasColor.rgb),1.0/(1.0+max(atlasColor.a,0.0)/32.0));" :
+  mode === 2 && defines.ATLAS_COVERAGE ? "mediump float a=max(atlasColor.a,0.0); gl_FragColor=vec4(max(atlasDisplay(atlasColor.rgb/max(a,0.001))-uAtlasBlack.rgb,0.0)*a,a);" :
+  mode === 2 ? "gl_FragColor=vec4(max(atlasDisplay(atlasColor.rgb)-uAtlasBlack.rgb,0.0),0.0);" :
+  "gl_FragColor=vec4(atlasDisplay(atlasColor.rgb),clamp(atlasColor.a,0.0,1.0));"}
+}
+`;
+    }
     if (mode !== 0)
       source = source.replace(
         "#version 100",
@@ -84,7 +113,7 @@ highp vec4 atlasEncode(highp vec4 c) {
  ${mode === 0 ? "/* Opaque: no framebuffer fetch or hidden surface dependency. */" : ""}
  ${mode === 0 ? "/*" : ""}
  {
-  highp vec4 dst=atlasDecode(gl_LastFragData[0]);
+  highp vec4 dst=atlasDecode(vec4(gl_LastFragData[0].rgb,0.0));
   highp float a=clamp(result.a,0.0,1.0);
   if(${mode}.0<1.5) result.rgb=result.rgb*a+dst.rgb*(1.0-a);
   else if(${mode}.0<2.5) result.rgb+=dst.rgb;
@@ -93,6 +122,7 @@ highp vec4 atlasEncode(highp vec4 c) {
  }
  ${mode === 0 ? "*/" : ""}
  gl_FragColor=atlasEncode(result);
+ ${mode === 0 ? "" : "gl_FragColor.a=gl_LastFragData[0].a;"}
 }\n`;
   }
   return source;

@@ -4,7 +4,7 @@ use alloc::{ffi::CString, format, string::String, vec};
 use core::ffi::{c_char, c_void};
 use serde::{Deserialize, Serialize};
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const MAX_BYTES: usize = 4096;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -138,8 +138,17 @@ impl Store {
         if length > MAX_BYTES {
             return Err("user state is too large");
         }
-        let state: UserState =
+        let mut state: UserState =
             serde_json::from_slice(&bytes[..length]).map_err(|_| "invalid user state JSON")?;
+        // Version 1 launched in full Retina by default. Its schema did not
+        // distinguish that default from a choice, so migrate only that quality
+        // value once, leaving the user's complete view and other settings intact.
+        if state.version == 1 {
+            state.version = VERSION;
+            if state.quality == 1 {
+                state.quality = 0;
+            }
+        }
         state.validate()?;
         Ok(Some(state))
     }

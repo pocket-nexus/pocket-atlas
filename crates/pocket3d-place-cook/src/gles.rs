@@ -1,5 +1,5 @@
-//! GLES texture adaptation. Geometry, materials and animation retain the
-//! common PLCE contract; iOS cannot sample the Vita's BC texture formats.
+//! GLES texture adaptation and bounded-error static vertex sharing. Materials,
+//! draw identities and animation retain the common PLCE contract.
 //!
 //! The common cooker stops each mip dimension at four texels. GLES continues
 //! to one, so narrow mip tails must be resampled rather than cropped. Authored
@@ -8,6 +8,16 @@
 use pocket3d_place as pc;
 use serde_json::value::RawValue;
 use std::{collections::BTreeMap, ops::Range, path::Path};
+
+#[path = "gles_clusters.rs"]
+mod gles_clusters;
+#[path = "gles_colors.rs"]
+mod gles_colors;
+#[path = "gles_geometry.rs"]
+mod gles_geometry;
+#[path = "gles_materials.rs"]
+mod gles_materials;
+pub use gles_geometry::Profile as GeometryProfile;
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -18,20 +28,44 @@ struct Adapted {
     geometry_bytes: usize,
     animation_bytes: usize,
     largest_texture: usize,
+    geometry_pages: usize,
+    shared_draws: usize,
+    position_error: f32,
+    uv_error_texels: f32,
+    tint_materials: usize,
+    tint_draws: usize,
+    tint_linear_error: f32,
+    tint_display_error: f32,
 }
 
 pub fn cook(input: &Path, output: &Path, cap: u32) {
+    cook_with_profile(input, output, cap, GeometryProfile::Balanced);
+}
+
+pub fn cook_with_profile(input: &Path, output: &Path, cap: u32, profile: GeometryProfile) {
     let source = std::fs::read(input).expect("source place");
-    let out = adapt(&source, cap).unwrap_or_else(|e| panic!("GLES adaptation: {e}"));
+    let out = adapt_with_profile(&source, cap, profile)
+        .unwrap_or_else(|e| panic!("GLES adaptation: {e}"));
     if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).expect("output directory");
     }
     std::fs::write(output, &out.bytes).expect("write GLES place");
+    gles_colors::write(&out.bytes, output).expect("write optional GLES colors");
+    gles_clusters::write(&out.bytes, output).expect("write optional GLES clusters");
     let mib = |n: usize| n as f64 / 1048576.0;
     println!(
         "GLES place: {} bytes, {} textures, texture cap {cap}",
         out.bytes.len(),
         out.texture_count
+    );
+    println!("  geometry {}", profile.description());
+    println!(
+        "  {} static vertex pages shared by {} draws; max re-encoding error {:.6} m / {:.5} adapted texels",
+        out.geometry_pages, out.shared_draws, out.position_error, out.uv_error_texels
+    );
+    println!(
+        "  {} canonical tint materials / {} draws; max base-color error {:.6} linear / {:.4} sRGB byte levels",
+        out.tint_materials, out.tint_draws, out.tint_linear_error, out.tint_display_error * 255.0
     );
     println!(
         "  texture payload {:.2} MiB + geometry {:.2} MiB; animation {:.2} MiB; largest texture upload {:.2} MiB",
@@ -41,7 +75,12 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
     // render targets, decoded JSON and the OS also occupy the shared RAM.
 }
 
+#[cfg(test)]
 fn adapt(source: &[u8], cap: u32) -> Result<Adapted> {
+    adapt_with_profile(source, cap, GeometryProfile::Balanced)
+}
+
+fn adapt_with_profile(source: &[u8], cap: u32, profile: GeometryProfile) -> Result<Adapted> {
     if cap == 0 {
         return Err("texture cap must be positive".into());
     }
@@ -74,8 +113,9 @@ fn adapt(source: &[u8], cap: u32) -> Result<Adapted> {
     if meta.version != pc::VERSION {
         return Err(format!("unsupported metadata version {}", meta.version));
     }
-    // Keep unrecognised metadata and sections, too. Only the five texture
-    // representation fields change; material references and all tracks remain.
+    // Keep unrecognised metadata and sections, too. Texture representation and
+    // eligible geometry ranges change. Throughput may append tint materials;
+    // original material entries and animation tracks remain byte-for-byte.
     let mut json: BTreeMap<String, Box<RawValue>> =
         serde_json::from_slice(pack.section(pc::TAG_META).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
@@ -83,10 +123,53 @@ fn adapt(source: &[u8], cap: u32) -> Result<Adapted> {
         serde_json::from_str(json.get("textures").ok_or("missing texture table")?.get())
             .map_err(|e| e.to_string())?;
     let blob = pack.section(pc::TAG_TEXTURES).map_err(|e| e.to_string())?;
-    let geometry_bytes = pack
-        .section(pc::TAG_GEOMETRY)
-        .map_err(|e| e.to_string())?
-        .len();
+    let geometry = pack.section(pc::TAG_GEOMETRY).map_err(|e| e.to_string())?;
+    let draw_json: Vec<Box<RawValue>> =
+        serde_json::from_str(json.get("draws").ok_or("missing draw table")?.get())
+            .map_err(|e| e.to_string())?;
+    let material_json: Vec<Box<RawValue>> =
+        serde_json::from_str(json.get("materials").ok_or("missing material table")?.get())
+            .map_err(|e| e.to_string())?;
+    let tinted = if profile == GeometryProfile::Throughput {
+        gles_materials::adapt(&meta, &material_json, &draw_json, geometry)?
+    } else {
+        None
+    };
+    if let Some(tinted) = &tinted {
+        json.insert(
+            "materials".into(),
+            serde_json::value::to_raw_value(&tinted.materials).map_err(|e| e.to_string())?,
+        );
+        json.insert(
+            "draws".into(),
+            serde_json::value::to_raw_value(&tinted.draws).map_err(|e| e.to_string())?,
+        );
+    }
+    let geometry = tinted
+        .as_ref()
+        .map(|t| t.geometry.as_slice())
+        .unwrap_or(geometry);
+    let batched = gles_geometry::adapt_with_profile(
+        tinted.as_ref().map(|t| &t.meta).unwrap_or(&meta),
+        tinted
+            .as_ref()
+            .map(|t| t.draws.as_slice())
+            .unwrap_or(&draw_json),
+        geometry,
+        cap,
+        profile,
+    )?;
+    if let Some(batched) = &batched {
+        json.insert(
+            "draws".into(),
+            serde_json::value::to_raw_value(&batched.draws).map_err(|e| e.to_string())?,
+        );
+    }
+    let geometry = batched
+        .as_ref()
+        .map(|b| b.bytes.as_slice())
+        .unwrap_or(geometry);
+    let geometry_bytes = geometry.len();
     let animation_bytes = pack
         .section(pc::TAG_ANIMATION)
         .map_err(|e| e.to_string())?
@@ -127,6 +210,7 @@ fn adapt(source: &[u8], cap: u32) -> Result<Adapted> {
             let data = match s.tag {
                 pc::TAG_META => json.as_slice(),
                 pc::TAG_TEXTURES => pixels.as_slice(),
+                pc::TAG_GEOMETRY => geometry,
                 _ => &source[s.offset as usize..s.offset as usize + s.size as usize],
             };
             (s.tag, data, s.align)
@@ -151,6 +235,14 @@ fn adapt(source: &[u8], cap: u32) -> Result<Adapted> {
         geometry_bytes,
         animation_bytes,
         largest_texture,
+        geometry_pages: batched.as_ref().map_or(0, |b| b.pages),
+        shared_draws: batched.as_ref().map_or(0, |b| b.shared_draws),
+        position_error: batched.as_ref().map_or(0.0, |b| b.position_error),
+        uv_error_texels: batched.as_ref().map_or(0.0, |b| b.uv_error_texels),
+        tint_materials: tinted.as_ref().map_or(0, |t| t.canonical_materials),
+        tint_draws: tinted.as_ref().map_or(0, |t| t.folded_draws),
+        tint_linear_error: tinted.as_ref().map_or(0.0, |t| t.linear_error),
+        tint_display_error: tinted.as_ref().map_or(0.0, |t| t.display_error),
     })
 }
 
@@ -647,7 +739,7 @@ mod tests {
             .contains("non-finite"));
     }
 
-    fn fixture(texture: &pc::Texture) -> serde_json::Value {
+    pub(super) fn fixture(texture: &pc::Texture) -> serde_json::Value {
         json!({
             "version": pc::VERSION, "name": "Full loop fixture", "kind": "night-street",
             "min": [-1,-2,-3], "max": [4,5,6], "textures": [texture], "materials": [],

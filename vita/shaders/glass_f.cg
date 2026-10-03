@@ -12,6 +12,12 @@
 
 uniform sampler2D uEnv;
 uniform sampler2D uBeads;
+#ifdef DISPLAY_COLOR
+uniform sampler2D uDisplayEnv;
+uniform half4 uDisplayFog;
+uniform half4 uDisplayHaze;
+uniform half4 uAtlasBlack;
+#endif
 uniform float4 uBase;     // linear tint, opacity
 uniform float4 uPbr;      // roughness, metalness, -, -
 uniform float4 uEnvK;     // env intensity, drops, -, rain
@@ -29,10 +35,13 @@ uniform float4 uLightUp[LIGHTS];
 
 half4 main(
     float3 vWorld : TEXCOORD0,
+#ifdef DISPLAY_COLOR
+    half4 vColor : COLOR0,
+#endif
 #ifdef BAKED
     half3 vLight : TEXCOORD5,
 #endif
-#ifdef VISTA
+#if defined(VISTA) && !defined(DISPLAY_COLOR)
     half4 vHaze : TEXCOORD7,
 #endif
     half3 vNormal : TEXCOORD1) : COLOR
@@ -44,6 +53,7 @@ half4 main(
     if (dot(N, V) < 0.0) N = -N;
 
     half drop = 0.0;
+#ifndef NO_DROPS
 #if defined(LITE) || defined(FAR)
     {
         float2 guv = abs(N.x) > abs(N.z) ? vWorld.zy : vWorld.xy;
@@ -65,6 +75,21 @@ half4 main(
     }
 #endif
 
+#endif // NO_DROPS
+
+#ifdef DISPLAY_COLOR
+    half k = (half)1.0 - saturate(dot(N, V));
+    half fresnel = (half)0.04 + (half)0.96 * k * k * k * k;
+    half3 radiance = max(tex2D(uDisplayEnv, octUv((float3)reflect(-V, N))).rgb - uAtlasBlack.rgb, (half)0.0);
+    half cover = saturate((half)uBase.a + drop * (half)0.12);
+    half3 color = vColor.rgb * cover + radiance * (fresnel * ((half)1.0 + drop * (half)0.6));
+#if defined(VISTA)
+    color = lerp(uDisplayHaze.rgb * cover, color, uDisplayHaze.a);
+#elif defined(FOG)
+    color = lerp(color, uDisplayFog.rgb * cover, (half)fogFactor(dist, uFog.w));
+#endif
+    return half4(color, cover);
+#else
     half roughness = max((half)uPbr.x, (half)0.0525);
     float alpha = roughness * roughness;
     half3 diffuseColor = (half3)uBase.rgb;
@@ -119,4 +144,5 @@ half4 main(
     color = lerp(color, (half3)uFog.rgb * cover, f);
 #endif
     return half4(color, cover);
+#endif
 }

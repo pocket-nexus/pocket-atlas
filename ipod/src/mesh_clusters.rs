@@ -1,0 +1,1121 @@
+//! Optional original-LOD selection per complete connected-part group.
+//! IPCL v2: 56-byte header, draw pairs, 32-byte groups, 12-byte levels,
+//! 32-byte clusters and u16 indices. No PLCE geometry or error is replaced.
+extern crate alloc;
+use self::alloc::{string::String, sync::Arc, vec::Vec};
+use pocket3d_place as pc;
+const HEADER: usize = 56;
+pub fn hash(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf29ce484222325u64, |h, &b| {
+        (h ^ b as u64).wrapping_mul(0x100000001b3)
+    })
+}
+fn u32_at(bytes: &[u8], at: usize) -> Result<u32, String> {
+    Ok(u32::from_le_bytes(
+        bytes
+            .get(at..at + 4)
+            .ok_or("truncated clusters")?
+            .try_into()
+            .unwrap(),
+    ))
+}
+fn u64_at(bytes: &[u8], at: usize) -> Result<u64, String> {
+    Ok(u64::from_le_bytes(
+        bytes
+            .get(at..at + 8)
+            .ok_or("truncated clusters")?
+            .try_into()
+            .unwrap(),
+    ))
+}
+fn span(first: u32, count: u32, length: usize) -> Result<core::ops::Range<usize>, String> {
+    let end = first.checked_add(count).ok_or("cluster range overflow")? as usize;
+    if end > length {
+        return Err("cluster range outside payload".into());
+    }
+    Ok(first as usize..end)
+}
+fn reserve<T>(n: usize) -> Result<Vec<T>, String> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(n)
+        .map_err(|_| "cluster allocation failed")?;
+    Ok(v)
+}
+pub fn eligible(meta: &pc::Meta, d: &pc::Draw) -> bool {
+    d.layout == pc::VertexLayout::Baked
+        && d.node.is_none()
+        && d.skin.is_none()
+        && meta.materials.get(d.material as usize).is_some_and(|m| {
+            m.kind == pc::Kind::Standard && m.blend == pc::Blend::Opaque && m.depth_write
+        })
+}
+fn budget(meta: &pc::Meta) -> Result<[usize; 5], String> {
+    let mut sizes = [meta.draws.len(), 0, 0, 0, 0];
+    for d in meta.draws.iter().filter(|d| eligible(meta, d)) {
+        let groups = d.index_count as usize / 3;
+        sizes[1] = sizes[1]
+            .checked_add(groups)
+            .ok_or("group budget overflow")?;
+        sizes[2] = sizes[2]
+            .checked_add(
+                groups
+                    .checked_mul(d.lods.len() + 1)
+                    .ok_or("level budget overflow")?,
+            )
+            .ok_or("level budget overflow")?;
+        for n in core::iter::once(d.index_count).chain(d.lods.iter().map(|l| l.index_count)) {
+            sizes[3] = sizes[3]
+                .checked_add(n as usize / 3)
+                .ok_or("cluster budget overflow")?;
+            sizes[4] = sizes[4]
+                .checked_add(n as usize)
+                .ok_or("index budget overflow")?;
+        }
+    }
+    Ok(sizes)
+}
+fn file_bytes(sizes: [usize; 5]) -> Result<usize, String> {
+    sizes
+        .into_iter()
+        .zip([8usize, 32, 12, 32, 2])
+        .try_fold(HEADER, |sum, (n, stride)| {
+            n.checked_mul(stride).and_then(|v| sum.checked_add(v))
+        })
+        .ok_or_else(|| "cluster file budget overflow".into())
+}
+pub fn max_file_bytes(meta: &pc::Meta) -> Result<usize, String> {
+    file_bytes(budget(meta)?)
+}
+#[derive(Clone, Copy)]
+pub struct Cluster {
+    first: u32,
+    count: u32,
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+}
+pub struct Level {
+    pub error: f32,
+    first: u32,
+    count: u32,
+}
+pub struct Group {
+    first: u32,
+    count: u32,
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+}
+/// One view shared by all draw queries in a pass. Plane dot arithmetic matches
+/// the renderer's original AABB test; reflected passes supply reflected planes.
+pub struct Query {
+    planes: [[f32; 4]; 6],
+    eye: glam::Vec3,
+    scale: f32,
+    scale_squared: f32,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct QueryKey {
+    planes: [[u32; 4]; 6],
+    eye: [u32; 3],
+    scale: u32,
+}
+impl Query {
+    pub fn new(planes: [[f32; 4]; 6], eye: [f32; 3], lod_scale: f32) -> Self {
+        Self {
+            planes,
+            eye: glam::Vec3::from(eye),
+            scale: lod_scale,
+            scale_squared: lod_scale * lod_scale,
+        }
+    }
+    fn key(&self) -> QueryKey {
+        QueryKey {
+            planes: self.planes.map(|p| p.map(f32::to_bits)),
+            eye: self.eye.to_array().map(f32::to_bits),
+            scale: self.scale.to_bits(),
+        }
+    }
+    #[inline]
+    fn plane(&self, k: usize, lo: [f32; 3], hi: [f32; 3], positive: bool) -> f32 {
+        let p = self.planes[k];
+        glam::Vec3::new(p[0], p[1], p[2]).dot(glam::Vec3::new(
+            if (p[0] >= 0.0) == positive {
+                hi[0]
+            } else {
+                lo[0]
+            },
+            if (p[1] >= 0.0) == positive {
+                hi[1]
+            } else {
+                lo[1]
+            },
+            if (p[2] >= 0.0) == positive {
+                hi[2]
+            } else {
+                lo[2]
+            },
+        )) + p[3]
+    }
+    /// Remaining intersecting planes; None means outside. A parent that is
+    /// wholly inside a plane makes all descendants' tests for it redundant.
+    fn classify(&self, lo: [f32; 3], hi: [f32; 3], mut mask: u8) -> Option<u8> {
+        for k in 0..6 {
+            if mask & (1 << k) == 0 {
+                continue;
+            }
+            if !(self.plane(k, lo, hi, true) >= 0.0) {
+                return None;
+            }
+            if self.plane(k, lo, hi, false) >= 0.0 {
+                mask &= !(1 << k);
+            }
+        }
+        Some(mask)
+    }
+    #[inline]
+    fn visible(&self, lo: [f32; 3], hi: [f32; 3], mask: u8) -> bool {
+        (0..6).all(|k| mask & (1 << k) == 0 || self.plane(k, lo, hi, true) >= 0.0)
+    }
+    fn level(&self, group: &Group, levels: &[Level]) -> usize {
+        if levels.len() == 1 {
+            return 0;
+        }
+        let nearest = self
+            .eye
+            .clamp(glam::Vec3::from(group.min), glam::Vec3::from(group.max));
+        let distance_squared = self.eye.distance_squared(nearest).max(1.0);
+        let threshold = distance_squared * self.scale_squared;
+        for (i, level) in levels.iter().enumerate().skip(1).rev() {
+            let error = level.error * level.error;
+            // Squaring avoids libm sqrt for ordinary comparisons. Around a
+            // rounding boundary (or overflow/underflow) use the exact previous
+            // expression, retaining strict `<` and its level selection.
+            let margin = error.abs().max(threshold.abs()) * (32.0 * f32::EPSILON);
+            if self.scale > 0.0
+                && self.scale_squared.is_normal()
+                && (error.is_normal() || level.error == 0.0)
+                && threshold.is_normal()
+                && (error - threshold).abs() > margin
+            {
+                if error < threshold {
+                    return i;
+                }
+            } else {
+                let tolerance = self.eye.distance(nearest).max(1.0) * self.scale;
+                return levels
+                    .iter()
+                    .rposition(|l| l.error < tolerance)
+                    .unwrap_or(0);
+            }
+        }
+        0
+    }
+}
+struct QueryNode {
+    min: [f32; 3],
+    max: [f32; 3],
+    /// Original contiguous group range, never a spatial reorder.
+    first: u32,
+    count: u32,
+    /// Left is the next node; MAX denotes a leaf of at most four groups.
+    right: u32,
+}
+pub struct MeshClusters {
+    draws: Vec<(u32, u32)>,
+    groups: Vec<Group>,
+    levels: Vec<Level>,
+    clusters: Vec<Cluster>,
+    indices: Vec<u16>,
+    query_roots: Vec<u32>,
+    query_nodes: Vec<QueryNode>,
+    // A cache retains this token, so a dropped mesh's address cannot be reused
+    // to produce a false identity match. Tokens never identify asset contents.
+    query_identity: Arc<()>,
+}
+#[derive(Clone, Copy)]
+struct SelectedCluster {
+    group: u32,
+    level: u32,
+    ordinal: u32,
+    index: u32,
+}
+#[derive(Default)]
+struct CachedDraw {
+    generation: u64,
+    selected: Vec<SelectedCluster>,
+    max_selected: usize,
+}
+/// Renderer-owned, per-pass cache for immutable IPCL geometry. Every exact
+/// view change invalidates entries lazily; their capacities survive movement.
+/// A distinct mesh instance always invalidates and releases the old entries.
+#[derive(Default)]
+pub struct QueryCache {
+    identity: Option<Arc<()>>,
+    key: Option<QueryKey>,
+    generation: u64,
+    draws: Vec<CachedDraw>,
+    #[cfg(test)]
+    evaluations: usize,
+}
+impl QueryCache {
+    pub fn query(
+        &mut self,
+        mesh: &MeshClusters,
+        draw: usize,
+        view: &Query,
+        mut emit: impl FnMut(u32, u32, u32, Cluster),
+    ) -> bool {
+        let Some(groups) = mesh.groups(draw) else {
+            return false;
+        };
+        if !self
+            .identity
+            .as_ref()
+            .is_some_and(|id| Arc::ptr_eq(id, &mesh.query_identity))
+        {
+            // Reclaim the previous scene before allocating a replacement.
+            self.draws = Vec::new();
+            self.identity = None;
+            self.key = None;
+            self.generation = 0;
+            if self.draws.try_reserve_exact(mesh.draws.len()).is_err() {
+                return mesh.query(draw, view, emit);
+            }
+            self.draws
+                .resize_with(mesh.draws.len(), CachedDraw::default);
+            self.identity = Some(Arc::clone(&mesh.query_identity));
+        }
+        let key = view.key();
+        if self.key != Some(key) {
+            self.key = Some(key);
+            self.generation = self.generation.wrapping_add(1);
+            if self.generation == 0 {
+                for cached in &mut self.draws {
+                    cached.generation = 0;
+                }
+                self.generation = 1;
+            }
+        }
+        let cached = &mut self.draws[draw];
+        if cached.generation != self.generation {
+            cached.selected.clear();
+            // At most one level is selected per group. Reserving this exact
+            // immutable maximum prevents geometric capacity growth over time.
+            // Across draws this is <= the sidecar's total cluster count.
+            if cached.max_selected == 0 {
+                cached.max_selected = groups
+                    .iter()
+                    .map(|g| {
+                        mesh.levels(g)
+                            .iter()
+                            .map(|l| l.count as usize)
+                            .max()
+                            .unwrap_or(0)
+                    })
+                    .sum();
+            }
+            if cached
+                .selected
+                .try_reserve_exact(cached.max_selected)
+                .is_err()
+            {
+                return mesh.query(draw, view, emit);
+            }
+            #[cfg(test)]
+            {
+                self.evaluations += 1;
+            }
+            mesh.query(draw, view, |group, level, ordinal, _| {
+                let index = mesh.levels(&groups[group as usize])[level as usize].first + ordinal;
+                cached.selected.push(SelectedCluster {
+                    group,
+                    level,
+                    ordinal,
+                    index,
+                });
+            });
+            cached.generation = self.generation;
+        }
+        for c in &cached.selected {
+            emit(c.group, c.level, c.ordinal, mesh.clusters[c.index as usize]);
+        }
+        true
+    }
+    /// Additional retained CPU allocation; shared mesh/token storage is counted
+    /// by MeshClusters. No GL objects or source geometry are held by this cache.
+    pub fn bytes(&self) -> usize {
+        self.draws.capacity() * core::mem::size_of::<CachedDraw>()
+            + self
+                .draws
+                .iter()
+                .map(|d| d.selected.capacity() * core::mem::size_of::<SelectedCluster>())
+                .sum::<usize>()
+    }
+}
+fn bounds(bytes: &[u8], at: usize) -> Result<([f32; 3], [f32; 3]), String> {
+    let mut values = [0.0; 6];
+    for (k, v) in values.iter_mut().enumerate() {
+        *v = f32::from_bits(u32_at(bytes, at + k * 4)?);
+    }
+    if values.iter().any(|v| !v.is_finite()) || (0..3).any(|k| values[k] > values[k + 3]) {
+        return Err("invalid cluster bounds".into());
+    }
+    Ok((
+        values[..3].try_into().unwrap(),
+        values[3..].try_into().unwrap(),
+    ))
+}
+fn contains(lo: [f32; 3], hi: [f32; 3], p: [f32; 3]) -> bool {
+    (0..3).all(|k| p[k] >= lo[k] && p[k] <= hi[k])
+}
+impl MeshClusters {
+    pub fn parse(
+        bytes: &[u8],
+        meta: &pc::Meta,
+        meta_bytes: &[u8],
+        geometry: &[u8],
+    ) -> Result<Self, String> {
+        if bytes.len() < HEADER
+            || &bytes[..4] != b"IPCL"
+            || u32_at(bytes, 4)? != 2
+            || u32_at(bytes, 52)? != 0
+        {
+            return Err("invalid cluster header".into());
+        }
+        if bytes.len() > max_file_bytes(meta)? {
+            return Err("cluster file exceeds geometry budget".into());
+        }
+        if u64_at(bytes, 8)? != hash(meta_bytes)
+            || u64_at(bytes, 16)? != hash(geometry)
+            || u64_at(bytes, 24)? != hash(&bytes[HEADER..])
+        {
+            return Err("stale or corrupt cluster sidecar".into());
+        }
+        let mut sizes = [0usize; 5];
+        for (k, n) in sizes.iter_mut().enumerate() {
+            *n = u32_at(bytes, 32 + k * 4)? as usize;
+        }
+        if sizes[0] != meta.draws.len()
+            || sizes.into_iter().zip(budget(meta)?).any(|(n, max)| n > max)
+            || file_bytes(sizes)? != bytes.len()
+        {
+            return Err("cluster payload size/count mismatch".into());
+        }
+        let mut out = Self {
+            draws: reserve(sizes[0])?,
+            groups: reserve(sizes[1])?,
+            levels: reserve(sizes[2])?,
+            clusters: reserve(sizes[3])?,
+            indices: reserve(sizes[4])?,
+            query_roots: Vec::new(),
+            query_nodes: Vec::new(),
+            query_identity: Arc::new(()),
+        };
+        let mut at = HEADER;
+        for _ in 0..sizes[0] {
+            out.draws.push((u32_at(bytes, at)?, u32_at(bytes, at + 4)?));
+            at += 8;
+        }
+        for _ in 0..sizes[1] {
+            let (min, max) = bounds(bytes, at + 8)?;
+            out.groups.push(Group {
+                first: u32_at(bytes, at)?,
+                count: u32_at(bytes, at + 4)?,
+                min,
+                max,
+            });
+            at += 32;
+        }
+        for _ in 0..sizes[2] {
+            let error = f32::from_bits(u32_at(bytes, at)?);
+            if !error.is_finite() || error < 0.0 {
+                return Err("invalid group LOD error".into());
+            }
+            out.levels.push(Level {
+                error,
+                first: u32_at(bytes, at + 4)?,
+                count: u32_at(bytes, at + 8)?,
+            });
+            at += 12;
+        }
+        for _ in 0..sizes[3] {
+            let (min, max) = bounds(bytes, at + 8)?;
+            let count = u32_at(bytes, at + 4)?;
+            if count == 0 || count % 3 != 0 {
+                return Err("invalid cluster index count".into());
+            }
+            out.clusters.push(Cluster {
+                first: u32_at(bytes, at)?,
+                count,
+                min,
+                max,
+            });
+            at += 32;
+        }
+        for _ in 0..sizes[4] {
+            out.indices
+                .push(u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap()));
+            at += 2;
+        }
+        let (mut gc, mut lc, mut cc, mut ic) = (0u32, 0u32, 0u32, 0u32);
+        for (di, &(first, count)) in out.draws.iter().enumerate() {
+            if first != gc {
+                return Err("groups are not contiguous".into());
+            }
+            if count == 0 {
+                continue;
+            }
+            let d = &meta.draws[di];
+            if !eligible(meta, d) {
+                return Err("ineligible cluster draw".into());
+            }
+            let roots = pc::parts::components(d, geometry)?;
+            let mut owners = reserve::<u32>(roots.len())?;
+            owners.resize(roots.len(), u32::MAX);
+            let sources: Vec<_> = core::iter::once((&d.indices, d.index_count, 0.0))
+                .chain(d.lods.iter().map(|l| (&l.indices, l.index_count, l.error)))
+                .collect();
+            let mut actual = reserve::<Vec<[u16; 3]>>(sources.len())?;
+            for (_, n, _) in &sources {
+                actual.push(reserve(*n as usize / 3)?);
+            }
+            for (gi, group) in out.groups[span(first, count, out.groups.len())?]
+                .iter()
+                .enumerate()
+            {
+                if group.first != lc || group.count as usize != sources.len() {
+                    return Err("incomplete/noncontiguous group LODs".into());
+                }
+                for (k, (level, (source, n, error))) in out.levels
+                    [span(group.first, group.count, out.levels.len())?]
+                .iter()
+                .zip(&sources)
+                .enumerate()
+                {
+                    if source.size != n.checked_mul(2).ok_or("source index overflow")?
+                        || n % 3 != 0
+                        || level.error.to_bits() != error.to_bits()
+                        || level.first != cc
+                    {
+                        return Err("group LOD differs from original".into());
+                    }
+                    let start = ic;
+                    for cluster in
+                        &out.clusters[span(level.first, level.count, out.clusters.len())?]
+                    {
+                        if cluster.first != ic {
+                            return Err("cluster indices are not contiguous".into());
+                        }
+                        let indices =
+                            &out.indices[span(cluster.first, cluster.count, out.indices.len())?];
+                        if actual[k]
+                            .len()
+                            .checked_add(indices.len() / 3)
+                            .is_none_or(|len| len > *n as usize / 3)
+                        {
+                            return Err("group triangles exceed original count".into());
+                        }
+                        for tri in indices.chunks_exact(3) {
+                            let root = *roots
+                                .get(tri[0] as usize)
+                                .ok_or("cluster index exceeds vertices")?;
+                            if root == u32::MAX
+                                || tri.iter().any(|&i| roots.get(i as usize) != Some(&root))
+                            {
+                                return Err("LOD triangle crosses full connected components".into());
+                            }
+                            if k == 0 {
+                                let owner = &mut owners[root as usize];
+                                if *owner == u32::MAX {
+                                    *owner = gi as u32;
+                                } else if *owner != gi as u32 {
+                                    return Err(
+                                        "full connected component split between groups".into()
+                                    );
+                                }
+                            } else if owners[root as usize] != gi as u32 {
+                                return Err("LOD component changes group".into());
+                            }
+                            for &i in tri {
+                                let p = pc::parts::position(d, geometry, i)?;
+                                if !contains(group.min, group.max, p)
+                                    || !contains(cluster.min, cluster.max, p)
+                                {
+                                    return Err("group/cluster bounds exclude geometry".into());
+                                }
+                            }
+                            actual[k].push([tri[0], tri[1], tri[2]]);
+                        }
+                        ic = ic
+                            .checked_add(cluster.count)
+                            .ok_or("cluster index overflow")?;
+                    }
+                    if k == 0 && start == ic {
+                        return Err("group has no full geometry".into());
+                    }
+                    cc = cc
+                        .checked_add(level.count)
+                        .ok_or("cluster count overflow")?;
+                }
+                lc = lc.checked_add(group.count).ok_or("level count overflow")?;
+            }
+            for (k, (source, n, _)) in sources.iter().enumerate() {
+                let original = pc::parts::slice(geometry, source)?;
+                let mut expected = reserve::<[u16; 3]>(*n as usize / 3)?;
+                expected.extend(original.chunks_exact(6).map(|b| {
+                    core::array::from_fn(|k| u16::from_le_bytes([b[k * 2], b[k * 2 + 1]]))
+                }));
+                expected.sort_unstable();
+                actual[k].sort_unstable();
+                if actual[k] != expected {
+                    return Err("group triangles differ from original LOD".into());
+                }
+            }
+            gc = gc.checked_add(count).ok_or("group count overflow")?;
+        }
+        if gc as usize != out.groups.len()
+            || lc as usize != out.levels.len()
+            || cc as usize != out.clusters.len()
+            || ic as usize != out.indices.len()
+        {
+            return Err("unused cluster payload".into());
+        }
+        out.build_query_index()?;
+        Ok(out)
+    }
+    fn build_query_index(&mut self) -> Result<(), String> {
+        fn count(n: usize) -> usize {
+            if n <= 4 {
+                1
+            } else {
+                1 + count(n / 2) + count(n - n / 2)
+            }
+        }
+        let n = self
+            .draws
+            .iter()
+            .filter(|(_, n)| *n > 4)
+            .try_fold(0usize, |sum, (_, n)| {
+                sum.checked_add(count(*n as usize))
+                    .ok_or("query tree count overflow")
+            })?;
+        self.query_roots = reserve(self.draws.len())?;
+        self.query_nodes = reserve(n)?;
+        for i in 0..self.draws.len() {
+            let (first, count) = self.draws[i];
+            let node = if count > 4 {
+                self.build_query_node(first, count)?
+            } else {
+                u32::MAX
+            };
+            self.query_roots.push(node);
+        }
+        Ok(())
+    }
+    fn build_query_node(&mut self, first: u32, count: u32) -> Result<u32, String> {
+        let mut min = [f32::INFINITY; 3];
+        let mut max = [f32::NEG_INFINITY; 3];
+        for g in &self.groups[first as usize..(first + count) as usize] {
+            for k in 0..3 {
+                min[k] = min[k].min(g.min[k]);
+                max[k] = max[k].max(g.max[k]);
+            }
+        }
+        let index = u32::try_from(self.query_nodes.len()).map_err(|_| "query tree exceeds u32")?;
+        self.query_nodes.push(QueryNode {
+            min,
+            max,
+            first,
+            count,
+            right: u32::MAX,
+        });
+        if count > 4 {
+            self.build_query_node(first, count / 2)?;
+            let right = self.build_query_node(first + count / 2, count - count / 2)?;
+            self.query_nodes[index as usize].right = right;
+        }
+        Ok(index)
+    }
+    /// Emit exactly the original ordered (group, level, cluster) selection.
+    /// No frame allocation or index copying occurs here. False means the draw
+    /// has no sidecar groups; true also covers a completely culled draw.
+    pub fn query(
+        &self,
+        draw: usize,
+        view: &Query,
+        mut emit: impl FnMut(u32, u32, u32, Cluster),
+    ) -> bool {
+        let Some(&(first, count)) = self.draws.get(draw).filter(|(_, n)| *n > 0) else {
+            return false;
+        };
+        let node = self.query_roots[draw];
+        if node != u32::MAX {
+            self.query_node(node, first, view, 63, &mut emit);
+        } else {
+            self.query_groups(first, count, first, view, 63, &mut emit);
+        }
+        true
+    }
+    fn query_node(
+        &self,
+        index: u32,
+        origin: u32,
+        view: &Query,
+        mask: u8,
+        emit: &mut impl FnMut(u32, u32, u32, Cluster),
+    ) {
+        let node = &self.query_nodes[index as usize];
+        let Some(mask) = view.classify(node.min, node.max, mask) else {
+            return;
+        };
+        if mask == 0 {
+            for i in node.first..node.first + node.count {
+                self.query_group(i, origin, view, 0, emit);
+            }
+        } else if node.right == u32::MAX {
+            self.query_groups(node.first, node.count, origin, view, mask, emit);
+        } else {
+            self.query_node(index + 1, origin, view, mask, emit);
+            self.query_node(node.right, origin, view, mask, emit);
+        }
+    }
+    fn query_groups(
+        &self,
+        first: u32,
+        count: u32,
+        origin: u32,
+        view: &Query,
+        mask: u8,
+        emit: &mut impl FnMut(u32, u32, u32, Cluster),
+    ) {
+        for i in first..first + count {
+            let g = &self.groups[i as usize];
+            if let Some(mask) = view.classify(g.min, g.max, mask) {
+                self.query_group(i, origin, view, mask, emit);
+            }
+        }
+    }
+    fn query_group(
+        &self,
+        index: u32,
+        origin: u32,
+        view: &Query,
+        mask: u8,
+        emit: &mut impl FnMut(u32, u32, u32, Cluster),
+    ) {
+        let group = &self.groups[index as usize];
+        let levels = self.levels(group);
+        let selected = view.level(group, levels);
+        for (i, c) in self.clusters(&levels[selected]).iter().enumerate() {
+            if mask == 0 || view.visible(c.min, c.max, mask) {
+                emit(index - origin, selected as u32, i as u32, *c);
+            }
+        }
+    }
+    pub fn query_bytes(&self) -> usize {
+        self.query_roots.capacity() * core::mem::size_of::<u32>()
+            + self.query_nodes.capacity() * core::mem::size_of::<QueryNode>()
+            + 2 * core::mem::size_of::<usize>() // shared Arc identity allocation
+    }
+    pub fn groups(&self, draw: usize) -> Option<&[Group]> {
+        let &(first, count) = self.draws.get(draw)?;
+        (count > 0).then(|| &self.groups[first as usize..(first + count) as usize])
+    }
+    pub fn levels(&self, group: &Group) -> &[Level] {
+        &self.levels[group.first as usize..(group.first + group.count) as usize]
+    }
+    pub fn clusters(&self, level: &Level) -> &[Cluster] {
+        &self.clusters[level.first as usize..(level.first + level.count) as usize]
+    }
+    pub fn indices(&self, cluster: &Cluster) -> &[u16] {
+        &self.indices[cluster.first as usize..(cluster.first + cluster.count) as usize]
+    }
+    pub fn bytes(&self) -> usize {
+        self.draws.len() * core::mem::size_of::<(u32, u32)>()
+            + self.groups.len() * core::mem::size_of::<Group>()
+            + self.levels.len() * core::mem::size_of::<Level>()
+            + self.clusters.len() * core::mem::size_of::<Cluster>()
+            + self.indices.len() * 2
+            + self.query_bytes()
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    type Selection = (u32, u32, u32, u32, u32);
+    // Deliberately retain the pre-query renderer's linear algorithm as an
+    // independent oracle, including sqrt and all six planes at every level.
+    fn linear(mesh: &MeshClusters, draw: usize, view: &Query) -> Vec<Selection> {
+        fn visible(view: &Query, lo: [f32; 3], hi: [f32; 3]) -> bool {
+            view.planes.iter().all(|p| {
+                glam::Vec3::new(p[0], p[1], p[2]).dot(glam::Vec3::new(
+                    if p[0] >= 0.0 { hi[0] } else { lo[0] },
+                    if p[1] >= 0.0 { hi[1] } else { lo[1] },
+                    if p[2] >= 0.0 { hi[2] } else { lo[2] },
+                )) + p[3]
+                    >= 0.0
+            })
+        }
+        let mut out = Vec::new();
+        for (gi, g) in mesh.groups(draw).unwrap_or(&[]).iter().enumerate() {
+            if !visible(view, g.min, g.max) {
+                continue;
+            }
+            let li = original_level(view, g, mesh.levels(g));
+            for (ci, c) in mesh.clusters(&mesh.levels(g)[li]).iter().enumerate() {
+                if visible(view, c.min, c.max) {
+                    out.push((gi as u32, li as u32, ci as u32, c.first, c.count));
+                }
+            }
+        }
+        out
+    }
+    fn original_level(view: &Query, g: &Group, levels: &[Level]) -> usize {
+        let distance = view
+            .eye
+            .distance(view.eye.clamp(g.min.into(), g.max.into()));
+        let tolerance = distance.max(1.0) * view.scale;
+        levels
+            .iter()
+            .rposition(|l| l.error < tolerance)
+            .unwrap_or(0)
+    }
+    fn accelerated(mesh: &MeshClusters, draw: usize, view: &Query) -> Vec<Selection> {
+        let mut out = Vec::new();
+        assert_eq!(
+            mesh.query(draw, view, |g, l, i, c| {
+                out.push((g, l, i, c.first, c.count));
+            }),
+            mesh.groups(draw).is_some()
+        );
+        out
+    }
+    fn planes(center: [f32; 3], extent: f32) -> [[f32; 4]; 6] {
+        [
+            [1.0, 0.0, 0.0, extent - center[0]],
+            [-1.0, 0.0, 0.0, extent + center[0]],
+            [0.0, 1.0, 0.0, extent - center[1]],
+            [0.0, -1.0, 0.0, extent + center[1]],
+            [0.0, 0.0, 1.0, extent - center[2]],
+            [0.0, 0.0, -1.0, extent + center[2]],
+        ]
+    }
+    fn query_fixture() -> MeshClusters {
+        let mut mesh = MeshClusters {
+            draws: Vec::new(),
+            groups: Vec::new(),
+            levels: Vec::new(),
+            clusters: Vec::new(),
+            indices: Vec::new(),
+            query_roots: Vec::new(),
+            query_nodes: Vec::new(),
+            query_identity: Arc::new(()),
+        };
+        for count in [0, 1, 4, 5, 41, 79] {
+            mesh.draws.push((mesh.groups.len() as u32, count));
+            for i in 0..count {
+                let lo = [((i * 13) % 19) as f32 - 9.0, (i % 3) as f32, (i / 3) as f32];
+                let hi = [lo[0] + 0.75, lo[1] + 0.75, lo[2] + 0.75];
+                let levels = if i % 4 == 0 { 1 } else { 3 };
+                mesh.groups.push(Group {
+                    first: mesh.levels.len() as u32,
+                    count: levels,
+                    min: lo,
+                    max: hi,
+                });
+                for li in 0..levels {
+                    // Empty coarsest levels are valid component removal.
+                    let clusters = if li == 2 && i % 3 == 0 { 0 } else { 2 };
+                    mesh.levels.push(Level {
+                        error: [0.0, 0.06, 0.25][li as usize],
+                        first: mesh.clusters.len() as u32,
+                        count: clusters,
+                    });
+                    for ci in 0..clusters {
+                        let mut c_lo = lo;
+                        let mut c_hi = hi;
+                        c_lo[0] += ci as f32 * 0.4;
+                        c_hi[0] -= (1 - ci) as f32 * 0.4;
+                        mesh.clusters.push(Cluster {
+                            first: mesh.indices.len() as u32,
+                            count: 3,
+                            min: c_lo,
+                            max: c_hi,
+                        });
+                        mesh.indices.extend([0, 1, 2]);
+                    }
+                }
+            }
+        }
+        mesh.build_query_index().unwrap();
+        mesh
+    }
+    #[test]
+    fn query_matches_ordered_linear_selection_for_moving_and_grazing_views() {
+        let mesh = query_fixture();
+        for step in -80..120 {
+            let center = [step as f32 * 0.25, 1.25, 8.0];
+            for extent in [0.0, 0.5, 7.0, 100.0] {
+                for scale in [0.8 / 106.0, 0.8 / 213.0, 1.6 / 42.0] {
+                    let view = Query::new(planes(center, extent), center, scale);
+                    for draw in 0..=mesh.draws.len() {
+                        assert_eq!(
+                            accelerated(&mesh, draw, &view),
+                            linear(&mesh, draw, &view),
+                            "step={step}, extent={extent}, draw={draw}"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(&mesh.query_roots[..3], &[u32::MAX; 3]);
+        assert!(mesh.query_roots[3..].iter().all(|&r| r != u32::MAX));
+        assert!(mesh.query_bytes() > 0);
+    }
+    #[test]
+    fn squared_lod_keeps_strict_sqrt_boundary_and_extreme_scales() {
+        let group = Group {
+            first: 0,
+            count: 2,
+            min: [0.0; 3],
+            max: [0.0; 3],
+        };
+        for distance in [0.0, 0.99999994, 1.0, 1.0000001, 7.25, 12345.0, 1e-20, 1e20] {
+            for scale in [
+                0.0,
+                1e-30,
+                1e-20,
+                0.8 / 106.0,
+                0.8 / 213.0,
+                1.6 / 42.0,
+                1e10,
+                1e30,
+            ] {
+                let view = Query::new(
+                    planes([0.0; 3], 1.0),
+                    [distance, distance * 0.3, 0.0],
+                    scale,
+                );
+                let threshold = view.eye.length().max(1.0) * scale;
+                let bits = threshold.to_bits();
+                for delta in -48i64..=48 {
+                    let candidate = (bits as i64 + delta).clamp(0, 0x7f7fffff) as u32;
+                    let levels = [
+                        Level {
+                            error: 0.0,
+                            first: 0,
+                            count: 0,
+                        },
+                        Level {
+                            error: f32::from_bits(candidate),
+                            first: 0,
+                            count: 0,
+                        },
+                    ];
+                    assert_eq!(
+                        view.level(&group, &levels),
+                        original_level(&view, &group, &levels),
+                        "distance={distance}, scale={scale}, delta={delta}"
+                    );
+                }
+            }
+        }
+    }
+    fn cached_selection(
+        cache: &mut QueryCache,
+        mesh: &MeshClusters,
+        draw: usize,
+        view: &Query,
+    ) -> Vec<Selection> {
+        let mut out = Vec::new();
+        assert_eq!(
+            cache.query(mesh, draw, view, |g, l, i, c| {
+                out.push((g, l, i, c.first, c.count));
+            }),
+            mesh.groups(draw).is_some()
+        );
+        out
+    }
+    #[test]
+    fn query_cache_reuses_empty_and_populated_draws_and_invalidates_exact_view_bits() {
+        let mesh = query_fixture();
+        let mut cache = QueryCache::default();
+        let mut view = Query::new(planes([0.0; 3], 100.0), [0.0; 3], 0.8 / 106.0);
+        for draw in 0..=mesh.draws.len() {
+            let expected = linear(&mesh, draw, &view);
+            assert_eq!(cached_selection(&mut cache, &mesh, draw, &view), expected);
+            let evaluated = cache.evaluations;
+            for _ in 0..3 {
+                assert_eq!(cached_selection(&mut cache, &mesh, draw, &view), expected);
+                assert_eq!(cache.evaluations, evaluated);
+            }
+        }
+        let bytes = cache.bytes();
+        let capacity: usize = cache.draws.iter().map(|d| d.max_selected).sum();
+        assert!(capacity <= mesh.clusters.len());
+        assert_eq!(
+            bytes,
+            cache.draws.len() * core::mem::size_of::<CachedDraw>()
+                + capacity * core::mem::size_of::<SelectedCluster>()
+        );
+        let other_generation = cache.draws[4].generation;
+        // Every plane/eye component and scale affect the exact key, including
+        // +0/-0. No quantized camera cache or time-dependent input exists.
+        for component in 0..28 {
+            let mut next = Query::new(view.planes, view.eye.to_array(), view.scale);
+            if component < 24 {
+                let value = &mut next.planes[component / 4][component % 4];
+                *value = f32::from_bits(value.to_bits() ^ 1);
+            } else if component < 27 {
+                next.eye[component - 24] = -0.0;
+            } else {
+                next.scale = f32::from_bits(next.scale.to_bits() + 1);
+                next.scale_squared = next.scale * next.scale;
+            }
+            let evaluated = cache.evaluations;
+            assert_eq!(
+                cached_selection(&mut cache, &mesh, 5, &next),
+                linear(&mesh, 5, &next)
+            );
+            assert_eq!(cache.evaluations, evaluated + 1);
+            assert_eq!(cache.draws[4].generation, other_generation); // lazy invalidation
+            assert_eq!(
+                cached_selection(&mut cache, &mesh, 5, &next),
+                linear(&mesh, 5, &next)
+            );
+            assert_eq!(cache.evaluations, evaluated + 1);
+        }
+        view = Query::new(planes([1000.0; 3], 0.1), [1000.0; 3], 0.8 / 106.0);
+        assert!(cached_selection(&mut cache, &mesh, 5, &view).is_empty());
+        let evaluated = cache.evaluations;
+        assert!(cached_selection(&mut cache, &mesh, 5, &view).is_empty());
+        assert_eq!(cache.evaluations, evaluated); // cached empty result
+        assert_eq!(cache.bytes(), bytes); // movement retains fixed capacity
+        cache.generation = u64::MAX;
+        view.eye.x += 1.0;
+        assert_eq!(
+            cached_selection(&mut cache, &mesh, 5, &view),
+            linear(&mesh, 5, &view)
+        );
+        assert_eq!(cache.generation, 1);
+        assert_eq!(cache.draws[4].generation, 0);
+        // Byte-identical meshes still have distinct lifetimes/identities.
+        let replacement = query_fixture();
+        let evaluated = cache.evaluations;
+        assert_eq!(
+            cached_selection(&mut cache, &replacement, 5, &view),
+            linear(&replacement, 5, &view)
+        );
+        assert_eq!(cache.evaluations, evaluated + 1);
+        assert!(Arc::ptr_eq(
+            cache.identity.as_ref().unwrap(),
+            &replacement.query_identity
+        ));
+        assert!(!Arc::ptr_eq(
+            cache.identity.as_ref().unwrap(),
+            &mesh.query_identity
+        ));
+    }
+    #[test]
+    #[ignore = "set POCKET_ATLAS_VALIDATION_PACKS to existing GLES packs; no GPU"]
+    fn real_pack_queries_match_linear_at_authored_camera_samples() {
+        let dir = std::env::var("POCKET_ATLAS_VALIDATION_PACKS").expect("pack directory");
+        let mut packs = 0;
+        let mut shots = 0;
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|s| s.to_str()) != Some("place") {
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            let pack = pc::Pack::parse(&bytes).unwrap();
+            let meta = pack.meta().unwrap();
+            let clusters = std::fs::read(path.with_extension("ipod-clusters.bin")).unwrap();
+            let mesh = MeshClusters::parse(
+                &clusters,
+                &meta,
+                pack.section(pc::TAG_META).unwrap(),
+                pack.section(pc::TAG_GEOMETRY).unwrap(),
+            )
+            .unwrap();
+            let mut cases = 0;
+            let mut cache = QueryCache::default();
+            for shot in &meta.camera.shots {
+                shots += 1;
+                for t in [0.0, 0.125, 0.5, 0.875, 1.0] {
+                    let eye = glam::Vec3::from(shot.from.pos).lerp(shot.to.pos.into(), t);
+                    let target = glam::Vec3::from(shot.from.target).lerp(shot.to.target.into(), t);
+                    let fov = shot.from.fov + (shot.to.fov - shot.from.fov) * t;
+                    let vp = glam::camera::rh::proj::opengl::perspective(
+                        fov.to_radians(),
+                        1.5,
+                        0.25,
+                        100000.0,
+                    ) * glam::camera::rh::view::look_at_mat4(eye, target, glam::Vec3::Y);
+                    for mirror in [false, true] {
+                        let clip = if mirror {
+                            vp * glam::Mat4::from_scale(glam::Vec3::new(1.0, -1.0, 1.0))
+                        } else {
+                            vp
+                        };
+                        let m = clip.transpose();
+                        let p = [
+                            m.w_axis + m.x_axis,
+                            m.w_axis - m.x_axis,
+                            m.w_axis + m.y_axis,
+                            m.w_axis - m.y_axis,
+                            m.w_axis + m.z_axis,
+                            m.w_axis - m.z_axis,
+                        ]
+                        .map(|v| v.to_array());
+                        for height in [106u32, 213] {
+                            let scale = if mirror {
+                                1.6 / (height / 3).max(42) as f32
+                            } else {
+                                0.8 / height as f32
+                            };
+                            let view = Query::new(p, eye.to_array(), scale);
+                            for draw in 0..meta.draws.len() {
+                                assert_eq!(
+                                    accelerated(&mesh, draw, &view),
+                                    linear(&mesh, draw, &view),
+                                    "{} {} t={t} mirror={mirror} height={height} draw={draw}",
+                                    path.display(),
+                                    shot.name
+                                );
+                                let expected = linear(&mesh, draw, &view);
+                                assert_eq!(
+                                    cached_selection(&mut cache, &mesh, draw, &view),
+                                    expected
+                                );
+                                let evaluated = cache.evaluations;
+                                assert_eq!(
+                                    cached_selection(&mut cache, &mesh, draw, &view),
+                                    expected
+                                );
+                                assert_eq!(cache.evaluations, evaluated);
+                                cases += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            std::println!(
+                "{}: {cases} ordered query comparisons, query RAM {} bytes, cache RAM {} bytes",
+                path.display(),
+                mesh.query_bytes(),
+                cache.bytes()
+            );
+            packs += 1;
+        }
+        assert!(packs > 0 && shots > 0);
+    }
+    #[test]
+    fn identity_and_checked_ranges() {
+        assert_eq!(hash(b""), 0xcbf29ce484222325);
+        assert_eq!(hash(b"a"), 0xaf63dc4c8601ec8c);
+        assert!(span(u32::MAX, 1, usize::MAX).is_err());
+        assert!(span(3, 4, 6).is_err());
+        assert_eq!(span(2, 4, 6).unwrap(), 2..6);
+        assert!(u32_at(&[0; 3], 0).is_err());
+    }
+}
