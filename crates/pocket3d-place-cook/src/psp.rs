@@ -53,6 +53,18 @@ pub(super) fn swizzle(pixels: &[u8], row: usize, height: usize) -> Vec<u8> {
     out
 }
 
+/// Native GE sampling policy: one-metre lighting refinement with a half-
+/// metre contact guard. AO retains fine trim/reveal contact; directional rays
+/// must not magnify those unresolved occluders over whole facade triangles.
+pub(super) fn daylight_tolerance(focus: Option<(Vec3, Vec3)>) -> crate::bake::Tolerance {
+    crate::bake::Tolerance { min_edge: 1.0, abs: 0.004, rel: 0.25, rounds: 4, focus, grow: 0.2 }
+}
+
+pub(super) fn static_sun_light(sun: Option<&pc::Sun>, occluder: Option<&crate::occlusion::Occluder>, pos: Vec3, normal: Vec3) -> Vec3 {
+    let shadows = occluder.filter(|_| sun.is_some_and(|s| s.shadow.is_some()));
+    daylight::sun_light(sun, shadows, pos + normal.normalize_or(Vec3::Y) * 0.5, normal, true)
+}
+
 pub fn cook(scene: &crate::source::Scene, output: &Path) {
     let m = &scene.meta;
     assert!(m.materials.iter().all(|m| !m.vertex_pbr), "PSP lowering requires source materials, not Vita PBR palettes");
@@ -93,10 +105,10 @@ pub fn cook(scene: &crate::source::Scene, output: &Path) {
                 m.albedo.or(m.emission) == Some(id)
                     && (m.emissive.iter().any(|&e| e > 0.1) || m.kind == pc::Kind::Unlit)
             });
-            // Glossy colour maps carry smooth reflected gradients. Keep their
+            // Daylight glossy maps carry smooth reflected gradients. Keep their
             // original precision; 4-bit ramps turn into moving contour bands.
             // Aggregate all uses before deduplication, independent of names.
-            let smooth = m.materials.iter().any(|m| {
+            let smooth = daytime && m.materials.iter().any(|m| {
                 m.albedo.or(m.emission) == Some(id)
                     && (m.kind == pc::Kind::Glass
                         || (m.kind == pc::Kind::Standard && m.roughness <= 0.25))
@@ -199,7 +211,7 @@ pub fn cook(scene: &crate::source::Scene, output: &Path) {
         (m.atmosphere.hemisphere_sky, m.atmosphere.hemisphere_ground),
         None,
     );
-    let occluder = if daytime {
+    let occluder = if daytime && !scene.baked_sun {
         crate::pica::sun_occluder(scene)
     } else {
         None
@@ -228,11 +240,13 @@ pub fn cook(scene: &crate::source::Scene, output: &Path) {
         }
         // Coarse lists retain outlines and the bake's lighting boundaries.
         // No camera-specific scene copies: all six shots share these draws.
-        let indices = draw
-            .lods
-            .last()
-            .map(|l| &l.indices)
-            .unwrap_or(&draw.indices);
+        // Overlay panes/decals carry their visible aperture in the outline;
+        // coarse open-boundary simplification can remove a whole pane.
+        let indices = if daytime && mat.polygon_offset.is_some() {
+            &draw.indices
+        } else {
+            draw.lods.last().map(|l| &l.indices).unwrap_or(&draw.indices)
+        };
         let source = &geom[indices.offset as usize..(indices.offset + indices.size) as usize];
         let mut remap = HashMap::<u16, u16>::new();
         let mut vertices = Vec::new();
@@ -279,6 +293,7 @@ pub fn cook(scene: &crate::source::Scene, output: &Path) {
                     baker.irradiance(world_pos, world_normal, mat.env_strength, true, 1.0)
                 };
                 if daytime
+                    && !(scene.baked_sun && draw.layout == pc::VertexLayout::Baked)
                     && !mat.interior
                     && !matches!(mat.kind, pc::Kind::Unlit | pc::Kind::Water)
                 {
@@ -610,6 +625,29 @@ fn compact(
 mod tests {
     use super::*;
     #[test]
+    fn coarse_sun_rejects_unresolved_contacts_but_retains_building_shadows() {
+        for normal in [Vec3::Y, Vec3::Z] {
+            let u = Vec3::X;
+            let v = normal.cross(u);
+            let mut sun = pc::Sun {
+                direction: normal.to_array(), radiance: [3.0; 3],
+                shadow: Some(pc::SunShadow { position: [0.0; 3], ortho: [-4.0,4.0,-4.0,4.0,0.1,10.0], map_size: 512, bias: 0.0, normal_bias: 0.0, radius: 1.0 }),
+            };
+            for (distance, blocked) in [(0.1, false), (2.0, true)] {
+                let o = crate::occlusion::Occluder::new(vec![crate::occlusion::Tri {
+                    a: normal * distance - u * 2.0 - v * 2.0, e1: u * 8.0, e2: v * 8.0, opacity: 1.0,
+                }], 32, 4.0);
+                let c = static_sun_light(Some(&sun), Some(&o), Vec3::ZERO, normal);
+                assert_eq!(c.x < 0.01, blocked);
+                assert!(o.visibility(Vec3::ZERO, normal) < 1.0, "AO retains contact detail");
+                sun.shadow = None;
+                assert!(static_sun_light(Some(&sun), Some(&o), Vec3::ZERO, normal).x > 0.9);
+                sun.shadow = Some(pc::SunShadow { position: [0.0; 3], ortho: [-4.0,4.0,-4.0,4.0,0.1,10.0], map_size: 512, bias: 0.0, normal_bias: 0.0, radius: 1.0 });
+            }
+        }
+    }
+
+    #[test]
     fn converts_daylight_sky_and_disables_night_effects_without_changing_night() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../.pocket-build/validation/psp-daylight-tests");
@@ -638,6 +676,7 @@ mod tests {
             let output = root.join(format!("{kind}.psp.place"));
             let scene = crate::source::Scene {
                 meta: serde_json::from_value(meta).unwrap(),
+                baked_sun: false,
                 blobs: crate::Blobs::default(),
             };
             cook(&scene, &output);

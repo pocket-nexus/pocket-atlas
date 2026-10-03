@@ -110,7 +110,11 @@ need device headroom measurements.
 `check --target` rejects known missing lowerings before cooking. Currently
 PICA/GE reject city-light fields and vista height haze. GE also rejects water
 and kinds outside night streets and dry daytime
-streets/slopes. Its shared daytime lowering bakes the sky and sun from the IR;
+streets/slopes. Its shared daytime lowering bakes the sky and sun from the IR.
+The GE analysis includes static sunlight before refinement/LOD, with an explicit
+transient `baked_sun` marker to avoid applying it twice. Its contact guard and
+intact source-window overlays are native sampling policies; the authored IR and
+Vita/PICA sunlight paths remain independent (see `psp/README.md`).
 PLPS v3 records per-texture precision (RGBA8888 gradients/glossy maps, compact
 RGBA4444 for other surfaces) and a bounded sky mesh. It does not
 silently treat light-field point records as triangle records. Unsupported

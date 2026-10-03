@@ -6,6 +6,8 @@ use pocket3d_place as pc;
 
 pub struct Scene {
     pub meta: pc::Meta,
+    /// Target analysis already included direct sun in static irradiance, before LODs.
+    pub baked_sun: bool,
     pub(crate) blobs: Blobs,
 }
 impl Scene {

@@ -83,11 +83,21 @@ impl Occluder {
     }
 
     fn slab(n: &Node, o: Vec3, inv: Vec3, tmax: f32) -> bool {
-        let t0 = (n.min - o) * inv;
-        let t1 = (n.max - o) * inv;
-        let near = t0.min(t1).max_element().max(0.0);
-        let far = t0.max(t1).min_element().min(tmax);
-        near <= far
+        let (mut near, mut far) = (0.0f32, tmax);
+        for axis in 0..3 {
+            // A ray parallel to a slab may start exactly on its boundary.
+            // 0 * infinity is NaN, which made visibility orientation-dependent.
+            if inv[axis].is_infinite() {
+                if o[axis] < n.min[axis] || o[axis] > n.max[axis] { return false; }
+                continue;
+            }
+            let a = (n.min[axis] - o[axis]) * inv[axis];
+            let b = (n.max[axis] - o[axis]) * inv[axis];
+            near = near.max(a.min(b));
+            far = far.min(a.max(b));
+            if near > far { return false; }
+        }
+        true
     }
 
     /// Opacity of the first surface that blocks the ray (0: open sky).
@@ -166,6 +176,20 @@ impl Occluder {
 #[cfg(test)]
 mod directional_tests {
     use super::*;
+    #[test]
+    fn parallel_slabs_include_boundary_rays_in_every_orientation() {
+        let n = Node { min: Vec3::ZERO, max: Vec3::ONE, start: 0, count: 1 };
+        for axis in 0..3 {
+            let mut origin = Vec3::ZERO;
+            origin[axis] = -1.0;
+            let mut inverse = Vec3::splat(f32::INFINITY);
+            inverse[axis] = 1.0;
+            assert!(Occluder::slab(&n, origin, inverse, 4.0));
+            origin[(axis+1)%3] = -0.01;
+            assert!(!Occluder::slab(&n, origin, inverse, 4.0));
+        }
+    }
+
     #[test]
     fn sunlight_obeys_blockers_and_foliage_opacity() {
         for opacity in [1.0, 0.55] {

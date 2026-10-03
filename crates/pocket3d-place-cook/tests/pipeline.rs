@@ -29,9 +29,9 @@ fn ok(args: &[&str]) {
     );
 }
 fn fixture(root: &Path, width: u32, height: u32) {
-    fixture_material(root, width, height, None);
+    fixture_material(root, width, height, None, "night-street");
 }
-fn fixture_material(root: &Path, width: u32, height: u32, roughness: Option<f32>) {
+fn fixture_material(root: &Path, width: u32, height: u32, roughness: Option<f32>, kind: &str) {
     std::fs::create_dir_all(root).unwrap();
     // A non-power-of-two source texture ensures native targets apply their own fit.
     let mut png = std::io::Cursor::new(Vec::new());
@@ -46,7 +46,7 @@ fn fixture_material(root: &Path, width: u32, height: u32, roughness: Option<f32>
     let mut document = json!({
         "asset":{"version":"2.0"}, "scene":0,
         "scenes":[{"nodes":[0],"extras":{"pocketAtlas":{
-            "kind":"night-street", "camera":{"shots":[{"name":"Front","from":shot,"to":shot,"duration":12}]}
+            "kind":kind, "camera":{"shots":[{"name":"Front","from":shot,"to":shot,"duration":12}]}
         }}}], "nodes":[{"mesh":0}],
         "meshes":[{"primitives":[{"attributes":{"POSITION":0},"material":0}]}],
         "materials":[{"pbrMetallicRoughness":{"baseColorTexture":{"index":0}}, "extensions":{"KHR_materials_unlit":{}}}],
@@ -196,10 +196,11 @@ fn pica_does_not_treat_an_ordinary_2k_source_texture_as_a_text_atlas() {
 #[test]
 fn psp_glossy_colour_preserves_source_precision_and_native_mip_layout() {
     let temp = Temp(std::env::temp_dir().join(format!("atlas-gloss-{}", std::process::id())));
-    for (roughness, format, bpp) in [(0.2, pocket3d_place_psp::RGBA8888, 4),
-        (0.8, pocket3d_place_psp::RGBA4444, 2)] {
+    for (roughness, kind, format, bpp) in [(0.2, "daytime-street", pocket3d_place_psp::RGBA8888, 4),
+        (0.8, "daytime-street", pocket3d_place_psp::RGBA4444, 2),
+        (0.2, "night-street", pocket3d_place_psp::RGBA4444, 2)] {
         let source = temp.0.join("surface");
-        fixture_material(&source, 32, 16, Some(roughness));
+        fixture_material(&source, 32, 16, Some(roughness), kind);
         let output = temp.0.join("surface.place");
         ok(&["--in", source.to_str().unwrap(), "--target", "psp", "--out", output.to_str().unwrap()]);
         let bytes = std::fs::read(output).unwrap();
@@ -450,5 +451,64 @@ fn skin_without_joints_is_rejected_for_every_target() {
         let error = String::from_utf8_lossy(&result.stderr);
         assert!(error.contains("has no joints"), "{target}: {error}");
         assert!(!output.exists());
+    }
+}
+
+#[test]
+fn psp_sun_is_refined_before_lods_and_not_added_twice() {
+    use pocket3d_place_psp as pp;
+    let temp = Temp(std::env::temp_dir().join(format!("atlas-sun-lod-{}", std::process::id())));
+    for vertical in [false, true] {
+        let export = temp.0.join(if vertical { "wall" } else { "ground" });
+        std::fs::create_dir_all(&export).unwrap();
+        let rotate = |[x, y, z]: [f32; 3]| if vertical { [x, -z, y] } else { [x, y, z] };
+        let mut positions = Vec::new();
+        for (height, right) in [(0.0, 4.0), (2.0, -1.0)] {
+            let q = [[-4.0,height,-4.0],[-4.0,height,4.0],[right,height,4.0],[right,height,-4.0]];
+            for i in [0,1,2,0,2,3] { positions.extend(rotate(q[i])); }
+        }
+        let normal = rotate([0.0,1.0,0.0]);
+        let mut bin: Vec<u8> = positions.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let normals = bin.len();
+        for _ in 0..12 { bin.extend(normal.iter().flat_map(|v| v.to_le_bytes())); }
+        let key = json!({"pos":[0,4,6],"target":[0,0,0],"fov":45});
+        let doc = json!({
+            "asset":{"version":"2.0"},"scene":0,
+            "scenes":[{"nodes":[0],"extras":{"pocketAtlas":{
+                "kind":"daytime-street",
+                "directionalLights":[{"color":[1,1,1],"intensity":3,"direction":normal,"castShadow":true,
+                    "shadow":{"position":[0,8,0],"ortho":[-8,8,-8,8,0.1,20]}}],
+                "camera":{"shots":[{"name":"Surface","from":key,"to":key,"duration":12}]}
+            }}}],"nodes":[{"mesh":0}],
+            "meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1},"material":0}]}],
+            "materials":[{"pbrMetallicRoughness":{"baseColorFactor":[0.5,0.5,0.5,1],"metallicFactor":0,"roughnessFactor":0.8}}],
+            "buffers":[{"byteLength":bin.len()}],
+            "bufferViews":[{"buffer":0,"byteLength":normals},{"buffer":0,"byteOffset":normals,"byteLength":bin.len()-normals}],
+            "accessors":[{"bufferView":0,"componentType":5126,"count":12,"type":"VEC3","min":[-4,-4,-4],"max":[4,4,4]},
+                {"bufferView":1,"componentType":5126,"count":12,"type":"VEC3"}]
+        });
+        let glb = gltf::binary::Glb { header: gltf::binary::Header { magic: *b"glTF",version:2,length:0 }, json:Cow::Owned(serde_json::to_vec(&doc).unwrap()),bin:Some(Cow::Owned(bin)) };
+        std::fs::write(export.join("scene.glb"),glb.to_vec().unwrap()).unwrap();
+        let output = temp.0.join("sun.place");
+        ok(&["--in",export.to_str().unwrap(),"--target","psp","--out",output.to_str().unwrap()]);
+        let bytes = std::fs::read(output).unwrap();
+        let h = pp::validate(&bytes).unwrap();
+        let draws = pp::slice::<pp::Draw>(&bytes,h.draws).unwrap();
+        let mut floor = Vec::new();
+        let mut count = 0;
+        for d in draws {
+            let vertices = pp::slice::<pp::Vertex>(&bytes,d.vertices).unwrap();
+            let indices = pp::slice::<u16>(&bytes,d.indices).unwrap();
+            count += indices.len()/3;
+            for &i in indices {
+                let v = &vertices[i as usize];
+                if v.pos[if vertical {2} else {1}].abs() < 1e-4 { floor.push(*v); }
+            }
+        }
+        assert!(count > 4, "sun boundary must drive refinement even without sky AO (vertical={vertical}, triangles={count})");
+        let shadow = pocket3d_place::color::tone([0.0;3],&Default::default())[0]*255.0;
+        assert!(floor.iter().any(|v| v.pos[0] < -2.0 && (v.color.to_le_bytes()[0] as f32-shadow).abs() < 3.0), "building shadow must remain; dark={shadow}, samples={:?}", floor.iter().map(|v|(v.pos,v.color.to_le_bytes()[0])).collect::<Vec<_>>());
+        let expected = pocket3d_place::color::tone([0.5*3.0/std::f32::consts::PI;3],&Default::default())[0]*255.0;
+        assert!(floor.iter().any(|v| v.pos[0] > 2.0 && (v.color.to_le_bytes()[0] as f32-expected).abs() < 3.0), "sunlight must be added exactly once");
     }
 }

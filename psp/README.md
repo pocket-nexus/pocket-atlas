@@ -24,17 +24,31 @@ finite coordinates, unit directions and UV bounds are validated before use.
   become one 512 × 256 swizzled RGBA8888 panorama. A unit dome follows camera
   position, retaining its world orientation. Eight-bit colour avoids the
   magnified checkerboard caused by ordered four-bit dither. Sky is drawn once, before scene depth, and is included in telemetry.
-- Directional sunlight is added to the existing ambient/sky-occlusion vertex
-  bake. A BVH over static, shadow-casting opaque geometry tests the sun rays;
-  alpha-tested foliage uses partial occlusion. Shadow detail is limited by
-  the retained vertices, rather than a per-pixel shadow map.
+- Directional sunlight joins the ambient/sky-occlusion bake **before** adaptive
+  refinement and LOD selection, so the simplifier sees its lighting boundaries.
+  A BVH tests static opaque casters; cutout foliage uses partial occlusion.
+  The GE policy uses a 1 m minimum refinement edge, four rounds and a 0.5 m
+  receiving-normal contact guard. This suppresses unresolved trim/window
+  self-shadow streaks; the full-detail sky-occlusion bake still provides their
+  contact shading. Large building shadows remain. This is a coarse vertex
+  approximation, not a per-pixel shadow map; sub-metre sun contacts are omitted.
+- Explicit source `window` annotations lower to GE surface overlays with an
+  intact pane outline and depth bias. Coarse open-boundary simplification can
+  otherwise erase window cards after the lighting tessellation changes.
+  The same silhouette rule applies to authored polygon-offset decals.
+- Opaque static daytime solids use twice the shared geometric LOD error
+  (12/50 cm in the near field), with baked lighting still part of the error
+  metric. Foliage, animated geometry and overlays retain their existing
+  bounds. This is a GE-only tradeoff: small solid trim may disappear sooner;
+  it compensates for the extra sunlight-boundary vertices.
 - Moving objects retain their authored node/skin tracks and use first-frame
   directional illumination. They do not keep a frozen world-shadow mask as
   they move. Animated cast shadows and changes in sun-facing normals are not
   reproduced by the fixed-function bake.
-- Glossy colour maps (glass or standard materials with roughness ≤ 0.25)
+- Daylight glossy colour maps (glass or standard materials with roughness ≤ 0.25)
   retain RGBA8888 gradients; other material maps retain compact RGBA4444.
-  Shared texture usage is aggregated before choosing the encoding.
+  Shared texture usage is aggregated before choosing the encoding. Night
+  textures keep the compact policy so luminous atlases fit the 18 MiB budget.
 - Daylight scene textures are capped at 256 px (luminous signage at 512 px),
   with the existing mip chains and alpha-tested foliage. The 18 MiB PLPS
   limit remains enforced. The full authored grade is baked into daylight
