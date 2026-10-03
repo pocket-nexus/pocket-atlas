@@ -79,39 +79,39 @@ float shadowDepth(float2 uv)
 // Share of the sun that reaches `sp`: the four map texels around it
 // compared and blended by the position between their centres (what a
 // hardware PCF lookup does), so shadow edges do not step with the texels.
-float sunLit(float3 sp)
+half sunLit(float3 sp)
 {
+    // Keep light-space coordinates and depth comparisons in float. Only
+    // bounded comparison results and filter weights use half precision.
     float4 wp = float4(sp, 1.0);
     float2 mapUv = float2(dot(uSunMat[0], wp), dot(uSunMat[1], wp));
-    if (mapUv.x < 0.0 || mapUv.y < 0.0 || mapUv.x > 1.0 || mapUv.y > 1.0) return 1.0;
+    if (mapUv.x < 0.0 || mapUv.y < 0.0 || mapUv.x > 1.0 || mapUv.y > 1.0) return (half)1.0;
+    float depth = (-dot(uSunDir.xyz, sp) - uShadowK.x) * uShadowK.y;
+    half lit = (half)1.0;
+#ifndef FAR
     float2 t = mapUv * uShadowK.w - 0.5;
     float2 f = frac(t);
     float2 uv = (t - f + 0.5) / uShadowK.w;
     float o = 1.0 / uShadowK.w;
-    float d = (-dot(uSunDir.xyz, sp) - uShadowK.x) * uShadowK.y - uShadowK.z;
-    float lit = 1.0;
-    float s00, s10, s01, s11;
-#ifndef FAR
-    s00 = step(d, shadowDepth(uv));
-    s10 = step(d, shadowDepth(uv + float2(o, 0.0)));
-    s01 = step(d, shadowDepth(uv + float2(0.0, o)));
-    s11 = step(d, shadowDepth(uv + float2(o, o)));
-    lit = lerp(lerp(s00, s10, f.x), lerp(s01, s11, f.x), f.y);
+    float d = depth - uShadowK.z;
+    half s00 = (half)step(d, shadowDepth(uv));
+    half s10 = (half)step(d, shadowDepth(uv + float2(o, 0.0)));
+    half s01 = (half)step(d, shadowDepth(uv + float2(0.0, o)));
+    half s11 = (half)step(d, shadowDepth(uv + float2(o, o)));
+    lit = lerp(lerp(s00, s10, (half)f.x), lerp(s01, s11, (half)f.x), (half)f.y);
 #endif
 #ifdef MOVING_SHADOW
-    // A moving caster cannot darken a pixel already fully occluded by the
-    // static map: min(0, movingLit) is still zero. Depth comparisons stay float.
-    if (lit <= 0.0) return 0.0;
-    t = float2(dot(uSunMat[0], wp), dot(uSunMat[1], wp)) * uMovingShadowK.w - 0.5;
-    f = frac(t);
-    uv = (t - f + 0.5) / uMovingShadowK.w;
-    o = 1.0 / uMovingShadowK.w;
-    d = (-dot(uSunDir.xyz, sp) - uMovingShadowK.x) * uMovingShadowK.y - uMovingShadowK.z;
-    s00 = step(d, tex2D(uMovingShadow, uv).r);
-    s10 = step(d, tex2D(uMovingShadow, uv + float2(o, 0.0)).r);
-    s01 = step(d, tex2D(uMovingShadow, uv + float2(0.0, o)).r);
-    s11 = step(d, tex2D(uMovingShadow, uv + float2(o, o)).r);
-    lit = min(lit, lerp(lerp(s00, s10, f.x), lerp(s01, s11, f.x), f.y));
+    if (lit <= (half)0.0) return (half)0.0;
+    float2 mt = mapUv * uMovingShadowK.w - 0.5;
+    float2 mf = frac(mt);
+    float2 muv = (mt - mf + 0.5) / uMovingShadowK.w;
+    float mo = 1.0 / uMovingShadowK.w;
+    float md = depth - uMovingShadowK.z;
+    half m00 = (half)step(md, tex2D(uMovingShadow, muv).r);
+    half m10 = (half)step(md, tex2D(uMovingShadow, muv + float2(mo, 0.0)).r);
+    half m01 = (half)step(md, tex2D(uMovingShadow, muv + float2(0.0, mo)).r);
+    half m11 = (half)step(md, tex2D(uMovingShadow, muv + float2(mo, mo)).r);
+    lit = min(lit, lerp(lerp(m00, m10, (half)mf.x), lerp(m01, m11, (half)mf.x), (half)mf.y));
 #endif
     return lit;
 }
@@ -339,18 +339,18 @@ half4 main(
 #ifdef SUN
     {
         float3 L = uSunDir.xyz;
-        float ndl = saturate(dot((float3)N, L));
+        half ndl = saturate(dot(N, (half3)L));
         // Both Lambert and GGX are multiplied by ndl. Back-facing surfaces
         // therefore need neither the static nor the moving shadow lookup.
-        if (ndl > 0.0) {
+        if (ndl > (half)0.0) {
 #if defined(FAR) && !defined(MOVING_SHADOW)
-            float lit = 1.0;
+            half lit = (half)1.0;
 #else
             // Offset along the geometric normal against self-shadowing acne.
-            float lit = sunLit(vWorld + (float3)Ng * uSunRad.w);
+            half lit = sunLit(vWorld + (float3)Ng * uSunRad.w);
 #endif
-            float3 E = uSunRad.rgb * (lit * ndl);
-            diffuse += (half3)(E * INV_PI) * diffuseColor;
+            half3 E = (half3)uSunRad.rgb * (lit * ndl);
+            diffuse += E * (half)INV_PI * diffuseColor;
 #if defined(SUN_SPEC) && !defined(NO_SPECULAR)
             // Palette factors select features; actual surface properties
             // came from UVs above. Apply the same lobe selection that the
@@ -363,7 +363,7 @@ half4 main(
                 float3 H = normalize(L + (float3)V);
                 float alpha = (float)(roughness * roughness);
                 float dotNV = saturate(dot((float3)N, (float3)V));
-                specular += (half3)(E * (float3)F_Schlick(specularColor, (half)saturate(dot((float3)V, H))) * (V_GGX_SmithCorrelated(alpha, ndl, dotNV) * D_GGX(alpha, saturate(dot((float3)N, H)))));
+                specular += (half3)(E * (float3)F_Schlick(specularColor, (half)saturate(dot((float3)V, H))) * (V_GGX_SmithCorrelated(alpha, (float)ndl, dotNV) * D_GGX(alpha, saturate(dot((float3)N, H)))));
             }
 #endif
         }

@@ -143,28 +143,54 @@ physical button and screen acceptance is still separate.
 
 At the Train shot's halfway camera, time 19.73 s, `vita30` step 0, 4× MSAA,
 480×272 HDR, the initial serialized GPU total was 60.21 ms (main 50.97 ms).
-The last fully compiled trial, using directly sampled stored depth and
-conservative moving-shadow receiver culling, measured 54.23 ms (main 45.00
-ms, moving map 1.70 ms). This still fails the 30 fps target. The wider moving
+The final R32F shader measured 53.83–53.84 ms across two runs (main 44.54 ms,
+moving map 1.72 ms). This still fails the 30 fps target. The wider moving
 shadow bias was checked in device captures and removed the train's stripes.
 
 The current build stores the same normalized depth in a single-channel R32F
 colour target, recovering the stored-depth trial's additional 17 MiB of
 CDRAM. It retains receiver culling and separates rough non-metal static
-palettes from sun-GGX palettes. A depth-prepass experiment was measured and
-removed because it increased GPU cost. No scene geometry was removed for
-these renderer optimizations.
+palettes from sun-GGX palettes. Bounded shadow-filter weights and sunlight
+use half precision; light-space coordinates, depth comparisons and GGX
+evaluation retain float precision. This reduced the R32F baseline's 54.69 ms
+to 53.83–53.84 ms. The fixed Train capture's mean absolute RGB change was
+0.57/255, with no pixel changing more than 10/255 (runtime grain also varies).
+A depth-prepass experiment was measured and removed because it increased
+GPU cost. No scene geometry was removed for these renderer optimizations.
 
-Native build `3b1aa4a3a7430b3902db398b15e9eba6` was successfully replaced in
-Pocket Devkit and entered shader compilation. The last status had 26 new
-programs compiled, 270 pending, no reported shader errors, and 39 MiB free
-CDRAM. USB disconnected and the Vita disappeared from the host's USB device
-list before this build completed compilation. The host has been restarted
-and is waiting for reconnection. Final R32F captures, the six-shot continuous
-run, re-entry/resource checks and standalone packaging are still pending.
-Previous device captures and timings must not be presented as this build's
-acceptance. Host build and shader lint do not establish SceShaccCg completion
-or runtime image correctness.
+After USB reconnection, native build `718f9d47cfe832ef1e31e7e7678fb2cd`
+loaded the final shaders in Pocket Devkit with pending=0, missing=0 and no
+reported renderer or shader errors. All six cameras were captured at
+960×544 and reviewed. Crossing captures at 0, 8, 25, 37 and 63.93 seconds
+checked open/lowering/closed/raising states and the loop boundary. The
+same-view endpoint captures differed by a mean 0.64/255, including moving
+petals and grain. These are GXM captures, not a human physical-screen or
+button-input acceptance claim.
+
+Three atlas/place round trips succeeded, with exactly 40,894,464 bytes
+(39 MiB) of free CDRAM after every entry and no cumulative loss in reported
+user or physically contiguous memory. The atlas preview and remotely opened
+settings sheet were captured and checked.
+
+At the six halfway cameras, time 19.73 s and step 0, the frame-time sweep
+reported 45.7 ms Crossing, 44.8 Blossom, 47.3 Tracks, 47.2 Train, 43.4 Lane
+and 46.1 Spring. These paced frame measurements are distinct from the
+serialized GPU timings above. None meets the step-0 30 fps acceptance bar.
+
+A 146-second continuous camera/governor run completed without reported
+errors. Mean frame rates were 25.1 fps Crossing, 27.2 Blossom, 29.8 Tracks,
+29.2 Train, 25.8 Lane and 26.5 Spring; the governor used steps 2–4, always
+at 480×272. No captures or package transfers ran during this measurement.
+This is stable execution evidence, not 30 fps acceptance.
+
+The standalone `PKAT00001` VPK contains this place, the atlas and 321
+device-compiled programs. Every manifest key was rehashed against current
+expanded shader sources; VPK CRC and eboot/atlas/place/GXP byte readback
+passed. It includes no USB debug driver. Standalone installation and launch
+are separate from the verified Pocket Devkit run. The device acknowledged
+copying all 25,826,343 bytes to
+`ux0:data/pocket-atlas/pocket-atlas-PKAT00001.vpk`, ready for VitaShell
+installation; that copy receipt does not prove standalone execution.
 
 To repeat a measurement on an existing USB host (replace the share path):
 
