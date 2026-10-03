@@ -20,7 +20,9 @@ const opt = (key: string, fallback: string) => {
 };
 const place = opt("--place", "tokyo-konbini");
 if (!/^[a-z0-9-]+$/.test(place)) throw new Error("invalid place id");
-const share = resolve(root, ".pocket-build/psp/host0");
+// An existing usbhostfs_pc may already own the cable in another worktree.
+// Reuse its exact root with --share; never start a second owner.
+const share = resolve(opt("--share", `${root}/.pocket-build/psp/host0`));
 const pack = resolve(root, `.pocket-build/places/${place}/${place}.psp.place`);
 const port = opt("--port", "10000");
 if (!/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65533)
@@ -79,7 +81,7 @@ async function shell(text: string) {
     throw new Error(`pspsh failed: ${text}`);
 }
 if (command === "cook") {
-  await $`cargo run --release --locked -p pocket3d-place-cook -- psp --in ${root}/.pocket-build/places/${place}/${place}.place --out ${pack}`.cwd(
+  await $`cargo run --release --locked -p pocket3d-place-cook -- --target psp --in ${root}/.pocket-build/places/${place} --out ${pack}`.cwd(
     root,
   );
 } else if (command === "build") await build();

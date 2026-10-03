@@ -234,8 +234,12 @@ function shotNames(id: string): string[] {
 }
 if (command === "cook") {
   mkdirSync(nativePlaces, { recursive: true });
-  for (const p of native3dsPlaces(PLACES, args.includes("--place") ? place : undefined)) {
-    await $`cargo run --release --locked -p pocket3d-place-cook -- --pica-from ${join(root, `.pocket-build/places/${p.id}/${p.id}.place`)} --out ${join(nativePlaces, `${p.id}.place`)} --tex ${option("--tex", "256")}`.cwd(
+  if (args.includes("--place") && !livePlaces.some((p) => p.id === place))
+    throw new Error(`${place} is not in the 3DS release catalog; compile its PlaceIR explicitly to check capabilities`);
+  for (const p of livePlaces.filter(
+    (p) => !args.includes("--place") || p.id === place,
+  )) {
+    await $`cargo run --release --locked -p pocket3d-place-cook -- --target 3ds --in ${join(root, `.pocket-build/places/${p.id}`)} --out ${join(nativePlaces, `${p.id}.place`)} --tex ${option("--tex", "256")}`.cwd(
       root,
     );
   }

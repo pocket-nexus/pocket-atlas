@@ -1,17 +1,9 @@
-import type { PlaceDef, PlaceKind } from "../web/src/core/types";
+import type { PlaceDef } from "../web/src/core/types";
 
-// Renderer capabilities, not place IDs. Keep in step with the PICA cooker's
-// feature validator; vista haze and point-light fields need a future backend.
-const kinds = new Set<PlaceKind>([
-  "night-street",
-  "daytime-slope",
-  "daytime-street",
-  "dusk-street",
-  "daytime-coast",
-]);
-
-export function supports3ds(place: Pick<PlaceDef, "kind">): boolean {
-  return kinds.has(place.kind);
+// Catalog eligibility is explicit; PlaceIR checks the authored feature set
+// before lowering. Keep browser availability and published packs in agreement.
+export function supports3ds(place: Pick<PlaceDef, "targets">): boolean {
+  return place.targets?.includes("3ds") ?? false;
 }
 
 export function native3dsPlaces(places: readonly PlaceDef[], requested?: string): PlaceDef[] {
@@ -19,7 +11,7 @@ export function native3dsPlaces(places: readonly PlaceDef[], requested?: string)
   if (requested) {
     const place = live.find((p) => p.id === requested);
     if (!place) throw new Error(`Unknown live place: ${requested}`);
-    if (!supports3ds(place)) throw new Error(`3DS does not support ${place.kind}: ${requested}`);
+    if (!supports3ds(place)) throw new Error(`3DS release is unavailable for ${requested} (${place.kind})`);
     return [place];
   }
   return live.filter(supports3ds);
@@ -34,7 +26,7 @@ export function browser3dsFlags(place: PlaceDef): number {
 
 export function unsupported3dsPlaces(places: readonly PlaceDef[]) {
   return places.filter((p) => p.status === "live" && p.load && !supports3ds(p))
-    .map(({ id, kind }) => ({ id, kind, reason: "This kind is not available on Nintendo 3DS" }));
+    .map(({ id, kind }) => ({ id, kind, reason: "This place is not available on Nintendo 3DS" }));
 }
 
 /** Refuse a stale browser pack that would advertise unavailable native scenes. */

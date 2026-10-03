@@ -485,7 +485,7 @@ else if (command === "ctl") {
 } else if (command === "serve") {
   await dev("serve");
 } else if (command === "cook") {
-  await $`cargo run --release -p pocket3d-place-cook -- --in ${PLACE_DIR}`.cwd(ROOT);
+  await $`cargo run --release --locked -p pocket3d-place-cook -- --target vita --in ${PLACE_DIR}`.cwd(ROOT);
 } else if (command === "cook-atlas") {
   const faces = await fontFaces();
   await $`cargo run --release -p pocket3d-place-cook -- atlas --in ${resolve(ROOT, ".pocket-build/atlas/globe")} --out ${ATLAS_PACK} ${faces}`.cwd(ROOT);

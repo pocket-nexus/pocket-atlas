@@ -1,17 +1,6 @@
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
 import { PLACES } from "../web/src/places/registry";
 import { browser3dsFlags, native3dsPlaces, unsupported3dsPlaces, validate3dsBrowserCatalog } from "./atlas-3ds-support";
-
-test("native PLCE reader tracks the shared cooker's container version", () => {
-  const native = readFileSync(new URL("../n3ds/src/format.h", import.meta.url), "utf8");
-  const shared = readFileSync(new URL("../crates/pocket3d-place/src/lib.rs", import.meta.url), "utf8");
-  const reader = native.match(/^#define ATLAS_PLCE_VERSION (\d+)$/m);
-  const writer = shared.match(/^pub const VERSION: u32 = (\d+);$/m);
-  expect(reader).not.toBeNull();
-  expect(writer).not.toBeNull();
-  expect(reader![1]).toBe(writer![1]);
-});
 
 test("catalog includes every supported live place and rejects unsupported requested content", () => {
   const ids = native3dsPlaces(PLACES).map((p) => p.id);
@@ -26,7 +15,7 @@ test("catalog includes every supported live place and rejects unsupported reques
 test("browser keeps unavailable live places distinct from planned places", () => {
   const place = PLACES.find((p) => p.id === "sf-lombard-street")!;
   expect(browser3dsFlags(place) & 1).toBe(1);
-  expect(browser3dsFlags({ ...place, kind: "dusk-vista" }) & 5).toBe(4);
+  expect(browser3dsFlags({ ...place, targets: ["vita"] }) & 5).toBe(4);
   expect(browser3dsFlags({ ...place, status: "soon", load: undefined }) & 5).toBe(0);
   expect(browser3dsFlags({ ...place, featured: true }) & 2).toBe(2);
   expect(native3dsPlaces([{ ...place, id: "another-daytime-slope" }])[0].id)

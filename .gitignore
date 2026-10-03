@@ -2,7 +2,6 @@
 /target/
 /vita/target/
 /psp/target/
-/crates/pocket3d-gxm/target/
 /dist/
 node_modules/
 /web/dist/
