@@ -2,9 +2,16 @@
 #define ATLAS_FORMAT_H
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 // PLCE v5, PICA section v3. All integers and IEEE floats are little endian.
 // Cooker: crates/pocket3d-place-cook/src/pica.rs. GPU records contain no
 // pointers.
+#define ATLAS_PICA_CONTAINER_VERSION 5
+#define ATLAS_PICA_TABLE_VERSION 3
+static inline bool atlas_pack_header_valid(const uint32_t header[4]) {
+  return header[0] == 0x45434c50 &&
+         header[1] == ATLAS_PICA_CONTAINER_VERSION && header[2] == 5;
+}
 typedef struct {
   uint32_t version, textures, materials, draws, shots, matrices, frames, lights,
       dry_boxes, skin_bytes;

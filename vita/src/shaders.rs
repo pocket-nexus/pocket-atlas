@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use pocket3d_gxm::shacccg::{Compiler, Stage};
+use pocket_vita_gxm::shacccg::{Compiler, Stage};
 
 pub const SOURCES: &[(&str, &str)] = &[
     ("common.cgh", include_str!("../shaders/common.cgh")),
