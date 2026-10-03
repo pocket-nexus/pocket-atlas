@@ -135,9 +135,8 @@ static void discard_pending_touches(void) {
 }
 static int capture_pixels(const char *name, unsigned target, int w, int h) {
     if (w <= 0 || h <= 0 || w > 4096 || h > 4096) return 0;
-    const int stripe_rows = h < 64 ? h : 64;
-    const size_t row_bytes = (size_t)w * 4;
-    unsigned char *pixels = malloc(row_bytes * (size_t)stripe_rows);
+    const size_t bytes = (size_t)w * (size_t)h * 4;
+    unsigned char *pixels = malloc(bytes);
     if (!pixels) return 0;
     char path[1100], staging[1110];
     snprintf(path, sizeof path, "%s/%s", directory, name);
@@ -145,20 +144,13 @@ static int capture_pixels(const char *name, unsigned target, int w, int h) {
     FILE *file = fopen(staging, "wb");
     int saved = 0;
     if (file) {
-        int valid = 1;
         glBindFramebuffer(0x8d40, target);
-        /* Preserve bottom-to-top RGBA rows without retaining a full drawable
-         * CPU copy. RGBA8 row sizes are naturally aligned to GLES's default 4. */
-        for (int y = 0; y < h; y += stripe_rows) {
-            int rows = h - y < stripe_rows ? h - y : stripe_rows;
-            size_t bytes = row_bytes * (size_t)rows;
-            glReadPixels(0, y, w, rows, 0x1908, 0x1401, pixels);
-            if (glGetError() != 0 || fwrite(pixels, 1, bytes, file) != bytes) {
-                valid = 0;
-                break;
-            }
-        }
+        /* One synchronous readback preserves bottom-to-top RGBA rows. Keep
+         * this diagnostic allocation alive until the complete write finishes. */
+        glReadPixels(0, 0, w, h, 0x1908, 0x1401, pixels);
+        int valid = glGetError() == 0;
         glBindFramebuffer(0x8d40, framebuffer);
+        if (valid) valid = fwrite(pixels, 1, bytes, file) == bytes;
         int flushed = fflush(file);
         int closed = fclose(file);
         saved = valid && flushed == 0 && closed == 0 && rename(staging, path) == 0;

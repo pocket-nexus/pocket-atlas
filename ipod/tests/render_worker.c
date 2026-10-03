@@ -24,9 +24,9 @@ static unsigned bound_framebuffer;
 static atomic_int hdr_reads;
 static atomic_int surface_paused, surface_changes, fail_surface;
 static atomic_size_t capture_allocation;
-static atomic_int stripe_reads, inspect_stripes;
+static atomic_int capture_reads, inspect_capture;
 static atomic_int fail_read_y = -1, fail_write_after = -1;
-static int stripe_y[3], stripe_height[3];
+static int capture_read_x, capture_read_y, capture_read_width, capture_read_height;
 static char atomic_capture_path[1200];
 static unsigned pending_gl_error;
 static int surface_size = 2;
@@ -90,7 +90,7 @@ void *objc_msgSend(void *object, const char *selector, uintptr_t first, void *se
     } else if (!strcmp(selector, "presentRenderbuffer:")) {
         render_owner();
         assert(context_bound);
-        if (atomic_load(&inspect_stripes)) assert(bound_framebuffer == 1);
+        if (atomic_load(&inspect_capture)) assert(bound_framebuffer == 1);
         sleep_ms(12);
         atomic_fetch_add(&presented_frames, 1);
         atomic_fetch_add(&gl_calls, 1);
@@ -117,17 +117,17 @@ void glBindRenderbuffer(unsigned target, unsigned buffer) {
 }
 void glReadPixels(int x, int y, int width, int height, unsigned format, unsigned type, void *pixels) {
     render_owner(); assert(context_bound);
-    assert(x == 0 && y >= 0 && height > 0 && height <= 64);
+    assert(x == 0 && y == 0 && height > 0);
     assert(format == 0x1908 && type == 0x1401);
     if (bound_framebuffer == 7) {
         assert(width == 3 && height == 2);
         atomic_fetch_add(&hdr_reads, 1);
     }
-    if (atomic_load(&inspect_stripes)) {
+    if (atomic_load(&inspect_capture)) {
         assert(bound_framebuffer == 1 && width == 130);
-        int index = atomic_fetch_add(&stripe_reads, 1);
-        assert(index < 3);
-        stripe_y[index] = y; stripe_height[index] = height;
+        assert(atomic_fetch_add(&capture_reads, 1) == 0);
+        capture_read_x = x; capture_read_y = y;
+        capture_read_width = width; capture_read_height = height;
         assert_old_capture(); /* Destination stays intact throughout readback. */
     }
     unsigned char *rgba = pixels;
@@ -478,9 +478,9 @@ int main(int argc, char **argv) {
     snprintf(path, sizeof path, "%s/capture-hdr-error.txt", directory);
     assert(access(path, F_OK) == 0);
 
-    /* A 130-row drawable requires 64 + 64 + 2 rows. Verify every output byte,
-     * the bounded allocation, and preservation of the previous capture until
-     * atomic completion. GL and disk failures after the first stripe must
+    /* A 130-row drawable must use one complete readback, including rows beyond
+     * the old 64-row boundary. Verify every output byte and preservation of the
+     * old capture until atomic completion. GL and partial-write failures must
      * remove staging/metadata without exposing or replacing partial pixels. */
     assert(atlas_worker_surface_pause());
     assert(atlas_worker_surface_resize((void *)130, 3, &resized_width, &resized_height));
@@ -489,19 +489,19 @@ int main(int argc, char **argv) {
     for (int failure = 0; failure < 3; ++failure) {
         file = fopen(atomic_capture_path, "wb"); assert(file);
         assert(fwrite("old!", 1, 4, file) == 4); assert(fclose(file) == 0);
-        atomic_store(&stripe_reads, 0);
+        atomic_store(&capture_reads, 0);
         atomic_store(&capture_allocation, 0);
-        atomic_store(&fail_read_y, failure == 1 ? 64 : -1);
-        atomic_store(&fail_write_after, failure == 2 ? 1 : -1);
-        atomic_store(&inspect_stripes, 1);
+        atomic_store(&fail_read_y, failure == 1 ? 0 : -1);
+        atomic_store(&fail_write_after, failure == 2 ? 0 : -1);
+        atomic_store(&inspect_capture, 1);
         snprintf(path, sizeof path, "%s/capture", directory);
         file = fopen(path, "w"); assert(file); assert(fclose(file) == 0);
         sequence = atlas_worker_action(-1); wait_ack(&snapshot, sequence);
-        atomic_store(&inspect_stripes, 0);
-        assert(atomic_load(&capture_allocation) == 130 * 64 * 4);
-        assert(atomic_load(&stripe_reads) == (failure ? 2 : 3));
-        assert(stripe_y[0] == 0 && stripe_height[0] == 64);
-        assert(stripe_y[1] == 64 && stripe_height[1] == 64);
+        atomic_store(&inspect_capture, 0);
+        assert(atomic_load(&capture_allocation) == 130 * 130 * 4);
+        assert(atomic_load(&capture_reads) == 1);
+        assert(capture_read_x == 0 && capture_read_y == 0);
+        assert(capture_read_width == 130 && capture_read_height == 130);
         snprintf(path, sizeof path, "%s/frame.rgba.new", directory);
         assert(access(path, F_OK) != 0);
         snprintf(path, sizeof path, "%s/frame.json", directory);
@@ -511,7 +511,6 @@ int main(int argc, char **argv) {
         if (failure) {
             assert_old_capture();
         } else {
-            assert(stripe_y[2] == 128 && stripe_height[2] == 2);
             file = fopen(atomic_capture_path, "rb"); assert(file);
             for (int y = 0; y < 130; ++y) {
                 for (int x = 0; x < 130; ++x) {
@@ -542,7 +541,7 @@ int main(int argc, char **argv) {
     assert(rmdir(directory) == 0);
     printf("PASS: exclusive owner; nonblocking input; copied snapshot; post-frame nonce; "
            "completed render/present timing; capture exclusion; atomic capture and HDR metadata; "
-           "bounded 64-row capture, partial stripe, GL/write failure cleanup; "
+           "single full-frame capture, exact row order, GL/write failure cleanup; "
            "surface transition barrier and sticky-error rollback; background after failed resize; "
            "background GL barrier; stale-touch purge; OOM end recovery; "
            "allocation-free coalesced memory pressure; deferred background warning; "
