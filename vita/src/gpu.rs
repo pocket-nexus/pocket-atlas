@@ -175,9 +175,30 @@ impl Drop for Program {
     }
 }
 
+/// A GXP in storage GXM accepts. `Gxp` keeps the program in a `Vec<u128>`
+/// for 16-byte alignment, but on 32-bit ARM a `u128` aligns to 8, so about
+/// half of the allocations come back unaligned and are refused. Until the
+/// kernel aligns its storage itself, the refused copies are held while
+/// another is made, so the allocator hands out a different address.
+fn aligned(bytes: &[u8]) -> Result<Gxp, String> {
+    // A refused copy is freed inside `Gxp::new`, and the next one would land on
+    // the same address: blocks of the same size, then odd small ones, take
+    // that address first.
+    let mut held: Vec<Vec<u64>> = Vec::new();
+    for k in 0..48 {
+        match Gxp::new(bytes) {
+            Err(e) if e.contains("unaligned") && bytes.len() >= 16 && &bytes[..4] == b"GXP\0" => {
+                held.push(vec![0u64; if k % 2 == 0 { bytes.len().div_ceil(16) * 2 } else { 1 + k }]);
+            }
+            r => return r,
+        }
+    }
+    Err("no 16-byte aligned storage for a GXP program".into())
+}
+
 impl Program {
     unsafe fn new(patcher: *mut g::SceGxmShaderPatcher, bytes: &[u8], hash: u64) -> Result<Self, String> {
-        let reg = Registered::new(patcher, Gxp::new(bytes)?)?;
+        let reg = Registered::new(patcher, aligned(bytes)?)?;
         let mut uniforms = [core::ptr::null(); U::Count as usize];
         for (i, n) in UNIFORM_NAMES.iter().enumerate() {
             uniforms[i] = reg.param(n);

@@ -33,10 +33,19 @@ export const SKIRT = 0.6;
 /** Metres of road per repeat of the surface texture along the road. */
 export const SURFACE_REPEAT = 8;
 
+/** A side street is seen from the driven road, not driven: its bank takes a cut face, a crest and a back slope. */
+const BEYOND_SIDE = [0.3, 0.9, 2.4];
+
+/** Distances beyond the ploughed edge of a road's cross-section stations, out to its verge. */
+export function beyondOf(road: Road): number[] {
+  const beyond = (road.main ? BEYOND : BEYOND_SIDE).filter((e) => e < road.cls.verge);
+  beyond.push(road.cls.verge);
+  return beyond;
+}
+
 /** Offsets of a road's cross-section, left to right, and which are on the carriageway. */
 function offsets(road: Road): { d: number[]; first: number; last: number } {
-  const beyond = BEYOND.filter((e) => e < road.cls.verge);
-  beyond.push(road.cls.verge);
+  const beyond = beyondOf(road);
   const d: number[] = [];
   for (let k = beyond.length - 1; k >= 0; k--) d.push(-(road.half + beyond[k]));
   const first = d.length;
@@ -48,7 +57,18 @@ function offsets(road: Road): { d: number[]; first: number; last: number } {
 
 /** Stations of a road: its line's points, and on the driven road extra ones at the edges of every side road's mouth. */
 export function stations(world: RouteWorld, road: Road): Float64Array {
-  const s: number[] = Array.from(road.line.s);
+  const l = road.line;
+  // A side street's stations are 10 m apart where it runs straight.
+  const s: number[] = road.main
+    ? Array.from(l.s)
+    : Array.from(l.s).filter((_, i) => {
+        if (i === 0 || i >= l.n - 1 || i % 2 === 0) return true;
+        const ax = l.x[i] - l.x[i - 1];
+        const az = l.z[i] - l.z[i - 1];
+        const bx = l.x[i + 1] - l.x[i];
+        const bz = l.z[i + 1] - l.z[i];
+        return Math.abs(ax * bz - az * bx) > 0.05 * Math.hypot(ax, az) * Math.hypot(bx, bz);
+      });
   if (road.main) {
     for (const j of world.junctions) {
       const w = j.road.half;

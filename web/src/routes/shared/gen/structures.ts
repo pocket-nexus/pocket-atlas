@@ -5,7 +5,7 @@ import { faceNormal, type MeshBuilder, type V3 } from "../mesh";
 import { clamp, fbm2, hash2, lerp, noise2, smoothstep } from "../noise";
 import type { Feature } from "../source";
 import type { Probe, RouteWorld } from "../world";
-import { BEYOND, SKIRT, stations as roadStations } from "./strip";
+import { beyondOf, SKIRT, stations as roadStations } from "./strip";
 
 /**
  * What stands in and over the ground along the route:
@@ -1156,8 +1156,7 @@ function bridge(c: CellContext, b: Bridge): void {
   }
 
   // Abutments: the end of the embankment and of its snow banks, walled across the strip's cross-section.
-  const beyond = BEYOND.filter((e) => e < road.cls.verge);
-  beyond.push(road.cls.verge);
+  const beyond = beyondOf(road);
   const offs: number[] = [];
   for (let i = beyond.length - 1; i >= 0; i--) offs.push(-(half + beyond[i]));
   offs.push(-half, 0, half);

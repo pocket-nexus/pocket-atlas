@@ -1,7 +1,7 @@
 import { Color, MeshBasicMaterial } from "three";
 import { extrudeEdges } from "../../../places/shared/atlas";
 import { canvas, JP_SANS, toTexture, type Ctx } from "../../../places/shared/canvas";
-import { ATLAS, CELLS, LIT_ATLAS, LIT_CELLS, LIT_STRIPS, PAD, STRIPS, BAND, type Cell, type Strip } from "./buildings-layout";
+import { ATLAS, CELLS, LIT_ATLAS, LIT_CELLS, LIT_STRIPS, PAD, ROWS, STRIPS, BAND, type Cell, type Strip } from "./buildings-layout";
 import type { Kit } from "./materials";
 
 /**
@@ -283,7 +283,7 @@ function paintAtlas(): HTMLCanvasElement {
       g.fillRect(r() * ATLAS, s.y + r() * s.h, 6 + r() * 40, 1 + r() * 3);
     }
     g.fillStyle = "rgba(60,60,58,0.5)";
-    for (let i = 0; i < 16; i++) g.fillRect(i * 64 + 30, s.y + 22, 3, 3);
+    for (let i = 0; i < 16; i++) g.fillRect(i * 64 + 30, s.y + 14, 3, 3);
     grain(g, 0, s.y, ATLAS, s.h, 0.12, 67);
     finishStrip(g, s);
   }
@@ -294,6 +294,38 @@ function paintAtlas(): HTMLCanvasElement {
     g.fillStyle = "#eeeeec";
     g.fillRect(0, s.y, ATLAS, s.h);
     grain(g, 0, s.y, ATLAS, s.h, 0.03, 71);
+    finishStrip(g, s);
+  }
+
+  // Storeys of a house for the distance tiers: a flat wall, a hint of board lines, windows painted in.
+  for (const name of ["rowA", "rowB"] as const) {
+    const s = STRIPS[name];
+    const px = ATLAS / 8;
+    const py = s.h / s.metres;
+    g.fillStyle = "#e6e6e3";
+    g.fillRect(0, s.y, ATLAS, s.h);
+    g.fillStyle = "rgba(120,120,116,0.10)";
+    for (let y = s.y + 3; y < s.y + s.h; y += 4) g.fillRect(0, y, ATLAS, 1);
+    for (const [x, w, sill, h, lit] of ROWS[name]) {
+      const X = Math.round(x * px);
+      const W = Math.round(w * px);
+      const H = Math.round(h * py);
+      const Y = Math.round(s.y + s.h - (sill + h) * py);
+      g.fillStyle = "#4a4642";
+      g.fillRect(X, Y, W, H);
+      if (lit) {
+        const grad = g.createLinearGradient(0, Y, 0, Y + H);
+        grad.addColorStop(0, "#ffe6b4");
+        grad.addColorStop(1, "#e9b877");
+        g.fillStyle = grad;
+        g.fillRect(X + 6, Y + 2, W - 12, H - 4);
+      } else glass(g, X + 6, Y + 2, W - 12, H - 4, 300 + x * 10, w > 1 ? 0.45 : 0);
+      if (w > 1) {
+        g.fillStyle = "#4a4642";
+        g.fillRect(X + W / 2 - 2, Y, 4, H);
+      }
+    }
+    grain(g, 0, s.y, ATLAS, s.h, 0.03, 91);
     finishStrip(g, s);
   }
 

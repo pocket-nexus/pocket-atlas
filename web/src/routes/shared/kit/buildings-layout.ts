@@ -41,23 +41,54 @@ export const PAD = 4;
 
 export const STRIPS = {
   /** Horizontal metal lap siding, 19 cm boards. */
-  lap: { y: 4, h: 176, metres: 3 },
+  lap: { y: 4, h: 144, metres: 3 },
   /** Ceramic siding panels (窯業系): a stretcher pattern of 45 × 15 cm blocks. */
-  ceramic: { y: 188, h: 160, metres: 3 },
+  ceramic: { y: 156, h: 128, metres: 3 },
   /** A storey of a block (school, flats, offices): three windows per repeat. */
-  band: { y: 356, h: 176, metres: 3.4 },
+  band: { y: 292, h: 144, metres: 3.4 },
   /** Vertical ribbed metal (角波), 12.5 cm ribs; also corrugated arches. */
-  rib: { y: 540, h: 48, metres: 0 },
+  rib: { y: 444, h: 32, metres: 0 },
   /** Standing-seam roof metal, seams 50 cm apart running down the slope. */
-  seam: { y: 596, h: 48, metres: 0 },
+  seam: { y: 484, h: 32, metres: 0 },
   /** Cast concrete: plinths, silos, chimneys. */
-  concrete: { y: 652, h: 48, metres: 0 },
+  concrete: { y: 524, h: 32, metres: 0 },
   /** Smooth painted metal: trims, fascias, tanks, posts. */
-  plain: { y: 708, h: 24, metres: 0 },
+  plain: { y: 564, h: 24, metres: 0 },
+  /**
+   * A storey of a house seen from beyond 45 m, its windows painted in: at
+   * that distance the handheld shows 17 cm or more per pixel, so siding is
+   * a flat tint and a window is a few dark pixels. `rowA` stands directly
+   * over `rowB`: a wall of two storeys takes both in one quad.
+   */
+  rowA: { y: 596, h: 64, metres: 2.7 },
+  rowB: { y: 668, h: 64, metres: 2.7 },
 } as const satisfies Record<string, Strip>;
 
 /** The windows of the `band` strip, per repeat (m from the repeat's left edge and the storey's floor). */
 export const BAND = { period: WALL_TILE / 3, x: 0.46, w: 1.75, sill: 0.95, h: 1.5 } as const;
+
+/**
+ * The windows of the `row` strips: left edge, width, sill, height (m), and
+ * whether it is lit. Walls start and end in the gaps between them.
+ */
+export const ROWS = {
+  rowA: [
+    [0.9, 1.7, 0.95, 1.15, 0],
+    [3.9, 0.75, 0.95, 1.3, 0],
+    [5.6, 1.7, 0.95, 1.15, 1],
+  ],
+  rowB: [
+    [0.6, 2.5, 0.7, 1.35, 0],
+    [3.9, 0.7, 1.5, 0.55, 0],
+    [5.6, 1.7, 0.95, 1.15, 0],
+  ],
+} as const;
+/** Where a wall may start or end along the `row` strips (m, modulo `WALL_TILE`): clear of every window of both. */
+export const ROW_GAPS: readonly [number, number][] = [
+  [3.25, 3.75],
+  [4.8, 5.45],
+  [7.45, 8.45],
+];
 
 export const CELLS = {
   /** Two-pane sliding window, dark bronze frame. */

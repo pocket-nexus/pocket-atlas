@@ -112,9 +112,9 @@ the kit with the place pipeline, then every cell on its own, in parallel:
   each vertex takes the hemisphere and the probe's diffuse light, scaled by
   the share of the sky it sees past the banks, trees and walls within 5 m
   (24 rays against its own and its neighbours' cells).
-- **Reduced levels per draw**, by layer (15 cm, 60 cm and 2.4 m in the
-  corridor; up to 40 m for the far hills), with every open border of a
-  mesh held so cells stay sealed; thin parts vanish from a level once they
+- **Reduced levels per draw**, by layer (20 cm, 1 m and 5 m in the
+  corridor; up to 40 m for the far hills), with the vertices where a cell
+  was cut from its neighbours held so cells stay sealed; thin parts vanish from a level once they
   are narrower than its error.
 - **Each cell quantized in its own frame** into the Vita layouts of the
   place renderer, as one blob: a header, draw records, vertices, indices.

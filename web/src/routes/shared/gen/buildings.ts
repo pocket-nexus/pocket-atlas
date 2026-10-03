@@ -1,9 +1,10 @@
 import type { CellContext } from "../cell";
-import { BAND, CELLS, LIT_ATLAS, LIT_CELLS, LIT_STRIPS, STORE_TILE, STRIPS, WALL_TILE, cellUV, stripV, type Cell, type Strip } from "../kit/buildings-layout";
+import { ATLAS, BAND, CELLS, LIT_ATLAS, LIT_CELLS, LIT_STRIPS, ROW_GAPS, STORE_TILE, STRIPS, WALL_TILE, cellUV, stripV, type Cell, type Strip } from "../kit/buildings-layout";
 import { faceNormal, normalize, type MeshBuilder, type V3 } from "../mesh";
 import { Rand, clamp, hash2 } from "../noise";
 import type { Feature } from "../source";
 import type { Probe, RouteWorld } from "../world";
+import { groundCut } from "./structures";
 import { Cover } from "./terrain";
 
 /**
@@ -19,6 +20,14 @@ import { Cover } from "./terrain";
  * or a farmstead) and from the shop and amenity points next to it. Every
  * choice is seeded from the footprint's centroid, so a house is the same
  * house in every cell, layer and run.
+ *
+ * The camera never leaves the driven road, so a building's detail follows
+ * its distance from that line (`Tier`): within 45 m everything; to 110 m
+ * the same massing with its windows in the wall texture, a plain porch and
+ * a square slab of snow; beyond, a box per part of the footprint, a roof
+ * and the snow the road can see. The seeded choices (roof type, storeys,
+ * colours) are made before the tier is looked at, so a street keeps its
+ * character where the tiers meet.
  *
  * `base` gets the building; `detail` gets what only shows from the road
  * (window frames' returns, tanks, chimneys, flues), for buildings near the
@@ -475,12 +484,49 @@ function returns(s: Sink, w: Wall, t: number, y: number, width: number, height: 
   s.quad(M, wp(w, a, y), wp(w, b, y), wp(w, b, y, proud), wp(w, a, y, proud), PLAIN_UV, shade(col, 0.8), [0, -1, 0]);
 }
 
+/** How much of a building is drawn: by its distance from the driven line. */
+type Tier = 0 | 1 | 2;
+const NEAR = 45;
+const MIDDLE = 110;
+/** Within the near tier, heaps, drifts and roof patches are only made this close to the driven line. */
+const KERB = 28;
+
+/** A wall as one quad of a strip, whatever its height. */
+function wallOne(s: Sink, w: Wall, yb: number, yt: number, strip: Strip, col: RGBA, u0: number): void {
+  const [vb, vt] = stripV(strip);
+  s.quad(M, wp(w, 0, yb), wp(w, w.len, yb), wp(w, w.len, yt), wp(w, 0, yt), [u0, vb + 0.002, u0 + w.len / WALL_TILE, vt - 0.002], col, w.n);
+}
+
+/**
+ * A house wall for the distance tiers: one quad of the `row` strips, whose
+ * windows are painted in; two storeys take both strips at once. The wall
+ * starts and ends between windows where its length allows.
+ */
+function wallRows(s: Sink, w: Wall, yb: number, yt: number, storeys: number, col: RGBA, pick: number): void {
+  if (w.len < 2.4) return wallOne(s, w, yb, yt, STRIPS.plain, col, 0);
+  const fits: number[] = [];
+  for (const [g0, g1] of ROW_GAPS)
+    for (const [h0, h1] of ROW_GAPS)
+      for (let k = 0; k <= Math.ceil(w.len / WALL_TILE) + 1; k++) {
+        const lo = Math.max(g0, h0 + k * WALL_TILE - w.len);
+        const hi = Math.min(g1, h1 + k * WALL_TILE - w.len);
+        if (hi >= lo) fits.push((lo + hi) / 2);
+      }
+  const a = fits.length ? fits[Math.min(fits.length - 1, Math.floor(pick * fits.length))] : 7.6;
+  const one = pick < 0.5 ? STRIPS.rowA : STRIPS.rowB;
+  const top = storeys >= 2 ? STRIPS.rowA : one;
+  const bottom = storeys >= 2 ? STRIPS.rowB : one;
+  const v0 = 1 - (bottom.y + bottom.h) / ATLAS + 0.001;
+  const v1 = 1 - top.y / ATLAS - 0.001;
+  s.quad(M, wp(w, 0, yb), wp(w, w.len, yb), wp(w, w.len, yt), wp(w, 0, yt), [a / WALL_TILE, v0, (a + w.len) / WALL_TILE, v1], col, w.n);
+}
+
 // ------------------------------------------------------------------ roofs
 
 /** A roof's cross-section over the wall top: (s across the span, h above the wall top), from −hw to +hw. */
 type Profile = [number, number][];
 
-function profileOf(kind: "flat" | "shed" | "gable" | "gambrel" | "arch", hw: number, rise: number): Profile {
+function profileOf(kind: "flat" | "shed" | "gable" | "gambrel" | "arch", hw: number, rise: number, n = 10): Profile {
   switch (kind) {
     case "flat":
       return [
@@ -508,7 +554,6 @@ function profileOf(kind: "flat" | "shed" | "gable" | "gambrel" | "arch", hw: num
       ];
     case "arch": {
       const out: Profile = [];
-      const n = 10;
       for (let k = 0; k <= n; k++) {
         const a = (Math.PI * k) / n;
         out.push([-hw * Math.cos(a), rise * Math.sin(a)]);
@@ -705,6 +750,48 @@ function snowSlab(s: Sink, fr: Frame, hl: number, hw: number, y: number, depth: 
   s.grid(MS, rows, [diag(1, 0.05), diag(0.7, 0.6), diag(0.2, 1)], (r, k) => s.suv(rows[r][k]), WHITE);
   const t = rows[2];
   s.snowQuad(t[0], t[1], t[2], t[3], UP);
+}
+
+/**
+ * A roof for the distance tiers: one face per segment of the profile, snow
+ * where the segment holds it and metal where it has slid off.
+ */
+function roofSimple(s: Sink, p: Part, yTop: number, prof: Profile, ov: number, col: RGBA, holds = HOLDS): void {
+  const ext = overhung(prof, ov);
+  const l = p.hl + ov * 0.7;
+  const [vb, vt] = stripV(STRIPS.seam);
+  for (let i = 0; i + 1 < ext.length; i++) {
+    const a = ext[i];
+    const b = ext[i + 1];
+    const run = b[0] - a[0];
+    const rise = b[1] - a[1];
+    const len = Math.hypot(run, rise) || 1;
+    let n = add(p.fr.dir(0, -rise / len), UP, run / len);
+    if (n[1] < 0) n = [-n[0], -n[1], -n[2]];
+    const A = p.fr.p(-l, a[0], yTop + a[1] + 0.02);
+    const B = p.fr.p(l, a[0], yTop + a[1] + 0.02);
+    const C = p.fr.p(l, b[0], yTop + b[1] + 0.02);
+    const D = p.fr.p(-l, b[0], yTop + b[1] + 0.02);
+    if (Math.abs(rise / (run || 1e-6)) < holds) s.snowQuad(A, B, C, D, n);
+    else s.quad(M, A, B, C, D, [0, vb + 0.003, (2 * l) / WALL_TILE, vt - 0.003], col, n);
+  }
+}
+
+/**
+ * Snow on a level roof for the distance tiers: a square-edged slab; from
+ * far away only its top and the sides the driven road can see.
+ */
+function snowCap(s: Sink, fr: Frame, hl: number, hw: number, y: number, depth: number, tier: Tier, toward: [number, number]): void {
+  const o = 0.04;
+  const c = [fr.p(-hl - o, -hw - o, 0), fr.p(hl + o, -hw - o, 0), fr.p(hl + o, hw + o, 0), fr.p(-hl - o, hw + o, 0)];
+  const outs = [fr.dir(0, -1), fr.dir(1, 0), fr.dir(0, 1), fr.dir(-1, 0)];
+  const at = (q: V3, yy: number): V3 => [q[0], yy, q[2]];
+  for (let k = 0; k < 4; k++) {
+    if (outs[k][0] * toward[0] + outs[k][2] * toward[1] < (tier === 2 ? 0.15 : -0.3)) continue;
+    const j = (k + 1) % 4;
+    s.snowQuad(at(c[k], y), at(c[j], y), at(c[j], y + depth), at(c[k], y + depth), outs[k]);
+  }
+  s.snowQuad(at(c[0], y + depth), at(c[1], y + depth), at(c[2], y + depth), at(c[3], y + depth), UP);
 }
 
 // ------------------------------------------------------------------ snow on the ground
@@ -907,6 +994,15 @@ function cylinder(s: Sink, x: number, z: number, r: number, y0: number, y1: numb
   };
   const [vb, vt] = stripV(strip);
   const turns = Math.max(1, Math.round((2 * Math.PI * r) / WALL_TILE));
+  if (sides < 8) {
+    // From a distance: one ring of faces and a cone.
+    const far = [ringAt(r, y0), ringAt(r, y1)];
+    s.grid(M, far, [nrmAt(0), nrmAt(0)], (rr, k) => [(k / sides) * turns, rr ? vt : vb], col);
+    const cone = [ringAt(r * 1.02, y1), ringAt(r * 0.1, y1 + dome)];
+    if (domeCol) s.grid(M, cone, [nrmAt(1), nrmAt(1)], (rr, k) => [(k / sides) * 0.2, rr ? PLAIN_UV[3] : PLAIN_UV[1]], domeCol);
+    else s.grid(MS, cone, [nrmAt(1), nrmAt(1)], (rr, k) => s.suv(cone[rr][k]), WHITE);
+    return;
+  }
   const body = [ringAt(r, y0), ringAt(r, (y0 + y1) / 2), ringAt(r, y1)];
   s.grid(M, body, [nrmAt(0), nrmAt(0), nrmAt(0)], (rr, k) => [(k / sides) * turns, rr === 1 ? vt : vb], col);
   const cap = [ringAt(r * 1.02, y1), ringAt(r * 0.62, y1 + dome * 0.75), ringAt(r * 0.06, y1 + dome)];
@@ -934,6 +1030,7 @@ interface Plot {
   dMain: number;
   /** Direction to the driven line. */
   toMain: [number, number];
+  tier: Tier;
   town: boolean;
   /** A restaurant or other named amenity next to it (for the sign). */
   hint: string;
@@ -1020,18 +1117,20 @@ function footing(s: Sink, pl: Plot, parts: Part[]): { floor: number; wallBase: n
   const drop = pl.yHigh - pl.yLow;
   if (drop < 0.5) return { floor: pl.yLow, wallBase: pl.yLow - 0.35 };
   const floor = pl.yLow + Math.min(drop, 1.5);
+  // From a distance the walls simply run down to the ground.
+  if (pl.tier > 0) return { floor, wallBase: pl.yLow - 0.35 };
   for (const p of parts) for (const w of wallsOf(p)) wallFace(s, w, pl.yLow - 0.35, floor, STRIPS.concrete, () => CONCRETE, 0);
   return { floor, wallBase: floor };
 }
 
 /** Drifts and heaps around a building: against the windward wall and beside a door. */
 function drifts(s: Sink, pl: Plot, walls: Wall[], skip: Wall | null): void {
-  if (pl.dMain > 260) return;
+  if (pl.tier > 0 || pl.dMain > KERB) return;
   // The winter wind is from the north-west.
   let best: Wall | null = null;
   let score = 0.2;
   for (const w of walls) {
-    if (w.inner || w === skip || w.len < 3) continue;
+    if (w.inner || w === skip || w.len < 3 || w.n[0] * pl.toMain[0] + w.n[2] * pl.toMain[1] < -0.3) continue;
     const d = w.n[0] * -0.8 + w.n[2] * -0.6;
     if (d > score) {
       score = d;
@@ -1063,7 +1162,7 @@ function house(s: Sink, pl: Plot, temple: boolean): void {
   const twoTone = storeys === 2 && rnd.next() < 0.22;
   const lowCol = twoTone ? rnd.pick([...DARK, TINTED[0], TINTED[4]]) : wallCol;
   const roofCol = temple ? rgb(60, 62, 66) : roofing(rnd);
-  const style: WindowStyle = { main: rnd.next() < 0.4 ? "winWhite" : "winSlide", lit: 0.2, near: pl.dMain < 50, toward: pl.toMain, blank: pl.dMain > 230 ? 0.5 : 0.22 };
+  const style: WindowStyle = { main: rnd.next() < 0.4 ? "winWhite" : "winSlide", lit: 0.2, near: true, toward: pl.toMain, blank: 0.22 };
   const u0 = rnd.next();
   const depth = rnd.range(0.4, 0.6);
   const eave = temple ? 0.9 : rnd.range(0.2, 0.45);
@@ -1087,6 +1186,30 @@ function house(s: Sink, pl: Plot, temple: boolean): void {
     } else if (roof === "shed") prof = profileOf("shed", p.hw, 2 * p.hw * pitch);
     else if (roof === "gambrel") prof = profileOf("gambrel", p.hw, Math.min(4.4, p.hw * 0.95));
     else prof = profileOf("gable", p.hw, Math.min(temple ? 5 : 4.6, p.hw * pitch));
+    if (pl.tier > 0) {
+      // Middle and far: the same massing, colours and roof with the windows in the wall strip.
+      for (const w of walls) {
+        if (w.inner && pl.tier === 2) continue;
+        const extra = w.end ? 0 : w.sign > 0 ? prof[prof.length - 1][1] : prof[0][1];
+        wallRows(s, w, wallBase, yTop + extra, st, wallCol, rnd.next());
+      }
+      if (roof === "musetsu") snowCap(s, p.fr, p.hl, p.hw, yTop, depth, pl.tier, pl.toMain);
+      else {
+        for (const sgn of [1, -1]) gableEnd(s, p, sgn, yTop, prof, STRIPS.plain, wallCol, u0);
+        roofSimple(s, p, yTop, prof, eave, roofCol);
+      }
+      if (pi === 0 && pl.tier === 1 && !temple) {
+        const front = facing(walls, pl.road ?? pl.toMain, roof === "gableSteep" ? -0.15 : 0.1, rnd);
+        const t = clamp(front.len * rnd.range(0.25, 0.75), 1.3, front.len - 1.3);
+        if (front.len > 3.4 && rnd.next() < 0.7) {
+          // The 風除室 as a pale box under its snow.
+          const fr = new Frame(front.mx + front.rx * (t - front.len / 2) + front.n[0] * 0.6, front.mz + front.rz * (t - front.len / 2) + front.n[2] * 0.6, front.rx, front.rz);
+          boxAt(s, fr, 0, 0, 0.8, 0.6, floor - 0.2, floor + 2.4, STRIPS.plain, rgb(150, 158, 164), false);
+          s.snowQuad(fr.p(-0.85, -0.6, floor + 2.45), fr.p(0.85, -0.6, floor + 2.45), fr.p(0.85, 0.65, floor + 2.45), fr.p(-0.85, 0.65, floor + 2.45), UP);
+        }
+      }
+      return;
+    }
     for (const w of walls) {
       const extra = w.end ? 0 : w.sign > 0 ? prof[prof.length - 1][1] : prof[0][1];
       const top = yTop + extra - (roof === "musetsu" ? 0.3 : 0);
@@ -1099,7 +1222,7 @@ function house(s: Sink, pl: Plot, temple: boolean): void {
       for (const sgn of [1, -1]) gableEnd(s, p, sgn, yTop, prof, strip, wallCol, u0);
       const ext = roofSkin(s, p, yTop, prof, eave, eave * 0.7, STRIPS.seam, roofCol);
       roofSnow(s, p, yTop, ext, eave * 0.7, depth);
-      roofPatches(s, p, yTop, ext, rnd);
+      if (pl.dMain < KERB) roofPatches(s, p, yTop, ext, rnd);
     }
     // The front: the main part's wall toward the road.
     let blocked: [number, number][] = [];
@@ -1118,19 +1241,20 @@ function house(s: Sink, pl: Plot, temple: boolean): void {
       // Snow shovelled off the path, beside the door.
       const side = rnd.next() < 0.5 ? -1 : 1;
       const hp = wp(front, t + side * rnd.range(1.9, 2.6), 0, rnd.range(1.4, 2.2));
-      if (pl.dMain < 260) heap(s, pl.site, hp[0], hp[2], rnd.range(1.0, 1.6), rnd.range(0.7, 1.3), rnd.next() * 6);
+      if (pl.dMain < KERB) heap(s, pl.site, hp[0], hp[2], rnd.range(1.0, 1.6), rnd.range(0.7, 1.3), rnd.next() * 6);
     }
     for (const w of walls) {
-      if (w.inner) continue;
+      // The camera stays on the driven road: a wall turned away from it is never seen.
+      if (w.inner || !seen(style, w)) continue;
       windowRow(s, w, floor + 0.45, st, rnd, style, w === front ? blocked : []);
       // A window high in a steep gable.
       if (w.end && prof.length >= 3 && prof[Math.floor(prof.length / 2)][1] > 2.6) windowAt(s, w, "winTall", w.len / 2, yTop + 0.35, rnd.next() < 0.2, seen(style, w));
     }
     // Snow that has slid off a steep roof lies along the eave walls.
-    if ((roof === "gableSteep" || roof === "gambrel") && pl.dMain < 260)
+    if ((roof === "gableSteep" || roof === "gambrel") && pl.dMain < KERB)
       for (const w of walls) {
         const h = rnd.range(0.7, 1.4);
-        if (w.end || w.inner || w === front) continue;
+        if (w.end || w.inner || w === front || !seen(style, w)) continue;
         mound(s, pl.site, w, w.len * 0.03, w.len * 0.97, h, 2.4);
       }
     if (pi === 0 && style.near && !temple) {
@@ -1170,9 +1294,20 @@ function shed(s: Sink, pl: Plot, garage: boolean): void {
   const yTop = floor + h;
   const sloped = A >= 45 && rnd.next() < 0.6;
   const prof = sloped ? profileOf("gable", p.hw, p.hw * rnd.range(0.28, 0.45)) : profileOf("shed", p.hw, 2 * p.hw * rnd.range(0.04, 0.12));
+  const roofCol = roofing(rnd);
+  if (pl.tier > 0) {
+    for (const w of walls) wallOne(s, w, wallBase, yTop + (w.end ? 0 : w.sign > 0 ? prof[prof.length - 1][1] : prof[0][1]), strip, col, u0);
+    for (const sgn of [1, -1]) gableEnd(s, p, sgn, yTop, prof, strip, col, u0);
+    roofSimple(s, p, yTop, prof, sloped ? 0.3 : 0.1, roofCol);
+    if (pl.tier === 1 && garage) {
+      const front = facing(walls, pl.road ?? pl.toMain, -0.3, rnd);
+      const wd = Math.min(CELLS.shutter.mw, front.len - 0.5);
+      if (wd > 1.6) panel(s, front, M, cellUV(CELLS.shutter), front.len / 2, floor + 0.05, wd, Math.min(CELLS.shutter.mh, h - 0.25), 0.04);
+    }
+    return;
+  }
   for (const w of walls) wallFace(s, w, wallBase, yTop + (w.end ? 0 : w.sign > 0 ? prof[prof.length - 1][1] : prof[0][1]), strip, () => col, u0);
   for (const sgn of [1, -1]) gableEnd(s, p, sgn, yTop, prof, strip, col, u0);
-  const roofCol = roofing(rnd);
   const ext = sloped ? roofSkin(s, p, yTop, prof, 0.3, 0.2, STRIPS.seam, roofCol) : overhung(prof, 0.1);
   if (!sloped) {
     // A plain sheet roof: only its edge shows under the snow.
@@ -1210,20 +1345,23 @@ function arch(s: Sink, pl: Plot): void {
   const y = pl.yLow - 0.3;
   const rise = Math.min(p.hw * rnd.range(0.85, 1.0), 8) + 0.3;
   const col = rnd.pick(FARM);
-  const prof = profileOf("arch", p.hw, rise);
-  const ext = roofSkin(s, p, y, prof, 0, 0, STRIPS.rib, col);
+  const prof = profileOf("arch", p.hw, rise, pl.tier === 0 ? 10 : pl.tier === 1 ? 8 : 6);
+  const ext = pl.tier === 0 ? roofSkin(s, p, y, prof, 0, 0, STRIPS.rib, col) : prof;
   // End walls: the shell's colour, another sheet colour, or the dark teal of photo 29.
   const ek = rnd.next();
   const endCol = ek < 0.4 ? col : ek < 0.7 ? rnd.pick(FARM) : rgb(44, 70, 80);
   for (const sgn of [1, -1]) gableEnd(s, p, sgn, y, prof, STRIPS.rib, endCol, 0);
   // Corrugations hold snow well down the arch's shoulders.
-  roofSnow(s, p, y, ext, 0, rnd.range(0.35, 0.55), rnd.next() < 0.6 ? 1.2 : HOLDS);
+  const snowD = rnd.range(0.35, 0.55);
+  const holds = rnd.next() < 0.6 ? 1.2 : HOLDS;
+  if (pl.tier === 0) roofSnow(s, p, y, ext, 0, snowD, holds);
+  else roofSimple(s, p, y, prof, 0, col, holds);
   const walls = wallsOf(p);
   const front = facing(walls, pl.road ?? pl.toMain, -1, rnd);
   bigDoors(s, front, pl.yLow, CELLS.bigShutter, 1, rise * 0.72, rnd);
   for (const w of walls) {
     const h = rnd.range(0.9, 1.7);
-    if (!w.end && pl.dMain < 300) mound(s, pl.site, w, w.len * 0.02, w.len * 0.98, h, 2.8);
+    if (!w.end && pl.tier === 0) mound(s, pl.site, w, w.len * 0.02, w.len * 0.98, h, 2.8);
   }
 }
 
@@ -1240,22 +1378,28 @@ function barn(s: Sink, pl: Plot): void {
   const u0 = rnd.next();
   const prof = profileOf("gambrel", p.hw, Math.min(6.5, p.hw * 0.92));
   const walls = wallsOf(p);
-  for (const w of walls) wallFace(s, w, wallBase, yTop, strip, () => col, u0);
+  for (const w of walls) {
+    if (pl.tier) wallOne(s, w, wallBase, yTop, strip, col, u0);
+    else wallFace(s, w, wallBase, yTop, strip, () => col, u0);
+  }
   for (const sgn of [1, -1]) gableEnd(s, p, sgn, yTop, prof, strip, col, u0);
-  const ext = roofSkin(s, p, yTop, prof, 0.35, 0.3, STRIPS.seam, roofCol);
-  roofSnow(s, p, yTop, ext, 0.3, rnd.range(0.3, 0.5));
-  roofPatches(s, p, yTop, ext, rnd);
+  const snowD = rnd.range(0.3, 0.5);
+  if (pl.tier === 0) {
+    const ext = roofSkin(s, p, yTop, prof, 0.35, 0.3, STRIPS.seam, roofCol);
+    roofSnow(s, p, yTop, ext, 0.3, snowD);
+    roofPatches(s, p, yTop, ext, rnd);
+  } else roofSimple(s, p, yTop, prof, 0.35, roofCol);
   const front = facing(walls, pl.road ?? pl.toMain, -1, rnd);
   bigDoors(s, front, floor, CELLS.barnDoor, 1, h - 0.1, rnd);
   // The loft door over it.
-  panel(s, front, M, cellUV(CELLS.barnDoor), front.len / 2, yTop + 0.5, 1.5, 1.5, 0.05);
+  if (pl.tier === 0) panel(s, front, M, cellUV(CELLS.barnDoor), front.len / 2, yTop + 0.5, 1.5, 1.5, 0.05);
   const style: WindowStyle = { main: "winWhite", lit: 0, near: false, toward: pl.toMain, blank: 0.3 };
   for (const w of walls) {
     if (w.end) continue;
     const n = Math.floor(w.len / 4);
-    for (let i = 0; i < n; i++) if (rnd.next() > style.blank) windowAt(s, w, "winSmall", ((i + 0.5) * w.len) / n, floor + 1.5, false, false);
+    for (let i = 0; i < n; i++) if (rnd.next() > style.blank && pl.tier === 0) windowAt(s, w, "winSmall", ((i + 0.5) * w.len) / n, floor + 1.5, false, false);
     const mh = rnd.range(0.8, 1.5);
-    if (pl.dMain < 300) mound(s, pl.site, w, w.len * 0.03, w.len * 0.97, mh, 2.6);
+    if (pl.tier === 0) mound(s, pl.site, w, w.len * 0.03, w.len * 0.97, mh, 2.6);
   }
   // Silos stand at the end away from the door.
   const silos = pl.fit.area > 230 ? (rnd.next() < 0.55 ? 1 + Math.floor(rnd.next() * 1.4) : 0) : 0;
@@ -1268,7 +1412,7 @@ function barn(s: Sink, pl: Plot): void {
     // Dark steel staves under a bright dome (photo 29), blue steel, or old concrete.
     const tint = rnd.pick([rgb(74, 82, 86), rgb(74, 82, 86), rgb(84, 108, 138), rgb(196, 196, 190), rgb(150, 132, 118)]);
     const domeCol = rnd.next() < 0.75 ? rgb(190, 196, 200) : rgb(86, 124, 104);
-    if (!Number.isNaN(gy)) cylinder(s, q[0], q[2], r, gy - 0.3, gy + sh, 9, STRIPS.concrete, tint, r * 0.6, domeCol);
+    if (!Number.isNaN(gy)) cylinder(s, q[0], q[2], r, gy - 0.3, gy + sh, pl.tier === 0 ? 9 : pl.tier === 1 ? 7 : 5, STRIPS.concrete, tint, r * 0.6, domeCol);
   }
 }
 
@@ -1292,15 +1436,18 @@ function warehouse(s: Sink, pl: Plot): void {
       parts.filter((q) => q !== p),
     );
     all.push(...walls);
-    for (const w of walls) wallFace(s, w, wallBase, yTop, STRIPS.rib, () => col, u0);
+    for (const w of walls) if (!(w.inner && pl.tier === 2)) wallFace(s, w, wallBase, yTop, STRIPS.rib, () => col, u0);
     for (const sgn of [1, -1]) gableEnd(s, p, sgn, yTop, prof, STRIPS.rib, col, u0);
-    const ext = roofSkin(s, p, yTop, prof, 0.25, 0.2, STRIPS.seam, roofCol);
-    roofSnow(s, p, yTop, ext, 0.2, rnd.range(0.35, 0.5));
+    const snowD = rnd.range(0.35, 0.5);
+    if (pl.tier === 0) {
+      const ext = roofSkin(s, p, yTop, prof, 0.25, 0.2, STRIPS.seam, roofCol);
+      roofSnow(s, p, yTop, ext, 0.2, snowD);
+    } else roofSimple(s, p, yTop, prof, 0.25, roofCol);
     if (pi === 0) {
       front = facing(walls, pl.road ?? pl.toMain, 0, rnd);
-      bigDoors(s, front, floor, CELLS.bigShutter, 3, h - 0.4, rnd);
+      bigDoors(s, front, floor, CELLS.bigShutter, pl.tier === 2 ? 1 : 3, h - 0.4, rnd);
       const side = walls.find((w) => w !== front && !w.inner && w.end !== front!.end);
-      if (side && side.len > 8) {
+      if (side && side.len > 8 && pl.tier === 0) {
         const n = Math.floor(side.len / 5);
         for (let i = 0; i < n; i++) if (rnd.next() < 0.6) windowAt(s, side, "winSlide", ((i + 0.5) * side.len) / n, floor + Math.min(2.2, h - 1.6), rnd.next() < 0.12, false);
       }
@@ -1319,13 +1466,15 @@ function greenhouse(s: Sink, pl: Plot): void {
   if (covered) {
     const prof: Profile = [];
     for (let k = 0; k <= 6; k++) prof.push([-p.hw * Math.cos((Math.PI * k) / 6), rise * Math.sin((Math.PI * k) / 6)]);
-    const ext = roofSkin(s, p, y, prof, 0, 0, STRIPS.plain, rgb(206, 212, 214));
     for (const sgn of [1, -1]) gableEnd(s, p, sgn, y, prof, STRIPS.plain, rgb(196, 202, 206), 0);
-    roofSnow(s, p, y, ext, 0, 0.3);
+    if (pl.tier === 0) roofSnow(s, p, y, roofSkin(s, p, y, prof, 0, 0, STRIPS.plain, rgb(206, 212, 214)), 0, 0.3);
+    else roofSimple(s, p, y, prof, 0, rgb(206, 212, 214));
     return;
   }
+  // Pipes 9 cm wide are less than a pixel beyond the middle distance.
+  if (pl.tier === 2) return;
   // Hoops as flat ribbons, both faces; the real pitch is 50 cm, a hoop every few metres reads the same from the road.
-  const hoops = clamp(Math.round((2 * p.hl) / 3.2), 3, 13);
+  const hoops = clamp(Math.round((2 * p.hl) / (pl.tier ? 6 : 3.2)), 3, pl.tier ? 6 : 13);
   const col = rgb(150, 154, 156);
   const segs = 5;
   const wide = 0.09;
@@ -1358,11 +1507,15 @@ function greenhouse(s: Sink, pl: Plot): void {
 }
 
 /** A flat-roofed box with a parapet and snow: the body of shops and blocks. Returns its walls. */
-function flatBox(s: Sink, p: Part, wallBase: number, yTop: number, strip: Strip, col: (band: number) => RGBA, u0: number, depth: number, others: Part[]): Wall[] {
+function flatBox(s: Sink, pl: Plot, p: Part, wallBase: number, yTop: number, strip: Strip, col: (band: number) => RGBA, u0: number, depth: number, others: Part[]): Wall[] {
   const walls = wallsOf(p);
   markInner(walls, others);
-  for (const w of walls) wallFace(s, w, wallBase, yTop, strip, col, u0);
-  snowSlab(s, p.fr, p.hl, p.hw, yTop - 0.04, depth, 0.02);
+  for (const w of walls) {
+    if (pl.tier === 0) wallFace(s, w, wallBase, yTop, strip, col, u0);
+    else if (!(w.inner && pl.tier === 2)) wallOne(s, w, wallBase, yTop, STRIPS.plain, col(1), u0);
+  }
+  if (pl.tier === 0) snowSlab(s, p.fr, p.hl, p.hw, yTop - 0.04, depth, 0.02);
+  else snowCap(s, p.fr, p.hl, p.hw, yTop, depth, pl.tier, pl.toMain);
   return walls;
 }
 
@@ -1370,11 +1523,12 @@ function flatBox(s: Sink, p: Part, wallBase: number, yTop: number, strip: Strip,
 const shopSide = (pl: Plot): [number, number] => (pl.dMain < 110 ? pl.toMain : (pl.road ?? pl.toMain));
 
 /** A lit fascia along the top of a wall: the band and two stripes. */
-function fascia(s: Sink, w: Wall, y0: number, y1: number, scheme: [RGBA, RGBA, RGBA], t0 = 0, t1 = w.len): void {
+function fascia(s: Sink, w: Wall, y0: number, y1: number, scheme: [RGBA, RGBA, RGBA], t0 = 0, t1 = w.len, stripes = true): void {
   const [vb, vt] = stripV(LIT_STRIPS.fascia, LIT_ATLAS);
   const q = (a: number, b: number, proud: number, col: RGBA) => s.quad(ML, wp(w, t0, a, proud), wp(w, t1, a, proud), wp(w, t1, b, proud), wp(w, t0, b, proud), [t0 / STORE_TILE, vb + 0.01, t1 / STORE_TILE, vt - 0.01], col, w.n);
   const h = y1 - y0;
   q(y0, y1, 0.08, scheme[0]);
+  if (!stripes) return;
   q(y0 + h * 0.62, y0 + h * 0.8, 0.1, scheme[1]);
   q(y0 + h * 0.2, y0 + h * 0.38, 0.1, scheme[2]);
 }
@@ -1393,15 +1547,15 @@ function konbini(s: Sink, pl: Plot): void {
   const { floor, wallBase } = footing(s, pl, [p]);
   const h = 3.7;
   const col = rgb(232, 230, 224);
-  const walls = flatBox(s, p, wallBase, floor + h, STRIPS.ceramic, () => col, rnd.next(), rnd.range(0.35, 0.5), []);
+  const walls = flatBox(s, pl, p, wallBase, floor + h, STRIPS.ceramic, () => col, rnd.next(), rnd.range(0.35, 0.5), []);
   const front = facing(walls, shopSide(pl), 0.25, rnd);
   const glassW = Math.min(front.len - 1, 15);
   storeFront(s, front, floor + 0.15, (front.len - glassW) / 2, (front.len + glassW) / 2, 2.5);
   const scheme = rnd.pick(FASCIAS);
   for (const w of walls) {
     const d = w.n[0] * front.n[0] + w.n[2] * front.n[2];
-    if (d < -0.5) continue;
-    fascia(s, w, floor + 2.85, floor + h - 0.05, scheme, 0, w === front ? w.len : Math.min(w.len, 4));
+    if (d < -0.5 || (pl.tier > 0 && w !== front)) continue;
+    fascia(s, w, floor + 2.85, floor + h - 0.05, scheme, 0, w === front ? w.len : Math.min(w.len, 4), pl.tier < 2);
   }
   drifts(s, pl, walls, front);
 }
@@ -1424,6 +1578,7 @@ function shop(s: Sink, pl: Plot, big: boolean): void {
   parts.forEach((p, pi) => {
     const walls = flatBox(
       s,
+      pl,
       p,
       wallBase,
       floor + h * (pi ? 0.8 : 1),
@@ -1446,7 +1601,7 @@ function shop(s: Sink, pl: Plot, big: boolean): void {
       const wd = clamp(f.len * 0.3, 6, 15);
       storeFront(s, f, floor + 0.15, f.len / 2 - wd / 2, f.len / 2 + wd / 2, 2.6);
       const sign = rnd.pick([LIT_CELLS.sign0, LIT_CELLS.sign2]);
-      panel(s, f, ML, cellUV(sign, LIT_ATLAS), f.len / 2, by - 0.1, 5, 1.6, 0.1);
+      if (pl.tier < 2) panel(s, f, ML, cellUV(sign, LIT_ATLAS), f.len / 2, by - 0.1, 5, 1.6, 0.1);
     } else {
       const c = CELLS.shopGlass;
       // The glazed part of the front: a few bays about the door, not the whole of a long wall.
@@ -1454,15 +1609,16 @@ function shop(s: Sink, pl: Plot, big: boolean): void {
       const g0 = clamp(f.len * rnd.range(0.3, 0.7) - span / 2, 0.6, f.len - 0.6 - span);
       if (open) storeFront(s, f, floor + 0.15, g0, g0 + span, Math.min(2.4, by - floor - 0.3));
       else {
-        const n = Math.max(1, Math.floor(span / c.mw));
+        const n = pl.tier === 2 ? 1 : Math.max(1, Math.floor(span / c.mw));
         for (let i = 0; i < n; i++) panel(s, f, M, cellUV(c), g0 + ((i + 0.5) * span) / n, floor + 0.15, span / n - 0.1, c.mh, 0.05);
       }
       const eats = pl.hint === "restaurant" || pl.f.type === "restaurant" || pl.f.type === "fast_food" || pl.f.type === "cafe";
+      if (pl.tier === 2) return;
       if (open) panel(s, f, ML, cellUV(eats ? LIT_CELLS.sign1 : rnd.pick([LIT_CELLS.sign0, LIT_CELLS.sign2]), LIT_ATLAS), clamp(f.len * 0.5, 1.4, f.len - 1.4), by + bh * 0.5 - 0.5, 2.5, 1.0, 0.09);
       else if (f.len > 4.6) panel(s, f, M, cellUV(CELLS.board), f.len / 2, by + bh * 0.5 - 0.5, 4, 1, 0.09);
-      if (storeys > 1) {
+      if (storeys > 1 && pl.tier === 0) {
         const n = Math.floor(f.len / 2.8);
-        for (let i = 0; i < n; i++) windowAt(s, f, "winSlide", ((i + 0.5) * f.len) / n, floor + 3.0 + 0.9, rnd.next() < 0.25, pl.dMain < 75);
+        for (let i = 0; i < n; i++) windowAt(s, f, "winSlide", ((i + 0.5) * f.len) / n, floor + 3.0 + 0.9, rnd.next() < 0.25, true);
       }
     }
   });
@@ -1492,6 +1648,11 @@ function block(s: Sink, pl: Plot): void {
     markInner(walls, others);
     all.push(...walls);
     for (const w of walls) {
+      if (pl.tier === 2) {
+        // From far away: the band over the whole wall, down to the ground.
+        if (!w.inner) wallFace(s, w, yTop - st * sh - (floor + 0.3 - wallBase), yTop, STRIPS.band, () => col, 0);
+        continue;
+      }
       // A base course, then whole repeats of the band so no window is cut at a corner.
       wallFace(s, w, wallBase, floor + 0.3, STRIPS.concrete, () => CONCRETE, 0);
       const n = Math.floor(w.len / BAND.period);
@@ -1511,11 +1672,12 @@ function block(s: Sink, pl: Plot): void {
       const c = LIT_CELLS.winBand;
       for (let k = 0; k < st; k++)
         for (let i = 0; i < n; i++) {
-          if (rnd.next() >= 0.14) continue;
+          if (rnd.next() >= 0.14 || pl.tier > 0) continue;
           panel(s, w, ML, cellUV(c, LIT_ATLAS), m + i * BAND.period + BAND.x + BAND.w / 2, floor + 0.3 + k * sh + BAND.sill, BAND.w, BAND.h, 0.04);
         }
     }
-    snowSlab(s, p.fr, p.hl, p.hw, yTop - 0.04, depth, 0.03);
+    if (pl.tier === 0) snowSlab(s, p.fr, p.hl, p.hw, yTop - 0.04, depth, 0.03);
+    else snowCap(s, p.fr, p.hl, p.hw, yTop, depth, pl.tier, pl.toMain);
   });
   drifts(s, pl, all, null);
 }
@@ -1534,13 +1696,15 @@ function canopy(s: Sink, pl: Plot): void {
     [1, 1],
     [-1, 1],
   ])
-    boxAt(s, p.fr, a * (p.hl - 0.3), b * (p.hw - 0.3), 0.08, 0.08, y - 0.3, y + h, STRIPS.plain, rgb(150, 152, 154), false);
-  snowSlab(s, p.fr, p.hl, p.hw, y + h + 0.28, rnd.range(0.3, 0.45), 0.03);
+    if (pl.tier < 2) boxAt(s, p.fr, a * (p.hl - 0.3), b * (p.hw - 0.3), 0.08, 0.08, y - 0.3, y + h, STRIPS.plain, rgb(150, 152, 154), false);
+  const depth = rnd.range(0.3, 0.45);
+  if (pl.tier === 0) snowSlab(s, p.fr, p.hl, p.hw, y + h + 0.28, depth, 0.03);
+  else snowCap(s, p.fr, p.hl, p.hw, y + h + 0.28, depth, pl.tier, pl.toMain);
 }
 
 function tank(s: Sink, pl: Plot): void {
   const r = Math.max(1.2, Math.sqrt(pl.fit.area / Math.PI));
-  cylinder(s, pl.fit.cx, pl.fit.cz, r, pl.yLow - 0.3, pl.yLow + clamp(r * 1.6, 3, 10), 10, STRIPS.concrete, rgb(214, 214, 208), r * 0.25);
+  cylinder(s, pl.fit.cx, pl.fit.cz, r, pl.yLow - 0.3, pl.yLow + clamp(r * 1.6, 3, 10), pl.tier === 0 ? 10 : 6, STRIPS.concrete, rgb(214, 214, 208), r * 0.25);
 }
 
 /**
@@ -1713,6 +1877,7 @@ export function buildings(c: CellContext): void {
     if (!clearOfRoads(site, ft.parts)) return;
     let yLow = Infinity;
     let yHigh = -Infinity;
+    let cut = 0;
     for (const p of ft.parts)
       for (const [a, b] of [
         [-1, -1],
@@ -1722,9 +1887,12 @@ export function buildings(c: CellContext): void {
       ]) {
         const q = p.fr.p(a * p.hl, b * p.hw, 0);
         const y = world.base(q[0], q[2]);
+        cut = Math.max(cut, groundCut(world, q[0], q[2], y));
         yLow = Math.min(yLow, y);
         yHigh = Math.max(yHigh, y);
       }
+    // A footprint in a river's channel or under a bridge: nothing stands there.
+    if (cut > 0.5) return;
     const m = ft.parts[0].fr;
     const pr = world.probe(m.cx, m.cz, site.probe);
     let road: [number, number] | null = null;
@@ -1744,7 +1912,10 @@ export function buildings(c: CellContext): void {
     const byFuel = fuels.some((p) => Math.hypot(p.pts[0] - cx, p.pts[1] - cz) < Math.max(14, ft.length * 0.7));
     const kind = classify(f, ft, town, byShop, byFuel, land, dMain, rnd);
     const hint = eats.some((p) => Math.hypot(p.pts[0] - cx, p.pts[1] - cz) < Math.max(12, ft.length * 0.6)) ? "restaurant" : "";
-    const pl: Plot = { f, fit: ft, kind, rnd, site, yLow, yHigh, road, dMain, toMain, town, hint };
+    const tier: Tier = dMain < NEAR ? 0 : dMain < MIDDLE ? 1 : 2;
+    // A store shed is a pixel or two from beyond the middle distance.
+    if (tier === 2 && ft.area < 12) return;
+    const pl: Plot = { f, fit: ft, kind, rnd, site, yLow, yHigh, road, dMain, toMain, tier, town, hint };
     s.base();
     switch (kind) {
       case "house":

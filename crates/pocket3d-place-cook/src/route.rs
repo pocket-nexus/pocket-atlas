@@ -126,16 +126,19 @@ fn read_cells(bytes: &[u8]) -> Result<(Vec<String>, Vec<Cell>), String> {
 fn lod_bounds(layer: &str) -> &'static [f32] {
     match layer {
         "detail" => &[0.12, 0.5],
-        "base" => &[0.15, 0.6, 2.4],
+        "base" => &[0.2, 1.0, 5.0],
         "mid" => &[1.2, 5.0],
         _ => &[10.0, 40.0],
     }
 }
 
-/// Vertices on an open border of a primitive's mesh (an edge one triangle
-/// uses): where a cell was cut from its neighbours, or where the mesh ends.
-/// They hold their place in every reduced level, so cells stay sealed.
-fn open_border(position: &[Vec3], tris: &[[u32; 3]]) -> Vec<bool> {
+/// Vertices where a cell was cut from its neighbours: on an open border of
+/// the primitive's mesh (an edge one triangle uses) and within `margin` of
+/// the cell's edge or beyond it (generators assign a quad to the cell that
+/// holds its centre, so a cut runs within a quad of the edge). They hold
+/// their place in every reduced level, so cells stay sealed; open borders
+/// inside the cell (the outer edge of a road's strip, a wall's foot) may go.
+fn open_border(position: &[Vec3], tris: &[[u32; 3]], size: f32, margin: f32) -> Vec<bool> {
     let mut edges: HashMap<([u32; 3], [u32; 3]), u32> = HashMap::new();
     for t in tris {
         for k in 0..3 {
@@ -150,7 +153,27 @@ fn open_border(position: &[Vec3], tris: &[[u32; 3]]) -> Vec<bool> {
             open.insert(b);
         }
     }
-    position.iter().map(|p| open.contains(&geometry::pos_bits(*p))).collect()
+    position.iter().map(|p| (p.x < margin || p.z < margin || p.x > size - margin || p.z > size - margin) && open.contains(&geometry::pos_bits(*p))).collect()
+}
+
+/// `keep` of the triangles by vertex clustering on positions alone, at most
+/// `error` metres off. None when it removes less than two fifths.
+fn sloppy(position: &[Vec3], tris: &[[u32; 3]], keep: f32, error: f32) -> Option<Vec<[u32; 3]>> {
+    if tris.len() < 48 {
+        return None;
+    }
+    let bytes: Vec<u8> = position.iter().flat_map(|p| [p.x, p.y, p.z]).flat_map(f32::to_le_bytes).collect();
+    let adapter = meshopt::VertexDataAdapter::new(&bytes, 12, 0).ok()?;
+    let flat: Vec<u32> = tris.iter().flatten().copied().collect();
+    let target = (((flat.len() as f32 * keep) as usize / 3).max(8)) * 3;
+    // meshopt takes the error relative to the mesh's extent.
+    let (lo, hi) = position.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), p| (lo.min(*p), hi.max(*p)));
+    let extent = (hi - lo).max_element().max(1e-3);
+    let out = meshopt::simplify_sloppy(&flat, &adapter, target, error / extent, None);
+    if out.is_empty() || out.len() * 5 > flat.len() * 3 {
+        return None;
+    }
+    Some(geometry::cache_order(&out.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect::<Vec<_>>(), position.len()))
 }
 
 struct CookedCell {
@@ -280,8 +303,23 @@ pub fn cook(input: &Path, output: &Path, tex_cap: u32) -> Result<(), String> {
                 let drop_parts = m.kind == pc::Kind::Standard && m.emissive.iter().all(|&e| e <= 0.0) && m.emission.is_none();
                 for (v, t) in geometry::split(&verts, &p.tris) {
                     let positions: Vec<Vec3> = v.iter().map(|x| x.pos).collect();
-                    let locked = open_border(&positions, &t);
-                    let lods = geometry::lods(&v, &t, &locked, drop_parts, lod_bounds(&layer.name));
+                    let locked = open_border(&positions, &t, layer.size, 8.0);
+                    let bounds = lod_bounds(&layer.name);
+                    let mut lods = geometry::lods(&v, &t, &locked, drop_parts, bounds);
+                    // The corridor's last level is seen through a kilometre of falling snow:
+                    // shape only. Position-only clustering takes what edge collapses with
+                    // attributes and held borders cannot (boxes, ribbons); the sunk terrain
+                    // of the layer beyond closes any gap it opens at a cell's edge.
+                    if near {
+                        let from = lods.last().map_or(&t, |l| &l.0);
+                        if let Some(coarse) = sloppy(&positions, from, 0.15, *bounds.last().unwrap()) {
+                            let error = *bounds.last().unwrap();
+                            if lods.len() == bounds.len() {
+                                lods.pop();
+                            }
+                            lods.push((coarse, error));
+                        }
+                    }
                     let b = geometry::build(&v, &t, layout, lods, true);
                     let mut d = rt::CellDraw {
                         material,
