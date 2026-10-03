@@ -158,6 +158,9 @@ pub struct Material {
     /// Interior surface: emission carries its lighting (no scene lights, no fog).
     pub interior: bool,
     pub fog: bool,
+    /// Keep bounded moving lights beyond the detail-map distance (e.g. headlights on snow).
+    #[serde(default)]
+    pub dynamic_lights: bool,
     pub wet: Option<Wet>,
     pub damp: Option<Damp>,
     /// Glass bead density, 0..1.
@@ -974,6 +977,9 @@ pub struct Meta {
     /// work it draws on.
     #[serde(default)]
     pub kind: String,
+    /// Domain data and Vita's compiled geometry residency plan. Ordinary places are resident.
+    #[serde(default)]
+    pub driving: Option<crate::streaming::Driving>,
     pub min: Vec3,
     pub max: Vec3,
     pub textures: Vec<Texture>,

@@ -21,12 +21,13 @@
 pub mod atlas;
 pub mod color;
 pub mod meta;
+pub mod streaming;
 
 pub use meta::*;
 
 pub const MAGIC: [u8; 4] = *b"PLCE";
-/// 6: light fields (`Kind::Lights`, `VertexLayout::Lights`), the vista haze.
-pub const VERSION: u32 = 6;
+/// 7: driving routes and independently resident geometry pages.
+pub const VERSION: u32 = 7;
 
 pub const TAG_META: [u8; 4] = *b"META";
 pub const TAG_TEXTURES: [u8; 4] = *b"TEXD";

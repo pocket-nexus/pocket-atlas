@@ -18,14 +18,17 @@ The web exporter (`web/src/places/shared/export.ts`) writes glTF 2.0 with these 
 
 Any material may carry `frames`/`scroll` (e.g. surf strips): `UvAnim` applies to every kind.
 
+`dynamicLights: true` on a lit material retains moving per-pixel lights at their authored range beyond the profile's normal/ORM detail distance. Snow road and cleared shoulders use this for headlights; it does not change wetness or request a reflection pass.
+
 ## Nodes
 
-- `dynamic: true` — the node moves (tracks recorded for the loop); not baked, not in the sun's shadow map, one draw per node. Do not use it to keep a static mesh out of the web's batching: batching keeps vertex colours.
+- `dynamic: true` — the node moves (tracks recorded for the loop, or a domain runtime controls its pose); retained even without recorded tracks, not baked, not in the sun's shadow map, one draw per node. Do not use it to keep a static mesh out of the web's batching: batching keeps vertex colours.
 - Lights: point, spot and the panel lights the exporter writes are baked into static vertices; `castShadow` on the directional light makes it the per-pixel sun.
 
 ## Scene (`extras.pocketAtlas` on the scene)
 
 - `kind` — from the registry's `PlaceDef.kind`.
+- `driving: {route, vehicle}` — a validated route and the final exported dynamic vehicle node name. The Vita compiler emits page residency, keeps actors in root geometry, and the driving runtime owns input/pose/saves. Pack version 7; web/Vita only. See `docs/DRIVING.md`.
 - `sky` — `model: "gradient-sun-cloudpanorama"` with zenith, horizon, ground, `gradientPower`, `groundBlend`, `sunDirection`, `sunColor`, `glow {intensity, wide, tight}`, `disc {intensity, cosInner, cosOuter}`, `clouds {file, sunColor, sunScale, ambientColor, fadeElevation, driftTurnsPerSecond}`, and after sunset `twilight {band {color, height, sunBias, sunPower}, belt {color, elevation, width, power}, shadow {strength, height, power}}` [Daytime places, Dusk places].
 - `sun` — azimuth, elevation, direction (informational; the directional light drives the device).
 - `bake.skyOcclusion` — `rays`, `reach` (m), `foliage` (opacity of cut-out leaves), refinement `minEdge`, `abs`, `rel`, `rounds`, `grow` [Daytime places].

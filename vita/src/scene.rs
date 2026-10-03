@@ -76,11 +76,14 @@ pub struct Scene {
     pub fog: Vec<FogNow>,
     pub emissive_gain: Vec<f32>,
     pub door_open: f32,
+    /// Live domain speed for vehicle-anchored winter particles (m/s).
+    pub drive_speed: f32,
     pub vram: Arena,
     pub main: Arena,
     pub load_ms: u32,
     pub bytes_tex: usize,
     pub bytes_geom: usize,
+    pub streaming: Option<crate::streaming::Stream>,
 }
 
 pub(crate) fn fmt(f: pc::TexFormat) -> Format {
@@ -190,6 +193,11 @@ impl Scene {
         let meta_bytes = f.section(&s_meta)?;
         let meta: pc::Meta = serde_json::from_slice(&meta_bytes).map_err(|e| format!("META: {e}"))?;
         drop(meta_bytes);
+        if let Some(d)=&meta.driving {
+            d.validate(&meta.draws,meta.nodes.len(),s_geom.size)?;
+            let route:pocket3d_drive::Route=serde_json::from_value(d.route.clone()).map_err(|e|e.to_string())?;
+            route.validate()?;
+        }
         let total = meta.textures.len() + 3;
 
         let mut up = Uploader::new(4 << 20)?;
@@ -230,14 +238,15 @@ impl Scene {
         let draws = meta
             .draws
             .iter()
-            .map(|d| DrawGpu {
-                vb: geom.add(d.vertices.offset as usize),
-                ib: geom.add(d.indices.offset as usize).cast(),
+            .enumerate()
+            .map(|(i,d)| { let resident=meta.driving.as_ref().is_none_or(|p|p.persistent.contains(&(i as u32))); DrawGpu {
+                vb: if resident {geom.add(d.vertices.offset as usize)} else {core::ptr::null()},
+                ib: if resident {geom.add(d.indices.offset as usize).cast()} else {core::ptr::null()},
                 count: d.index_count,
                 skinned: d.layout == pc::VertexLayout::Skinned,
                 baked: d.layout == pc::VertexLayout::Baked,
                 lights: d.layout == pc::VertexLayout::Lights,
-                lods: d.lods.iter().map(|l| (geom.add(l.indices.offset as usize).cast::<u16>() as *const u16, l.index_count, l.error)).collect(),
+                lods: d.lods.iter().map(|l| (if resident {geom.add(l.indices.offset as usize).cast::<u16>() as *const u16} else {core::ptr::null()}, l.index_count, l.error)).collect(),
                 material: d.material,
                 dequant: [d.pos_scale[0], d.pos_scale[1], d.pos_scale[2], 0.0, d.pos_offset[0], d.pos_offset[1], d.pos_offset[2], 0.0],
                 uv: [d.uv_scale[0], d.uv_scale[1], d.uv_offset[0], d.uv_offset[1]],
@@ -246,9 +255,10 @@ impl Scene {
                 node: d.node,
                 skin: d.skin,
                 no_reflect: d.no_reflect,
-            })
+            }})
             .collect();
 
+        let streaming=meta.driving.clone().map(|p|crate::streaming::Stream::new(path,p,meta.draws.clone())).transpose()?;
         let n = meta.nodes.len();
         let mut scene = Self {
             node_world: vec![Mat4::IDENTITY; n],
@@ -256,6 +266,7 @@ impl Scene {
             fog: vec![FogNow::default(); meta.fog_lights.len()],
             emissive_gain: vec![1.0; meta.materials.len()],
             door_open: 0.0,
+            drive_speed: 0.0,
             meta,
             textures,
             draws,
@@ -265,6 +276,7 @@ impl Scene {
             load_ms: 0,
             bytes_tex,
             bytes_geom: s_geom.size as usize,
+            streaming,
         };
         scene.update(0.0);
         scene.load_ms = t0.elapsed().as_millis() as u32;
@@ -276,6 +288,7 @@ impl Scene {
     /// # Safety
     /// GPU idle with respect to every draw of this scene.
     pub unsafe fn release(self) {
+        if let Some(stream)=self.streaming {stream.release();}
         self.vram.free();
         self.main.free();
     }
@@ -325,6 +338,12 @@ impl Scene {
             };
         }
 
+        self.update_lighting(time);
+    }
+
+    /// Re-evaluate lights after a domain runtime overrides animated node poses.
+    pub fn update_lighting(&mut self, time: f32) {
+        let frame = (time * self.meta.fps).rem_euclid(self.meta.frames.max(1) as f32);
         for (i, l) in self.meta.lights.iter().enumerate() {
             let (pos, dir) = match l.node {
                 Some(n) => {

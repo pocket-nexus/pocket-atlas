@@ -40,7 +40,7 @@ const place = option("--place", "tokyo-konbini"),
   dir = join(root, ".pocket-build/3ds"),
   romfs = join(dir, "atlas-romfs");
 const nativePlaces = join(dir, "places");
-const livePlaces = PLACES.filter((p) => p.status === "live" && p.load);
+const livePlaces = PLACES.filter((p) => p.status === "live" && p.load && (!p.platforms || p.platforms.includes("3ds")));
 const receipts = join(root, ".pocket-build/validation/3ds");
 mkdirSync(receipts, { recursive: true });
 const thin = args.includes("--thin");

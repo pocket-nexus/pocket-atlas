@@ -18,6 +18,7 @@ import {
   RectAreaLight,
   Scene,
   SRGBColorSpace,
+  SpotLight,
   Texture,
   Vector3,
   VectorKeyframeTrack,
@@ -507,7 +508,7 @@ export async function exportPlace(input: ExportInput): Promise<ExportOutput> {
       }
     }
     const light = o as Light & { castShadow?: boolean; angle?: number; penumbra?: number; distance?: number; decay?: number };
-    if ((o as DirectionalLight).isDirectionalLight) {
+    if ((o as DirectionalLight).isDirectionalLight || (o as SpotLight).isSpotLight) {
       // A clone's target is a detached copy; point it back at the cloned child
       // so GLTFExporter sees the (0, 0, −1) child it expects.
       const l = o as DirectionalLight;
@@ -639,4 +640,3 @@ export async function exportPlace(input: ExportInput): Promise<ExportOutput> {
   };
   return { glb, env, files, report };
 }
-

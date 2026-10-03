@@ -1,9 +1,10 @@
-import { CubeCamera, HalfFloatType, PMREMGenerator, Scene, Vector3, WebGLCubeRenderTarget, type DirectionalLight, type FogExp2, type Mesh, type PerspectiveCamera, type Texture } from "three";
+import { Scene, Vector3, WebGLCubeRenderTarget, type WebGLRenderTarget, type DirectionalLight, type FogExp2, type Mesh, type PerspectiveCamera, type Texture } from "three";
 import type { PlaceDef, Stage, StageContext } from "../../core/types";
 import type { Baker } from "./bake";
 import { CameraRig, type Box6, type Shot, type ShotKey } from "./camera";
 import type { CommonMeta, ExportWorld } from "./export";
 import { postMeta, type PlacePost } from "./post";
+import { captureEnvironmentProbe } from "./probe";
 
 /** What a place's soundscape offers the stage (its per-frame update is the place's own). */
 export interface PlaceAudio {
@@ -41,7 +42,7 @@ export abstract class PlaceStage<W extends ExportWorld = ExportWorld, A extends 
   protected post!: PlacePost;
   protected rig!: CameraRig;
   protected sun: DirectionalLight | null = null;
-  private env: Texture | null = null;
+  private env: WebGLRenderTarget | null = null;
   private envCube: WebGLCubeRenderTarget | null = null;
   private envAt = new Vector3();
   private shadowFrames = 0;
@@ -106,23 +107,12 @@ export abstract class PlaceStage<W extends ExportWorld = ExportWorld, A extends 
    * disposed after the export.
    */
   protected captureProbe(at: Vector3, opts: { near: number; far: number; intensity: number; before?: () => void; after?: () => void }): void {
-    const { renderer } = this.ctx;
-    const rt = new WebGLCubeRenderTarget(256, { type: HalfFloatType });
-    const cube = new CubeCamera(opts.near, opts.far, rt);
-    cube.position.copy(at);
     this.envAt.copy(at);
-    this.scene.add(cube);
-    renderer.shadowMap.needsUpdate = true;
-    opts.before?.();
-    cube.update(renderer, this.scene);
-    opts.after?.();
-    this.scene.remove(cube);
-    const pmrem = new PMREMGenerator(renderer);
-    this.env = pmrem.fromCubemap(rt.texture).texture;
-    pmrem.dispose();
-    if (this.ctx.params.exporting) this.envCube = rt;
-    else rt.dispose();
-    this.scene.environment = this.env;
+    const probe = captureEnvironmentProbe(this.ctx.renderer, this.scene, at, opts);
+    this.env = probe.filtered;
+    if (this.ctx.params.exporting) this.envCube = probe.cube;
+    else probe.cube.dispose();
+    this.scene.environment = this.env.texture;
     this.scene.environmentIntensity = opts.intensity;
   }
 

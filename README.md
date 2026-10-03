@@ -21,6 +21,7 @@ A pack connects the renderers: the web app exports a place as glTF 2.0 with `ext
 | Radio Kaikan at Blue Hour | `akihabara-radio-kaikan` | Akihabara, Tokyo (秋葉原ラジオ会館, the 2014 building) | twilight sky (sun below the horizon), animated LED signage (flipbooks and scrolling strips), backlit window artwork, panel lights and lamps baked with sky occlusion, pedestrians and a passing train |
 | Kamakura-Kōkōmae Crossing | `kamakura-koko-mae-crossing` | Shichirigahama, Kamakura (鎌倉高校前1号踏切 on the Enoden) | open water (wave layers, Fresnel sky reflection, glitter path) to a 16 km horizon in FogExp2 haze, scrolling surf strips, flashing crossing lamps and gates driven by material and node tracks, a train, Route 134 traffic |
 | Griffith Observatory at Blue Hour | `griffith-observatory` | Mount Hollywood, Los Angeles, over the basin (September 2015) | light fields of GXM point sprites (52k city lights, 5k moving), height haze with an inversion layer to a 71 km horizon, floodlit masonry baked into vertices, parallax windows, a resolution boost to 640×362 |
+| Northbound: Hokkaido Winter Drive | `hokkaido-winter-drive` | Furano → Biei, Route 237 | complete parcel journey; compiled spatial pages, kei-car controls, snow/ice PBR, layered snowfall, vehicle powder and headlight scattering (web/Vita) |
 
 Real places fall into a finite set of kinds; the registry names them (`PlaceKind` in `web/src/core/types.ts`): `night-street`, `daytime-slope`, `dusk-street`, `daytime-coast`, `dusk-vista` for the places built so far, and `daytime-street`, `night-slope`, `dusk-coast`, `night-coast`, `interior` and `rooftop` for the places still to come. Each first-party place brings its kind's rendering to the best quality the handheld holds, and the work goes into the shared renderer and cooker so later places of the same kind reuse it. Glass (`places/shared/glass.ts`) blends premultiplied on the web as on the device. The workflow and quality bar for making a place are in the `pocket-atlas-place` skill (`.claude/skills/pocket-atlas-place/`).
 
@@ -30,6 +31,7 @@ Real places fall into a finite set of kinds; the registry names them (`PlaceKind
 | --- | --- |
 | `web/` | three.js reference places (`src/places/<id>`, shared code in `src/places/shared`), globe, scripts: `export-place.ts`, `export-atlas.ts`, `preview-place.ts` |
 | `crates/pocket3d-place` | pack formats: `.place` (META JSON + texture, geometry and animation blobs) and `atlas.pack` (globe, place list, preview cards, interface font); sRGB helpers |
+| `crates/pocket3d-drive` | portable driving simulation, route/save validation and replay oracle; no graphics dependency |
 | `crates/pocket3d-place-cook` | glTF → pack: BC1/BC3/BC5 textures with mips, quantized vertices, baked vertex lighting and sky occlusion, low-poly shelf stock, octahedral environment, effect textures; the atlas pack and its baked font (`atlas.rs`, `uifont.rs`); annotation readers (`extras.rs`) |
 | `crates/pocket3d-gxm` | GXM layer: GXP registration and patching, own shader patcher, render targets, texture upload, runtime SceShaccCg |
 | `vita/` | Vita app: place loader (`scene.rs`), frame renderer (`frame.rs`), atlas globe (`atlas.rs`), place browser (`browser.rs`), settings sheet (`settings.rs`), interface drawing and text (`ui.rs`), file locations (`paths.rs`), Cg programs (`vita/shaders`), LiveArea art |
@@ -209,6 +211,14 @@ A `dusk-vista` place is a lookout over a lit city at blue hour, its scene reachi
 - **No sun**: a sun below the horizon draws no shadow map and lights nothing; the floodlights and lamps are point and spot lights baked into the vertices, and bloom carries the lit windows and the city.
 
 The day sky's tight glow lobe takes its weight (`glow.tight[0]`) on the Vita as on the web; the places before Griffith Observatory all used 1.
+
+## Winter driving works
+
+`winter-road` is a driving domain built on the place pipeline. Route geometry and elevations are authored once; the Three.js reference builds the corridor in bounded chunks, while the Vita cooker lowers it to quantized, independently checked geometry pages. Native file I/O runs on a worker, residency has a fixed memory budget, and missing required pages pause driving. The car, ordered deliveries, fuel, snow traction, recovery and saves share a tested TypeScript/Rust contract. PocketJS's device host and GXM substrate stay unchanged.
+
+The winter renderer uses the existing cloud panorama, HDR environment probe, baked sky occlusion and PBR material path. Two bounded particle batches add three snow layers, wind gusts, tyre powder, cold exhaust and headlight mist; these costs do not grow with route length. See [driving architecture, controls and evidence](docs/DRIVING.md) for the data sources, 33.4 km route, build commands and acceptance limits. This work currently targets web and Vita; PSP and 3DS reject driving packs explicitly.
+
+Pack version **7** requires re-cooking older places and the atlas. A driving pack's `.place.pages/` sidecar directory is required for sync and packaging. Hardware acceptance for Northbound is recorded separately from the existing places below.
 
 ## Status on hardware
 

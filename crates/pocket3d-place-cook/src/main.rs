@@ -21,6 +21,7 @@ mod procedural;
 mod psp;
 mod psp_products;
 mod textures;
+mod streaming;
 
 use geometry::Vertex;
 use glam::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4};
@@ -312,6 +313,7 @@ impl<'a> Cook<'a> {
             vertex_color: false,
             interior: x.get("interior").and_then(|v| v.as_bool()).unwrap_or(false),
             fog: x.get("fog").and_then(|v| v.as_bool()).unwrap_or(true),
+            dynamic_lights: extras::dynamic_lights(&x),
             wet,
             damp,
             drops: x.get("glass").map(|g| f(g, "drops", 0.0)).unwrap_or(0.0),
@@ -628,6 +630,7 @@ fn main() {
     println!("loaded {} ({} nodes, {} images) in {} ms", glb.display(), doc.nodes().count(), images.len(), t0.elapsed().as_millis());
     let scene = doc.default_scene().or_else(|| doc.scenes().next()).expect("scene");
     let sx = pc_of(scene.extras());
+    let drive_route = extras::driving(&sx["driving"]).expect("valid driving annotation");
 
     // ---- which nodes move
     let mut animated: HashSet<usize> = HashSet::new();
@@ -638,7 +641,7 @@ fn main() {
     }
     let door_names: Vec<String> = ["left", "right"].iter().filter_map(|k| sx.get("doors").and_then(|d| d.get(*k)).and_then(|v| v.as_str()).map(String::from)).collect();
     for n in doc.nodes() {
-        if n.name().is_some_and(|name| door_names.iter().any(|d| d == name)) {
+        if n.name().is_some_and(|name| door_names.iter().any(|d| d == name)) || pc_of(n.extras())["dynamic"].as_bool() == Some(true) {
             animated.insert(n.index());
         }
     }
@@ -963,6 +966,7 @@ fn main() {
             vertex_color: true,
             interior: false,
             fog: true,
+            dynamic_lights: false,
             wet: None,
             damp: None,
             drops: 0.0,
@@ -1209,7 +1213,7 @@ fn main() {
         let cells: Vec<Cell> = p
             .tris
             .iter()
-            .map(|t| if water { Cell::Whole } else { cell_at((p.verts[t[0] as usize].pos + p.verts[t[1] as usize].pos + p.verts[t[2] as usize].pos) / 3.0, a.cell, 0.0) })
+            .map(|t| if water { Cell::Whole } else if drive_route.is_some() { let c=(p.verts[t[0] as usize].pos+p.verts[t[1] as usize].pos+p.verts[t[2] as usize].pos)/3.0; Cell::Grid(128,(c.x/128.).floor() as i32,(c.z/128.).floor() as i32) } else { cell_at((p.verts[t[0] as usize].pos + p.verts[t[1] as usize].pos + p.verts[t[2] as usize].pos) / 3.0, a.cell, 0.0) })
             .collect();
         // Edges (by position, across attribute seams) whose triangles land in
         // different chunks.
@@ -1320,7 +1324,7 @@ fn main() {
             ut.push(r);
         }
         let layout = if *baked { pc::VertexLayout::Baked } else { pc::VertexLayout::Static };
-        emit(&uv, &ut, Some(locks), &lod_bounds(*cell), *material, layout, None, None, *no_reflect, &mut cook.blobs, &mut draws);
+        emit(&uv, &ut, Some(locks), &if drive_route.is_some() {vec![0.06,0.25,0.8]} else {lod_bounds(*cell)}, *material, layout, None, None, *no_reflect, &mut cook.blobs, &mut draws);
     }
     emit_stock(&mut cook.blobs, &mut draws);
     let static_draws = draws.len();
@@ -1643,8 +1647,15 @@ fn main() {
         pc::Post::default()
     };
     let place = a.input.file_name().and_then(|n| n.to_str()).unwrap_or("place").to_string();
+    let driving = drive_route.map(|route| {
+        let vehicle = node_by_name(sx["driving"]["vehicle"].as_str().unwrap()).expect("driving vehicle node must be dynamic");
+        let plan=streaming::compile(route,vehicle,&mut draws,&mut cook.blobs.geom,&a.output).expect("driving residency cook");
+        plan.validate(&draws,nodes.len(),cook.blobs.geom.len() as u32).expect("valid compiled residency");
+        plan
+    });
     let meta = pc::Meta {
         version: pc::VERSION,
+        driving,
         name: place,
         kind: sx["kind"].as_str().unwrap_or("night-street").to_string(),
         min: scene_min.to_array(),

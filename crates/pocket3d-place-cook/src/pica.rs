@@ -652,6 +652,7 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
     let bytes = std::fs::read(input).expect("read source place");
     let pack = pc::Pack::parse(&bytes).unwrap();
     let m = pack.meta().unwrap();
+    assert!(m.driving.is_none(), "Driving worlds require a PICA residency/compiler and driving runtime; use the Vita target");
     let src_tex = pack.section(pc::TAG_TEXTURES).unwrap();
     let src_geom = pack.section(pc::TAG_GEOMETRY).unwrap();
     let src_anim = pack.section(pc::TAG_ANIMATION).unwrap();

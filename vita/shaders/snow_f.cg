@@ -1,0 +1,22 @@
+// Premultiplied over the HDR scene; RGB-only blending preserves eye-distance
+// alpha. A polynomial soft shape avoids extra textures and transcendental
+// fragment work, even for the larger wheel powder and cold exhaust puffs.
+float4 main(
+    half3 vColor : TEXCOORD0,
+    half2 vUv : TEXCOORD1,
+    half vOpacity : TEXCOORD2) : COLOR
+{
+    float2 uv = (float2)vUv;
+    float radius2 = dot(uv, uv);
+#ifdef PLUME
+    radius2 *= 1.0 + uv.x * uv.y * 0.28 + (uv.x * uv.x - uv.y * uv.y) * 0.18;
+    float edge = 1.0 - smoothstep(0.02, 1.0, radius2);
+    float shape = edge * edge;
+#else
+    float edge = 1.0 - smoothstep(0.07, 1.0, radius2);
+    float arms = 1.0 - saturate(min(abs(uv.x), abs(uv.y)) * 3.4);
+    float shape = edge * (0.72 + 0.28 * arms);
+#endif
+    float alpha = shape * (float)vOpacity;
+    return float4((float3)vColor * alpha, alpha);
+}

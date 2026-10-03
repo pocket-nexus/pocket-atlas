@@ -4,6 +4,19 @@
 use pocket3d_place as pc;
 use serde_json::Value;
 
+/// A material explicitly receives moving lights at their full authored range.
+pub fn dynamic_lights(x: &Value) -> bool {
+    x.get("dynamicLights").and_then(Value::as_bool).unwrap_or(false)
+}
+
+#[test]
+fn dynamic_light_receiver_is_explicit() {
+    assert!(dynamic_lights(&serde_json::json!({"dynamicLights":true})));
+    for x in [serde_json::json!({}), serde_json::json!({"wet":{}}), serde_json::json!({"dynamicLights":"true"})] {
+        assert!(!dynamic_lights(&x));
+    }
+}
+
 /// A number, or `d` when absent.
 pub fn f(v: &Value, k: &str, d: f32) -> f32 {
     v.get(k).and_then(|x| x.as_f64()).map(|x| x as f32).unwrap_or(d)
@@ -196,5 +209,26 @@ mod tests {
     fn short_arrays_take_defaults() {
         assert_eq!(arr(&json!([3]), [1.0, 2.0]), [3.0, 2.0]);
         assert_eq!(arr(&Value::Null, [1.0, 2.0]), [1.0, 2.0]);
+    }
+}
+
+/// Driving annotations carry semantic route input; the cooker supplies the
+/// target-specific residency plan, never the authoring scene.
+pub fn driving(x: &Value) -> Result<Option<serde_json::Value>, String> {
+    if x.is_null() { return Ok(None); }
+    let route: pocket3d_drive::Route=serde_json::from_value(x["route"].clone()).map_err(|e|format!("driving route: {e}"))?;
+    route.validate()?;
+    if x["vehicle"].as_str().is_none_or(str::is_empty) { return Err("driving vehicle node is required".into()); }
+    Ok(Some(x["route"].clone()))
+}
+#[cfg(test)]
+mod drive_tests {
+    use super::*;
+    #[test] fn route_annotation_rejects_missing_geometry() {
+        assert!(driving(&Value::Null).unwrap().is_none());
+        assert!(driving(&serde_json::json!({"route":{},"vehicle":"car"})).is_err());
+        let route:Value=serde_json::from_str(include_str!("../../../web/src/places/hokkaido-winter-drive/data/route.json")).unwrap();
+        assert!(driving(&serde_json::json!({"route":route,"vehicle":"car"})).unwrap().is_some());
+        assert!(driving(&serde_json::json!({"route":route})).is_err());
     }
 }

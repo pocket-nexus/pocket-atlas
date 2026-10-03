@@ -58,6 +58,7 @@ pub fn cook(input: &Path, output: &Path) {
     let bytes = std::fs::read(input).expect("input place");
     let pack = pc::Pack::parse(&bytes).expect("cook this revision's Vita pack first");
     let m = pack.meta().expect("place metadata");
+    assert!(m.driving.is_none(), "Driving worlds require a GE residency/compiler and driving runtime; use the Vita target");
     assert_eq!(
         m.kind, "night-street",
         "PSP currently supports the night-street material/effect set"

@@ -106,6 +106,16 @@ pub enum U {
     VistaSunSky,
     Field,
     FieldT,
+    SnowCam,
+    SnowRight,
+    SnowUp,
+    SnowMotion,
+    SnowWind,
+    SnowDrift,
+    SnowColor,
+    SnowFog,
+    SnowVehicle,
+    SnowHeading,
     Count,
 }
 
@@ -120,6 +130,7 @@ const UNIFORM_NAMES: [&str; U::Count as usize] = [
     "uTwBand", "uTwBelt", "uTwShape", "uTwShadow",
     "uWave", "uWaterK", "uWaterShallow",
     "uVista", "uVistaEye", "uVistaSun", "uVistaGlow", "uVistaSky", "uVistaSunSky", "uField", "uFieldT",
+    "uSnowCam", "uSnowRight", "uSnowUp", "uSnowMotion", "uSnowWind", "uSnowDrift", "uSnowColor", "uSnowFog", "uSnowVehicle", "uSnowHeading",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

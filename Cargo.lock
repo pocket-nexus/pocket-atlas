@@ -346,6 +346,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pocket3d-drive"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pocket3d-place"
 version = "0.1.0"
 dependencies = [
@@ -364,6 +372,7 @@ dependencies = [
  "half",
  "image",
  "meshopt",
+ "pocket3d-drive",
  "pocket3d-place",
  "pocket3d-place-psp",
  "rayon",

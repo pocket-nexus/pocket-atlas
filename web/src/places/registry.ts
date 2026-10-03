@@ -6,6 +6,16 @@ import type { PlaceDef } from "../core/types";
  */
 export const PLACES: PlaceDef[] = [
   {
+    id: "hokkaido-winter-drive", name: "Northbound: Hokkaido Winter Drive", native: "北海道雪便り",
+    locality: "Furano to Biei, Hokkaido", localityNative: "富良野・美瑛", country: "Japan",
+    lat: 43.347256, lon: 142.390653, timeZone: "Asia/Tokyo", status: "live",
+    weather: "Snow · −8°C", accent: "#dec191", author: "Pocket Atlas", kind: "winter-road",
+    tags: ["Driving", "Snow", "Route 237", "Delivery"], featured: true, preview: "Furano",
+    platforms: ["web", "vita"],
+    summary: "Drive a kei wagon from Furano to Biei through a snowy 33.4 km real-world route, delivering parcels and saving your journey.",
+    load: () => import("./hokkaido-winter-drive/index"),
+  },
+  {
     id: "tokyo-konbini",
     name: "Rainy Night Konbini",
     native: "雨夜のコンビニ",

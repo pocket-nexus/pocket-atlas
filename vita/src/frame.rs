@@ -29,6 +29,10 @@ const HAZE_LIGHTS: usize = 6;
 const STILL_MOVE: f32 = 0.25;
 const STILL_TURN: f32 = 0.035;
 const FX_LIGHTS: usize = 8;
+/// Two bounded draws / 5,280 triangles / 454,080 bytes for winter weather.
+/// Counts do not grow with route length or distance travelled.
+const SNOW_FLAKES: usize = 2400;
+const WINTER_PLUMES: usize = 240;
 const SKY_FAR: f32 = 200.0;
 const UNAVAILABLE: *const Pipeline = 1 as *const Pipeline;
 
@@ -47,7 +51,8 @@ pub struct Settings {
     /// Profiling: every mesh drawn with a constant-colour fragment program.
     pub flat: bool,
     /// Particle systems drawn (bit per system: curtain, streak, drip,
-    /// splash, steam, beacon).
+    /// splash, steam, beacon). Winter-road kinds reuse bit 16 for snow and
+    /// bit 32 for tyre powder, cold exhaust and headlight mist.
     pub fx: u32,
     /// Scene resolution, upscaled to the display: an index into `SCALES`
     /// (960×544, 720×408, 640×362, 544×308), or `SCALES.len()` for the
@@ -212,6 +217,8 @@ struct Mat {
     fs: &'static str,
     defines: Vec<&'static str>,
     lit: bool,
+    /// Keep moving lights beyond the detail-map distance (road headlights).
+    dynamic_lights: bool,
     blend: BlendMode,
     two_sided: bool,
     depth_write: bool,
@@ -359,6 +366,7 @@ fn material(m: &pc::Material, env_scene: f32, textures: &[pc::Texture], sun: boo
         fs,
         defines,
         lit,
+        dynamic_lights: m.dynamic_lights,
         blend,
         two_sided: m.double_sided || m.kind == pc::Kind::Tower,
         depth_write: m.depth_write && !transparent,
@@ -484,6 +492,8 @@ pub struct Renderer {
     drips: FxBuf,
     steam: FxBuf,
     beacons: FxBuf,
+    snow: Option<FxBuf>,
+    winter_plumes: Option<FxBuf>,
     bones: Vec<f32>,
     cur_vp: *mut g::SceGxmVertexProgram,
     cur_fp: *mut g::SceGxmFragmentProgram,
@@ -744,6 +754,21 @@ impl Renderer {
         })?;
         let beacons = &scene.meta.beacons;
         let beacons = fx_quads(&mut mem, beacons.len(), [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]], |i| ([0.0; 4], beacons[i], [0.0; 3]))?;
+        let snow = if scene.meta.kind == "winter-road" {
+            Some(fx_quads(&mut mem, SNOW_FLAKES, [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]], |i| ([rng.next(), rng.next(), rng.next(), rng.next()], [if i % 6 < 3 { 0.0 } else if i % 6 < 5 { 1.0 } else { 2.0 }, 0.0, 0.0], [0.0; 3]))?)
+        } else {
+            None
+        };
+
+        let winter_plumes = if snow.is_some() && scene.meta.driving.is_some() {
+            Some(fx_quads(&mut mem, WINTER_PLUMES, [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]], |i| {
+                // 80 puffs per rear tyre, 48 cold exhaust, 32 headlight mist.
+                let kind = if i < 160 { (i % 2) as f32 } else if i < 208 { 2.0 } else { 3.0 };
+                ([rng.next(), rng.next(), rng.next(), rng.next()], [kind, 0.0, 0.0], [0.0; 3])
+            })?)
+        } else {
+            None
+        };
 
         let env_scene = scene.meta.atmosphere.environment_strength;
         // A sun below the horizon (blue hour) lights nothing directly.
@@ -793,6 +818,8 @@ impl Renderer {
             drips,
             steam,
             beacons,
+            snow,
+            winter_plumes,
             bones: Vec::with_capacity(64 * 12),
             cur_vp: core::ptr::null_mut(),
             cur_fp: core::ptr::null_mut(),
@@ -903,6 +930,14 @@ impl Renderer {
         if self.day_sky {
             gpu.want(&self.sky_key());
         }
+        if self.snow.is_some() {
+            gpu.want(&Key::new("snow_v.cg", &[]));
+            gpu.want(&Key::new("snow_f.cg", &[]));
+        }
+        if self.winter_plumes.is_some() {
+            gpu.want(&Key::new("snow_v.cg", &["PLUME"]));
+            gpu.want(&Key::new("snow_f.cg", &["PLUME"]));
+        }
     }
 
     /// A light field's programs: the point sprite, dimmed by the vista haze
@@ -924,6 +959,9 @@ impl Renderer {
         }
         let mut state = false;
         for d in scene.draws.iter().filter(|d| d.lights) {
+            if d.vb.is_null() {
+                continue;
+            }
             let Some(field) = self.mats[d.material as usize].field else { continue };
             if !camera::visible(planes, d.min, d.max) {
                 st.culled += 1;
@@ -991,6 +1029,9 @@ impl Renderer {
         let Some(fill) = gpu.pipeline(&fill).map(|p| p as *const Pipeline) else { return Ok(()) };
         let mut draws = Vec::new();
         for (i, d) in scene.draws.iter().enumerate() {
+            if d.vb.is_null() {
+                continue;
+            }
             let Some((vs, fs, layout)) = self.shadow_keys(d) else { continue };
             let key = PipeKey { vs, fs, layout, blend: BlendMode::Opaque, output: Out::Uchar4, msaa: Msaa::None.gxm() };
             match gpu.pipeline(&key) {
@@ -1016,6 +1057,9 @@ impl Renderer {
         g::sceGxmSetFrontDepthWriteEnable(ctx, g::SceGxmDepthWriteMode_SCE_GXM_DEPTH_WRITE_ENABLED);
         for (i, p) in draws {
             let d = &scene.draws[i];
+            if d.vb.is_null() {
+                continue;
+            }
             let p = &*p;
             self.use_pipeline(ctx, p);
             let m = &self.mats[d.material as usize];
@@ -1245,6 +1289,9 @@ impl Renderer {
         // blended surfaces drawn after them cover them.
         let target_h = self.main_t(mi).height as f32;
         self.light_fields(ctx, gpu, scene, &frame, &planes, msaa, target_h, &mut st);
+        // Snow is depth-tested against opaque objects; later glass covers the
+        // flakes outside it. The pass preserves the scene's distance alpha.
+        self.snowfall(ctx, gpu, scene, &frame, target_h, &mut st);
         self.draw_meshes(ctx, gpu, scene, &frame, &planes, false, true, &mut st);
         if self.settings.rain && self.has_rain {
             self.particles(ctx, gpu, scene, &frame, rain);
@@ -1520,6 +1567,10 @@ impl Renderer {
         let mut order = core::mem::take(&mut self.order);
         order.clear();
         for (i, d) in scene.draws.iter().enumerate() {
+            // Streamed pages retain metadata while their GPU buffers are absent.
+            if d.vb.is_null() {
+                continue;
+            }
             let m = &self.mats[d.material as usize];
             if d.lights || m.transparent != transparent || self.settings.skip & (1 << m.class) != 0 {
                 continue;
@@ -1559,6 +1610,9 @@ impl Renderer {
         let mut last_state: Option<(bool, bool, Option<(i32, i32)>)> = None;
         for &(i, _, lo, hi) in &order {
             let d = &scene.draws[i as usize];
+            if d.vb.is_null() {
+                continue;
+            }
             let mi = d.material as usize;
             let max_n = if mirror { REFL_LIGHTS.min(self.settings.max_lights) } else { self.settings.max_lights.min(LIGHTS_MAX) };
             let v = variant(d);
@@ -1577,11 +1631,11 @@ impl Renderer {
                 continue;
             }
             // Baked draws light only moving sources per pixel. Beyond the
-            // detail distance only the wet ground keeps them (a passing car's
-            // beam on the street): a car's headlights reach whole 32 m chunks
+            // detail distance only wet ground and opt-in receivers keep them
+            // (road headlights): a car's headlights reach whole 32 m chunks
             // of walls, and per-pixel lights there cost ~25 ms at 480×272.
             // One per baked draw: the car's merged headlights, or its tail light.
-            let max_n = if d.baked { if far && self.mats[mi].class != 0 { 0 } else { max_n.min(1) } } else { max_n };
+            let max_n = if d.baked { if far && self.mats[mi].class != 0 && !self.mats[mi].dynamic_lights { 0 } else { max_n.min(1) } } else { max_n };
             let lights = if self.mats[mi].lit { select_lights(scene, lo, hi, max_n, d.baked) } else { LightSet::default() };
             let n = lights.n;
             // Light-count class: 0 none; 1 one (baked) or two; 2 four.
@@ -1745,6 +1799,65 @@ impl Renderer {
         }
         g::sceGxmSetFrontDepthBias(ctx, 0, 0);
         self.order = order;
+    }
+
+    /// Winter-road weather is two depth-tested, bounded draws. The vertex
+    /// programs own all motion; only camera and live vehicle constants change.
+    /// Full float4 uploads match declarations (SceGxmSetUniformDataF does not
+    /// clamp an upload to its parameter's declared range).
+    unsafe fn snowfall(&mut self, ctx: *mut g::SceGxmContext, gpu: &mut Gpu, scene: &Scene, f: &FrameConsts, target_h: f32, st: &mut PassStats) {
+        if self.snow.is_none() { return; }
+        let right = Vec3::new(f.ray_x[0], f.ray_x[1], f.ray_x[2]).normalize_or(Vec3::X);
+        let up = Vec3::new(f.ray_y[0], f.ray_y[1], f.ray_y[2]).normalize_or(Vec3::Y);
+        let color: [f32; 4] = std::array::from_fn(|i| {
+            if i < 3 { (f.hemi_sky[i] * 0.7 + f.hemi_ground[i] * 0.3) * (3.8 * core::f32::consts::FRAC_1_PI) } else { 0.0 }
+        });
+        let vehicle = scene.meta.driving.as_ref().and_then(|d| scene.node_world.get(d.vehicle_node as usize));
+        let (vehicle, heading) = vehicle.map_or(([0.0; 4], [0.0, 0.0, -1.0, 0.0]), |m| {
+            let p = m.transform_point3(Vec3::ZERO);
+            let dir = m.transform_vector3(Vec3::NEG_Z).normalize_or(Vec3::NEG_Z);
+            let speed = if scene.drive_speed.is_finite() { scene.drive_speed } else { 0.0 };
+            ([p.x, p.y, p.z, speed], [dir.x, dir.y, dir.z, 1.0])
+        });
+        // Copy handles before binding mutable renderer state.
+        let handles = |b: &Option<FxBuf>| b.as_ref().map(|b| (b.vb, b.ib, b.count));
+        let passes = [(16, handles(&self.snow), false), (32, handles(&self.winter_plumes), true)];
+        for (bit, buffer, plume) in passes {
+            if self.settings.fx & bit == 0 { continue; }
+            let Some((vb, ib, count)) = buffer else { continue; };
+            let defines: &[&str] = if plume { &["PLUME"] } else { &[] };
+            let key = PipeKey {
+                vs: Key::new("snow_v.cg", defines), fs: Key::new("snow_f.cg", defines),
+                layout: Layout::Fx, blend: BlendMode::Premultiplied,
+                output: Out::Half4, msaa: self.settings.msaa.gxm(),
+            };
+            let Some(p) = gpu.pipeline(&key).map(|p| p as *const Pipeline) else {
+                st.missing += 1;
+                continue;
+            };
+            let p = &*p;
+            self.use_pipeline(ctx, p);
+            g::sceGxmSetFrontDepthFunc(ctx, g::SceGxmDepthFunc_SCE_GXM_DEPTH_FUNC_GREATER_EQUAL);
+            g::sceGxmSetFrontDepthWriteEnable(ctx, g::SceGxmDepthWriteMode_SCE_GXM_DEPTH_WRITE_DISABLED);
+            g::sceGxmSetFrontDepthBias(ctx, 0, 0);
+            g::sceGxmSetCullMode(ctx, g::SceGxmCullMode_SCE_GXM_CULL_NONE);
+            let u = Uniforms::reserve(ctx, p);
+            u.set(p, U::ViewProj, &f.vp);
+            u.set(p, U::SnowCam, &[f.eye[0], f.eye[1], f.eye[2], f.pixel * H as f32 / target_h]);
+            u.set(p, U::SnowRight, &[right.x, right.y, right.z, 0.0]);
+            u.set(p, U::SnowUp, &[up.x, up.y, up.z, 0.0]);
+            u.set(p, U::SnowMotion, &[f.eye[3], 0.9, 0.006, 0.014]);
+            let time = f.eye[3];
+            u.set(p, U::SnowWind, &[(time * 0.19).sin() * 2.3, (time * 0.11 + 0.7).sin() * 1.2, 0.5 + 0.5 * (time * 0.19).sin() * (time * 0.071 + 1.3).sin(), 0.0]);
+            u.set(p, U::SnowDrift, &[0.86, 0.0, 0.31, 1.05]);
+            u.set(p, U::SnowColor, &color);
+            u.set(p, U::SnowFog, &f.fog);
+            u.set(p, U::SnowVehicle, &vehicle);
+            u.set(p, U::SnowHeading, &heading);
+            g::sceGxmSetVertexStream(ctx, 0, vb.cast());
+            g::sceGxmDraw(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, ib.cast(), count);
+            self.stats.fx_quads += count / 6;
+        }
     }
 
     unsafe fn particles(&mut self, ctx: *mut g::SceGxmContext, gpu: &mut Gpu, scene: &Scene, f: &FrameConsts, w: &Weather) {

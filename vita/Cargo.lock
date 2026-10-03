@@ -72,12 +72,21 @@ name = "pocket-atlas-vita"
 version = "0.1.0"
 dependencies = [
  "glam",
+ "pocket3d-drive",
  "pocket3d-gxm",
  "pocket3d-place",
  "pocketjs-vita",
  "serde_json",
  "vita2d-sys",
  "vitasdk-sys",
+]
+
+[[package]]
+name = "pocket3d-drive"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

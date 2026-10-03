@@ -27,8 +27,9 @@
 // builds the standalone Pocket Atlas package (PKAT00001).
 
 import { $ } from "bun";
+import { copyDrivePages } from "./drive-assets";
 import { createHash, randomBytes } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { packageVitaVpk } from "../vendor/pocketjs/tools/vita-package.ts";
 import { prepareVitaUsb } from "../vendor/pocketjs/tools/vita-usb.ts";
@@ -55,6 +56,8 @@ const release = !argv.includes("--debug");
 const output = `pocket-atlas-${title}`;
 /** The place a command cooks, syncs or measures. */
 const PLACE = value("--place", "tokyo-konbini");
+/** Use the share already owned by the one connected USB host, when requested. */
+const USB_SHARE = resolve(value("--share", resolve(ROOT, ".pocket-build/vita-usb/share")));
 
 interface BuildOptions {
   /** Packaged build: no USB debug driver, pack and GXPs inside the VPK. */
@@ -75,6 +78,7 @@ async function build(options: BuildOptions = {}): Promise<string> {
     POCKETJS_VITA_TITLE_ID: title,
     POCKETJS_NATIVE_BUILD: nativeBuild,
     POCKETJS_EMBED_APP: "0",
+    POCKET_ATLAS_START_PLACE: PLACE,
     TARGET_AR: "arm-vita-eabi-ar",
     AR_armv7_sony_vita_newlibeabihf: "arm-vita-eabi-ar",
     TARGET_CC: "arm-vita-eabi-gcc",
@@ -112,12 +116,12 @@ async function build(options: BuildOptions = {}): Promise<string> {
 // PocketJS's wired debug tool, pointed at this repository's USB share.
 async function dev(...args: string[]): Promise<void> {
   const runtime = `${OUT_DIR}/${output}.runtime.json`;
-  const share = resolve(ROOT, ".pocket-build/vita-usb/share");
+  const share = USB_SHARE;
   mkdirSync(share, { recursive: true });
   await $`bun ${POCKETJS}/tools/vita-dev.ts ${args} --runtime ${runtime} --title ${title} --dir ${share}`.cwd(POCKETJS);
 }
 
-const SHARE = resolve(ROOT, ".pocket-build/vita-usb/share/atlas");
+const SHARE = resolve(USB_SHARE, "atlas");
 const PLACES_DIR = resolve(ROOT, ".pocket-build/places");
 const PLACE_DIR = `${PLACES_DIR}/${PLACE}`;
 const PACK = `${PLACE_DIR}/${PLACE}.place`;
@@ -181,6 +185,7 @@ function sync(): void {
   writeFileSync(`${SHARE}/shaders/stamp`, stamp.digest("hex"));
   const places = cookedPlaces();
   if (!places.length) throw new Error(`no cooked place under ${PLACES_DIR}: run \`bun tools/atlas.ts cook\` first`);
+  for (const [id,path] of places) copyDrivePages(path,`${SHARE}/places/${id}.place`);
   const copied = places.filter(([id, path]) => copyIfChanged(path, `${SHARE}/places/${id}.place`)).map(([id]) => id);
   if (existsSync(ATLAS_PACK) && copyIfChanged(ATLAS_PACK, `${SHARE}/atlas.pack`)) copied.push("atlas");
   console.log(`atlas: synced shaders${copied.length ? ` and ${copied.join(", ")}` : ""} to ${SHARE}`);
@@ -211,6 +216,7 @@ async function lint(): Promise<void> {
     ["products_f.cg", []], ["skyline_f.cg", []], ["tower_f.cg", []], ["sky_v.cg", []], ["sky_f.cg", []],
     ...["STREAK", "SPLASH", "DRIP", "STEAM", "BEACON"].map((d): [string, string[]] => ["fx_v.cg", [d]]),
     ...["STREAK", "SPLASH", "STEAM", "BEACON"].map((d): [string, string[]] => ["fx_f.cg", [d]]),
+    ["snow_v.cg", []], ["snow_f.cg", []], ["snow_v.cg", ["PLUME"]], ["snow_f.cg", ["PLUME"]],
     ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "SUN_SPEC", "ALBEDO_MAP", "NORMAL_MAP", "ORM_MAP", "FOG"]], ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "ALPHA_TEST", "ALBEDO_MAP", "EMISSION_MAP", "FOG"]],
     ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "FAR", "ALBEDO_MAP", "FOG"]], ["shadow_f.cg", []], ["shadow_f.cg", ["ALPHA_TEST"]], ["fill_f.cg", []], ["sky_day_f.cg", []], ["sky_day_f.cg", ["TWILIGHT"]],
     ["globe_v.cg", []], ["globe_f.cg", []], ["marker_v.cg", []], ["marker_f.cg", []], ["ui_v.cg", []], ["ui_f.cg", []], ["ui_f.cg", ["TEX"]], ["text_v.cg", []], ["text_f.cg", []], ["surface_v.cg", ["WAVES"]], ["water_f.cg", ["SUN", "FOG"]], ["water_f.cg", []], ["water_f.cg", ["SUN", "FOG", "SHALLOW"]], ["surface_v.cg", ["WAVES", "COLOR"]], ["surface_v.cg", ["FLAT"]], ["surface_v.cg", ["BAKED", "FLAT"]],
@@ -242,17 +248,27 @@ async function lint(): Promise<void> {
 // Every measurement names the render profile, which resets the device's
 // switches and governor to the profile's; `settings` then overrides them.
 const RENDER = value("--render", "vita30");
-const STATUS = resolve(ROOT, `.pocket-build/vita-usb/share/pocket-vita/${title}/status.json`);
+const STATUS = resolve(USB_SHARE, `pocket-vita/${title}/status.json`);
 
 /** The device's engine status (the USB host replaces the file while it is read). */
 function engine(): any {
+  if (Date.now()-statSync(STATUS).mtimeMs>10_000) throw new Error("Vita status is stale; verify the running app and USB host before measuring");
   for (let i = 0; ; i++) {
     try { return JSON.parse(readFileSync(STATUS, "utf8")).engine ?? {}; } catch (e) { if (i > 20) throw e; }
     Bun.sleepSync(50);
   }
 }
 
-interface Shot { name: string; from: { pos: number[]; target: number[]; fov: number }; to: { pos: number[]; target: number[]; fov: number } }
+interface Shot { name: string; from: { pos: number[]; target: number[]; fov: number }; to: { pos: number[]; target: number[]; fov: number }; driveS?: number }
+
+/** Render the moving car at the measured location without changing a player's save. */
+function driveInspection(shot?: Shot): {drive?:{inspect:{s:number;speed:number}}} {
+  const at=value("--drive-at",shot?.driveS===undefined?"":String(shot.driveS));
+  if (!at) return {};
+  const s=Number(at), speed=Number(value("--drive-speed","12"));
+  if (!Number.isFinite(s)||s<0||!Number.isFinite(speed)||speed< -7||speed>27) throw new Error("invalid --drive-at / --drive-speed");
+  return {drive:{inspect:{s,speed}}};
+}
 
 /** The cinematic shots authored in the cooked scene (scene.glb extras). */
 function shotList(): Shot[] {
@@ -269,14 +285,14 @@ function shotView(s: Shot): { pos: number[]; target: number[]; fov: number } {
 }
 
 /** `--shot NAME` (halfway view), else the device's current view; `--time` or the device's time. */
-function measuredView(): { view: { pos: number[]; target: number[]; fov: number }; time: number } {
+function measuredView() {
   const e = engine();
   if (e.stage !== "running" || !e.view) throw new Error("the device is not running Pocket Atlas");
   const name = value("--shot", "");
   const shot = name ? shotList().find((s) => s.name.toLowerCase() === name.toLowerCase()) : undefined;
   if (name && !shot) throw new Error(`no shot ${name}: ${shotList().map((s) => s.name).join(", ")}`);
   const view = shot ? shotView(shot) : { pos: e.view.pos, target: e.view.target, fov: e.view.fov };
-  return { view, time: Number(value("--time", String(e.time))) };
+  return { view, time: Number(value("--time", String(e.time))), ...driveInspection(shot) };
 }
 
 // Frame cost per renderer feature at a fixed view and time: each row turns
@@ -297,7 +313,7 @@ async function bench(): Promise<void> {
   console.log(`view ${JSON.stringify(shot)}`);
   for (const [name, off] of rows) {
     await Bun.write(`${SHARE}/control.json`, JSON.stringify({ ...shot, settings: { ...base, ...off } }) + "\n");
-    await Bun.sleep(3000);
+    await settle();
     const sum = { frameMs: 0, cpuSubmitMs: 0, waitMs: 0, swapMs: 0 };
     for (let i = 0; i < 8; i++) {
       await Bun.sleep(500);
@@ -354,8 +370,9 @@ async function settle(): Promise<void> {
   await Bun.sleep(2000);
   for (let i = 0; i < 600; i++) {
     const e = engine();
-    if (!(e.main?.missing || e.reflection?.missing || e.pending)) return;
-    if (i % 10 === 0) console.log(`waiting for programs: ${e.pending ?? 0} compiling, ${e.main?.missing ?? 0} + ${e.reflection?.missing ?? 0} draws missing`);
+    if (e.renderError || e.streaming?.error || e.errors?.length) throw new Error(`Vita render failure: ${JSON.stringify(e.renderError??e.streaming?.error??e.errors)}`);
+    if (e.stage==="running" && e.place===PLACE && !(e.main?.missing || e.reflection?.missing || e.pending) && e.streaming?.ready!==false) return;
+    if (i % 10 === 0) console.log(`waiting for programs/pages: ${e.pending ?? 0} compiling, ${e.main?.missing ?? 0} + ${e.reflection?.missing ?? 0} draws missing, streaming ${e.streaming?.ready??"n/a"}`);
     await Bun.sleep(500);
   }
   throw new Error("programs still compiling after 5 minutes");
@@ -377,7 +394,7 @@ async function sweep(): Promise<void> {
   for (const s of shots) {
     const row: string[] = [];
     for (let k = 0; k < steps; k++) {
-      await Bun.write(`${SHARE}/control.json`, JSON.stringify({ place: PLACE, renderProfile: RENDER, view: shotView(s), time, settings: { step: k, hold: true, ...extra } }) + "\n");
+      await Bun.write(`${SHARE}/control.json`, JSON.stringify({ place: PLACE, renderProfile: RENDER, view: shotView(s), time, ...driveInspection(s), settings: { step: k, hold: true, ...extra } }) + "\n");
       await settle();
       let ms = 0;
       let cpu = 0;
@@ -413,7 +430,10 @@ async function vpk(): Promise<void> {
   }
   mkdirSync(`${stage}/places`, { recursive: true });
   const places = cookedPlaces();
-  for (const [id, path] of places) cpSync(path, `${stage}/places/${id}.place`);
+  for (const [id, path] of places) {
+    copyDrivePages(path,`${stage}/places/${id}.place`);
+    cpSync(path, `${stage}/places/${id}.place`);
+  }
   if (!existsSync(ATLAS_PACK)) throw new Error(`${ATLAS_PACK} missing: run \`bun tools/atlas.ts cook-atlas\` first`);
   cpSync(ATLAS_PACK, `${stage}/atlas.pack`);
   console.log(`atlas: staged ${hashes.length} programs, the atlas and ${places.map(([id]) => id).join(", ")} in ${stage}`);
@@ -423,6 +443,7 @@ async function vpk(): Promise<void> {
 // Frame time per cinematic shot while the camera rig plays (render profile
 // and governor as they run for a viewer).
 async function shots(): Promise<void> {
+  if (shotList().some(s=>s.driveS!==undefined)) throw new Error("Driving uses live vehicle poses: use sweep --steps 1 and profile --shot NAME --drive-speed 12 for every route shot, then repeat at speed 0.");
   const seconds = Number(value("--seconds", "90"));
   await Bun.write(`${SHARE}/control.json`, JSON.stringify({ place: PLACE, renderProfile: RENDER }) + "\n");
   await Bun.sleep(3000);

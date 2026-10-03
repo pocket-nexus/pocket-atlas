@@ -47,6 +47,7 @@ export type PlaceStatus = "live" | "soon";
  * of an existing kind reuses it.
  */
 export type PlaceKind =
+  | "winter-road"
   | "night-street"
   | "dusk-street"
   | "daytime-street"
@@ -86,6 +87,8 @@ export interface PlaceDef {
   summary?: string;
   /** Listed under Featured. */
   featured?: boolean;
+  /** Omitted for established Atlas targets. Domain works name their implemented runtimes. */
+  platforms?: ("web" | "vita" | "3ds" | "psp")[];
   /** Cinematic shot the preview card is captured from. */
   preview?: string;
   load?: () => Promise<PlaceModule>;

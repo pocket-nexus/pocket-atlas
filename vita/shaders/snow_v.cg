@@ -1,0 +1,143 @@
+// Shared winter-road atmosphere. The same seeds are resident for an entire
+// journey: three world-anchored snow volumes, or a bounded car-local plume.
+// PLUME selects tyre powder, cold exhaust and small headlight-lit mist puffs.
+// No route-sized history, texture fetch or fullscreen transparency is required.
+uniform float4x4 uViewProj;
+uniform float4 uSnowCam;      // camera xyz, world size of one target pixel at 1 m
+uniform float4 uSnowRight;    // unit camera right, -
+uniform float4 uSnowUp;       // unit camera up, -
+uniform float4 uSnowMotion;   // elapsed seconds, opacity, radius min, radius range
+uniform float4 uSnowWind;     // integrated gust x/z displacement, gust strength, -
+uniform float4 uSnowDrift;    // horizontal velocity xyz, falling speed
+uniform float4 uSnowColor;    // diffuse snow radiance, -
+uniform float4 uSnowFog;      // scene fog rgb, exponential-squared density
+uniform float4 uSnowVehicle;  // vehicle origin xyz, signed speed in m/s
+uniform float4 uSnowHeading;  // vehicle forward (-Z transformed), enabled
+
+void main(
+    float4 aSeed,
+    float2 aCorner,
+    float3 aA,                 // snow layer 0/1/2, or plume kind 0/1/2/3
+    out float4 oPosition : POSITION,
+    out half3 oColor : TEXCOORD0,
+    out half2 oUv : TEXCOORD1,
+    out half oOpacity : TEXCOORD2)
+{
+    float t = uSnowMotion.x;
+    float3 cam = uSnowCam.xyz;
+    float3 car = uSnowVehicle.xyz;
+    float3 heading = uSnowHeading.xyz;
+    float3 carRight = float3(-heading.z, 0.0, heading.x);
+    float speed = uSnowVehicle.w;
+    float absSpeed = abs(speed);
+    float gust = uSnowWind.z;
+    float3 p;
+    float radius;
+    float alpha;
+    float stretch = 1.0;
+    float2 major = float2(0.0, 1.0);
+#ifdef PLUME
+    float kind = aA.x;
+    if (kind < 1.5) {
+        // Reconstruct only the last 0.85 s of wheel wake. Powder ceases at
+        // rest; it does not leave a persistent route-sized particle trail.
+        float duration = 0.52 + aSeed.y * 0.33;
+        float life = frac(t / duration + aSeed.x);
+        float age = life * duration;
+        float side = kind < 0.5 ? -1.0 : 1.0;
+        float travel = speed < 0.0 ? -1.0 : 1.0;
+        float lateral = side * (0.63 + age * (0.35 + aSeed.z * 0.9));
+        p = car + carRight * lateral - heading * (travel * 1.18 + speed * age * 0.68);
+        p.y += 0.08 + age * (0.5 + aSeed.w * 0.75) - age * age * 0.5;
+        p.x += age * (0.25 + gust * 0.45);
+        radius = 0.07 + age * (0.18 + aSeed.z * 0.29);
+        alpha = smoothstep(0.3, 4.0, absSpeed) * smoothstep(0.0, 0.08, life) * (1.0 - life) * (1.0 - life) * 0.19;
+        stretch = 1.0 + life * 0.65;
+    } else if (kind < 2.5) {
+        float duration = 1.8 + aSeed.y * 0.8;
+        float life = frac(t / duration + aSeed.x);
+        float age = life * duration;
+        p = car - carRight * 0.44 - heading * (1.72 + speed * age * 0.82 + age * 0.32);
+        p.y += 0.3 + age * 0.3 + age * age * 0.035;
+        p.x += age * (0.14 + gust * 0.25) + sin(age * 2.4 + aSeed.z * 6.283185) * age * 0.09;
+        p.z += cos(age * 2.1 + aSeed.w * 6.283185) * age * 0.09;
+        radius = 0.065 + age * (0.19 + aSeed.z * 0.08);
+        alpha = smoothstep(0.0, 0.075, life) * (1.0 - life) * (1.0 - life) * 0.105 / (1.0 + absSpeed * 0.095);
+    } else {
+        // A few depth-tested puffs give the headlamp cone body. Their
+        // footprint is local to the road, not a fullscreen fog layer.
+        float phase = frac(t * 0.06 + aSeed.x);
+        float along = 2.0 + phase * 25.0;
+        float lateral = (aSeed.y - 0.5) * (0.4 + along * 0.39);
+        p = car + heading * (1.6 + along) + carRight * lateral;
+        p.y += 0.52 + aSeed.z * 0.65 + sin(t * 0.41 + aSeed.w * 6.283185) * 0.12;
+        radius = 0.22 + along * 0.085;
+        alpha = smoothstep(0.0, 0.12, phase) * (1.0 - smoothstep(0.7, 1.0, phase)) * 0.035;
+    }
+    float rot = aSeed.w * 6.283185 + t * 0.18;
+    major = float2(sin(rot), cos(rot));
+    alpha *= uSnowHeading.w;
+#else
+    // 1,200 near / 800 middle / 400 far flakes. Dense nearby flakes, middle
+    // detail and sparse small far flakes read at 480x272 without giant dots.
+    float layer = aA.x;
+    float3 box = layer < 0.5 ? float3(16.0, 10.0, 16.0) : (layer < 1.5 ? float3(38.0, 22.0, 38.0) : float3(84.0, 40.0, 84.0));
+    float limit = layer < 0.5 ? 10.0 : (layer < 1.5 ? 22.0 : 47.0);
+    float3 origin = cam - float3(box.x * 0.5, box.y * 0.35, box.z * 0.5);
+    float3 velocity = float3(uSnowDrift.x, -uSnowDrift.w * (0.65 + 0.7 * aSeed.w), uSnowDrift.z);
+    p = aSeed.xyz * box + velocity * t;
+    p.x += uSnowWind.x + sin(t * 0.91 + aSeed.w * 6.283185) * 0.48;
+    p.z += uSnowWind.y + cos(t * 0.73 + aSeed.x * 6.283185) * 0.34;
+    float3 relative = p - origin;
+    p = origin + relative - box * floor(relative / box);
+    float bandDistance = length(p - cam);
+    float rangeFade = 1.0 - smoothstep(limit * 0.65, limit, bandDistance);
+    float y = p.y - origin.y;
+    float verticalFade = smoothstep(0.0, 1.5, y) * (1.0 - smoothstep(box.y - 2.0, box.y, y));
+    radius = (uSnowMotion.z + uSnowMotion.w * aSeed.w * aSeed.w) * (1.0 + layer * 0.6);
+    float3 apparent = velocity - heading * speed * uSnowHeading.w;
+    float2 motion = float2(dot(apparent, uSnowRight.xyz), dot(apparent, uSnowUp.xyz));
+    major = normalize(motion + float2(0.001, 0.001));
+    stretch = 1.0 + min(2.6, absSpeed * 0.065 + gust * 0.65) * step(0.6, aSeed.z);
+    alpha = rangeFade * verticalFade * (0.62 + aSeed.y * 0.38) / sqrt(stretch);
+    // Keep the cabin dry in both driving views. Outside flakes still show
+    // through the glass; particles cannot spawn inside the enclosed car.
+    float3 cabin = p - car;
+    if (uSnowHeading.w > 0.5 && abs(dot(cabin, carRight)) < 0.74 && abs(dot(cabin, heading)) < 1.6 && cabin.y > 0.0 && cabin.y < 1.82) alpha = 0.0;
+#endif
+    float3 toFlake = p - cam;
+    float dist = length(toFlake);
+    float3 forward = -cross(uSnowRight.xyz, uSnowUp.xyz);
+    float depth = dot(toFlake, forward);
+    float drawnRadius = max(radius, max(depth, 0.1) * uSnowCam.w * 0.55);
+    float coverage = (radius * radius) / (drawnRadius * drawnRadius);
+#ifndef PLUME
+    // Reserve subpixel visibility at the handheld target resolution.
+    coverage = max(coverage, 0.22);
+#endif
+    float2 minor = float2(major.y, -major.x);
+    float2 corner = minor * aCorner.x + major * aCorner.y * stretch;
+    float3 wp = p + (uSnowRight.xyz * corner.x + uSnowUp.xyz * corner.y) * drawnRadius;
+    alpha *= coverage * smoothstep(0.4, 1.0, depth) * uSnowMotion.y;
+
+    // Forward lighting in the drifting flakes provides inexpensive volume
+    // scattering aligned to the same live car transform as its real lights.
+    float3 lightDelta = p - (car + heading * 1.71 + float3(0.0, 0.82, 0.0));
+    float along = dot(lightDelta, heading);
+    float lateral = dot(lightDelta, carRight);
+    float vertical = lightDelta.y + along * 0.0332;
+    float width = 0.35 + max(along, 0.0) * 0.46;
+    float beam = 1.0 - smoothstep(0.35, 1.0, (lateral * lateral + vertical * vertical * 2.8) / (width * width));
+    beam *= smoothstep(0.0, 1.0, along) * (1.0 - smoothstep(16.0, 33.0, along)) * uSnowHeading.w;
+    float3 color = uSnowColor.rgb * (0.9 + 0.1 * aSeed.y) + float3(2.1, 1.77, 1.22) * beam;
+#ifdef PLUME
+    if (aA.x > 2.5) alpha *= beam;
+#endif
+    float haze = uSnowFog.w * dist;
+    color = lerp(uSnowFog.rgb, color, exp(-haze * haze));
+    oPosition = mul(uViewProj, float4(wp, 1.0));
+    if (depth < 0.1 || alpha < 0.0001) oPosition = float4(2.0, 2.0, 2.0, 1.0);
+    oColor = (half3)color;
+    oUv = (half2)aCorner;
+    oOpacity = (half)alpha;
+}

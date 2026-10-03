@@ -4,7 +4,8 @@
  */
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { PLACES } from "../web/src/places/registry";
+import { PLACES as REGISTRY } from "../web/src/places/registry";
+const PLACES = REGISTRY.filter((p) => !p.platforms || p.platforms.includes("3ds"));
 
 const root = resolve(import.meta.dir, "..");
 const arg = (name: string, fallback: string) => {

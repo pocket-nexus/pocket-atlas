@@ -9,6 +9,9 @@
 #![recursion_limit = "256"]
 
 mod atlas;
+mod drive;
+mod drive_audio;
+mod streaming;
 mod browser;
 mod camera;
 mod frame;
@@ -44,7 +47,7 @@ pub static sceUserMainThreadStackSize: u32 = 1024 * 1024;
 pub static _newlib_heap_size_user: u32 = 96 * 1024 * 1024;
 
 /// The first place of a development build without an atlas pack.
-const DEFAULT_PLACE: &str = "tokyo-konbini";
+const DEFAULT_PLACE: &str = match option_env!("POCKET_ATLAS_START_PLACE") {Some(p)=>p,None=>"tokyo-konbini"};
 
 extern "C" {
     fn scePowerSetArmClockFrequency(freq: i32) -> i32;
@@ -573,7 +576,7 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                 Ok(r) => r,
                 Err(e) => {
                     g::sceGxmFinish(g::vita2d_get_context());
-                    core::ptr::read(&scene).release();
+                    scene.release();
                     let mut frame = 0u32;
                     loop {
                         dev.engine = json!({"stage": "error", "place": id, "error": e});
@@ -592,6 +595,7 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
             // The player's settings, then anything a control message names.
             prefs.apply(&mut renderer);
             renderer.warm(&mut gpu, &scene);
+            let mut drive=match drive::Drive::from_scene(&scene){Ok(d)=>d,Err(e)=>{pocketjs_vita::vita_log(format_args!("drive: {e}"));None}};
             let mut sheet = settings::Sheet::new();
             let mut rig = Rig::new(&scene.meta.camera);
             let mut ctl = Control { frozen: None, view: None };
@@ -616,6 +620,7 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
             let mut compiling_since = Some(Instant::now());
             if let Some(v) = &first {
                 apply_control(v, &mut rig, &mut renderer, &mut ctl, &mut prefs.hud);
+                if let Some(d)=&mut drive {d.control(v);}
             }
             let exit = loop {
                 let pad = input::read();
@@ -624,7 +629,7 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                 prev_buttons = buttons;
                 gpu.poll();
                 // START (outside the menu) or a control message leaves the place.
-                if pressed & vitasdk_sys::SCE_CTRL_START != 0 && !dev.menu.visible {
+                if pressed & vitasdk_sys::SCE_CTRL_START != 0 && !dev.menu.visible && drive.is_none() {
                     break Next::Atlas(Some(id.to_string()));
                 }
                 let mut switch = None;
@@ -639,6 +644,7 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                         continue;
                     }
                     apply_control(&v, &mut rig, &mut renderer, &mut ctl, &mut prefs.hud);
+                    if let Some(d)=&mut drive{d.control(&v);}
                     if let Some(open) = v["sheet"].as_bool() {
                         sheet.open = open;
                     }
@@ -698,7 +704,7 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                     break Next::Atlas(Some(id.to_string()));
                 }
                 let sheet_open = sheet.open;
-                if pressed & vitasdk_sys::SCE_CTRL_TRIANGLE != 0 && !sheet_open {
+                if pressed & vitasdk_sys::SCE_CTRL_TRIANGLE != 0 && !sheet_open && drive.is_none() {
                     rig.next_shot();
                 }
                 // Dead zone, then 0..1 over the remaining travel (no step at its edge).
@@ -709,9 +715,15 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                 let lift = if buttons & vitasdk_sys::SCE_CTRL_RTRIGGER != 0 { 1.0 } else if buttons & vitasdk_sys::SCE_CTRL_LTRIGGER != 0 { -1.0 } else { 0.0 };
                 let menu_open = dev.menu.visible || sheet_open;
                 let (l, r) = if menu_open { ((0.0, 0.0), (0.0, 0.0)) } else { ((axis(pad.lx), axis(pad.ly)), (axis(pad.rx), axis(pad.ry))) };
+                if let Some(d)=&mut drive {
+                    let pos=ctl.view.as_ref().map_or(d.render_position(),|v|v.pos.to_array());
+                    if let Some(stream)=&mut scene.streaming {stream.update(pos,&mut scene.draws);}
+                    let blocked=menu_open || ctl.view.is_some() || ctl.frozen.is_some() || scene.streaming.as_ref().is_some_and(|s|!s.ready);
+                    d.update(dt,buttons,if menu_open{0}else{pressed},l.0,blocked);
+                }
                 view = match &ctl.view {
                     Some(v) => View { pos: v.pos, target: v.target, fov_y: v.fov_y },
-                    None => rig.update(dt, time, l, r, if menu_open { 0.0 } else { lift }, &view),
+                    None => match &drive {Some(d)=>d.view(),None=>rig.update(dt, time, l, r, if menu_open { 0.0 } else { lift }, &view)},
                 };
                 let weather = Weather::at(time);
                 if let Some(d) = &scene.meta.doors {
@@ -720,6 +732,11 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                     scene.door_open += (goal - scene.door_open) * (1.0 - (-dt * if near { 3.5 } else { 2.2 }).exp());
                 }
                 scene.update(time);
+                if let Some(d)=&drive{
+                    d.pose(&mut scene);
+                    scene.drive_speed=d.render_speed();
+                    scene.update_lighting(time);
+                }
                 if frame_no % 60 == 0 && clocks_now().iter().zip(CLOCKS).any(|(&now, want)| now < want) {
                     set_clocks();
                     clock_resets += 1;
@@ -731,8 +748,8 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                 if !renderer.timeline.on && !sheet.visible() {
                     renderer.feedback(frame_ms, last_gpu, raw * 1000.0);
                 }
-                let fade = if ctl.view.is_some() { 0.0 } else { rig.fade };
-                let bars = if ctl.view.is_some() { 0.0 } else { rig.bars };
+                let fade = if ctl.view.is_some() || drive.is_some() { 0.0 } else { rig.fade };
+                let bars = if ctl.view.is_some() || drive.is_some() { 0.0 } else { rig.bars };
                 let render_error = renderer.render(&mut gpu, &scene, &view, time, &weather, fade, bars).err();
                 let t_wait = Instant::now();
                 fence.wait((frame_no.wrapping_sub(1) % 2) as usize);
@@ -761,6 +778,11 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                 }
                 let (w, h) = frame::SCALES[renderer.level()];
                 let stats = format!("{fps:.1} fps  {frame_ms:.1} ms  ·  {w}×{h}  ·  step {} of {}", renderer.governor.step + 1, renderer.profile.steps.len());
+                if let Some(d)=&drive {
+                    let ready=scene.streaming.as_ref().is_none_or(|s|s.ready);
+                    let err=scene.streaming.as_ref().and_then(|s|s.error.as_deref());
+                    if !sheet.visible(){d.draw(ui,&mut gpu,ready,err);}
+                }
                 sheet.draw(ui, &mut gpu, prefs, &renderer, &rig, name, place.accent, &stats);
                 dev.overlay();
                 let t_display = Instant::now();
@@ -816,6 +838,8 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                 let heavy: Vec<Value> = by.iter().take(64).map(|(i, t)| json!([scene.meta.materials[*i].name, t, renderer.stats.draws_by_material.get(*i).copied().unwrap_or(0)])).collect();
                 dev.engine = json!({
                     "stage": "running",
+                    "drive": drive.as_ref().map(|d|d.status()),
+                    "streaming": scene.streaming.as_ref().map(|s|s.status()),
                     "place": id,
                     "pack": pack_path,
                     "fps": fps, "frameMs": frame_ms, "cpuSubmitMs": st.cpu_submit_us as f32 / 1000.0, "waitMs": wait_ms, "swapMs": swap_ms,
@@ -842,6 +866,7 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                 serve(&mut dev, frame_no, action);
                 frame_no = frame_no.wrapping_add(1);
             };
+            if let Some(d)=&mut drive{d.save();}
             // Leave: the GPU finishes this place's frames before its memory goes.
             g::sceGxmFinish(ctx);
             renderer.release();
