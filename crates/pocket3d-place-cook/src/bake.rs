@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 
 use glam::{Vec2, Vec3};
-use pocket3d_place as pc;
+use pocket_atlas_model as pc;
 use rayon::prelude::*;
 
 use crate::geometry::Vertex;

@@ -91,6 +91,7 @@ export class Sign {
     const fb = anim.flipbook;
     this.material.userData.pocketAtlas = {
       kind: "sign",
+      ...(fb && fb.frames > 1 ? { textureUsage: { albedo: "flipbook" } } : {}),
       color: color.toArray(),
       ...(fb ? { frames: fb.frames, cols: fb.cols, rows: fb.rows, fps: fb.fps } : {}),
       ...(anim.scroll ? { scroll: anim.scroll } : {}),

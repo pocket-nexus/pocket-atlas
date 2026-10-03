@@ -184,3 +184,59 @@ fn pica_does_not_treat_an_ordinary_2k_source_texture_as_a_text_atlas() {
     assert_eq!(word(table + 4), 1, "one texture");
     assert_eq!((word(table + 120), word(table + 124)), (256, 256));
 }
+
+fn annotate_texture(root: &Path, usage: &str) {
+    let bytes = std::fs::read(root.join("scene.glb")).unwrap();
+    let mut glb = gltf::binary::Glb::from_slice(&bytes).unwrap();
+    let mut doc: serde_json::Value = serde_json::from_slice(&glb.json).unwrap();
+    doc["materials"][0]["extras"] = json!({"pocketAtlas":{"textureUsage":{"albedo":usage}}});
+    glb.json = Cow::Owned(serde_json::to_vec(&doc).unwrap());
+    std::fs::write(root.join("scene.glb"), glb.to_vec().unwrap()).unwrap();
+}
+
+#[test]
+fn semantic_texture_intent_overrides_legacy_size_and_luminance_in_each_backend() {
+    let temp = Temp(std::env::temp_dir().join(format!("atlas-intent-{}",std::process::id())));
+    let export = temp.0.join("strip");
+    fixture(&export,2048,16);
+    for (usage,expect) in [("surface",[256,256,128]),("text-atlas",[2048,1024,512])] {
+        annotate_texture(&export,usage);
+        for (target,width) in ["vita","3ds","psp"].into_iter().zip(expect) {
+            let dest=temp.0.join(format!("{usage}-{target}.place"));
+            let mut args=vec!["--in",export.to_str().unwrap(),"--target",target,"--out",dest.to_str().unwrap(),"--json"];
+            if target!="psp" {args.extend(["--tex","256"]);}
+            let result=run(&args);assert!(result.status.success(),"{}",String::from_utf8_lossy(&result.stderr));
+            let report:serde_json::Value=serde_json::from_slice(&result.stdout).unwrap();
+            assert_eq!(report["artifact"]["textures"][0]["width"],width);
+            assert_eq!(report["sourceTextures"][0]["usage"],usage);
+            assert_eq!(report["validation"]["device"]["status"],"not-recorded");
+            assert_eq!(report["validation"]["frameBudget"]["status"],"requires-device-measurement");
+            assert_eq!(report["diagnostics"],json!([]));
+            assert_eq!(report["artifact"]["bytes"].as_u64().unwrap(),std::fs::metadata(dest).unwrap().len());
+        }
+    }
+    annotate_texture(&export,"guess-a-layout");
+    let result=run(&["check","--in",export.to_str().unwrap(),"--json"]);
+    assert!(!result.status.success());
+    let error:serde_json::Value=serde_json::from_slice(&result.stderr).unwrap();
+    assert!(error["diagnostics"][0]["message"].as_str().unwrap().contains("unknown textureUsage"));
+}
+
+#[test]
+fn profile_budget_failure_preserves_old_artifact_and_receipts_are_repeatable() {
+    let temp=Temp(std::env::temp_dir().join(format!("atlas-profile-{}",std::process::id())));
+    let export=temp.0.join("triangle");fixture(&export,13,7);
+    let dest=temp.0.join("scene.place");
+    let args=["--in",export.to_str().unwrap(),"--profile","old3ds30","--out",dest.to_str().unwrap(),"--json"];
+    let first=run(&args);assert!(first.status.success(),"{}",String::from_utf8_lossy(&first.stderr));
+    let second=run(&args);assert!(second.status.success());assert_eq!(first.stdout,second.stdout);
+    let report:serde_json::Value=serde_json::from_slice(&first.stdout).unwrap();
+    let pack=std::fs::read(&dest).unwrap();let receipt=std::fs::read(dest.with_extension("compile.json")).unwrap();
+    let mut profile=report["profile"]["definition"].clone();profile["id"]="tiny-budget".into();profile["budgets"]["sections"]["GEOM"]=1.into();
+    let custom=temp.0.join("tiny.json");std::fs::write(&custom,serde_json::to_vec(&profile).unwrap()).unwrap();
+    let rejected=run(&["--in",export.to_str().unwrap(),"--profile",custom.to_str().unwrap(),"--out",dest.to_str().unwrap(),"--json"]);
+    assert!(!rejected.status.success());assert!(String::from_utf8_lossy(&rejected.stderr).contains("GEOM budget exceeded"));
+    assert_eq!(pack,std::fs::read(&dest).unwrap());assert_eq!(receipt,std::fs::read(dest.with_extension("compile.json")).unwrap());
+    let conflict=run(&["check","--in",export.to_str().unwrap(),"--profile","old3ds30","--target","psp","--json"]);
+    assert!(!conflict.status.success());assert!(String::from_utf8_lossy(&conflict.stderr).contains("conflicts"));
+}

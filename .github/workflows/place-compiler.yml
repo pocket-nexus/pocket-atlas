@@ -24,5 +24,7 @@ jobs:
       - run: bun test tools/psp-session.test.ts tools/atlas-3ds-delivery.test.ts
       - run: bun install --frozen-lockfile
         working-directory: web
+      - run: bun test test/texture-usage.test.ts
+        working-directory: web
       - run: bun run build
         working-directory: web

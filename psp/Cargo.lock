@@ -77,7 +77,15 @@ dependencies = [
  "bytemuck",
  "glam",
  "libm",
+ "pocket-psp-ge",
  "pocket3d-place-psp",
+ "psp",
+]
+
+[[package]]
+name = "pocket-psp-ge"
+version = "0.1.0"
+dependencies = [
  "psp",
 ]
 

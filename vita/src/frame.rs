@@ -757,8 +757,8 @@ impl Renderer {
         };
         let has_fields = scene.draws.iter().any(|d| d.lights);
         let field_ib = if has_fields {
-            let ib = mem.alloc(pc::LightPoint::PER_DRAW * 2, 16)?.cast::<u16>();
-            for i in 0..pc::LightPoint::PER_DRAW {
+            let ib = mem.alloc(pc::LIGHT_POINTS_PER_DRAW * 2, 16)?.cast::<u16>();
+            for i in 0..pc::LIGHT_POINTS_PER_DRAW {
                 *ib.add(i) = i as u16;
             }
             ib as *const u16
@@ -963,7 +963,7 @@ impl Renderer {
                 u.set(p, U::VistaEye, &f.vista_eye);
             }
             g::sceGxmSetVertexStream(ctx, 0, d.vb.cast());
-            g::sceGxmDraw(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_POINTS, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, self.field_ib.cast(), d.count.min(pc::LightPoint::PER_DRAW as u32));
+            g::sceGxmDraw(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_POINTS, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, self.field_ib.cast(), d.count.min(pc::LIGHT_POINTS_PER_DRAW as u32));
             st.fields += 1;
             st.points += d.count;
         }
