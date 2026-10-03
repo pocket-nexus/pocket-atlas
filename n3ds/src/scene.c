@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <mbedtls/sha256.h>
 AtlasStats atlas = {.reflection = true,
                     .rain = true,
                     .haze = true,
@@ -182,7 +183,7 @@ static bool make_effect_textures(void) {
   C3D_TexFlush(&glow);
   return true;
 }
-bool scene_load(const char *path, char *error, size_t capacity) {
+bool scene_load(const char *path, const char *expected_sha256, char *error, size_t capacity) {
   // Call only once the previous GPU frame has retired: resources may still
   // be referenced by its command list. Choices deliberately survive unload.
   scene_free();
@@ -191,6 +192,24 @@ bool scene_load(const char *path, char *error, size_t capacity) {
     snprintf(error, capacity, "cannot open %s", path);
     return false;
   }
+  // Verify the opened content-addressed asset, not just its filename and size.
+  mbedtls_sha256_context hash;
+  mbedtls_sha256_init(&hash);
+  bool valid = mbedtls_sha256_starts_ret(&hash, 0) == 0;
+  unsigned char buffer[4096], digest[32];
+  size_t n;
+  while (valid && (n = fread(buffer, 1, sizeof buffer, file)) != 0)
+    valid = mbedtls_sha256_update_ret(&hash, buffer, n) == 0;
+  valid = valid && !ferror(file) && mbedtls_sha256_finish_ret(&hash, digest) == 0;
+  mbedtls_sha256_free(&hash);
+  char actual[65];
+  if (valid) for (unsigned i = 0; i < 32; i++) snprintf(actual + i * 2, 3, "%02x", digest[i]);
+  if (!valid || !expected_sha256 || strcmp(actual, expected_sha256)) {
+    snprintf(error, capacity, "place SHA-256 mismatch");
+    fclose(file);
+    return false;
+  }
+  rewind(file);
   uint32_t header[4], sect[5][4];
   long length;
   fseek(file, 0, SEEK_END);

@@ -1,3 +1,4 @@
+import { CAMERAS as SHOTS } from "./cameras";
 import {
   Color,
   CubeCamera,
@@ -16,7 +17,7 @@ import {
 import { RectAreaLightUniformsLib } from "three/examples/jsm/lights/RectAreaLightUniformsLib.js";
 import type { PlaceDef, Progress, Stage, StageContext } from "../../core/types";
 import { TokyoAudio } from "./audio";
-import { CameraRig, type Shot, type ShotKey } from "../shared/camera";
+import { CameraRig, type ShotKey } from "../shared/camera";
 import { createPost, type PostChain } from "./fx/post";
 import { Rain } from "./fx/rain";
 import { Atlas } from "../shared/atlas";
@@ -36,44 +37,7 @@ import { buildProps } from "./world/props";
 import { buildSky } from "./world/sky";
 import { buildTraffic } from "./world/traffic";
 
-const SHOTS: Shot[] = [
-  {
-    name: "Konbini",
-    from: { pos: [12.7, 1.55, 8.6], target: [1.6, 2.1, -3.2], fov: 36 },
-    to: { pos: [12.1, 1.6, 7.0], target: [1.2, 2.2, -3.2], fov: 36 },
-    duration: 12,
-  },
-  {
-    name: "Puddles",
-    from: { pos: [3.6, 0.3, 6.5], target: [1.2, 1.25, -3.2], fov: 40 },
-    to: { pos: [2.2, 0.26, 6.3], target: [1.0, 1.35, -3.2], fov: 40 },
-    duration: 10,
-  },
-  {
-    name: "Vending",
-    from: { pos: [-8.3, 1.45, 3.9], target: [-5.6, 1.05, -1.4], fov: 40 },
-    to: { pos: [-7.3, 1.35, 3.2], target: [-5.4, 1.1, -1.4], fov: 40 },
-    duration: 10,
-  },
-  {
-    name: "Crossing",
-    from: { pos: [10.4, 1.7, -0.9], target: [10.0, 8.0, -80], fov: 34 },
-    to: { pos: [10.1, 1.7, -3.4], target: [10.0, 8.5, -80], fov: 32 },
-    duration: 12,
-  },
-  {
-    name: "Inside",
-    from: { pos: [-1.6, 1.45, -9.5], target: [0.4, 1.3, 4.0], fov: 44 },
-    to: { pos: [-1.3, 1.5, -7.6], target: [0.8, 1.4, 4.0], fov: 44 },
-    duration: 10,
-  },
-  {
-    name: "Wires",
-    from: { pos: [9.4, 0.9, -0.2], target: [5.8, 8.5, -2.8], fov: 50 },
-    to: { pos: [8.9, 1.1, -0.7], target: [5.2, 9.0, -3.0], fov: 50 },
-    duration: 9,
-  },
-];
+
 
 const WALKABLE: [number, number, number, number, number, number][] = [
   [-60, 0.2, L.mainNorth + 0.2, 60, 14, L.mainSouth - 0.25],
@@ -140,7 +104,7 @@ export class TokyoStage implements Stage {
     lib.bakeAll();
     // 4 px between cells (2 px of extruded border each): the atlas is nearly full at 4096.
     const atlas = new Atlas(quality.textureSize >= 2048 ? 4096 : 2048, { pad: 2 });
-    const world = (this.world = new World(lib, atlas, quality, 20240929));
+    const world = (this.world = new World(lib, atlas, quality, this.ctx.authoring?.seed ?? 20240929));
 
     await progress(0.2, "Laying the street");
     buildGround(world, this.baker);
@@ -209,7 +173,10 @@ export class TokyoStage implements Stage {
   /** `window.pocketAtlasExport()` → glTF + environment for the Vita cooker. */
   private exposeExport(): void {
     const w = window as unknown as { pocketAtlasExport?: (seconds?: number) => Promise<unknown> };
-    w.pocketAtlasExport = async (seconds = 20) => {
+    let consumed = false;
+    w.pocketAtlasExport = async (seconds = this.ctx.authoring?.sampling.durationSeconds ?? 20) => {
+      if (consumed) throw new Error("Export consumes a fresh scene; reload before exporting again");
+      consumed = true;
       const { exportPlace } = await import("../shared/export");
       const fog = this.scene.fog as FogExp2;
       const haze = {
@@ -232,7 +199,9 @@ export class TokyoStage implements Stage {
         fog: { color: fog.color.toArray(), density: fog.density },
         environmentIntensity: this.scene.environmentIntensity,
         record: seconds,
-        fps: 15,
+        fps: this.ctx.authoring?.sampling.fps ?? 15,
+        startSeconds: this.ctx.authoring?.sampling.startSeconds ?? 0,
+        authoring: this.ctx.authoring ? { ...this.ctx.authoring, sampling: { ...this.ctx.authoring.sampling, durationSeconds: seconds } } : undefined,
         // Rain, the lit haze and the automatic doors are this place's own keys.
         meta: (c) => ({
           version: c.version,

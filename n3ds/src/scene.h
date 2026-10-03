@@ -42,7 +42,7 @@ void scene_hud_reset(void);
 void scene_input_block(bool blocked);
 void scene_frame_budget(float milliseconds);
 void atlas_diagnostic(const char *message);
-bool scene_load(const char *path, char *error, size_t capacity);
+bool scene_load(const char *path, const char *expected_sha256, char *error, size_t capacity);
 void scene_update(float dt, uint32_t down, uint32_t held);
 void scene_prepare(void);
 void scene_measure(void);

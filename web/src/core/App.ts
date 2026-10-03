@@ -214,6 +214,8 @@ export class App implements Navigator {
   }
 
   private tick(ts: number): void {
+    // Export owns the simulation clock. Loading/fading must not advance actors.
+    if (this.params.exporting) return;
     this.timer.update(ts);
     const dt = Math.min(this.timer.getDelta(), 1 / 20);
     this.time += dt;

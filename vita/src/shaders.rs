@@ -9,7 +9,8 @@
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
 
 use pocket_vita_gxm::shacccg::{Compiler, Stage};
@@ -148,6 +149,7 @@ pub struct Service {
     pub events: Receiver<Event>,
     /// Programs the worker is still rebuilding after a source change.
     pub rebuilding: Arc<AtomicUsize>,
+    pub source_sha256: Arc<Mutex<String>>,
 }
 
 impl Service {
@@ -157,11 +159,13 @@ impl Service {
         let (ev_tx, ev_rx) = mpsc::channel::<Event>();
         let rebuilding = Arc::new(AtomicUsize::new(0));
         let busy = rebuilding.clone();
+        let source_sha256 = Arc::new(Mutex::new(String::new()));
+        let source_identity = source_sha256.clone();
         let _ = std::thread::Builder::new()
             .name("atlas-shaders".into())
             .stack_size(1024 * 1024)
-            .spawn(move || worker(live, req_rx, ev_tx, busy));
-        Self { requests: req_tx, events: ev_rx, rebuilding }
+            .spawn(move || worker(live, req_rx, ev_tx, busy, source_identity));
+        Self { requests: req_tx, events: ev_rx, rebuilding, source_sha256 }
     }
 
     pub fn request(&self, key: Key) {
@@ -244,12 +248,20 @@ fn build_retry(compiler: &mut Option<Compiler>, key: &Key, sources: &HashMap<Str
     build(compiler.as_ref(), key, sources, memo)
 }
 
-fn worker(live: bool, requests: Receiver<Key>, events: Sender<Event>, rebuilding: Arc<AtomicUsize>) {
+fn source_digest(sources: &HashMap<String, String>) -> String {
+    let mut names: Vec<_> = sources.keys().collect(); names.sort();
+    let mut hash = Sha256::new();
+    for name in names { hash.update(name.as_bytes()); hash.update(sources[name].as_bytes()); }
+    format!("{:x}", hash.finalize())
+}
+
+fn worker(live: bool, requests: Receiver<Key>, events: Sender<Event>, rebuilding: Arc<AtomicUsize>, source_identity: Arc<Mutex<String>>) {
     let compiler = Compiler::load();
     let _ = events.send(Event::Compiler(compiler.as_ref().map(|c| c.version.clone()).map_err(|e| e.clone())));
     let mut compiler = compiler.ok();
     let mut last_provision = Instant::now();
     let mut sources = load_sources(live);
+    if let Ok(mut hash) = source_identity.lock() { *hash = source_digest(&sources); }
     let mut known: Vec<(Key, u64)> = Vec::new();
     let mut memo: HashMap<u64, Arc<Vec<u8>>> = HashMap::new();
     let mut last_watch = Instant::now();
@@ -305,6 +317,7 @@ fn worker(live: bool, requests: Receiver<Key>, events: Sender<Event>, rebuilding
             let fresh = load_sources(true);
             if fresh != sources {
                 sources = fresh;
+                if let Ok(mut hash) = source_identity.lock() { *hash = source_digest(&sources); }
                 for i in 0..known.len() {
                     rebuilding.store(known.len() - i, Ordering::Relaxed);
                     let key = known[i].0.clone();

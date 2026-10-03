@@ -464,9 +464,99 @@ fn profile_budget_failure_preserves_old_artifact_and_receipts_are_repeatable() {
     let custom=temp.0.join("tiny.json");std::fs::write(&custom,serde_json::to_vec(&profile).unwrap()).unwrap();
     let rejected=run(&["--in",export.to_str().unwrap(),"--profile",custom.to_str().unwrap(),"--out",dest.to_str().unwrap(),"--json"]);
     assert!(!rejected.status.success());assert!(String::from_utf8_lossy(&rejected.stderr).contains("GEOM budget exceeded"));
+    let failure:serde_json::Value=serde_json::from_slice(&rejected.stderr).unwrap();
+    assert_eq!(failure["validation"]["published"],false);
+    assert_eq!(failure["passes"].as_array().unwrap().last().unwrap()["result"]["status"],"failed");
+    assert_eq!(failure["diagnostics"].as_array().unwrap().last().unwrap()["code"],"ATLAS_STRUCTURAL_BUDGET");
     assert_eq!(pack,std::fs::read(&dest).unwrap());assert_eq!(receipt,std::fs::read(dest.with_extension("compile.json")).unwrap());
     let conflict=run(&["check","--in",export.to_str().unwrap(),"--profile","old3ds30","--target","psp","--json"]);
     assert!(!conflict.status.success());assert!(String::from_utf8_lossy(&conflict.stderr).contains("conflicts"));
+}
+
+fn hash(bytes: &[u8]) -> String {
+    use sha2::{Digest,Sha256};
+    format!("{:x}",Sha256::digest(bytes))
+}
+fn authored_fixture(root: &Path, kind: &str, layout: usize) {
+    fixture(root,13,7);
+    let raw=std::fs::read(root.join("scene.glb")).unwrap();
+    let mut glb=gltf::binary::Glb::from_slice(&raw).unwrap();
+    let mut doc:serde_json::Value=serde_json::from_slice(&glb.json).unwrap();
+    let authoring=json!({"version":1,"id":format!("test-{kind}-{layout}"),"kind":kind,"seed":42,
+        "geometry":"full","resources":[],"sampling":{"startSeconds":0,"durationSeconds":1,"fps":15}});
+    let meta=&mut doc["scenes"][0]["extras"]["pocketAtlas"];
+    meta["kind"]=kind.into();meta["authoring"]=authoring.clone();
+    meta["tracks"]=json!({"fps":15,"frames":15});
+    if kind.starts_with("daytime") {meta["sky"]=json!({"model":"test-daylight","horizon":[0.6,0.7,0.8],"zenith":[0.2,0.3,0.5]});}
+    // The second layout moves and duplicates geometry; the same recipes must handle both.
+    doc["nodes"][0]["extras"]=json!({"pocketAtlas":{"sourceId":"layout/road"}});
+    if layout==1 {
+        doc["nodes"].as_array_mut().unwrap().push(json!({"mesh":0,"translation":[3.0,0.4,-2.0],"extras":{"pocketAtlas":{"sourceId":"layout/shop"}}}));
+        doc["scenes"][0]["nodes"]=json!([0,1]);
+    }
+    doc["materials"][0]["extras"]=json!({"pocketAtlas":{"textureUsage":{"albedo":"surface"}}});
+    glb.json=Cow::Owned(serde_json::to_vec(&doc).unwrap());
+    let bytes=glb.to_vec().unwrap();
+    std::fs::write(root.join("scene.glb"),&bytes).unwrap();
+    let files=json!([{"path":"src/test.ts","sha256":hash(b"synthetic layout fixture")}]);
+    let receipt=json!({"schemaVersion":1,"authoring":authoring,"source":{"sha256":hash(&serde_json::to_vec(&files).unwrap()),"files":files},
+        "resources":[{"path":"scene.glb","sha256":hash(&bytes)}],"toolchain":{"fixture":true}});
+    std::fs::write(root.join("export.json"),serde_json::to_vec(&receipt).unwrap()).unwrap();
+}
+
+#[test]
+fn two_layouts_per_family_keep_source_ownership_through_each_supported_recipe() {
+    let temp=Temp(std::env::temp_dir().join(format!("atlas-families-{}",std::process::id())));
+    for family in ["night-street","daytime-street"] {
+        for layout in 0..2 {
+            let export=temp.0.join(format!("{family}-{layout}"));authored_fixture(&export,family,layout);
+            for target in ["vita","3ds","psp"] {
+                let output=temp.0.join("result.place");
+                let result=run(&["--in",export.to_str().unwrap(),"--out",output.to_str().unwrap(),"--target",target,"--json"]);
+                if family.starts_with("daytime") && target=="psp" {
+                    assert!(!result.status.success());
+                    assert!(String::from_utf8_lossy(&result.stderr).contains("PSP lowering"));
+                    continue;
+                }
+                assert!(result.status.success(),"{}",String::from_utf8_lossy(&result.stderr));
+                let report:serde_json::Value=serde_json::from_slice(&result.stdout).unwrap();
+                assert_eq!(report["export"]["authoring"]["id"],format!("test-{family}-{layout}"));
+                assert_eq!(report["passes"].as_array().unwrap().len(),report["recipe"]["passes"].as_array().unwrap().len());
+                let owners=&report["artifact"]["textures"][0]["sources"];
+                assert!(owners.as_array().unwrap().contains(&json!("layout/road")));
+                if layout==1 {assert!(owners.as_array().unwrap().contains(&json!("layout/shop")));}
+                let again=run(&["--in",export.to_str().unwrap(),"--out",output.to_str().unwrap(),"--target",target,"--json"]);
+                assert_eq!(result.stdout,again.stdout);
+            }
+        }
+    }
+}
+
+#[test]
+fn partial_or_tampered_authoring_exports_fail_before_replacing_a_sealed_ir() {
+    let temp=Temp(std::env::temp_dir().join(format!("atlas-export-seal-{}",std::process::id())));
+    let export=temp.0.join("export");let ir=temp.0.join("place.ir");
+    authored_fixture(&export,"night-street",0);
+    let args=["import","--in",export.to_str().unwrap(),"--out",ir.to_str().unwrap(),"--json"];
+    ok(&args);
+    let sealed=std::fs::read(ir.join("manifest.json")).unwrap();
+    let original=std::fs::read(export.join("export.json")).unwrap();
+    for mode in ["identity","resource","sampling","source","missing"] {
+        let mut receipt:serde_json::Value=serde_json::from_slice(&original).unwrap();
+        match mode {
+            "identity"=>receipt["authoring"]["id"]="another-place".into(),
+            "resource"=>receipt["resources"][0]["sha256"]="0".repeat(64).into(),
+            "sampling"=>receipt["authoring"]["sampling"]["durationSeconds"]=20.into(),
+            "source"=>receipt["source"]["files"][0]["sha256"]="1".repeat(64).into(),
+            _=>receipt["resources"]=json!([]),
+        }
+        std::fs::write(export.join("export.json"),serde_json::to_vec(&receipt).unwrap()).unwrap();
+        assert!(!run(&args).status.success(),"accepted {mode}");
+        assert_eq!(sealed,std::fs::read(ir.join("manifest.json")).unwrap());
+        ok(&["check","--in",ir.to_str().unwrap(),"--target","psp"]);
+    }
+    std::fs::remove_file(export.join("export.json")).unwrap();
+    assert!(!run(&args).status.success());
 }
 
 fn annotate_texture(root: &Path, usage: &str) {

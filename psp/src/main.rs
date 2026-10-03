@@ -90,7 +90,7 @@ unsafe fn run() {
     let mut hud = false;
     let mut muted = false;
     let mut was_open = false;
-    let mut dev = dev::Session::connect();
+    let mut dev = dev::Session::connect(bytes);
     let mut frame = 0u32;
     let mut work_sum = 0u64;
     let mut gpu_sum = 0u64;

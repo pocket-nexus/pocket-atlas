@@ -30,9 +30,14 @@ import {
   THREE_DS_DEV_TARGET_ID,
 } from "../vendor/pocketjs/tools/3ds-profile.ts";
 import { pocketRuntimeDeviceId } from "../vendor/pocketjs/contracts/spec/pocket-runtime-wire.ts";
+import { guardDeviceCommand } from "../vendor/pocketjs/tools/device-lease.ts";
+import { DeviceEvidence } from "../vendor/pocketjs/tools/device-evidence.ts";
+import { assertFrameSample, compileIdentity } from "./device-validation";
 const root = resolve(import.meta.dir, "..");
 const args = Bun.argv.slice(2),
   command = args[0] ?? "build";
+const lease = ["cook", "build", "package"].includes(command) ? undefined : await guardDeviceCommand("3ds:wire");
+let deviceIdentity = "";
 const option = (key: string, fallback: string) => {
   const i = args.indexOf(key);
   return i >= 0 ? args[i + 1]! : fallback;
@@ -145,6 +150,7 @@ cp /tmp/atlas-build/*.shbin /tmp/atlas-build/atlas.elf /tmp/atlas-build/atlas.ma
   return receipt;
 }
 async function connect() {
+  lease?.assertHeld();
   const host = option("--host", process.env.POCKET_3DS_HOST ?? "192.168.8.159");
   const keys = option(
     "--keys",
@@ -161,6 +167,9 @@ async function connect() {
   }
   const device = devices.find((d) => d.address === host);
   if (!device) throw new Error(`no Pocket Runtime at ${host}:8131`);
+  const foundIdentity = `3ds:${device.deviceId.toString(16)}`;
+  if (deviceIdentity && deviceIdentity !== foundIdentity) throw new Error("Another 3DS replaced the connected device");
+  deviceIdentity = foundIdentity;
   let token: Uint8Array | undefined;
   for (const name of readdirSync(keys).filter((n) => n.endsWith(".key"))) {
     const t = parsePocketRuntimeToken(readFileSync(join(keys, name), "utf8"));
@@ -197,6 +206,7 @@ async function status(
   c: PocketRuntimeClient,
   ctl: Record<string, unknown> = {},
 ) {
+  lease?.assertHeld();
   const p = c.waitForCtrl((m) => m.t === "atlas.status");
   await c.sendCtrl({ t: "atlas.control", ...ctl });
   return await p;
@@ -367,6 +377,16 @@ else if (command === "install") {
         shotNames(String(current.place)).join(","),
       ).split(",");
       const available = shotNames(String(current.place));
+      const expected = JSON.parse(readFileSync(join(receipts, thin ? "build-thin.json" : "build.json"), "utf8"));
+      const pack = assets().find(a => a.id === current.place);
+      if (!pack || !expected.places.some((a: any) => a.id === pack.id && a.sha256 === pack.sha256)) throw new Error("3DS local pack differs from the runtime build catalog");
+      const compilation = compileIdentity(pack.path, "3ds", option("--compile", pack.path.replace(/\.place$/, ".compile.json")));
+      const identity = (s: any) => ({ device: deviceIdentity, runtimeBuild: String(s.build), assets: { pack: String(s.packSha256) } });
+      const evidence = new DeviceEvidence<object>({ device: deviceIdentity, runtimeBuild: expected.buildId, assets: { pack: pack.sha256 } });
+      evidence.observe(identity(current), { kind: "begin", place: current.place });
+      const evidencePath = option("--out", join(receipts, `${command}.json`)) + ".device.json";
+      let complete = false;
+      try {
       for (const name of names)
         if (!available.includes(name)) throw new Error(`Unknown shot: ${name}`);
       const sampleCount = Number(option("--samples", "20"));
@@ -389,15 +409,17 @@ else if (command === "install") {
           });
           await Bun.sleep(1200);
           let previous = await status(c, { measure: true });
-          const samples = [];
+          const samples: Record<string, any>[] = [];
           for (let i = 0; i < sampleCount; i++) {
             await Bun.sleep(120);
             const sample = await status(c);
+            assertFrameSample(sample, Number(previous.frame), ["frameMs", "gpuMs", "cpuMs", "workMax", "measuredFrames", "frameMean", "frameP95", "frameMax", "draws", "triangles"]);
             if (
               sample.phase !== "running" ||
               sample.place !== current.place ||
               sample.build !== current.build ||
               sample.shot !== shot ||
+              Number(sample.step) !== step ||
               sample.error ||
               Number(sample.frame) <= Number(previous.frame) ||
               Number(sample.measuredFrames) <= 0
@@ -406,6 +428,7 @@ else if (command === "install") {
                 `Profile runtime stopped or changed: ${JSON.stringify(sample)}`,
               );
             samples.push(sample);
+            evidence.observe(identity(sample), { kind: "timing", shot, step, sample, missedBudget: Number(sample.workMax) > compilation.budgetMs });
             previous = sample;
           }
           const mean = (key: string) =>
@@ -440,7 +463,21 @@ else if (command === "install") {
             option("--out", join(receipts, `${command}.json`)),
             JSON.stringify(rows, null, 2) + "\n",
           );
+          // Capture after the timing window so the screenshot transfer does not inflate it.
+          const pending = c.waitForScreenshot();
+          await c.sendCtrl({ t: "screenshot", surface: "top" });
+          const capture = await pending;
+          const capturePath = `${evidencePath}.${available.indexOf(shot)}-${step}.png`;
+          await Bun.write(capturePath, capture.png);
+          evidence.observe(identity(await status(c)), { kind: "capture", shot, step, path: capturePath, sha256: sha(capturePath), visualReview: "not-recorded" });
         }
+        complete = true;
+      } finally {
+        writeFileSync(evidencePath, JSON.stringify({ ...evidence.receipt(), compilation, complete, allCameras: names.length === available.length && new Set(names).size === available.length, budgetMs: compilation.budgetMs }, null, 2));
+        const ending = await status(c);
+        if (ending.build === expected.buildId && ending.packSha256 === pack.sha256)
+          await status(c, { hold: false, inputLock: false, cameraHold: false, play: true });
+      }
     } else if (command === "tour") {
       let previous = await status(c, {
         shot: 0,
@@ -450,8 +487,8 @@ else if (command === "install") {
         inputLock: true,
         measure: true,
       });
-      const samples = [];
-      const reconnects = [];
+      const samples: Record<string, any>[] = [];
+      const reconnects: object[] = [];
       const out = option("--out", join(receipts, "tour.json"));
       const saveTour = (complete: boolean) =>
         writeFileSync(

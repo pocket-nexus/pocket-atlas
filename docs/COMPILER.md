@@ -70,14 +70,21 @@ into geometry and annotations; arbitrary JavaScript, GLSL and gameplay code do
 not become portable automatically. Sampled traffic contains the exported time
 interval. Doors, camera controls and animation evaluation remain runtime code.
 
-Reproducibility starts at a fixed export / PlaceIR and pinned compiler/dependency
-revision. Procedural web authoring may use time or randomness; creating a new
-export is not promised to reproduce an earlier export. Cook timing is kept out
-of the device metadata so repeated cooks can produce identical bytes. Cross-OS
-floating-point or compiler-version identity is not established by the current
-same-host regression tests.
+Authoring definitions now supply a checked seed/sampling/resource contract.
+Fresh exports prevent preview time from advancing actors, use fixed sampling,
+preserve source IDs and canonicalize asynchronous GLB buffer placement. The
+export receipt seals source/resources and browser/GPU identity; matching fresh
+exports are verified on the same recorded environment. Cross-browser/GPU identity
+is not promised for procedural GPU baking. From a sealed PlaceIR and pinned
+compiler/dependencies, target packs and compile receipts are repeatable without
+a browser. See [Authoring](AUTHORING.md) for the complete creator workflow,
+compatibility adapter, limits and device evidence contract.
 
 ## Commands
+
+`bun tools/place.ts inspect|export|import|check|cook|build|report|recipe|profiles`
+is the Atlas creator entry point. The Rust commands below remain available for
+CI and callers that already have sealed inputs.
 
 Export a place using `web/scripts/export-place.ts`, then import it once:
 
@@ -162,6 +169,11 @@ cargo run --locked --release -p pocket3d-place-cook -- \
   --in .pocket-build/places/tokyo-konbini/place.ir --profile old3ds30 \
   --out .pocket-build/validation/tokyo.3ds.place --json
 ```
+
+Recipes expose named/versioned executed passes and GPU-specific decisions.
+Reports retain material/object contributor sets through batching and map output
+textures to source textures. These are material contributor sets, not exact
+per-triangle or TypeScript-line attribution.
 
 Every successful cook writes `<output-stem>.compile.json`; `--report` selects
 another path. The report records the sealed source manifest/resources, compiler

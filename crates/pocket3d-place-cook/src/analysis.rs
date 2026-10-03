@@ -549,7 +549,7 @@ fn push_draw(verts: &[Vertex], tris: &[[u32; 3]], lods: Vec<(Vec<[u32; 3]>, f32)
     });
 }
 
-pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
+pub fn analyze(a: &Args, name: &str, pipeline: &mut crate::recipe::Pipeline) -> (pc::Scene, Vec<String>) {
     let t0 = Instant::now();
     let glb = a.input.join("scene.gltf");
     // EXT_mesh_gpu_instancing is listed as required; the crate does not know
@@ -561,6 +561,8 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
     crate::progress!("loaded {} ({} nodes, {} images) in {} ms", glb.display(), doc.nodes().count(), images.len(), t0.elapsed().as_millis());
     let scene = doc.default_scene().or_else(|| doc.scenes().next()).expect("scene");
     let sx = pc_of(scene.extras());
+
+    pipeline.record("read-source", json!({"nodes":doc.nodes().count(),"images":images.len()}));
 
     // ---- which nodes move
     let mut animated: HashSet<usize> = HashSet::new();
@@ -702,6 +704,8 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
     }
     crate::progress!("walked scene: {} primitives, {} materials, {} textures ({} ms)", prims.len(), cook.materials.len(), cook.textures.len(), t0.elapsed().as_millis());
 
+    pipeline.record("resolve-materials", json!({"primitives":prims.len(),"materials":cook.materials.len(),"textures":cook.textures.len()}));
+
     // ---- `lodBias` (materials that ask for it): a number, or "auto" — a
     // texture whose mapping lays more texels per metre one way than the
     // other (mean over the area it covers) gets a negative bias, so the
@@ -733,7 +737,7 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
                 continue;
             }
             let tex = &cook.textures[t as usize];
-            let (w, h) = if cook.profile.target == ir::Target::Vita {
+            let (w, h) = if pipeline.solid_pbr() {
                 let cap = cook.profile.vita_texture_cap(tex);
                 textures::pow2_fit(tex.width, tex.height, cap)
             } else { (tex.width, tex.height) };
@@ -761,16 +765,21 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
         cook.log.push(format!("texture {}: LOD bias {:.2}", tex.name, tex.lod_bias));
     }
 
+    pipeline.record("texture-sampling", json!({"targetResolutionAnisotropy":pipeline.solid_pbr()}));
+
     // Solid PBR palettes are a Vita vertex encoding, not shared source
     // analysis: PICA/GE need the authored UVs, tint and material reflectance.
     // Keep named animated materials on their own path.
-    if a.target == ir::Target::Vita {
+    let palette_before = prims.len();
+    if pipeline.solid_pbr() {
         let material_animation: HashSet<String> = sx["tracks"]["materials"].as_array().into_iter().flatten()
             .filter_map(|t| t["material"].as_str().map(str::to_owned)).collect();
         let before = prims.len();
         palette::batch(&mut prims, &mut cook.materials, &parent, &animated, &world_of, &material_animation);
         crate::progress!("solid PBR palette: {before} → {} primitives", prims.len());
     }
+
+    pipeline.record("solid-pbr-palette", json!({"enabled":pipeline.solid_pbr(),"inputPrimitives":palette_before,"outputPrimitives":prims.len(),"reason":if pipeline.solid_pbr(){"GXM vertex PBR encoding"}else{"retain authored UVs and reflectance for fixed-function GPU"}}));
 
     // ---- node table for moving content (ancestors included for hierarchy)
     let mut node_ids: BTreeMap<usize, u32> = BTreeMap::new();
@@ -900,6 +909,8 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
         skins.push(pc::Skin { joints, inverse_bind: ibm.chunks_exact(16).map(|v| v.try_into().unwrap()).collect() });
         skin_ids.insert(s.index(), (skins.len() - 1) as u32);
     }
+
+    pipeline.record("sample-motion", json!({"fps":fps,"frames":frames,"nodes":nodes.len(),"skins":skins.len()}));
 
     // ---- skyline boxes become static geometry
     if let Some(boxes) = sx.get("skyline").and_then(|s| s.get("boxes")).and_then(|b| b.as_array()) {
@@ -1055,6 +1066,8 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
         None
     };
 
+    pipeline.record("scene-lighting", json!({"lights":out_lights.len(),"environment":environment}));
+
     // ---- static lighting baked into lit static surfaces
     let t_bake = Instant::now();
     let hemi = &sx["hemisphere"];
@@ -1151,6 +1164,8 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
     crate::progress!("baked {baked_prims} primitives: {tris_before} → {tris_after} triangles ({} ms)", t_bake.elapsed().as_millis());
     cook.log.push(format!("bake {baked_prims} primitives, {tris_before} → {tris_after} triangles"));
 
+    pipeline.record("bake-lighting", json!({"primitives":baked_prims,"inputTriangles":tris_before,"outputTriangles":tris_after,"skyOcclusion":so}));
+
     // ---- static chunking and draw building
     let mut draws: Vec<pc::Draw> = Vec::new();
     // Per bucket: vertices, triangles, and the positions on edges the chunk
@@ -1229,7 +1244,7 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
                 for (lock, seam) in locked.iter_mut().zip(geometry::palette_locks(&v)) { *lock |= seam; }
             }
             let levels = geometry::lods(&v, &t, layout, &locked, drop_parts, &bounds, uv_weight).into_iter().map(|(t, e)| (t, (e + base_error) * metric_scale)).collect();
-            push_draw(&v, &t, levels, material, layout, node, skin, no_reflect, a.target != ir::Target::Vita, draws);
+            push_draw(&v, &t, levels, material, layout, node, skin, no_reflect, pipeline.native_cache_order(), draws);
         }
     };
     // Shelf stock: groups of items near each other, full stand-ins plus the
@@ -1262,7 +1277,7 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
                 let cards = geometry::cache_order(&cards, verts.len());
                 // Cards replace items beyond a few metres (a small nominal
                 // error puts the switch at ~4 m at 640×362).
-                push_draw(&verts, &tris, vec![(cards, 0.012)], *material, pc::VertexClass::Static, None, None, true, a.target != ir::Target::Vita, draws);
+                push_draw(&verts, &tris, vec![(cards, 0.012)], *material, pc::VertexClass::Static, None, None, true, pipeline.native_cache_order(), draws);
                 start = end;
             }
         }
@@ -1322,6 +1337,8 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
         }
     }
     let field_draws = draws.len() - field_draws;
+
+    pipeline.record("chunk-and-lod", json!({"cellMeters":a.cell,"draws":draws.len(),"lods":draws.iter().map(|d|d.lods().len()).sum::<usize>(),"nativeCacheOrder":pipeline.native_cache_order()}));
 
     // ---- fog lights and scalar tracks
     let tracks = sx.get("tracks").cloned().unwrap_or(Value::Null);
@@ -1582,7 +1599,10 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
         pc::Post::default()
     };
     let place = name.to_string();
+    pipeline.record("scene-effects", json!({"effects":effects,"daySky":day_sky.is_some(),"materialTracks":material_tracks.len()}));
+    let provenance = crate::provenance::collect(&doc, &cook.mat_keys);
     let scene = pc::Scene {
+        provenance,
         name: place,
         kind: sx["kind"].as_str().unwrap_or("night-street").to_string(),
         min: scene_min.to_array(),
