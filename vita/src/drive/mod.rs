@@ -274,7 +274,7 @@ impl Drive {
         }
         if driving && !self.paused {
             let input = if let Some(speed) = self.auto {
-                autopilot(&self.car, &self.pack.line, &self.spec, speed, LANE)
+                autopilot(&self.car, &self.pack.line, &self.spec, speed, LANE, self.traffic.lead(&self.car, 80.0))
             } else if menu_open {
                 Controls { steer: 0.0, throttle: 0.0, brake: 0.0 }
             } else {

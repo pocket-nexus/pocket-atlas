@@ -46,7 +46,7 @@ function place(t: Traffic, c: TrafficCar, driver: number, length: number, first:
   const oncoming = rnd(t) < 0.72;
   const far = first ? 250 + rnd(t) * (AHEAD - 250) : AHEAD - rnd(t) * 300;
   c.d = oncoming ? LANE : -LANE;
-  c.v = oncoming ? -(11 + rnd(t) * 5) : 8.5 + rnd(t) * 3;
+  c.v = oncoming ? -(12.5 + rnd(t) * 4.5) : 12.5 + rnd(t) * 3;
   c.body = Math.floor(rnd(t) * TRAFFIC_BODIES) % TRAFFIC_BODIES;
   c.wait = 0;
   // Near the end of the road nothing more sets out: the car is parked off it (s < 0).
@@ -61,6 +61,16 @@ export function newTraffic(driver: number, length: number): Traffic {
     t.cars.push(c);
   }
   return t;
+}
+
+/** The vehicle ahead of the driver in the driver's lane within `reach` metres. */
+export function leadOf(t: Traffic, driver: CarState, reach: number): { gap: number; v: number } | null {
+  let best: { gap: number; v: number } | null = null;
+  for (const c of t.cars) {
+    const gap = c.s - driver.s;
+    if (c.s >= 0 && gap > 0 && gap < reach && Math.abs(c.d - driver.d) < 1.5 && (!best || gap < best.gap)) best = { gap, v: c.wait > 0 ? 0 : c.v };
+  }
+  return best;
 }
 
 /** Advances the traffic; returns true when the driver has just run into one of them (the caller stops the driver). */

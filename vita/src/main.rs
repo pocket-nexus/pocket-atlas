@@ -645,6 +645,13 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
             let mut compiling_since = Some(Instant::now());
             if let Some(v) = &first {
                 apply_control(v, &mut rig, &mut renderer, &mut ctl, &mut prefs.hud);
+                if let Some(d) = drive.as_mut() {
+                    if v["drive"].is_object() {
+                        d.control(&v["drive"]);
+                    } else if v["shot"].is_u64() {
+                        d.mode = drive::Mode::Look;
+                    }
+                }
             }
             let exit = loop {
                 let pad = input::read();

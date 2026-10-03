@@ -11,7 +11,7 @@ import { driveSound, QUIET, RouteAudio, type DriveSound } from "./audio";
 import type { RouteDef, RouteView } from "./def";
 import { autopilot } from "./drive/autopilot";
 import { newChase, stepChase, type DriveView, type Eye } from "./drive/chase";
-import { newTraffic, stepTraffic, type Traffic } from "./drive/traffic";
+import { leadOf, newTraffic, stepTraffic, type Traffic } from "./drive/traffic";
 import { newTrip, nextStop, stepTrip, type Stop, type TripState } from "./drive/trip";
 import { KEI, startState, stepCar, type CarState, type Controls, type Surface } from "./drive/vehicle";
 import { Snow } from "./fx/snow";
@@ -366,7 +366,7 @@ export class RouteStage extends PlaceStage<RouteExport, RouteAudio> {
       }
     }
     const before = c.odometer;
-    const wheel = this.auto > 0 ? autopilot(c, this.line, this.auto, -1.65) : this.pad.controls;
+    const wheel = this.auto > 0 ? autopilot(c, this.line, this.auto, -1.65, KEI, undefined, leadOf(this.traffic, c, 80)) : this.pad.controls;
     const input = this.trip.phase === "arrived" ? { steer: wheel.steer, throttle: 0, brake: 1 } : wheel;
     stepCar(c, input, this.surface, dt);
     if (stepTraffic(this.traffic, c, this.line.length, dt)) {

@@ -51,10 +51,23 @@ impl Traffic {
         let oncoming = self.rnd() < 0.72;
         let far = if first { 250.0 + self.rnd() * (AHEAD - 250.0) } else { AHEAD - self.rnd() * 300.0 };
         let d = if oncoming { LANE } else { -LANE };
-        let v = if oncoming { -(11.0 + self.rnd() * 5.0) } else { 8.5 + self.rnd() * 3.0 };
+        let v = if oncoming { -(12.5 + self.rnd() * 4.5) } else { 12.5 + self.rnd() * 3.0 };
         let body = (self.rnd() * TRAFFIC_BODIES as f64).floor() as usize % TRAFFIC_BODIES;
         let s = if driver + far > length - 60.0 { -1.0 } else { driver + far };
         self.cars[i] = TrafficCar { s, d, v, body, wait: 0.0 };
+    }
+
+    /// The vehicle ahead of the driver in the driver's lane within `reach`
+    /// metres: (gap, its speed along the line).
+    pub fn lead(&self, driver: &Car, reach: f64) -> Option<(f64, f64)> {
+        let mut best: Option<(f64, f64)> = None;
+        for c in &self.cars {
+            let gap = c.s - driver.s;
+            if c.s >= 0.0 && gap > 0.0 && gap < reach && (c.d - driver.d).abs() < 1.5 && best.map_or(true, |b| gap < b.0) {
+                best = Some((gap, if c.wait > 0.0 { 0.0 } else { c.v }));
+            }
+        }
+        best
     }
 
     /// Advances the traffic; true when the driver has just run into one of them.

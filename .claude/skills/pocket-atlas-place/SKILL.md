@@ -34,6 +34,10 @@ A place is one real spot, recreated faithfully enough that someone who has stood
 - **Motion**: the loop is seamless; moving content (trains, cars, gates, signs, surf) is modelled with the same care as the static scene.
 - **Budget** per shot on the Vita: 30.0 fps at step 0 under `shots` and serialized GPU ≤ ~25 ms under `profile` (headroom for the passing train or taxi) are the verdict. Guides for planning: about 250 draws and 130k triangles after LOD (Kamakura's Platform view, 263 draws and 141k triangles, takes 20.9 ms), moving geometry ≤ 30k triangles, a pack no larger than the konbini's 50.6 MiB.
 
+## Routes
+
+A route (a real road driven end to end, streamed as cells) follows `references/routes.md` and `docs/ROUTES.md`: survey, research, generators by area, export and cook, a host estimate of the device's load, then the device.
+
 ## Export annotations
 
 What the cooker reads from `extras.pocketAtlas` — material kinds (`unlit`, `sign`, `glass`, `interiorWindow`, `products`, `tower`, `water`), signage animation, water, day and twilight sky, sun, sky occlusion, post — is in `references/annotations.md`. Add a new annotation only together with its cooker reader (`crates/pocket3d-place-cook/src/extras.rs`, with a test), its pack field (`crates/pocket3d-place/src/meta.rs`), the Vita side, and a README section.

@@ -7,7 +7,7 @@ import { KEI, type CarSpec, type CarState, type Controls } from "./vehicle";
  * on snow. The handheld has the same driver (`pocket3d-drive`,
  * `autopilot.rs`).
  */
-export function autopilot(c: CarState, line: Line, speed: number, lane: number, k: CarSpec = KEI, out: Controls = { steer: 0, throttle: 0, brake: 0 }): Controls {
+export function autopilot(c: CarState, line: Line, speed: number, lane: number, k: CarSpec = KEI, out: Controls = { steer: 0, throttle: 0, brake: 0 }, lead: { gap: number; v: number } | null = null): Controls {
   const v = Math.abs(c.vx);
   const look = 7 + v * 0.9;
   const p = line.at(c.s + look);
@@ -26,7 +26,9 @@ export function autopilot(c: CarState, line: Line, speed: number, lane: number, 
   const b = line.at(c.s + 70);
   const turn = Math.abs(Math.atan2(ax * b.tz - az * b.tx, ax * b.tx + az * b.tz)) / 60;
   const bend = turn > 1e-5 ? Math.sqrt((0.16 * 9.81) / turn) : Infinity;
-  const e = Math.min(speed, bend) - c.vx;
+  // Behind a vehicle in the lane: settle 14 m back at its speed.
+  const follow = lead ? Math.max(0, lead.v + (lead.gap - 14) * 0.4) : Infinity;
+  const e = Math.min(speed, bend, follow) - c.vx;
   out.throttle = Math.max(0, Math.min(1, e * 0.6));
   out.brake = c.vx > 1 ? Math.max(0, Math.min(1, -e * 0.35 - 0.1)) : 0;
   return out;
