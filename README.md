@@ -10,7 +10,7 @@ Places share their assets across the reference and handheld renderers:
 - **`vita/`** renders the same place on a PS Vita with its own GXM pipeline: Cg programs compiled on the device by SceShaccCg, 4× MSAA HDR targets and the effect set the place needs.
 - **`n3ds/`** renders the shared globe, place browser and all four scenes on an Old 3DS, using a PICA200 cook of the same assets, native 400 × 240 output and a 30fps quality budget. See [the 3DS build and debug workflow](n3ds/README.md).
 
-A pack connects the renderers: the web app exports a place as glTF 2.0 with `extras.pocketAtlas`, and the cooker (`crates/pocket3d-place-cook`) turns it into a `.place` pack for the handheld GPU.
+The web app exports glTF 2.0 with `extras.pocketAtlas`. The cooker seals a lossless PlaceIR, then independently lowers it into Vita, PICA or GE assets. See [the compiler boundaries, commands and migration plan](docs/COMPILER.md).
 
 ## Places
 
@@ -31,7 +31,7 @@ Real places fall into a finite set of kinds; the registry names them (`PlaceKind
 | `web/` | three.js reference places (`src/places/<id>`, shared code in `src/places/shared`), globe, scripts: `export-place.ts`, `export-atlas.ts`, `preview-place.ts` |
 | `crates/pocket3d-place` | pack formats: `.place` (META JSON + texture, geometry and animation blobs) and `atlas.pack` (globe, place list, preview cards, interface font); sRGB helpers |
 | `crates/pocket3d-place-cook` | glTF → pack: BC1/BC3/BC5 textures with mips, quantized vertices, baked vertex lighting and sky occlusion, low-poly shelf stock, octahedral environment, effect textures; the atlas pack and its baked font (`atlas.rs`, `uifont.rs`); annotation readers (`extras.rs`) |
-| `crates/pocket3d-gxm` | GXM layer: GXP registration and patching, own shader patcher, render targets, texture upload, runtime SceShaccCg |
+| `vendor/pocketjs/devices/vita/pocket-vita-gxm` | Shared GXM memory/program/target/texture mechanisms, optional runtime SceShaccCg; no scene or material policy |
 | `vita/` | Vita app: place loader (`scene.rs`), frame renderer (`frame.rs`), atlas globe (`atlas.rs`), place browser (`browser.rs`), settings sheet (`settings.rs`), interface drawing and text (`ui.rs`), file locations (`paths.rs`), Cg programs (`vita/shaders`), LiveArea art |
 | `psp/` | Native PSP place viewer: GE rendering, animated nodes and skinning, camera controls, procedural rain audio, PSPLINK telemetry |
 | `crates/pocket3d-place-psp` | Validated `PLPS` payload: shared GE vertex buffers, spatial index chunks, swizzled RGBA4444 mip chains, animation and camera data; no JSON on the device |
@@ -59,12 +59,12 @@ Requirements: `usbhostfs_pc` and `pspsh`, PSPLINK running on the console, and Po
 ```sh
 # Export and cook the current checkout, with the web dev server running.
 (cd web && bun scripts/export-place.ts --place tokyo-konbini --seconds 20)
-bun tools/atlas.ts cook --place tokyo-konbini
 bun tools/atlas-psp.ts cook
 bun tools/atlas-psp.ts build
 
 # Keep exactly one PSP USB host running in a terminal.
 bun tools/atlas-psp.ts serve
+# If a host already owns the cable, use --share /its/existing/host0 on later commands.
 # In another terminal:
 bun tools/atlas-psp.ts run --no-build
 bun tools/atlas-psp.ts status
@@ -77,7 +77,7 @@ bun tools/atlas-psp.ts ctl '{}'                  # live clock
 bun tools/atlas-psp.ts package                  # dist/PSP/GAME/PocketAtlas/{EBOOT.PBP,scene.place}
 ```
 
-The PSP cook is a second stage over this checkout's ordinary `.place` output, and writes `<id>.psp.place` with separate `PLPS` magic/version. It rejects unsupported place kinds and packs above 18 MiB. It preserves rigid and skeletal tracks, uses the shared cooker's coarse geometry, bakes the Products material onto world-space shelf cards, shares static vertex buffers across spatial chunks, and combines only visible chunks at draw time. GPU pointers, indices, texture layouts and animation ranges are validated before upload. The current 20-second export follows the existing Vita workflow; it does not contain the web traffic simulation's full, longer schedule.
+The PSP cook starts from the same PlaceIR as Vita and 3DS, and writes `<id>.psp.place` with separate `PLPS` magic/version. It rejects unsupported place kinds and packs above 18 MiB. It preserves rigid and skeletal tracks, uses the shared cooker's coarse geometry, bakes the Products material onto world-space shelf cards, shares static vertex buffers across spatial chunks, and combines only visible chunks at draw time. GPU pointers, indices, texture layouts and animation ranges are validated before upload. The current 20-second export follows the existing Vita workflow; it does not contain the web traffic simulation's full, longer schedule.
 
 This is a fixed-function adaptation: it does not reproduce Vita's HDR/PBR shaders, normal maps, volumetric haze, per-pixel wet ripples, dynamic per-pixel lights or bloom. The PSP's 16-bit depth and reduced texture sizes also limit fine facade detail and lettering. Reflection geometry is limited to lit surfaces and moving objects. The atlas globe and multi-place browser are not part of the PSP viewer. PSP `workMs` includes CPU submission and waiting for the GE; `gpuWaitMs` is only the wait after submission, **not** serialized GPU pass timing. Captures and USB transfers must be kept outside measurement windows. Host build, physical runtime, installed-file readback, manual control feel and listening to the sound are separate evidence.
 

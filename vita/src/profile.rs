@@ -13,7 +13,7 @@
 //! counts). Its quality steps are what the governor trades at run time:
 //! scene resolution first, then LOD and detail distances.
 
-use pocket3d_gxm::target::Msaa;
+use pocket_vita_gxm::target::Msaa;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Step {

@@ -9,14 +9,15 @@ use std::collections::BTreeMap;
 pub fn cook(
     draw: &pc::Draw,
     mat: &pc::Material,
-    meta: &pc::Meta,
-    geom: &[u8],
-    tex: &[u8],
+    scene: &crate::source::Scene,
     w: &mut Writer,
     textures: &mut Vec<pp::Texture>,
     materials: &mut Vec<pp::Material>,
     draws: &mut Vec<pp::Draw>,
 ) {
+    let meta = &scene.meta;
+    let geom = scene.geometry();
+    let tex = scene.textures();
     let ids = &draw
         .lods
         .last()
@@ -28,28 +29,23 @@ pub fn cook(
     let mut cards: BTreeMap<(usize, i32, [i32; 4]), ([f32; 3], [f32; 3], [u8; 4])> =
         BTreeMap::new();
     for tri in geom[ids.offset as usize..(ids.offset + ids.size) as usize].chunks_exact(6) {
-        let verts: Vec<&[u8]> = tri
+        let verts: Vec<&crate::geometry::Vertex> = tri
             .chunks_exact(2)
             .map(|b| {
                 let i = u16::from_le_bytes(b.try_into().unwrap()) as usize;
-                let off = draw.vertices.offset as usize + i * draw.layout.stride() as usize;
-                &geom[off..off + draw.layout.stride() as usize]
+                scene.vertex(draw, i)
             })
             .collect();
-        let axis = if (verts[0][8] as i8).abs() > (verts[0][10] as i8).abs() {
+        let axis = if verts[0].normal.x.abs() > verts[0].normal.z.abs() {
             0
         } else {
             2
         };
-        if verts[0][8 + axis] as i8 <= 0 {
+        if verts[0].normal[axis] <= 0.0 {
             continue;
         }
-        let pos = |b: &[u8], i| {
-            i16::from_le_bytes([b[i * 2], b[i * 2 + 1]]) as f32 / 32767.0 * draw.pos_scale[i]
-                + draw.pos_offset[i]
-        };
-        let lo = core::array::from_fn(|k| verts.iter().map(|v| pos(v, k)).fold(f32::MAX, f32::min));
-        let hi = core::array::from_fn(|k| verts.iter().map(|v| pos(v, k)).fold(f32::MIN, f32::max));
+        let lo = core::array::from_fn(|k| verts.iter().map(|v| v.pos[k]).fold(f32::MAX, f32::min));
+        let hi = core::array::from_fn(|k| verts.iter().map(|v| v.pos[k]).fold(f32::MIN, f32::max));
         let along = 2 - axis;
         let key = (
             axis,
@@ -61,7 +57,7 @@ pub fn cook(
                 (hi[1] * 1000.0).round() as i32,
             ],
         );
-        cards.insert(key, (lo, hi, verts[0][20..24].try_into().unwrap()));
+        cards.insert(key, (lo, hi, verts[0].color));
     }
     for ((axis, plane, _), card) in cards {
         planes.entry((axis, plane)).or_default().push(card);
@@ -76,6 +72,7 @@ pub fn cook(
         pc::TexFormat::Bc3 => {
             texpresso::Format::Bc3.decompress(src, t.width as usize, t.height as usize, &mut art)
         }
+        pc::TexFormat::Rgba8 => art.copy_from_slice(&src[..(t.width * t.height * 4) as usize]),
         _ => panic!("product art format"),
     }
     let ph = |n: f32| {

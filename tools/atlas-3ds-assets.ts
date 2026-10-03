@@ -135,7 +135,7 @@ for (const [i, p] of PLACES.entries()) {
   }
   places.writeFloatLE(p.lat, i * PLACE + 48);
   places.writeFloatLE(p.lon, i * PLACE + 52);
-  places.writeUInt32LE((p.load ? 1 : 0) | (p.featured ? 2 : 0), i * PLACE + 56);
+  places.writeUInt32LE((p.load && p.targets?.includes("3ds") ? 1 : 0) | (p.featured ? 2 : 0), i * PLACE + 56);
   places.writeUInt32LE(parseInt(p.accent.replace("#", ""), 16), i * PLACE + 60);
   places.writeInt32LE(-1, i * PLACE + 64);
 }

@@ -8,9 +8,9 @@
 //! filmic tone mapping, vignette and grain as on the web (`GlobePost`).
 
 use glam::{EulerRot, Mat4, Quat, Vec3, Vec4};
-use pocket3d_gxm::mem::{Arena, Kind};
-use pocket3d_gxm::target::{ColorFormat, Depth, Msaa, Target};
-use pocket3d_gxm::texture::{Texture, Uploader};
+use pocket_vita_gxm::mem::{Arena, Kind};
+use pocket_vita_gxm::target::{ColorFormat, Depth, Msaa, Target};
+use pocket_vita_gxm::texture::{Texture, Uploader};
 use pocket3d_place as pc;
 use pocket3d_place::atlas::AtlasMeta;
 use pocketjs_vita::input::Pad;

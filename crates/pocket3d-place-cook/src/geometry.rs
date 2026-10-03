@@ -59,6 +59,7 @@ pub fn tangents(pos: &[Vec3], nrm: &[Vec3], uv: &[Vec2], tris: &[[u32; 3]]) -> V
 }
 
 pub struct Built {
+    pub source: Vec<Vertex>,
     pub vertices: Vec<u8>,
     pub indices: Vec<u8>,
     pub vertex_count: u32,
@@ -145,7 +146,7 @@ pub fn simplify(verts: &[Vertex], tris: &[[u32; 3]], keep: f32, max_error: f32, 
 /// Quantizes one draw (≤ 65 536 unique vertices) into the Static (24 B),
 /// Baked (28 B) or Skinned (32 B) layout. `lods`: reduced triangles over the
 /// same vertices and their errors, finest first.
-pub fn build(verts: &[Vertex], tris: &[[u32; 3]], layout: pocket3d_place::VertexLayout, lods: Vec<(Vec<[u32; 3]>, f32)>) -> Built {
+pub fn build(verts: &[Vertex], tris: &[[u32; 3]], layout: pocket3d_place::VertexLayout, lods: Vec<(Vec<[u32; 3]>, f32)>, encode_vita: bool) -> Built {
     let skinned = layout == pocket3d_place::VertexLayout::Skinned;
     let mut min = Vec3::splat(f32::MAX);
     let mut max = Vec3::splat(f32::MIN);
@@ -163,7 +164,7 @@ pub fn build(verts: &[Vertex], tris: &[[u32; 3]], layout: pocket3d_place::Vertex
     let uvh = ((uvmax - uvmin) * 0.5).max(Vec2::splat(1e-5));
     let stride = layout.stride() as usize;
     let mut out = Vec::with_capacity(verts.len() * stride);
-    for v in verts {
+    for v in verts.iter().filter(|_| encode_vita) {
         let q = (v.pos - center) / half;
         for c in [q.x, q.y, q.z, 0.0] {
             out.extend(s16n(c).to_le_bytes());
@@ -184,6 +185,7 @@ pub fn build(verts: &[Vertex], tris: &[[u32; 3]], layout: pocket3d_place::Vertex
         }
     }
     Built {
+        source: if encode_vita { Vec::new() } else { verts.to_vec() },
         vertices: out,
         indices: u16_indices(&cache_order(tris, verts.len())),
         vertex_count: verts.len() as u32,

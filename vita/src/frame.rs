@@ -7,8 +7,8 @@
 
 use glam::{Mat4, Vec3, Vec4};
 use pocket3d_place as pc;
-use pocket3d_gxm::mem::{Arena, Kind};
-use pocket3d_gxm::target::{ColorFormat, Depth, Msaa, Target};
+use pocket_vita_gxm::mem::{Arena, Kind};
+use pocket_vita_gxm::target::{ColorFormat, Depth, Msaa, Target};
 use vita2d_sys as g;
 
 use crate::camera::{self, View};

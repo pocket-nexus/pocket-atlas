@@ -4,7 +4,8 @@ Pocket Atlas opens on an interactive globe and runs all four shared places on
 an Old 3DS: Rainy Night Konbini, Suga Shrine Stairs, Radio Kaikan at Blue Hour,
 and Kamakura-Kōkōmae Crossing. The registry, globe maps, postcard previews,
 font, material annotations, camera shots, geometry and motion come from the
-same web exports and canonical packs as the Vita. Rendering contains no
+same web exports and lossless PlaceIR as the Vita. PICA cooks independently
+from source geometry and textures; it does not read a Vita device pack. Rendering contains no
 scene-name branches. PocketJS owns the unchanged paired debug transport and
 native installer; Atlas owns the application and its content-addressed packs.
 
@@ -28,9 +29,6 @@ bun scripts/export-place.ts --place kamakura-koko-mae-crossing --seconds 120
 bun scripts/preview-place.ts
 bun scripts/export-atlas.ts
 cd ..
-for place in tokyo-konbini suga-shrine-stairs akihabara-radio-kaikan kamakura-koko-mae-crossing; do
-  bun tools/atlas.ts cook --place "$place"
-done
 bun tools/atlas.ts cook-atlas
 bun tools/atlas-3ds.ts cook
 bun tools/atlas-3ds-assets.ts
