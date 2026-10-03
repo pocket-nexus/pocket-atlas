@@ -38,6 +38,8 @@ mod pipelines;
 mod globe;
 #[path = "../../src/shadow.rs"]
 mod shadow;
+#[path = "../../src/reflection_region.rs"]
+mod reflection_region;
 #[path = "../../src/renderer.rs"]
 mod renderer;
 // Globe GPU methods are typechecked here; this host harness does not execute

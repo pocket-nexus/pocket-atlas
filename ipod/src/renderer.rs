@@ -1,4 +1,5 @@
 use crate::pipelines::{Compiled, Pipelines};
+use crate::reflection_region::{ReflectionRegion, WetBounds};
 use crate::{
     effects::{Effects, VistaUniforms},
     gl::*,
@@ -55,6 +56,9 @@ pub struct Renderer {
     copy: usize,
     mirror: Target,
     mirror_blur: Target,
+    // Only the validated static wet recipe uses this cache. Animation still
+    // renders every frame; an identical view only reuses its read footprint.
+    mirror_region_cache: Option<([u32; 16], ReflectionRegion)>,
     down: usize,
     white: u32,
     white_cube: u32,
@@ -298,6 +302,7 @@ impl Renderer {
             copy,
             mirror: Target::new(mirror_width, mirror_height, true)?,
             mirror_blur: Target::new(mirror_width / 2, mirror_height / 2, false)?,
+            mirror_region_cache: None,
             down,
             white,
             white_cube,
@@ -354,6 +359,7 @@ impl Renderer {
         self.mirror = mirror;
         self.sky_low = sky_low;
         self.mirror_blur = mirror_blur;
+        self.mirror_region_cache = None;
         self.present = present;
         self.main = main;
         self.wet_response = wet_response;
@@ -719,7 +725,15 @@ impl Renderer {
             } else {
                 0.8 / self.height as f32
             },
-        );
+        )
+        // Mirror winding is reversed by glFrontFace below. Evaluate source
+        // triangle orientation from the reflected eye, while retaining the
+        // original eye above for the existing LOD distance contract.
+        .with_cull_eye(if mirror {
+            [eye.x, -eye.y, eye.z]
+        } else {
+            eye.to_array()
+        });
         for run in &mut order {
             let groups = if self.performance && !run.transparent {
                 s.mesh_clusters
@@ -1406,16 +1420,50 @@ impl Renderer {
             100000.0,
         );
         let vp = projection * glam::camera::rh::view::look_at_mat4(eye, target, Vec3::Y);
-        if reflection
+        let mirror_needed = reflection
             && s.meta
                 .materials
                 .iter()
-                .any(|m| m.wet.as_ref().is_some_and(|w| w.planar))
+                .any(|m| m.wet.as_ref().is_some_and(|w| w.planar));
+        // The read footprint is specific to the compiled display wet recipe.
+        // Any raw/Reference consumer retains the complete reflection target.
+        let mirror_region = if !mirror_needed {
+            ReflectionRegion::Empty
+        } else if self.performance && self.wet_response.is_some()
+            && s.meta.draws.iter().enumerate().all(|(i, d)| {
+                s.meta.materials[d.material as usize].wet.is_none()
+                    || self.wet_programs[i].is_some()
+            })
         {
+            let key = vp.to_cols_array().map(f32::to_bits);
+            if let Some((_, region)) = self.mirror_region_cache.filter(|(view, _)| *view == key) {
+                region
+            } else {
+                let response = self.wet_response.as_ref().unwrap();
+                let region = ReflectionRegion::calculate(vp, [response.w, response.h],
+                    [self.mirror.w, self.mirror.h], [self.mirror_blur.w, self.mirror_blur.h],
+                    s.meta.draws.iter().filter_map(|d| {
+                        let wet = s.meta.materials[d.material as usize].wet.as_ref()?;
+                        let (min, max) = s.bounds(d);
+                        Some(WetBounds { min, max, ripple: wet.ripple,
+                            puddle_gain: if wet.puddles >= 0.001 && s.meta.rain.active { 1.0 } else { 0.0 } })
+                    }));
+                self.mirror_region_cache = Some((key, region));
+                region
+            }
+        } else {
+            ReflectionRegion::Full
+        };
+        glDisable(GL_SCISSOR_TEST);
+        if mirror_region != ReflectionRegion::Empty {
             self.mirror.bind();
             glDepthMask(1);
             glClearColor(0.0, 0.0, 0.0, 1.0);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            if let ReflectionRegion::Scissor { mirror, .. } = mirror_region {
+                glEnable(GL_SCISSOR_TEST);
+                glScissor(mirror.x, mirror.y, mirror.width, mirror.height);
+            }
             self.sky(s, eye, target, fov, time, true);
             self.meshes(s, vp, eye, time, MeshPass::Mirror, false);
             if self.performance {
@@ -1427,6 +1475,14 @@ impl Renderer {
             glDisable(GL_CULL_FACE);
             glDisable(GL_BLEND);
             self.mirror_blur.bind();
+            glDisable(GL_SCISSOR_TEST);
+            // Clear before scissoring so a partial draw need not restore the
+            // previous frame's unused tiles on a tile-based GPU.
+            glClear(GL_COLOR_BUFFER_BIT);
+            if let ReflectionRegion::Scissor { down, .. } = mirror_region {
+                glEnable(GL_SCISSOR_TEST);
+                glScissor(down.x, down.y, down.width, down.height);
+            }
             let p = &self.programs[self.down];
             p.bind();
             p.tex("uSource", self.mirror.texture, 0);
@@ -1440,6 +1496,7 @@ impl Renderer {
                 ],
             );
             self.fullscreen(p);
+            glDisable(GL_SCISSOR_TEST);
         }
         stamp = self.end_pass(1, stamp, false);
         self.wet_response_ms = 0.0;

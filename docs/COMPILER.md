@@ -231,6 +231,50 @@ render state; source draws still select visibility and LOD independently.
 multiset. Both are identity-bound to their target pack. These are target output
 artifacts, not alternative compiler inputs. Rebuild all of them from PlaceIR.
 
+IPCL v3 adds conservative facing bounds only for immutable, one-sided, opaque,
+depth-writing Baked Standard draws without alpha test. Each existing spatial
+cluster containing at least 24 triangles is stably partitioned into six dominant
+geometric-normal directions; smaller clusters retain their original index order
+and single record. This fixed SGX compiler policy limits tiny-face query/cache
+overhead observed on the A4. Small mixed-orientation clusters and degenerate
+triangles retain a visible fallback. Original draw membership,
+complete-part groups, all LOD levels/errors and each level's exact triangle
+multiset stay unchanged. Subclusters retain their parent bounds, so this step
+does not change frustum or LOD decisions. The 56-byte cluster record contains
+the previous 32-byte index/bounds record followed by six float32 values: normal
+axis XYZ, cone cosine, plane offset and orientation condition bound. The loader
+checks that these bounds enclose every actual indexed source triangle, alongside
+existing source hashes and triangle proofs. The producer reserves explicit
+outward floating-point slack; the reader checks geometric containment rather
+than relying on bit-identical host and ARM `sqrt` results. V2
+sidecars remain readable with facing rejection disabled.
+
+The query keeps its original eye for distance/LOD selection. A separate culling
+eye, reflected in source space for the mirror pass, participates in its exact-bit
+cache identity. Rejection requires a strictly negative cone/plane upper bound
+with a coordinate- and triangle-conditioning-dependent floating-point margin;
+near, tangent, degenerate or invalid cases remain visible. This is conservative
+geometry filtering with a numerical guard, not a claim of bit-identical GPU
+screen-space arithmetic. Extra clusters increase sidecar and resident memory,
+query work and cache entries. Moving-camera CPU cost and GPU savings require
+separate device measurements; a fixed-camera cache hit does not measure either.
+After source validation, the runtime replaces the stored descriptor with six
+prepared float32 values in the same 24-byte footprint. It bounds each normal by
+`cos(theta)*axis` plus a ball of radius `sin(theta)`, expanded for coefficient
+rounding. Queries use only float32 arithmetic and the view vector's L1 norm,
+which conservatively bounds its Euclidean length. With `M` the largest absolute
+camera/bounds coordinate or one, `g=64*EPSILON*M`, and `b=sine+g*condition`, the
+query bounds each face by `F=dot(k,view)+offset+g+b*L1+1e-6`. It rejects only when
+`F < -128*EPSILON*S`, where `S=M+abs(offset)+g+b*(L1+M)`. For round-to-nearest
+arithmetic, the combined center, dot, norm, product and sum error is less than
+`64u*S` (`u=EPSILON/2`); the implemented allowance is `256u*S` before the positive
+scale's rounding. This also covers subnormal arithmetic. Nonfinite intermediate
+results, near-boundary cases, or coordinates above `2^60` remain visible. There
+is no query-time square root, squared comparison or float64 work. L1 can retain
+more triangles than the original cone bound; it cannot hide additional content.
+The original float64 cone implementation remains the test reference. Serialized
+IPCL data is unchanged, and preparation needs no second descriptor array.
+
 Static opaque Products without animated UV/emission can additionally compile
 `products-appearance` recipe v1. It evaluates the existing packaging seed,
 base/atlas blend, cap/side gate, item-height shading and scene grade into a
@@ -362,6 +406,47 @@ original and derived tiers for Optimized CPU/GPU selection and IPCL generation.
 IPCL still binds the actual raw META and complete GEOM; no rewritten metadata
 or disguised source hash is introduced. Errors retain the existing measured
 attribute-weighted simplifier contract, not a Hausdorff or pixel guarantee.
+
+### SGX sampled animation/display tiers
+
+`ipod_recipes.animated_display_lods` version 1 is separate from strict
+`skin_lods` version 1. The SGX lowering generates final graded display colors
+first, then proposes source-local index tiers using posed positions at up to
+eight representative poses, final UVs, and graded RGBA as simplifier attributes.
+The original source vertices, four joint/weight slots, full indices, original
+LODs, animation and Reference path are retained. Only ordinary prelit Standard
+skin draws with supported TRS/nlerp animation and byte weights summing to 255
+are eligible; user-operated door descendants and unsupported material/layout
+contracts retain their existing tiers.
+
+Each candidate is measured against the original surface over every authored
+key and half-key, including the last-to-first loop interval. At each sample the
+measurement tests up to 64 source vertices and 64 triangle centroids in each
+direction. At up to 32 uniformly spaced poses plus representative poses it
+tests every stored source vertex and every source/candidate triangle centroid.
+The receipt records this schedule, exact query counts, sampled maximum, dense
+RMS and the independent attribute-QEM metric. Selection error is the sampled
+maximum multiplied by 1.1 plus 1 mm, rounded upward. This is a conservative
+margin on an **empirical sample**, not a bound on unsampled triangle interiors,
+continuous time, Hausdorff distance, appearance error, or screen pixels. The
+existing runtime projection heuristic and frame resolution are unchanged.
+
+Open/nonmanifold edges and cross-draw boundaries are retained using position
+plus dense bone-weight identity; co-located vertices on different animation
+trajectories cannot substitute for one another. No source connected component
+may disappear or join another. Final UV/color differences remain simplifier
+attributes; unused display normals/tangents are not promoted into additional
+locks. Approximate interpolation of color, UV and mixed influences is explicit.
+
+Typed receipts bind the original draw/material/lighting descriptors, original
+vertex/full/LOD bytes, complete ANIM identity, exact final graded colors and
+appended index payload. Both profiles validate source identity, topology,
+measurement schedule and nonoverlapping tail ranges. Optimized also checks the
+validated color sidecar's exact per-draw bytes before selecting these tiers;
+Reference does not load display colors or consume their derived indices.
+`EffectiveLods` merges non-dominated source, strict and sampled tiers without
+rewriting shared analysis or the original metadata's draw LODs. The offline
+surface audit is not repeated during device loading.
 
 ## Profiles, recipes and compile receipts
 

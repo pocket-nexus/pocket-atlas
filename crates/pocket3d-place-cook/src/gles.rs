@@ -3,6 +3,8 @@
 //! RGBA pixels. PLIP and its vertex layouts have a version independent of Vita.
 use pocket3d_place as pc;
 use std::path::Path;
+#[path = "gles_animated_lods.rs"]
+mod gles_animated_lods;
 #[path = "gles_clusters.rs"]
 mod gles_clusters;
 #[path = "gles_colors.rs"]
@@ -91,7 +93,9 @@ pub fn cook(
         .map(|path| gles_pvrtc::Encoder::new(path, output.parent().unwrap_or(Path::new("."))))
         .transpose()?;
     let (bytes, recipe, receipt) = lower(source, profile, encoder.as_ref())?;
-    let colors = gles_colors::adapt_with_recipe(&bytes, &recipe)?;
+    let mut colors = gles_colors::adapt_with_recipe(&bytes, &recipe)?;
+    let bytes = gles_animated_lods::lower(&bytes, &colors)?;
+    colors.rebind(&bytes)?;
     let clusters = gles_clusters::adapt(&bytes)?;
     let p = pc::ipod::parse(&bytes).map_err(|e| e.to_string())?;
     let meta = p.meta().map_err(|e| e.to_string())?;

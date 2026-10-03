@@ -274,7 +274,12 @@ fn mapping(meta: &pc::Meta, tex: &[u8], m: &pc::Material) -> Result<Option<Mappi
     }
 }
 
+pub(super) struct AnimationColors {
+    pub draw: u32,
+    pub range: pc::Range,
+}
 pub(super) struct Colors {
+    pub animation: Vec<AnimationColors>,
     pub json: Vec<u8>,
     pub bytes: Vec<u8>,
     pub draws: usize,
@@ -530,11 +535,42 @@ pub(super) fn adapt_with_recipe(
     let index_overrides =
         display_indices::append(&meta, geom, &mut bytes, &draws, &pages, &mut states)?;
     let json = json!({"version":3,"vertexBytes":vertex_bytes,"indexOverrides":index_overrides,"recipes":recipe.receipts,"identity":"fnv1a64-v1","metaHash":hash(meta_bytes),"geometryHash":hash(geom),"animationHash":hash(anim),"textureHash":texture_hash,"colorsHash":hash(&bytes),"colorsBytes":bytes.len(),"states":states,"pages":pages.iter().map(|p|p.json()).collect::<Vec<_>>(),"draws":draws.iter().map(|d|d.json()).collect::<Vec<_>>(),"approximation":{"gradeBeforeSrgbTextureModulation":true,"flags":{"1":"frame-zero dynamic lighting","2":"weak emission shares albedo sample","4":"Gouraud sun without runtime shadows","8":"diffuse-only color; independent emission sample remains in shader","16":"static planar wet diffuse; wet effects remain in shader","32":"glass diffuse only; coverage Fresnel beads remain in shader","64":"Products material appearance baked into a remapped display texture"},"weakEmissionLimit":MAX_WEAK_EMISSION,"visibleEmissionErrorLimit":MAX_VISIBLE_EMISSION_ERROR,"emissionSamples":approximation,"fallbackDraws":fallback}});
+    let animation = draws
+        .iter()
+        .filter(|d| {
+            meta.draws[d.draw as usize].layout == pc::VertexLayout::Skinned
+                && d.page.is_none()
+                && d.flags & (16 | 32 | 64) == 0
+        })
+        .map(|d| AnimationColors {
+            draw: d.draw,
+            range: pc::Range {
+                offset: d.offset,
+                size: d.vertex_count * 4,
+            },
+        })
+        .collect();
     Ok(Colors {
+        animation,
         json: serde_json::to_vec_pretty(&json).map_err(|e| e.to_string())?,
         bytes,
         draws: draws.len(),
     })
+}
+
+impl Colors {
+    /// Geometry lowering only appends index payloads. Existing colors, texture
+    /// recipes, page mappings and Products overrides retain their exact bytes.
+    pub(super) fn rebind(&mut self, bytes: &[u8]) -> Result<()> {
+        let pack = pc::ipod::parse(bytes).map_err(|e| e.to_string())?;
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&self.json).map_err(|e| e.to_string())?;
+        json["metaHash"] = hash(pack.section(pc::TAG_META).map_err(|e| e.to_string())?).into();
+        json["geometryHash"] =
+            hash(pack.section(pc::TAG_GEOMETRY).map_err(|e| e.to_string())?).into();
+        self.json = serde_json::to_vec_pretty(&json).map_err(|e| e.to_string())?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

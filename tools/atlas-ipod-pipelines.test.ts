@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { performanceMainPair, performanceReflectionPair, windowParameterDraws, windowRayDraws } from "./atlas-ipod-pipelines";
+import { colorPair, performanceMainPair, performanceReflectionPair, windowParameterDraws, windowRayDraws } from "./atlas-ipod-pipelines";
 import { samplerDeclarations } from "./atlas-ipod-textures";
 
 test("optimized interior-window mirrors select REFLECTION and the display tier by material kind", () => {
@@ -10,7 +10,7 @@ test("optimized interior-window mirrors select REFLECTION and the display tier b
   const compile = (...args: any[]) => { calls.push(args); return ["vertex", "display-reflection"]; };
   for (const kind of ["standard", "glass", "water", "products", "interior_window", "lights"]) {
     const scene = { materials: [{ kind }] };
-    const result = performanceReflectionPair(scene, draw, compile);
+    const result = performanceReflectionPair(scene, draw, undefined, compile);
     if (kind === "interior_window") {
       expect(result).toEqual(["vertex", "display-reflection"]);
       expect(calls.at(-1)).toEqual([scene, draw, true, 3]);
@@ -31,7 +31,7 @@ test("window parameter selection requires the versioned proof and affects only d
     performanceMainPair(scene, draw, enabled, false, compile);
     expect(calls.at(-1)).toEqual([scene, draw, false, 3, "scene", enabled, false]);
   }
-  performanceReflectionPair(scene, draw, compile);
+  performanceReflectionPair(scene, draw, undefined, compile);
   expect(calls.at(-1)).toEqual([scene, draw, true, 3]);
   for (const recipe of [{ version: 2, draws: [0] }, { version: 1, draws: [1, 0] },
     { version: 1, draws: [0, 0] }, { version: 1, draws: [2] }, { version: 1, draws: [-1] },
@@ -124,5 +124,108 @@ test("display window reflection links both fog modes and excludes the full room 
     });
     const linked = Bun.spawnSync(["glslangValidator", "-l", ...files], { stdout: "pipe", stderr: "pipe" });
     expect(linked.exitCode, linked.stdout.toString() + linked.stderr.toString()).toBe(0);
+  }
+});
+
+function colorFixture(fog = "none", geometry = "float", alpha = false) {
+  return {
+    scene: {
+      materials: [{ kind: "standard", blend: "opaque", fog: fog !== "none",
+        interior: false, alpha_test: alpha ? 0.5 : 0, depth_write: true, albedo: 0, emission: 1 }],
+      rain: { active: true }, atmosphere: { haze_ambient: [0, 0, 0] }, skins: [{ joints: [0, 1] }],
+      vista_haze: fog === "vista" ? {} : null,
+    },
+    draw: { material: 0, layout: geometry === "skin" ? "skinned" : "baked",
+      node: geometry === "float" ? null : 0, skin: geometry === "skin" ? 0 : null },
+    color: { texture: 0, flags: 8, page: geometry === "float" ? 0 : null },
+  };
+}
+
+const readColorShader = (key: string) => readFileSync(resolve(import.meta.dir,
+  `../.pocket-build/ipod/assets/shaders/${key}.glsl`), "utf8");
+
+test("mirror depth omission is restricted to opaque display colours, preserving raw and blend paths", () => {
+  const { scene, draw, color } = colorFixture();
+  for (const kind of ["standard", "unlit", "products"]) {
+    scene.materials[0].kind = kind;
+    expect(performanceReflectionPair(scene, draw,
+      { ...color, flags: kind === "products" ? 64 : kind === "unlit" ? 0 : 8 })).not.toBeNull();
+  }
+  for (const kind of ["glass", "water", "tower", "lights"]) {
+    scene.materials[0].kind = kind;
+    expect(performanceReflectionPair(scene, draw, color)).toBeNull();
+  }
+  scene.materials[0].kind = "standard";
+  expect(performanceReflectionPair(scene, draw)).toBeNull();
+  for (const blend of ["alpha", "premultiplied", "additive"]) {
+    scene.materials[0].blend = blend;
+    expect(performanceReflectionPair(scene, draw, color)).toBeNull();
+  }
+  scene.materials[0].blend = "opaque";
+  for (const flags of [16, 32, 16 | 32])
+    expect(performanceReflectionPair(scene, draw, { ...color, flags })).toBeNull();
+  scene.rain.active = false;
+  expect(performanceReflectionPair(scene, draw, color)).toEqual(colorPair(scene, draw, color));
+});
+
+// This is a compiler-output comparison, not a rewritten RGB reference model:
+// after deleting the unused depth input and setting only output alpha to zero,
+// the fragment program must be identical (temporary IDs are compiler assigned).
+function withoutDepth(source: string) {
+  const names = new Map<string, string>();
+  return source.replace(/^varying\s+(?:(?:lowp|mediump|highp)\s+)?float\s+vDepth;\n/gm, "")
+    .replace(/\bvDepth\b/g, "0.0")
+    .replace(/\b_\d+\b/g, name => {
+      if (!names.has(name)) names.set(name, `_temp${names.size}`);
+      return names.get(name)!;
+    });
+}
+
+test("mirror colour pairs remove only depth while keeping fog, coverage, texture and all vertex transforms", () => {
+  const directory = resolve(import.meta.dir, "../.pocket-build/validation/ipod-mirror-depth");
+  mkdirSync(directory, { recursive: true });
+  for (const fog of ["none", "fog", "vista"])
+    for (const geometry of ["float", "model", "skin"])
+      for (const alpha of [false, true]) {
+        const { scene, draw, color } = colorFixture(fog, geometry, alpha);
+        const main = colorPair(scene, draw, color).map(readColorShader);
+        const mirror = performanceReflectionPair(scene, draw, color)!.map(readColorShader);
+        expect(main[0]).toContain("vDepth"); expect(main[1]).toContain("vDepth");
+        expect(mirror.join("\n")).not.toContain("vDepth");
+        expect(mirror[0]).not.toMatch(/\blength\s*\(/);
+        expect(withoutDepth(main[1])).toBe(withoutDepth(mirror[1]));
+        expect(samplerDeclarations(mirror[1])).toEqual(["uAlbedo", "uEmission"]);
+        expect(mirror[1].includes("discard")).toBe(alpha);
+        expect(/\buDisplayFog\./.test(mirror[1])).toBe(fog === "fog");
+        expect(/\buDisplayHaze\./.test(mirror[1])).toBe(fog === "vista");
+        expect(mirror[0].includes("uEye")).toBe(fog === "fog");
+        for (const uniform of ["uViewProj", geometry === "float" ? "uWorldScale" : "uModel"])
+          expect(mirror[0]).toContain(uniform);
+        if (geometry === "skin") {
+          for (const attribute of ["aJoints", "aWeights", "uBones"])
+            expect(mirror[0]).toContain(attribute);
+        }
+        const files = mirror.map((source, stage) => {
+          const path = join(directory, `${fog}-${geometry}-${+alpha}.${stage ? "frag" : "vert"}`);
+          writeFileSync(path, source); return path;
+        });
+        const linked = Bun.spawnSync(["glslangValidator", "-l", ...files], { stdout: "pipe", stderr: "pipe" });
+        expect(linked.exitCode, linked.stdout.toString() + linked.stderr.toString()).toBe(0);
+      }
+}, 30_000);
+
+test("untextured mirrors and scene-wide haze triggers keep the main depth contract", () => {
+  const { scene, draw } = colorFixture();
+  const color = { texture: null, flags: 0, page: 0 };
+  for (const cause of ["rain", "lights", "ambient"]) {
+    const input = { ...scene, rain: { active: cause === "rain" },
+      fog_lights: cause === "lights" ? [{}] : [],
+      atmosphere: { haze_ambient: cause === "ambient" ? [0.1, 0, 0] : [0, 0, 0] } };
+    const main = colorPair(input, draw, color).map(readColorShader);
+    const mirror = performanceReflectionPair(input, draw, color)!.map(readColorShader);
+    expect(main[0]).toContain("vDepth");
+    expect(mirror.join("\n")).not.toContain("vDepth");
+    expect(samplerDeclarations(mirror[1])).toEqual([]);
+    expect(withoutDepth(main[1])).toBe(withoutDepth(mirror[1]));
   }
 });

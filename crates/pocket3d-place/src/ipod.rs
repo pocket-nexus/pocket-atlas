@@ -3,12 +3,14 @@
 use crate::{Draw, Error, Pack, Section, VertexLayout};
 use alloc::{string::String, vec::Vec};
 use serde::{Deserialize, Serialize};
+pub mod animated_display_lods;
+pub mod backface;
 pub mod display_environment;
 pub mod display_indices;
 pub mod display_lods;
+pub mod light_pages;
 pub mod skin_lods;
 pub mod window_params;
-pub mod light_pages;
 pub mod window_ray_params;
 
 /// Color sidecar v3 replacement for one complete source LOD. Both ranges are
@@ -28,6 +30,8 @@ pub struct DisplayIndexOverride {
 /// other backends neither produce nor interpret these texture recipes.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Recipes {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animated_display_lods: Option<AnimatedDisplayLods>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub light_pages: Option<LightPages>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -86,6 +90,38 @@ pub struct DisplayLodDraw {
     pub source_hash: String,
     pub payload_hash: String,
     pub levels: Vec<crate::DrawLod>,
+}
+
+/// Explicitly approximate animation-aware display LODs. Surface measurements
+/// sample the complete authored loop; they are not a continuous Hausdorff or
+/// pixel guarantee. Original vertices, weights and Reference remain unchanged.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnimatedDisplayLods {
+    pub version: u32,
+    pub draws: Vec<AnimatedDisplayLodDraw>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AnimatedDisplayLodDraw {
+    pub draw: u32,
+    pub source_hash: String,
+    pub colors_hash: String,
+    pub payload_hash: String,
+    pub sample_count: u32,
+    pub representative_samples: Vec<u32>,
+    pub dense_samples: Vec<u32>,
+    pub levels: Vec<crate::DrawLod>,
+    pub measurements: Vec<AnimatedLodMeasurement>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AnimatedLodMeasurement {
+    pub qem_error: f32,
+    pub sampled_max: f32,
+    pub dense_rms: f32,
+    pub samples: u64,
+    pub dense_point_samples: u64,
 }
 
 /// Optional SGX index-only simplification. Original source/Reference topology

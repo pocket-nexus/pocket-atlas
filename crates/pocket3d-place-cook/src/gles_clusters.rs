@@ -5,6 +5,10 @@ use std::collections::BTreeMap;
 type Result<T> = std::result::Result<T, String>;
 const CELL: f64 = 16.0;
 const PART_CELL: f64 = 4.0;
+// A4 moving-view measurements make tiny per-face query/cache records costly.
+// Split only substantial spatial clusters; the source/group/LOD policy stays
+// unchanged and smaller mixed-orientation clusters remain conservatively visible.
+const MIN_FACING_SPLIT_TRIANGLES: usize = 24;
 const HEADER: usize = 56;
 fn hash(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf29ce484222325, |h, &b| {
@@ -49,7 +53,7 @@ impl Bounds {
         self.point(b.min);
         self.point(b.max);
     }
-    fn bytes(&self, d: &pc::Draw, out: &mut Vec<u8>) {
+    fn padded(&self, d: &pc::Draw) -> Self {
         let mut b = self.clone();
         for k in 0..3 {
             let pad =
@@ -57,6 +61,10 @@ impl Bounds {
             b.min[k] -= pad;
             b.max[k] += pad;
         }
+        b
+    }
+    fn bytes(&self, d: &pc::Draw, out: &mut Vec<u8>) {
+        let b = self.padded(d);
         for n in b.min.into_iter().chain(b.max) {
             out.extend(n.to_le_bytes());
         }
@@ -70,7 +78,7 @@ struct Group {
     bounds: Bounds,
     levels: Vec<BTreeMap<[i64; 3], Cluster>>,
 }
-fn groups(d: &pc::Draw, lods:&[pc::DrawLod], geometry: &[u8]) -> Result<Vec<Group>> {
+fn groups(d: &pc::Draw, lods: &[pc::DrawLod], geometry: &[u8]) -> Result<Vec<Group>> {
     let roots = pc::ipod::components(d, geometry)?;
     let mut parts = BTreeMap::<u32, Bounds>::new();
     for (i, &r) in roots.iter().enumerate() {
@@ -135,24 +143,63 @@ fn groups(d: &pc::Draw, lods:&[pc::DrawLod], geometry: &[u8]) -> Result<Vec<Grou
     }
     Ok(bins.into_values().collect())
 }
+fn oriented(
+    meta: &pc::Meta,
+    d: &pc::Draw,
+    g: &[u8],
+    clusters: BTreeMap<[i64; 3], Cluster>,
+) -> Result<Vec<Cluster>> {
+    let mut out = Vec::new();
+    for (_, c) in clusters {
+        if !pc::ipod::backface::eligible(meta, d)
+            || c.indices.len() / 3 < MIN_FACING_SPLIT_TRIANGLES
+        {
+            out.push(c);
+            continue;
+        }
+        let mut buckets: BTreeMap<u8, Vec<u16>> = BTreeMap::new();
+        for t in c.indices.chunks_exact(3) {
+            let positions = [
+                pc::ipod::position(d, g, t[0])?,
+                pc::ipod::position(d, g, t[1])?,
+                pc::ipod::position(d, g, t[2])?,
+            ];
+            buckets
+                .entry(pc::ipod::backface::bucket(positions))
+                .or_default()
+                .extend_from_slice(t);
+        }
+        for indices in buckets.into_values() {
+            out.push(Cluster {
+                indices,
+                bounds: c.bounds.clone(),
+            });
+        }
+    }
+    Ok(out)
+}
 pub(super) fn adapt(source: &[u8]) -> Result<Vec<u8>> {
     let pack = pc::ipod::parse(source).map_err(|e| e.to_string())?;
     let meta_bytes = pack.section(pc::TAG_META).map_err(|e| e.to_string())?;
-    let metadata: pc::ipod::Metadata = serde_json::from_slice(meta_bytes).map_err(|e|e.to_string())?;
+    let metadata: pc::ipod::Metadata =
+        serde_json::from_slice(meta_bytes).map_err(|e| e.to_string())?;
     let meta = metadata.scene;
-    let effective = pc::ipod::display_lods::EffectiveLods::new(&meta,&metadata.ipod_recipes)?;
+    let effective = pc::ipod::display_lods::EffectiveLods::new(&meta, &metadata.ipod_recipes)?;
     let geometry = pack.section(pc::TAG_GEOMETRY).map_err(|e| e.to_string())?;
     let (mut draws, mut group_data, mut levels, mut bounds, mut indices) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let (mut ng, mut nl, mut nc, mut ni) = (0, 0, 0, 0);
-    for (di,d) in meta.draws.iter().enumerate() {
-        let lods=effective.get(&meta,di);
+    for (di, d) in meta.draws.iter().enumerate() {
+        let lods = effective.get(&meta, di);
         word(&mut draws, ng)?;
         if !eligible(&meta, d) {
             word(&mut draws, 0)?;
             continue;
         }
         let all = groups(d, lods, geometry)?;
+        // Decide membership from the original spatial partition, before
+        // orientation splitting. Otherwise a formerly raw draw could acquire
+        // a different group bound and therefore a different LOD decision.
         if all.is_empty() || (all.len() == 1 && all[0].levels.iter().all(|l| l.len() <= 1)) {
             word(&mut draws, 0)?;
             continue;
@@ -164,16 +211,26 @@ pub(super) fn adapt(source: &[u8]) -> Result<Vec<u8>> {
             word(&mut group_data, group.levels.len())?;
             group.bounds.bytes(d, &mut group_data);
             for (k, clusters) in group.levels.into_iter().enumerate() {
+                let clusters = oriented(&meta, d, geometry, clusters)?;
                 let error = if k == 0 { 0.0 } else { lods[k - 1].error };
                 levels.extend(error.to_le_bytes());
                 word(&mut levels, nc)?;
                 word(&mut levels, clusters.len())?;
                 nl += 1;
                 nc += clusters.len();
-                for (_, c) in clusters {
+                for c in clusters {
                     word(&mut bounds, ni)?;
                     word(&mut bounds, c.indices.len())?;
                     c.bounds.bytes(d, &mut bounds);
+                    let b = c.bounds.padded(d);
+                    let facing = if pc::ipod::backface::eligible(&meta, d) {
+                        pc::ipod::backface::build(d, geometry, &c.indices, b.min, b.max)?
+                    } else {
+                        Default::default()
+                    };
+                    for value in facing.values() {
+                        bounds.extend(value.to_le_bytes());
+                    }
                     ni += c.indices.len();
                     for i in c.indices {
                         indices.extend(i.to_le_bytes());
@@ -189,7 +246,7 @@ pub(super) fn adapt(source: &[u8]) -> Result<Vec<u8>> {
     out.extend(bounds);
     out.extend(indices);
     out[..4].copy_from_slice(b"IPCL");
-    out[4..8].copy_from_slice(&2u32.to_le_bytes());
+    out[4..8].copy_from_slice(&3u32.to_le_bytes());
     for (at, h) in [
         (8, hash(meta_bytes)),
         (16, hash(geometry)),
@@ -281,9 +338,162 @@ mod tests {
         assert!(out.groups(100).is_none());
         assert_eq!(out.bytes() - out.query_bytes() + HEADER, bytes.len());
     }
+    #[test]
+    fn v3_facing_proof_is_recomputed_and_v2_stays_readable() {
+        let (mut m, g) = separate_parts();
+        m.draws[0].pos_scale = [1.; 3];
+        let source = source(&m, &g);
+        let bytes = adapt(&source).unwrap();
+        let groups = u32::from_le_bytes(bytes[36..40].try_into().unwrap()) as usize;
+        let levels = u32::from_le_bytes(bytes[40..44].try_into().unwrap()) as usize;
+        let count = u32::from_le_bytes(bytes[44..48].try_into().unwrap()) as usize;
+        let at = HEADER + m.draws.len() * 8 + groups * 32 + levels * 12;
+        for value in [f32::NAN, 0., 0.00001] {
+            let mut bad = bytes.clone();
+            bad[at + 32 + 5 * 4..at + 56].copy_from_slice(&value.to_le_bytes());
+            rehash(&mut bad);
+            assert!(read(&bad, &source).is_err());
+        }
+        let mut old = bytes[..at].to_vec();
+        old[4..8].copy_from_slice(&2u32.to_le_bytes());
+        for c in bytes[at..at + count * 56].chunks_exact(56) {
+            old.extend_from_slice(&c[..32]);
+        }
+        old.extend_from_slice(&bytes[at + count * 56..]);
+        rehash(&mut old);
+        let legacy = read(&old, &source).unwrap();
+        let modern = read(&bytes, &source).unwrap();
+        let view = runtime::Query::new([[0., 0., 0., 1.]; 6], [0., 0., -100.], 0.00001);
+        let mut a = 0;
+        let mut b = 0;
+        legacy.query(0, &view, |_, _, _, c| a += legacy.indices(&c).len());
+        modern.query(0, &view, |_, _, _, c| b += modern.indices(&c).len());
+        assert!(a > 0);
+        assert_eq!(b, 0);
+    }
     fn rehash(bytes: &mut [u8]) {
         let h = hash(&bytes[HEADER..]);
         bytes[24..32].copy_from_slice(&h.to_le_bytes());
+    }
+    #[test]
+    fn orientation_split_does_not_add_formerly_raw_draws() {
+        let (mut m, mut g) = separate_parts();
+        let d = &mut m.draws[0];
+        d.pos_scale = [1.; 3];
+        // Two disconnected, oppositely wound patches in the same original
+        // part cell and triangle cell would produce two orientation buckets.
+        for i in 0..8 {
+            let x = (i % 4 == 1 || i % 4 == 2) as u8 as f32 + (i / 4) as f32 * 2.;
+            g[i * 56..i * 56 + 4].copy_from_slice(&x.to_le_bytes());
+        }
+        for range in core::iter::once(&d.indices).chain(d.lods.iter().map(|l| &l.indices)) {
+            for tri in g[range.offset as usize..][..range.size as usize].chunks_exact_mut(6) {
+                if u16::from_le_bytes(tri[..2].try_into().unwrap()) >= 4 {
+                    tri.swap(2, 4);
+                    tri.swap(3, 5);
+                }
+            }
+        }
+        let original = pc::parts::slice(&g, &d.indices).unwrap().to_vec();
+        d.indices.offset = g.len() as u32;
+        for _ in 0..6 {
+            g.extend(&original);
+        }
+        d.indices.size = original.len() as u32 * 6;
+        d.index_count = d.indices.size / 2;
+        d.lods.clear();
+        let all = groups(d, &d.lods, &g).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].levels[0].len(), 1);
+        let clusters = oriented(
+            &m,
+            &m.draws[0],
+            &g,
+            all.into_iter().next().unwrap().levels.remove(0),
+        )
+        .unwrap();
+        assert_eq!(clusters.len(), 2);
+        let src = source(&m, &g);
+        assert!(read(&adapt(&src).unwrap(), &src)
+            .unwrap()
+            .groups(0)
+            .is_none());
+    }
+    #[test]
+    fn facing_threshold_preserves_23_and_24_triangle_lods_exactly() {
+        let (mut meta, mut geometry) = separate_parts();
+        let d = &mut meta.draws[0];
+        d.pos_scale = [1.; 3];
+        d.min = [0.; 3];
+        d.max = [33., 1., 0.];
+        geometry.truncate(8 * 56);
+        // Two opposite-facing complete parts occupy one original spatial
+        // cluster. A distant third part keeps the old draw membership active.
+        for i in 0..8 {
+            let x = (i % 4 == 1 || i % 4 == 2) as u8 as f32 + (i / 4) as f32 * 2.;
+            geometry[i * 56..i * 56 + 4].copy_from_slice(&x.to_le_bytes());
+        }
+        for p in [[32f32, 0., 0.], [33., 0., 0.], [32., 1., 0.]] {
+            let mut vertex = [0u8; 56];
+            for k in 0..3 {
+                vertex[k * 4..k * 4 + 4].copy_from_slice(&p[k].to_le_bytes());
+            }
+            geometry.extend(vertex);
+        }
+        d.vertex_count = 11;
+        d.vertices.size = 11 * 56;
+        let mut levels = Vec::new();
+        for n in [24usize, 23] {
+            let start = geometry.len();
+            for i in 0..n {
+                for index in if i % 2 == 0 { [0u16, 1, 2] } else { [4, 6, 5] } {
+                    geometry.extend(index.to_le_bytes());
+                }
+            }
+            for index in [8u16, 9, 10] {
+                geometry.extend(index.to_le_bytes());
+            }
+            levels.push(pc::Range {
+                offset: start as u32,
+                size: (geometry.len() - start) as u32,
+            });
+        }
+        d.indices = levels[0].clone();
+        d.index_count = levels[0].size / 2;
+        d.lods = vec![pc::DrawLod {
+            indices: levels[1].clone(),
+            index_count: levels[1].size / 2,
+            error: 0.02,
+        }];
+        let src = source(&meta, &geometry);
+        let copy = src.clone();
+        let bytes = adapt(&src).unwrap();
+        let out = read(&bytes, &src).unwrap(); // re-proves every exact multiset
+        assert_eq!(src, copy);
+        assert_eq!(bytes, adapt(&src).unwrap());
+        let groups = out.groups(0).unwrap();
+        assert_eq!(groups.len(), 2);
+        let levels = out.levels(&groups[0]);
+        assert_eq!(
+            levels.iter().map(|l| l.error).collect::<Vec<_>>(),
+            [0., 0.02]
+        );
+        assert_eq!(out.clusters(&levels[0]).len(), 2);
+        assert_eq!(out.clusters(&levels[1]).len(), 1);
+        let cluster = &out.clusters(&levels[1])[0];
+        let expected: Vec<u16> = (0..23)
+            .flat_map(|i| if i % 2 == 0 { [0, 1, 2] } else { [4, 6, 5] })
+            .collect();
+        assert_eq!(out.indices(cluster), expected); // no small-cluster reorder
+        assert!(pc::ipod::backface::build(
+            &meta.draws[0],
+            &geometry,
+            out.indices(cluster),
+            cluster.min,
+            cluster.max
+        )
+        .unwrap()
+        .disabled());
     }
     fn separate_parts() -> (pc::Meta, Vec<u8>) {
         let (mut m, _) = fixture();
@@ -395,7 +605,7 @@ mod tests {
         let groups_at = HEADER + 8;
         let levels_at = groups_at + 2 * 32;
         let clusters_at = levels_at + 6 * 12;
-        let index_at = clusters_at + 4 * 32;
+        let index_at = clusters_at + 4 * 56;
         let a = bad[index_at..index_at + 6].to_vec();
         let b = bad[index_at + 18..index_at + 24].to_vec();
         bad[index_at..index_at + 6].copy_from_slice(&b);
@@ -404,9 +614,9 @@ mod tests {
             groups_at,
             groups_at + 32,
             clusters_at,
-            clusters_at + 32,
-            clusters_at + 64,
-            clusters_at + 96,
+            clusters_at + 56,
+            clusters_at + 112,
+            clusters_at + 168,
         ] {
             for k in 0..3 {
                 bad[at + 8 + k * 4..at + 12 + k * 4].copy_from_slice(&(-100f32).to_le_bytes());

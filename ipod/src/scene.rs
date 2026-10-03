@@ -1264,17 +1264,26 @@ impl Scene {
         } else { None };
         scene.skin_bounds = SkinBounds::build(&scene.meta, &data)?;
         validation::validate_window_parameters(&scene.meta, &scene.ipod_recipes, &data)?;
-        if let Some(recipe) = &scene.ipod_recipes.skin_lods {
+        if scene.ipod_recipes.skin_lods.is_some()
+            || scene.ipod_recipes.animated_display_lods.is_some()
+        {
             // iPod ARMv7 and the host harness are little-endian. Borrow the
             // already decoded immutable f32 allocation; retaining a second
             // ANIM staging buffer would add several MiB at peak load.
             #[cfg(target_endian = "little")]
-            let animation = core::slice::from_raw_parts(scene.anim.as_ptr().cast::<u8>(), scene.anim.len() * 4);
+            let animation =
+                core::slice::from_raw_parts(scene.anim.as_ptr().cast::<u8>(), scene.anim.len() * 4);
             #[cfg(target_endian = "big")]
-            let animation_storage: Vec<u8> = scene.anim.iter().flat_map(|f| f.to_le_bytes()).collect();
+            let animation_storage: Vec<u8> =
+                scene.anim.iter().flat_map(|f| f.to_le_bytes()).collect();
             #[cfg(target_endian = "big")]
             let animation = &animation_storage;
-            pc::ipod::skin_lods::validate(&scene.meta, &data, animation, recipe)?;
+            if let Some(recipe) = &scene.ipod_recipes.skin_lods {
+                pc::ipod::skin_lods::validate(&scene.meta, &data, animation, recipe)?;
+            }
+            if let Some(recipe) = &scene.ipod_recipes.animated_display_lods {
+                pc::ipod::animated_display_lods::validate(&scene.meta, &data, animation, recipe)?;
+            }
         }
         pc::ipod::display_lods::validate(&scene.meta, &data, &scene.ipod_recipes)?;
         if performance {
@@ -1301,6 +1310,36 @@ impl Scene {
             for entry in scene.ipod_recipes.display_lods.iter().flat_map(|r| &r.draws) {
                 if !colors.as_ref().is_some_and(|c| c.draws.iter().any(|d| d.draw == entry.draw && d.page.is_some() && d.flags & (16 | 32 | 64) == 0)) {
                     return Err("display LOD requires a validated dry float display page".into());
+                }
+            }
+        }
+        if performance {
+            for recipe in scene
+                .ipod_recipes
+                .animated_display_lods
+                .iter()
+                .flat_map(|r| &r.draws)
+            {
+                let colors = colors
+                    .as_ref()
+                    .ok_or("animated display LOD requires color sidecar")?;
+                let entry = colors
+                    .draws
+                    .iter()
+                    .find(|d| d.draw == recipe.draw)
+                    .ok_or("animated display LOD requires graded colors")?;
+                if entry.page.is_some() || entry.flags & (16 | 32 | 64) != 0 {
+                    return Err("animated display LOD requires ordinary skin display layout".into());
+                }
+                let end = (entry.offset as usize)
+                    .checked_add(entry.vertex_count as usize * 4)
+                    .ok_or("animated display color range overflow")?;
+                let bytes = colors
+                    .bytes
+                    .get(entry.offset as usize..end)
+                    .ok_or("animated display color range")?;
+                if pc::ipod::animated_display_lods::color_hash(bytes) != recipe.colors_hash {
+                    return Err("animated display LOD stale graded colors".into());
                 }
             }
         }
@@ -1388,11 +1427,13 @@ impl Scene {
             let usage = crate::geometry_usage::GeometryUsage::new(
                 &scene.meta, data.len(), &display_pages,
                 texture_plan.as_ref().is_none_or(|p| p.needs_original_shadow()),
-                scene.ipod_recipes.skin_lods.iter().flat_map(|r| &r.draws).flat_map(|d| &d.levels).map(|l| (&l.indices,l.index_count)),
+                scene.ipod_recipes.skin_lods.iter().flat_map(|r| &r.draws).flat_map(|d| &d.levels)
+                    .chain(scene.ipod_recipes.animated_display_lods.iter().flat_map(|r| &r.draws).flat_map(|d| &d.levels))
+                    .map(|l| (&l.indices,l.index_count)),
             )?;
             usage.compact(&mut data)?;
             scene.geometry_usage = Some(usage);
-        } else if scene.ipod_recipes.skin_lods.is_some() || scene.ipod_recipes.display_lods.is_some() {
+        } else if scene.ipod_recipes.skin_lods.is_some() || scene.ipod_recipes.display_lods.is_some() || scene.ipod_recipes.animated_display_lods.is_some() {
             // Validation above reads the whole source plus recipe payload.
             // Reference uploads only original ranges, never derived indices.
             data.truncate(pc::ipod::display_lods::source_end(&scene.meta)? as usize);
@@ -5504,6 +5545,99 @@ mod tests {
                 released();
             }
         }
+    }
+    #[test]
+    fn animation_display_recipe_binds_colors_preserves_reference_and_releases_failed_loads() {
+        let _lock = SERIAL.lock().unwrap();
+        let (meta, geometry, animation, mut recipes) = skin_recipe_fixture();
+        let old = recipes.skin_lods.take().unwrap();
+        let mut levels = old.draws[0].levels.clone();
+        levels[0].error = pc::ipod::animated_display_lods::guarded_error(0.).unwrap();
+        let anim: Vec<u8> = animation.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let sample_count = meta.frames * pc::ipod::animated_display_lods::SUBFRAMES;
+        let reps = vec![0];
+        let dense = pc::ipod::animated_display_lods::dense_schedule(sample_count, &reps);
+        let dense_points =
+            (meta.draws[0].vertex_count as u64 + meta.draws[0].index_count as u64 / 3 + 1)
+                * dense.len() as u64;
+        let sparse_points =
+            (meta.draws[0].vertex_count as u64 + meta.draws[0].index_count as u64 / 3 + 1)
+                * (sample_count as u64 - dense.len() as u64);
+        let colors = [42, 84, 126, 255].repeat(meta.draws[0].vertex_count as usize);
+        recipes.animated_display_lods = Some(pc::ipod::AnimatedDisplayLods {
+            version: 1,
+            draws: vec![pc::ipod::AnimatedDisplayLodDraw {
+                draw: 0,
+                source_hash: pc::ipod::animated_display_lods::source_hash(
+                    &meta,
+                    &meta.draws[0],
+                    &geometry,
+                    pc::ipod::skin_lods::animation_hash(&meta, &anim).unwrap(),
+                )
+                .unwrap(),
+                colors_hash: pc::ipod::animated_display_lods::color_hash(&colors),
+                payload_hash: pc::ipod::skin_lods::payload_hash(&levels, &geometry).unwrap(),
+                sample_count,
+                representative_samples: reps,
+                dense_samples: dense,
+                levels: levels.clone(),
+                measurements: vec![pc::ipod::AnimatedLodMeasurement {
+                    qem_error: 0.,
+                    sampled_max: 0.,
+                    dense_rms: 0.,
+                    samples: dense_points + sparse_points,
+                    dense_point_samples: dense_points,
+                }],
+            }],
+        });
+        let source = window_pack(&meta, &geometry, &animation, &recipes);
+        let file = PackFile::write(&source);
+        let (json, bytes) = color_sidecar(&source);
+        write_colors(&file, &json, &bytes);
+        for performance in [true, false] {
+            reset(None);
+            let scene = unsafe { Scene::load_for_profile(file.path(), performance) }.unwrap();
+            assert_eq!(scene.effective_lods(0).len(), usize::from(performance));
+            assert!(scene.meta.draws[0].lods.is_empty());
+            assert_eq!(
+                scene
+                    .gpu_index_offset(levels[0].indices.offset, 3)
+                    .is_some(),
+                performance
+            );
+            drop(scene);
+            released();
+        }
+        for fail in [
+            "buffer",
+            "geometry upload",
+            "color buffer",
+            "color upload",
+            "color vaos",
+            "color attributes",
+        ] {
+            reset(Some(fail));
+            assert!(unsafe { Scene::load(file.path()) }.is_err(), "{fail}");
+            released();
+        }
+        let mut changed = bytes.clone();
+        changed[0] ^= 1;
+        let mut j = json.clone();
+        j["colorsHash"] = serde_json::json!(color_hash(&changed));
+        write_colors(&file, &j, &changed);
+        reset(None);
+        assert!(unsafe { Scene::load(file.path()) }
+            .err()
+            .unwrap()
+            .contains("stale graded"));
+        released();
+        std::fs::remove_file(color_path(file.path(), "json")).unwrap();
+        reset(None);
+        assert!(unsafe { Scene::load(file.path()) }.is_err());
+        released();
+        reset(None);
+        drop(unsafe { Scene::load_for_profile(file.path(), false) }.unwrap());
+        released();
     }
     #[test]
     fn skin_pose_bounds_enclose_mixed_influences_nonuniform_scale_and_stretched_limbs() {

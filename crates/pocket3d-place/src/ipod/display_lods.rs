@@ -290,6 +290,13 @@ pub fn validate_ranges(
                 .flat_map(|r| &r.draws)
                 .flat_map(|d| &d.levels),
         )
+        .chain(
+            recipes
+                .animated_display_lods
+                .iter()
+                .flat_map(|r| &r.draws)
+                .flat_map(|d| &d.levels),
+        )
     {
         let r = &level.indices;
         if r.offset < source_end
@@ -370,7 +377,10 @@ pub struct EffectiveLods {
 }
 impl EffectiveLods {
     pub fn new(meta: &Meta, recipes: &super::Recipes) -> Result<Self, String> {
-        if recipes.skin_lods.is_none() && recipes.display_lods.is_none() {
+        if recipes.skin_lods.is_none()
+            && recipes.display_lods.is_none()
+            && recipes.animated_display_lods.is_none()
+        {
             return Ok(Self::default());
         }
         let mut draws = vec![None; meta.draws.len()];
@@ -401,6 +411,45 @@ impl EffectiveLods {
             all.extend(levels.iter().cloned());
             if all.iter().any(|l| !l.error.is_finite() || l.error < 0.0) {
                 return Err("effective LOD nonfinite error".into());
+            }
+            all.sort_by(|a, b| {
+                a.error
+                    .total_cmp(&b.error)
+                    .then(a.index_count.cmp(&b.index_count))
+            });
+            let mut count = source.index_count;
+            all.retain(|l| {
+                if l.index_count < count {
+                    count = l.index_count;
+                    true
+                } else {
+                    false
+                }
+            });
+            *dst = Some(all);
+        }
+        // The approximate animation/display tiers supplement the original
+        // same-influence tiers. Neither changes the other's proof or payload.
+        for entry in recipes.animated_display_lods.iter().flat_map(|r| &r.draws) {
+            if recipes
+                .display_lods
+                .iter()
+                .flat_map(|r| &r.draws)
+                .any(|d| d.draw == entry.draw)
+            {
+                return Err("static and animated display LOD recipes overlap".into());
+            }
+            let source = meta
+                .draws
+                .get(entry.draw as usize)
+                .ok_or("animated effective LOD draw")?;
+            let dst = draws
+                .get_mut(entry.draw as usize)
+                .ok_or("animated effective LOD draw")?;
+            let mut all = dst.take().unwrap_or_else(|| source.lods.clone());
+            all.extend(entry.levels.iter().cloned());
+            if all.iter().any(|l| !l.error.is_finite() || l.error < 0.) {
+                return Err("animated effective LOD error".into());
             }
             all.sort_by(|a, b| {
                 a.error

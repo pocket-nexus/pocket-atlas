@@ -127,6 +127,7 @@ unsafe extern "C" {
         pointer: *const c_void,
     );
     pub fn glViewport(x: GLint, y: GLint, width: GLsizei, height: GLsizei);
+    pub fn glScissor(x: GLint, y: GLint, width: GLsizei, height: GLsizei);
 }
 extern "C" {
     pub fn glBindFramebuffer(t: u32, f: u32);

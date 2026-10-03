@@ -1,6 +1,7 @@
 //! Optional original-LOD selection per complete connected-part group.
-//! IPCL v2: 56-byte header, draw pairs, 32-byte groups, 12-byte levels,
-//! 32-byte clusters and u16 indices. No PLCE geometry or error is replaced.
+//! IPCL v3: 56-byte header, draw pairs, 32-byte groups, 12-byte levels,
+//! 56-byte clusters and u16 indices. Version 2's 32-byte clusters remain
+//! readable with facing rejection disabled. No PLIP geometry/error is replaced.
 extern crate alloc;
 use self::alloc::{string::String, sync::Arc, vec::Vec};
 use pocket3d_place as pc;
@@ -83,10 +84,10 @@ fn budget(
     }
     Ok(sizes)
 }
-fn file_bytes(sizes: [usize; 5]) -> Result<usize, String> {
+fn file_bytes(sizes: [usize; 5], cluster_stride: usize) -> Result<usize, String> {
     sizes
         .into_iter()
-        .zip([8usize, 32, 12, 32, 2])
+        .zip([8usize, 32, 12, cluster_stride, 2])
         .try_fold(HEADER, |sum, (n, stride)| {
             n.checked_mul(stride).and_then(|v| sum.checked_add(v))
         })
@@ -100,10 +101,11 @@ pub fn max_file_bytes_with_lods(
     meta: &pc::Meta,
     lods: &pc::ipod::display_lods::EffectiveLods,
 ) -> Result<usize, String> {
-    file_bytes(budget(meta, lods)?)
+    file_bytes(budget(meta, lods)?, 56)
 }
 #[derive(Clone, Copy)]
 pub struct Cluster {
+    facing: pc::ipod::backface::PreparedCone,
     first: u32,
     count: u32,
     pub min: [f32; 3],
@@ -125,6 +127,7 @@ pub struct Group {
 pub struct Query {
     planes: [[f32; 4]; 6],
     eye: glam::Vec3,
+    cull_eye: [f32; 3],
     scale: f32,
     scale_squared: f32,
 }
@@ -132,6 +135,7 @@ pub struct Query {
 struct QueryKey {
     planes: [[u32; 4]; 6],
     eye: [u32; 3],
+    cull_eye: [u32; 3],
     scale: u32,
 }
 impl Query {
@@ -139,14 +143,20 @@ impl Query {
         Self {
             planes,
             eye: glam::Vec3::from(eye),
+            cull_eye: eye,
             scale: lod_scale,
             scale_squared: lod_scale * lod_scale,
         }
+    }
+    pub fn with_cull_eye(mut self, eye: [f32; 3]) -> Self {
+        self.cull_eye = eye;
+        self
     }
     fn key(&self) -> QueryKey {
         QueryKey {
             planes: self.planes.map(|p| p.map(f32::to_bits)),
             eye: self.eye.to_array().map(f32::to_bits),
+            cull_eye: self.cull_eye.map(f32::to_bits),
             scale: self.scale.to_bits(),
         }
     }
@@ -405,11 +415,13 @@ impl MeshClusters {
     ) -> Result<Self, String> {
         if bytes.len() < HEADER
             || &bytes[..4] != b"IPCL"
-            || u32_at(bytes, 4)? != 2
+            || !matches!(u32_at(bytes, 4)?, 2 | 3)
             || u32_at(bytes, 52)? != 0
         {
             return Err("invalid cluster header".into());
         }
+        let version = u32_at(bytes, 4)?;
+        let cluster_stride = if version == 3 { 56 } else { 32 };
         if bytes.len() > max_file_bytes_with_lods(meta, lods)? {
             return Err("cluster file exceeds geometry budget".into());
         }
@@ -428,7 +440,7 @@ impl MeshClusters {
                 .into_iter()
                 .zip(budget(meta, lods)?)
                 .any(|(n, max)| n > max)
-            || file_bytes(sizes)? != bytes.len()
+            || file_bytes(sizes, cluster_stride)? != bytes.len()
         {
             return Err("cluster payload size/count mismatch".into());
         }
@@ -469,6 +481,7 @@ impl MeshClusters {
             });
             at += 12;
         }
+        let cluster_records = at;
         for _ in 0..sizes[3] {
             let (min, max) = bounds(bytes, at + 8)?;
             let count = u32_at(bytes, at + 4)?;
@@ -476,12 +489,13 @@ impl MeshClusters {
                 return Err("invalid cluster index count".into());
             }
             out.clusters.push(Cluster {
+                facing: Default::default(),
                 first: u32_at(bytes, at)?,
                 count,
                 min,
                 max,
             });
-            at += 32;
+            at += cluster_stride;
         }
         for _ in 0..sizes[4] {
             out.indices
@@ -535,14 +549,35 @@ impl MeshClusters {
                         return Err("group LOD differs from original".into());
                     }
                     let start = ic;
-                    for cluster in
-                        &out.clusters[span(level.first, level.count, out.clusters.len())?]
-                    {
+                    let cluster_range = span(level.first, level.count, out.clusters.len())?;
+                    for (local, cluster) in out.clusters[cluster_range].iter_mut().enumerate() {
                         if cluster.first != ic {
                             return Err("cluster indices are not contiguous".into());
                         }
                         let indices =
                             &out.indices[span(cluster.first, cluster.count, out.indices.len())?];
+                        if version == 3 {
+                            let at =
+                                cluster_records + (level.first as usize + local) * cluster_stride;
+                            let mut values = [0.; 6];
+                            for (k, value) in values.iter_mut().enumerate() {
+                                *value = f32::from_bits(u32_at(bytes, at + 32 + k * 4)?);
+                            }
+                            let cone = pc::ipod::backface::Cone::from_values(values);
+                            if pc::ipod::backface::eligible(meta, d) {
+                                pc::ipod::backface::validate(
+                                    cone,
+                                    d,
+                                    geometry,
+                                    indices,
+                                    cluster.min,
+                                    cluster.max,
+                                )?
+                            } else if !cone.disabled() {
+                                return Err("ineligible cluster backface descriptor".into());
+                            }
+                            cluster.facing = cone.prepare();
+                        }
                         if actual[k]
                             .len()
                             .checked_add(indices.len() / 3)
@@ -742,7 +777,9 @@ impl MeshClusters {
         let levels = self.levels(group);
         let selected = view.level(group, levels);
         for (i, c) in self.clusters(&levels[selected]).iter().enumerate() {
-            if mask == 0 || view.visible(c.min, c.max, mask) {
+            if (mask == 0 || view.visible(c.min, c.max, mask))
+                && !c.facing.backfacing(c.min, c.max, view.cull_eye)
+            {
                 emit(index - origin, selected as u32, i as u32, *c);
             }
         }
@@ -798,7 +835,8 @@ mod tests {
             }
             let li = original_level(view, g, mesh.levels(g));
             for (ci, c) in mesh.clusters(&mesh.levels(g)[li]).iter().enumerate() {
-                if visible(view, c.min, c.max) {
+                if visible(view, c.min, c.max) && !c.facing.backfacing(c.min, c.max, view.cull_eye)
+                {
                     out.push((gi as u32, li as u32, ci as u32, c.first, c.count));
                 }
             }
@@ -872,6 +910,7 @@ mod tests {
                         c_lo[0] += ci as f32 * 0.4;
                         c_hi[0] -= (1 - ci) as f32 * 0.4;
                         mesh.clusters.push(Cluster {
+                            facing: Default::default(),
                             first: mesh.indices.len() as u32,
                             count: 3,
                             min: c_lo,
@@ -906,6 +945,37 @@ mod tests {
         assert_eq!(&mesh.query_roots[..3], &[u32::MAX; 3]);
         assert!(mesh.query_roots[3..].iter().all(|&r| r != u32::MAX));
         assert!(mesh.query_bytes() > 0);
+    }
+    #[test]
+    fn reflected_cull_eye_changes_cache_selection_but_not_lod_distance() {
+        let mut mesh = query_fixture();
+        for c in &mut mesh.clusters {
+            c.facing = pc::ipod::backface::Cone {
+                axis: [0., 1., 0.],
+                cosine: 0.9999,
+                offset: 0.,
+                condition: 2.,
+            }
+            .prepare();
+        }
+        let original = [0., 50., 0.];
+        let view = Query::new(planes([0.; 3], 1000.), original, 0.001);
+        let reflected = Query::new(view.planes, original, view.scale).with_cull_eye([0., -50., 0.]);
+        for g in &mesh.groups {
+            assert_eq!(
+                view.level(g, mesh.levels(g)),
+                reflected.level(g, mesh.levels(g))
+            );
+        }
+        let mut cache = QueryCache::default();
+        let main = cached_selection(&mut cache, &mesh, 5, &view);
+        assert!(!main.is_empty());
+        let n = cache.evaluations;
+        assert!(cached_selection(&mut cache, &mesh, 5, &reflected).is_empty());
+        assert_eq!(cache.evaluations, n + 1);
+        assert!(cached_selection(&mut cache, &mesh, 5, &reflected).is_empty());
+        assert_eq!(cache.evaluations, n + 1);
+        assert_eq!(main, cached_selection(&mut cache, &mesh, 5, &view));
     }
     #[test]
     fn squared_lod_keeps_strict_sqrt_boundary_and_extreme_scales() {
@@ -996,13 +1066,15 @@ mod tests {
         let other_generation = cache.draws[4].generation;
         // Every plane/eye component and scale affect the exact key, including
         // +0/-0. No quantized camera cache or time-dependent input exists.
-        for component in 0..28 {
+        for component in 0..31 {
             let mut next = Query::new(view.planes, view.eye.to_array(), view.scale);
             if component < 24 {
                 let value = &mut next.planes[component / 4][component % 4];
                 *value = f32::from_bits(value.to_bits() ^ 1);
             } else if component < 27 {
                 next.eye[component - 24] = -0.0;
+            } else if component < 30 {
+                next.cull_eye[component - 27] = -0.0;
             } else {
                 next.scale = f32::from_bits(next.scale.to_bits() + 1);
                 next.scale_squared = next.scale * next.scale;
@@ -1065,12 +1137,17 @@ mod tests {
             let bytes = std::fs::read(&path).unwrap();
             let pack = pc::ipod::parse(&bytes).unwrap();
             let meta = pack.meta().unwrap();
+            let metadata: pc::ipod::Metadata =
+                serde_json::from_slice(pack.section(pc::TAG_META).unwrap()).unwrap();
+            let lods =
+                pc::ipod::display_lods::EffectiveLods::new(&meta, &metadata.ipod_recipes).unwrap();
             let clusters = std::fs::read(path.with_extension("ipod-clusters.bin")).unwrap();
-            let mesh = MeshClusters::parse(
+            let mesh = MeshClusters::parse_with_lods(
                 &clusters,
                 &meta,
                 pack.section(pc::TAG_META).unwrap(),
                 pack.section(pc::TAG_GEOMETRY).unwrap(),
+                &lods,
             )
             .unwrap();
             let mut cases = 0;
@@ -1103,13 +1180,18 @@ mod tests {
                             m.w_axis - m.z_axis,
                         ]
                         .map(|v| v.to_array());
-                        for height in [106u32, 213] {
+                        for height in [106u32, 213, 320] {
                             let scale = if mirror {
                                 1.6 / (height / 3).max(42) as f32
                             } else {
                                 0.8 / height as f32
                             };
-                            let view = Query::new(p, eye.to_array(), scale);
+                            let view =
+                                Query::new(p, eye.to_array(), scale).with_cull_eye(if mirror {
+                                    [eye.x, -eye.y, eye.z]
+                                } else {
+                                    eye.to_array()
+                                });
                             for draw in 0..meta.draws.len() {
                                 assert_eq!(
                                     accelerated(&mesh, draw, &view),

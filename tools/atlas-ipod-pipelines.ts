@@ -163,11 +163,17 @@ function pair(scene: any, d: any, mirror: boolean, tier: number, output: "scene"
     shader(fragments[m.kind], f),
   ];
 }
-function colorPair(scene: any, d: any, color: { texture: number | null; flags: number; page?: number | null }, wetResponse = false) {
+type DisplayColor = { texture: number | null; flags: number; page?: number | null };
+type ColorPass = "main" | "wet-response" | "reflection";
+
+export function colorPair(scene: any, d: any, color: DisplayColor, pass: ColorPass = "main") {
   const m = scene.materials[d.material];
+  const wetResponse = pass === "wet-response";
   const v: Record<string, number> = { COLOR: 1, DISPLAY_COLOR: 1 };
   const f: Record<string, number> = {};
-  const depth = scene.rain.active || scene.fog_lights?.length || scene.atmosphere.haze_ambient?.some((x: number) => x > 0);
+  // Mirror/downsample/wet consumers read RGB only. Keep the main target's
+  // haze/rain depth, but do not calculate or interpolate it for mirror colour.
+  const depth = pass !== "reflection" && (scene.rain.active || scene.fog_lights?.length || scene.atmosphere.haze_ambient?.some((x: number) => x > 0));
   if (color.page != null) v.FLOAT_VERTEX = 1;
   if (depth) v.LDR_COLOR = 1;
   else f.DEPTH_UNUSED = 1;
@@ -208,12 +214,16 @@ function colorPair(scene: any, d: any, color: { texture: number | null; flags: n
   return [shader("surface_v", v), shader(color.flags & 32 ? "glass_f" : "color_f", f)];
 }
 
-/** Interior windows have an authored cheap mirror path. Compile it in the
- * same display domain as the optimized mirror target; an HDR reflection pair
- * cannot be substituted for this one. Other materials retain their alias. */
-export function performanceReflectionPair(scene: any, draw: any, compile = pair): string[] | null {
-  return scene.materials[draw.material].kind === "interior_window"
-    ? compile(scene, draw, true, 3) : null;
+/** Opaque prelit mirrors need colour and coverage, not encoded eye depth.
+ * Alpha-tested coverage still runs. Wet/glass have separate response/blend
+ * contracts, and transparent RGB blending needs its original source alpha.
+ * Raw interior windows retain their authored cheap display-domain mirror. */
+export function performanceReflectionPair(scene: any, draw: any, color?: DisplayColor, compile = pair): string[] | null {
+  const material = scene.materials[draw.material];
+  if (color && material.blend === "opaque" && !(color.flags & (16 | 32)) &&
+      ["standard", "unlit", "products"].includes(material.kind))
+    return colorPair(scene, draw, color, "reflection");
+  return material.kind === "interior_window" ? compile(scene, draw, true, 3) : null;
 }
 
 /** The compiler and runtime both prove all full/LOD triangles. This reader
@@ -263,7 +273,7 @@ for (const place of selectIPodPlaces(PLACES)) {
   const windowParameters = windowParameterDraws(m);
   const windowRays = windowRayDraws(m);
   const colorPath = join(root, `.pocket-build/ipod/assets/${place.id}.ipod-color.json`);
-  const colors = new Map<number, { texture: number | null; flags: number; page?: number | null }>();
+  const colors = new Map<number, DisplayColor>();
   if (existsSync(colorPath)) {
     const color = JSON.parse(readFileSync(colorPath, "utf8"));
     if (color.version !== 2 && color.version !== 3) throw new Error(`Unsupported display color version: ${place.id}`);
@@ -287,8 +297,8 @@ for (const place of selectIPodPlaces(PLACES)) {
           reflection: pair(m, d, true, 2),
           ...waterPrograms(m, d, colors.has(i) ? colorPair(m, d, colors.get(i)!) : performanceMainPair(m, d, windowParameters.has(i), windowRays.has(i)),
             () => pair(m, d, false, 3, "coverage")),
-          performance_reflection: performanceReflectionPair(m, d),
-          wet_response: (colors.get(i)?.flags ?? 0) & 16 ? colorPair(m, d, colors.get(i)!, true) : null,
+          performance_reflection: performanceReflectionPair(m, d, colors.get(i)),
+          wet_response: (colors.get(i)?.flags ?? 0) & 16 ? colorPair(m, d, colors.get(i)!, "wet-response") : null,
         },
   );
   const fixed = {

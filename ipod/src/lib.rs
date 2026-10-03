@@ -13,6 +13,7 @@ mod mesh_clusters;
 mod performance;
 mod pipelines;
 mod renderer;
+mod reflection_region;
 mod scene;
 mod shadow;
 mod state;
