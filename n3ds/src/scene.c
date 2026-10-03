@@ -195,7 +195,7 @@ bool scene_load(const char *path, char *error, size_t capacity) {
   fseek(file, 0, SEEK_END);
   length = ftell(file);
   if (!read_at(file, 0, header, sizeof header) || header[0] != 0x45434c50 ||
-      header[1] != 5 || header[2] != 5 ||
+      header[1] != ATLAS_PLCE_VERSION || header[2] != 5 ||
       !read_at(file, 16, sect, sizeof sect)) {
     snprintf(error, capacity, "invalid PLCE header");
     fclose(file);
