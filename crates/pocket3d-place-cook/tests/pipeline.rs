@@ -28,11 +28,11 @@ fn ok(args: &[&str]) {
         String::from_utf8_lossy(&out.stderr)
     );
 }
-fn fixture(root: &Path) {
+fn fixture(root: &Path, width: u32, height: u32) {
     std::fs::create_dir_all(root).unwrap();
     // A non-power-of-two source texture ensures native targets apply their own fit.
     let mut png = std::io::Cursor::new(Vec::new());
-    image::RgbaImage::from_pixel(13, 7, image::Rgba([170, 120, 70, 255]))
+    image::RgbaImage::from_pixel(width, height, image::Rgba([170, 120, 70, 255]))
         .write_to(&mut png, image::ImageFormat::Png)
         .unwrap();
     let pos = [0.1234567f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
@@ -69,7 +69,7 @@ fn one_ir_builds_three_repeatable_packs_without_web_export_or_vita_intermediate(
     let temp = Temp(std::env::temp_dir().join(format!("atlas-pipeline-{}", std::process::id())));
     let export = temp.0.join("triangle");
     let ir = temp.0.join("place.ir");
-    fixture(&export);
+    fixture(&export, 13, 7);
     ok(&[
         "import",
         "--in",
@@ -155,4 +155,32 @@ fn one_ir_builds_three_repeatable_packs_without_web_export_or_vita_intermediate(
     let out = run(&["check", "--in", ir.to_str().unwrap(), "--target", "psp"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("resource changed"));
+}
+
+#[test]
+fn pica_does_not_treat_an_ordinary_2k_source_texture_as_a_text_atlas() {
+    let temp =
+        Temp(std::env::temp_dir().join(format!("atlas-pica-texture-{}", std::process::id())));
+    let export = temp.0.join("large-texture");
+    fixture(&export, 2048, 2048);
+    let output = temp.0.join("pica.place");
+    ok(&[
+        "--in",
+        export.to_str().unwrap(),
+        "--out",
+        output.to_str().unwrap(),
+        "--target",
+        "3ds",
+        "--tex",
+        "256",
+    ]);
+    let bytes = std::fs::read(output).unwrap();
+    let word = |offset| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+    let section = (0..word(8) as usize)
+        .map(|i| 16 + i * 16)
+        .find(|&at| &bytes[at..at + 4] == b"PICA")
+        .unwrap();
+    let table = word(section + 4) as usize;
+    assert_eq!(word(table + 4), 1, "one texture");
+    assert_eq!((word(table + 120), word(table + 124)), (256, 256));
 }

@@ -94,6 +94,13 @@ fail with a migration message.
 `--tex` retains the Vita/PICA texture cap setting; PSP currently uses its own
 128/512-pixel material policy. Output suffixes do not identify a universal pack:
 PICA has its own table and geometry layout; PSP uses the separate PLPS header.
+PICA's higher-resolution exceptions inspect the authored 4K text-atlas
+convention, animation grids and emissive strips. Ordinary 2K source maps obey
+the texture cap; their original size must not be mistaken for a previously
+resized Vita atlas. The writer checks the reader's per-section limits (4 MiB
+table, 12 MiB textures, 24 MiB geometry, 16 MiB animation) before publishing.
+These are structural ceilings; combined allocations and render targets still
+need device headroom measurements.
 
 ## Capability, release eligibility and evidence
 
@@ -120,7 +127,8 @@ must not be treated as measurements of these new artifacts.
 The regression test `tests/pipeline.rs` imports a small textured scene, deletes
 the web export, compiles PSP and PICA before Vita, validates the PSP payload,
 checks retained float precision and non-power-of-two texture fitting, then
-repeats every cook byte-for-byte. IR tests cover retained unknown metadata,
+repeats every cook byte-for-byte. Another fixture exercises the PICA sizing
+policy with an ordinary 2K source image. IR tests cover retained unknown metadata,
 version/capability and resource integrity. Run `cargo test --locked --workspace`.
 
 ## GXM ownership

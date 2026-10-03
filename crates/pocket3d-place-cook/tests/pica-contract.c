@@ -17,6 +17,15 @@ int main(int argc, char **argv) {
       fread(sections, sizeof sections, 1, file) != 1)
     goto done;
   for (unsigned i = 0; i < 5; i++) {
+    // The same section limits as scene_load, independent of the Rust writer.
+    uint32_t mib = sections[i][0] == 0x41434950 ? 4 :
+                   sections[i][0] == 0x44584554 ? 12 :
+                   sections[i][0] == 0x4d4f4547 ? 24 :
+                   sections[i][0] == 0x4d494e41 ? 16 : 4;
+    if (sections[i][2] > mib * 1024 * 1024)
+      goto done;
+  }
+  for (unsigned i = 0; i < 5; i++) {
     if (sections[i][0] != 0x41434950)
       continue;
     AtlasHeader table;

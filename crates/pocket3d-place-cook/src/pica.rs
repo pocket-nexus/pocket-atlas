@@ -729,8 +729,10 @@ pub fn cook(scene: &crate::source::Scene, output: &Path, cap: u32) {
                         *p = [v, v, v, 1.0];
                     }
                 }
-                // Text atlases retain 1024 so Japanese lettering survives the 400px display.
-                let limit = if src.w >= 2048
+                // Authored 4K text atlases retain 1024 for the 400px display.
+                // The old Vita intermediate had already reduced these to 2K;
+                // testing 2K here incorrectly promotes ordinary source maps.
+                let limit = if src.w >= 4096
                     || grid[0] > 1
                     || grid[1] > 1
                     || ti.is_some_and(|id| emissive_strips[id as usize])
@@ -1419,6 +1421,15 @@ pub fn cook(scene: &crate::source::Scene, output: &Path, cap: u32) {
         fs(&mut table, &b[1]);
     }
     table.extend(&skin_data);
+    // Match the loader's per-section limits before publishing an unusable pack.
+    // Actual allocation headroom still needs device validation (skinning, FX,
+    // render targets and the host also consume memory).
+    for (name, bytes, mib) in [("table", table.len(), 4), ("textures", tex.len(), 12),
+        ("geometry", geom.len(), 24), ("animation", anim.len(), 16)] {
+        if bytes > mib * 1024 * 1024 {
+            crate::fail(format!("PICA {name} budget exceeded: {bytes} bytes > {mib} MiB"));
+        }
+    }
     let summary = serde_json::json!({"target":"3ds","version":TABLE_VERSION,"name":m.name,"kind":m.kind,"sourceMaterials":m.materials.len(),"textures":textures.len(),"draws":draws.len(),"textureBytes":tex.len(),"geometryBytes":geom.len(),"animationBytes":anim.len(),"matrices":matrices,"frames":frames,"fps":fps,"features":features,"sourceNodes":m.nodes.len(),"camera":m.camera});
     let meta = serde_json::to_vec(&summary).unwrap();
     let out = pc::write_versioned(pc::MAGIC, CONTAINER_VERSION, &[
