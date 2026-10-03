@@ -99,6 +99,7 @@ enum Row {
     Haze,
     Reflection,
     Rain,
+    Snow,
     Exposure,
     Shot,
     Hud,
@@ -166,6 +167,9 @@ impl Sheet {
         if r.has_rain() {
             v.push(Row::Rain);
         }
+        if r.has_snow() {
+            v.push(Row::Snow);
+        }
         v.extend([Row::Exposure, Row::Shot, Row::Hud, Row::Leave]);
         v
     }
@@ -180,6 +184,7 @@ impl Sheet {
             Row::Haze => "Lit haze",
             Row::Reflection => "Reflections",
             Row::Rain => "Rain",
+            Row::Snow => "Snow",
             Row::Exposure => "Exposure",
             Row::Shot => "Camera",
             Row::Hud => "Performance overlay",
@@ -203,7 +208,7 @@ impl Sheet {
             Row::Bloom => on_off(r.settings.bloom),
             Row::Haze => on_off(r.settings.haze),
             Row::Reflection => on_off(r.settings.reflection),
-            Row::Rain => on_off(r.settings.rain),
+            Row::Rain | Row::Snow => on_off(r.settings.rain),
             Row::Exposure => format!("{:+.2} EV", p.exposure_ev),
             Row::Shot => match rig.mode {
                 Mode::Free => "Free camera".into(),
@@ -319,7 +324,7 @@ impl Sheet {
                 p.reflection = Some(!r.settings.reflection);
                 p.overrides(r);
             }
-            Row::Rain => {
+            Row::Rain | Row::Snow => {
                 p.rain = Some(!r.settings.rain);
                 p.overrides(r);
             }

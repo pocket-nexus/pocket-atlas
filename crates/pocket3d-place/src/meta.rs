@@ -535,6 +535,26 @@ pub struct Rain {
     pub steam_vents: Vec<[Vec3; 2]>,
 }
 
+/// Falling snow (web `routes/shared/fx/snow.ts`): flakes seeded in a box
+/// that wraps around the camera, each drawn along its velocity relative to
+/// the camera over `shutter` seconds, so a moving camera sees streaks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Snow {
+    pub count: u32,
+    /// Box edges (m): across, up, along.
+    #[serde(rename = "box")]
+    pub extent: Vec3,
+    /// Fall speed (m/s) and wind (m/s along x, z).
+    pub fall: f32,
+    pub wind: [f32; 2],
+    /// Flake diameter (m).
+    pub size: f32,
+    pub shutter: f32,
+    /// Linear radiance of a flake.
+    pub color: Vec3,
+    pub opacity: f32,
+}
+
 // --------------------------------------------------------------------- sun
 
 /// A directional light evaluated per pixel with a shadow map, not baked.
@@ -1004,5 +1024,8 @@ pub struct Meta {
     /// The vista haze (`dusk-vista` places), in place of the uniform fog.
     #[serde(default)]
     pub vista_haze: Option<VistaHaze>,
+    /// Falling snow (`snow-road` routes).
+    #[serde(default)]
+    pub snow: Option<Snow>,
     pub stats: serde_json::Value,
 }

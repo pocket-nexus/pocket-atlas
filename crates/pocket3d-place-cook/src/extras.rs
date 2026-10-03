@@ -113,6 +113,20 @@ pub fn vista_haze(h: &Value) -> Option<pc::VistaHaze> {
 }
 
 /// The twilight terms of a day sky (`sky.twilight`).
+/// `snow` of a scene's annotation: falling snow.
+pub fn snow(x: &Value) -> Option<pc::Snow> {
+    x.is_object().then(|| pc::Snow {
+        count: f(x, "count", 4000.0) as u32,
+        extent: if x["box"].is_array() { v3(&x["box"]) } else { [40.0, 24.0, 40.0] },
+        fall: f(x, "fall", 1.2),
+        wind: arr(&x["wind"], [0.0; 2]),
+        size: f(x, "size", 0.03),
+        shutter: f(x, "shutter", 1.0 / 60.0),
+        color: if x["color"].is_array() { v3(&x["color"]) } else { [1.0; 3] },
+        opacity: f(x, "opacity", 0.5),
+    })
+}
+
 pub fn twilight(t: &Value) -> pc::Twilight {
     let (b, l, s) = (&t["band"], &t["belt"], &t["shadow"]);
     pc::Twilight {

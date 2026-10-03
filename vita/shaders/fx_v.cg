@@ -2,7 +2,9 @@
 // seeds (every quad repeats its seed on four corners). Lit by the nearest
 // haze lights with a soft 1 / (d² + r²) falloff.
 //
-// Defines (one of): STREAK, SPLASH, DRIP, STEAM, BEACON.
+// Defines (one of): STREAK, SPLASH, DRIP, STEAM, BEACON, FLAKE (falling
+// snow: flakes in a box that wraps around the camera, each drawn along its
+// velocity relative to the camera over the shutter time, lit by the sky).
 
 #define FX_LIGHTS 8
 
@@ -16,6 +18,9 @@ uniform float4 uAmbient;  // ambient light on drops
 uniform float4 uDry[4];   // two dry boxes: min, max, min, max
 uniform float4 uFogPos[FX_LIGHTS];
 uniform float4 uFogCol[FX_LIGHTS];
+#ifdef FLAKE
+uniform float4 uFlake;    // camera velocity (m/s), shutter (s)
+#endif
 
 float rHash(float2 p)
 {
@@ -156,6 +161,33 @@ void main(
         float size = clamp(900.0 / dist, 1.5, 6.0) * dist * uCam.w * 0.5;
         wp = aA + (right * aCorner.x + up * aCorner.y) * size;
         color = float3(1.0, 0.08, 0.04) * 6.0 * (0.35 + 0.65 * step(0.45, frac(t * 0.55 + aA.x * 0.0003)));
+    }
+#endif
+#ifdef FLAKE
+    {
+        // uWind: the flakes' fall and wind; uTime.w: a flake's diameter (m).
+        float3 vel = uWind.xyz * (0.8 + 0.4 * aSeed.w);
+        float3 box = uBox.xyz;
+        float3 p = aSeed.xyz * box + vel * t;
+        p.x += sin(t * (0.7 + aSeed.w) + aSeed.x * 40.0) * 0.18;
+        p.z += cos(t * (0.6 + aSeed.y) + aSeed.z * 40.0) * 0.18;
+        float3 origin = cam - box * 0.5;
+        float3 r = p - origin;
+        p = origin + r - box * floor(r / box);
+        float3 toCam = cam - p;
+        float dist = length(toCam);
+        // A streak along the velocity relative to the camera, at least a dot.
+        float3 rel = (vel - uFlake.xyz) * uFlake.w;
+        float len = length(rel);
+        float wdt = max(uTime.w, dist * uCam.w * 1.2);
+        float3 axis = float3(0.0, -1.0, 0.0);
+        if (len > 1e-4) axis = rel / len;
+        float3 side = normalize(cross(axis, toCam / max(dist, 1e-3)));
+        wp = p + side * aCorner.x * wdt + axis * aCorner.y * (len + wdt);
+        uv = aCorner;
+        color = uAmbient.rgb;
+        // The flake's light spread over the quad: wider or longer is dimmer.
+        alpha = (uTime.w / wdt) * (wdt / (len + wdt)) * smoothstep(0.4, 1.6, dist) * (1.0 - smoothstep(box.x * 0.34, box.x * 0.5, dist));
     }
 #endif
     oPosition = mul(uViewProj, float4(wp, 1.0));

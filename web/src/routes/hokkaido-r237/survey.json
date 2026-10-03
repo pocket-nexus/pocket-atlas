@@ -1,0 +1,17 @@
+{
+  "id": "hokkaido-r237",
+  "zone": "JPRCS XII",
+  "note": "National Route 237 from the south edge of Asahikawa (Nishi-Goryō) through Biei, Miyama Pass, Kami-Furano and Naka-Furano to Furano Marché.",
+  "ref": "237",
+  "bbox": [43.3, 142.25, 43.8, 142.6],
+  "start": { "name": "Nishi-Goryō, Asahikawa", "native": "旭川市西御料", "lat": 43.7186, "lon": 142.3725 },
+  "end": { "name": "Furano Marché", "native": "フラノマルシェ", "lat": 43.3421, "lon": 142.3862 },
+  "via": [],
+  "localStreets": 700,
+  "corridor": { "roads": 900, "buildings": 700, "rail": 1500, "land": 4000, "power": 1500, "points": 300 },
+  "dem": {
+    "near": { "zoom": 14, "cell": 10, "reach": 2200 },
+    "mid": { "zoom": 12, "cell": 40, "reach": 9000 },
+    "far": { "zoom": 10, "cell": 160, "reach": 45000 }
+  }
+}

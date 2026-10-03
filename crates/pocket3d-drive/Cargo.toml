@@ -1,0 +1,11 @@
+[package]
+name = "pocket3d-drive"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "The simulation of a Pocket Atlas route: the driven line, the car, the trip and the driving cameras, the same on every device"
+
+[dependencies]
+
+[dev-dependencies]
+serde_json = "1"

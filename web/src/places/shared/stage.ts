@@ -46,7 +46,7 @@ export abstract class PlaceStage<W extends ExportWorld = ExportWorld, A extends 
   private envAt = new Vector3();
   private shadowFrames = 0;
   private keyHandler = (e: KeyboardEvent) => {
-    if (e.key === "c" || e.key === "C") this.rig.toggleCinematic();
+    if (e.key === "c" || e.key === "C") this.toggleCinematic();
   };
 
   protected constructor(ctx: StageContext, place: PlaceDef, camera: PerspectiveCamera, views: PlaceViews, audio: A) {
@@ -59,6 +59,11 @@ export abstract class PlaceStage<W extends ExportWorld = ExportWorld, A extends 
 
   /** The place's per-frame work after the camera moves: updaters, sky, sound. */
   protected abstract advance(dt: number, time: number): void;
+
+  /** `C` and the overlay's button: the cinematic camera on or off. */
+  protected toggleCinematic(): void {
+    this.rig.toggleCinematic();
+  }
 
   /** The camera rig over the shots; the camera starts at the `?cam` shot (else the first). */
   protected startRig(): void {
@@ -172,7 +177,7 @@ export abstract class PlaceStage<W extends ExportWorld = ExportWorld, A extends 
       this.place,
       {
         onBack: () => this.ctx.nav.closePlace(),
-        onCinematic: () => this.rig.toggleCinematic(),
+        onCinematic: () => this.toggleCinematic(),
         onShot: (name) => this.rig.goTo(name),
       },
       shots.map((s) => s.name),

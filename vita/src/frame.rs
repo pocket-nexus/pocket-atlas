@@ -484,6 +484,12 @@ pub struct Renderer {
     drips: FxBuf,
     steam: FxBuf,
     beacons: FxBuf,
+    /// Falling snow (places and routes with `Meta::snow`).
+    flakes: FxBuf,
+    /// Camera velocity (m/s) for the flakes' streaks; the caller sets it.
+    pub cam_velocity: Vec3,
+    /// Near plane (m): a driving camera sits further from surfaces than a walking one.
+    pub near: f32,
     bones: Vec<f32>,
     cur_vp: *mut g::SceGxmVertexProgram,
     cur_fp: *mut g::SceGxmFragmentProgram,
@@ -744,6 +750,9 @@ impl Renderer {
         })?;
         let beacons = &scene.meta.beacons;
         let beacons = fx_quads(&mut mem, beacons.len(), [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]], |i| ([0.0; 4], beacons[i], [0.0; 3]))?;
+        // The web's flakes: the same generator and seed (`routes/shared/fx/snow.ts`).
+        let mut rng = Rng(0x2545_f491);
+        let flakes = fx_quads(&mut mem, scene.meta.snow.map_or(0, |s| s.count as usize), [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], |_| ([rng.next(), rng.next(), rng.next(), rng.next()], [0.0; 3], [0.0; 3]))?;
 
         let env_scene = scene.meta.atmosphere.environment_strength;
         // A sun below the horizon (blue hour) lights nothing directly.
@@ -793,6 +802,9 @@ impl Renderer {
             drips,
             steam,
             beacons,
+            flakes,
+            cam_velocity: Vec3::ZERO,
+            near: 0.1,
             bones: Vec::with_capacity(64 * 12),
             cur_vp: core::ptr::null_mut(),
             cur_fp: core::ptr::null_mut(),
@@ -902,6 +914,10 @@ impl Renderer {
         }
         if self.day_sky {
             gpu.want(&self.sky_key());
+        }
+        if scene.meta.snow.is_some() {
+            gpu.want(&Key::new("fx_v.cg", &["FLAKE"]));
+            gpu.want(&Key::new("fx_f.cg", &["FLAKE"]));
         }
     }
 
@@ -1077,6 +1093,11 @@ impl Renderer {
         self.has_rain
     }
 
+    /// Falling snow shares the precipitation switch with rain.
+    pub fn has_snow(&self) -> bool {
+        self.flakes.count > 0
+    }
+
     pub fn has_haze(&self) -> bool {
         self.has_haze
     }
@@ -1185,7 +1206,7 @@ impl Renderer {
         self.timeline.first_kick = None;
 
         let aspect = W as f32 / H as f32;
-        let proj = camera::projection(view.fov_y, aspect, 0.1);
+        let proj = camera::projection(view.fov_y, aspect, self.near);
         let v = glam::camera::rh::view::look_at_mat4(view.pos, view.target, Vec3::Y);
         let vp = proj * v;
         let frame = FrameConsts::new(scene, view, time, rain, vp, aspect);
@@ -1248,6 +1269,11 @@ impl Renderer {
         self.draw_meshes(ctx, gpu, scene, &frame, &planes, false, true, &mut st);
         if self.settings.rain && self.has_rain {
             self.particles(ctx, gpu, scene, &frame, rain);
+        }
+        if self.settings.rain {
+            if let Some(snow) = scene.meta.snow {
+                self.snow(ctx, gpu, scene, &frame, &snow);
+            }
         }
         let main_target = self.main_t(mi) as *const Target;
         self.timeline.end(ctx, &*main_target, "main");
@@ -1791,6 +1817,41 @@ impl Renderer {
             self.stats.fx_quads += count / 6;
         }
         let _ = scene;
+    }
+}
+
+impl Renderer {
+    /// Falling snow: one additive pass of flakes around the camera, lit by
+    /// the sky (the hemisphere's light from above).
+    unsafe fn snow(&mut self, ctx: *mut g::SceGxmContext, gpu: &mut Gpu, scene: &Scene, f: &FrameConsts, snow: &pc::Snow) {
+        let buf = &self.flakes as *const FxBuf;
+        let buf = &*buf;
+        if buf.count == 0 {
+            return;
+        }
+        let key = PipeKey { vs: key_v("fx_v.cg", &["FLAKE"]), fs: Key::new("fx_f.cg", &["FLAKE"]), layout: Layout::Fx, blend: BlendMode::Additive, output: Out::Half4, msaa: self.settings.msaa.gxm() };
+        let Some(p) = gpu.pipeline(&key) else { return };
+        let p = &*(p as *const Pipeline);
+        g::sceGxmSetFrontDepthFunc(ctx, g::SceGxmDepthFunc_SCE_GXM_DEPTH_FUNC_GREATER_EQUAL);
+        g::sceGxmSetFrontDepthWriteEnable(ctx, g::SceGxmDepthWriteMode_SCE_GXM_DEPTH_WRITE_DISABLED);
+        g::sceGxmSetCullMode(ctx, g::SceGxmCullMode_SCE_GXM_CULL_NONE);
+        self.use_pipeline(ctx, p);
+        let a = &scene.meta.atmosphere;
+        // What a flake scatters toward the eye: the sky's irradiance over π, on its colour.
+        let lit: [f32; 3] = core::array::from_fn(|k| snow.color[k] * a.hemisphere_sky[k] * core::f32::consts::FRAC_1_PI);
+        let v = self.cam_velocity;
+        let u = Uniforms::reserve(ctx, p);
+        u.set(p, U::ViewProj, &f.vp);
+        u.set(p, U::Cam, &[f.eye[0], f.eye[1], f.eye[2], f.pixel]);
+        u.set(p, U::Time, &[f.eye[3], 0.0, 0.0, snow.size]);
+        u.set(p, U::Box, &[snow.extent[0], snow.extent[1], snow.extent[2], 0.0]);
+        u.set(p, U::Wind, &[snow.wind[0], -snow.fall, snow.wind[1], 0.0]);
+        u.set(p, U::Ambient, &[lit[0], lit[1], lit[2], 0.0]);
+        u.set(p, U::Flake, &[v.x, v.y, v.z, snow.shutter]);
+        u.set(p, U::Opacity, &[snow.opacity, 0.0, 0.0, 0.0]);
+        g::sceGxmSetVertexStream(ctx, 0, buf.vb.cast());
+        g::sceGxmDraw(ctx, g::SceGxmPrimitiveType_SCE_GXM_PRIMITIVE_TRIANGLES, g::SceGxmIndexFormat_SCE_GXM_INDEX_FORMAT_U16, buf.ib.cast(), buf.count);
+        self.stats.fx_quads += buf.count / 6;
     }
 }
 

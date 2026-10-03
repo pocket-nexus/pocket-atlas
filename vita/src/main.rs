@@ -11,6 +11,7 @@
 mod atlas;
 mod browser;
 mod camera;
+mod drive;
 mod frame;
 mod gpu;
 mod hostfs;
@@ -530,25 +531,43 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
     let ui = &app.ui;
     {
             // ---------------------------------------------------------- load
-            let mut scene = None;
+            let mut scene: Option<(Scene, String)> = None;
             let mut load_error = String::new();
             let paths = atlas::place_paths(id);
-            for path in paths.iter().map(String::as_str) {
+            // A route: its kit loads as the place, its cells stream while it runs.
+            let mut drive: Option<drive::Drive> = None;
+            if drive::pack::exists(id) {
                 let mut last = Instant::now();
-                let r = Scene::load(path, |done, total, what| {
+                match drive::load(id, |what| {
                     if last.elapsed() > Duration::from_millis(100) {
                         last = Instant::now();
-                        loading_frame(font, &title, &[format!("{path}"), format!("loading {done}/{total}  {what}")], &dev);
+                        loading_frame(font, &title, &[format!("route {id}"), what.to_string()], &dev);
                     }
-                });
-                match r {
-                    Ok(s) => {
+                }) {
+                    Ok((s, d, path)) => {
                         scene = Some((s, path));
-                        break;
+                        drive = Some(d);
                     }
-                    // A missing pack fails at open; keep the first real error.
-                    Err(e) if load_error.is_empty() || !e.contains("No such file") => load_error = e,
-                    Err(_) => {}
+                    Err(e) => load_error = e,
+                }
+            } else {
+                for path in paths.iter().map(String::as_str) {
+                    let mut last = Instant::now();
+                    let r = Scene::load(path, |done, total, what| {
+                        if last.elapsed() > Duration::from_millis(100) {
+                            last = Instant::now();
+                            loading_frame(font, &title, &[format!("{path}"), format!("loading {done}/{total}  {what}")], &dev);
+                        }
+                    });
+                    match r {
+                        Ok(s) => {
+                            scene = Some((s, path.to_string()));
+                            break;
+                        }
+                        // A missing pack fails at open; keep the first real error.
+                        Err(e) if load_error.is_empty() || !e.contains("No such file") => load_error = e,
+                        Err(_) => {}
+                    }
                 }
             }
             let Some((mut scene, pack_path)) = scene else {
@@ -573,6 +592,9 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                 Ok(r) => r,
                 Err(e) => {
                     g::sceGxmFinish(g::vita2d_get_context());
+                    if let Some(d) = drive.take() {
+                        d.release();
+                    }
                     core::ptr::read(&scene).release();
                     let mut frame = 0u32;
                     loop {
@@ -592,6 +614,13 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
             // The player's settings, then anything a control message names.
             prefs.apply(&mut renderer);
             renderer.warm(&mut gpu, &scene);
+            if let Some(d) = drive.as_mut() {
+                // The kit's swatches named every program the cells need; they go.
+                d.adopt(&mut scene);
+                renderer.near = 0.3;
+            }
+            // The camera in the world (a route renders relative to a moving origin).
+            let mut look = View { pos: Vec3::ZERO, target: Vec3::NEG_Z, fov_y: 50.0 };
             let mut sheet = settings::Sheet::new();
             let mut rig = Rig::new(&scene.meta.camera);
             let mut ctl = Control { frozen: None, view: None };
@@ -623,8 +652,9 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                 let pressed = buttons & !prev_buttons;
                 prev_buttons = buttons;
                 gpu.poll();
-                // START (outside the menu) or a control message leaves the place.
-                if pressed & vitasdk_sys::SCE_CTRL_START != 0 && !dev.menu.visible {
+                // START (outside the menu) or a control message leaves the place;
+                // on a route START pauses the drive, which offers the way out.
+                if pressed & vitasdk_sys::SCE_CTRL_START != 0 && !dev.menu.visible && drive.is_none() {
                     break Next::Atlas(Some(id.to_string()));
                 }
                 let mut switch = None;
@@ -639,6 +669,13 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                         continue;
                     }
                     apply_control(&v, &mut rig, &mut renderer, &mut ctl, &mut prefs.hud);
+                    if let Some(d) = drive.as_mut() {
+                        if v["drive"].is_object() {
+                            d.control(&v["drive"]);
+                        } else if v["shot"].is_u64() {
+                            d.mode = drive::Mode::Look;
+                        }
+                    }
                     if let Some(open) = v["sheet"].as_bool() {
                         sheet.open = open;
                     }
@@ -698,7 +735,8 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                     break Next::Atlas(Some(id.to_string()));
                 }
                 let sheet_open = sheet.open;
-                if pressed & vitasdk_sys::SCE_CTRL_TRIANGLE != 0 && !sheet_open {
+                let looking = drive.as_ref().map_or(true, |d| d.mode == drive::Mode::Look);
+                if pressed & vitasdk_sys::SCE_CTRL_TRIANGLE != 0 && !sheet_open && looking {
                     rig.next_shot();
                 }
                 // Dead zone, then 0..1 over the remaining travel (no step at its edge).
@@ -709,10 +747,36 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                 let lift = if buttons & vitasdk_sys::SCE_CTRL_RTRIGGER != 0 { 1.0 } else if buttons & vitasdk_sys::SCE_CTRL_LTRIGGER != 0 { -1.0 } else { 0.0 };
                 let menu_open = dev.menu.visible || sheet_open;
                 let (l, r) = if menu_open { ((0.0, 0.0), (0.0, 0.0)) } else { ((axis(pad.lx), axis(pad.ly)), (axis(pad.rx), axis(pad.ry))) };
-                view = match &ctl.view {
-                    Some(v) => View { pos: v.pos, target: v.target, fov_y: v.fov_y },
-                    None => rig.update(dt, time, l, r, if menu_open { 0.0 } else { lift }, &view),
+                let mut leave = false;
+                view = match drive.as_mut() {
+                    None => match &ctl.view {
+                        Some(v) => View { pos: v.pos, target: v.target, fov_y: v.fov_y },
+                        None => rig.update(dt, time, l, r, if menu_open { 0.0 } else { lift }, &view),
+                    },
+                    Some(d) => {
+                        // ○ hands the camera to the rig (from where it is) and back to the car.
+                        if pressed & vitasdk_sys::SCE_CTRL_CIRCLE != 0 && !menu_open && ctl.view.is_none() && d.can_look() {
+                            if d.mode == drive::Mode::Drive {
+                                d.mode = drive::Mode::Look;
+                                rig.free_from(&look);
+                            } else {
+                                d.mode = drive::Mode::Drive;
+                            }
+                        }
+                        let held = match &ctl.view {
+                            Some(v) => Some(View { pos: v.pos, target: v.target, fov_y: v.fov_y }),
+                            None if d.mode == drive::Mode::Look => Some(rig.update(dt, time, l, r, if menu_open { 0.0 } else { lift }, &look)),
+                            None => None,
+                        };
+                        let (v, outcome) = d.update(dt, &pad, buttons, pressed, menu_open, &mut scene, &mut renderer, held.as_ref());
+                        look = d.look();
+                        leave = matches!(outcome, drive::Outcome::Leave);
+                        v
+                    }
                 };
+                if leave {
+                    break Next::Atlas(Some(id.to_string()));
+                }
                 let weather = Weather::at(time);
                 if let Some(d) = &scene.meta.doors {
                     let near = (view.pos - Vec3::from(d.trigger)).length() < d.radius;
@@ -731,8 +795,9 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                 if !renderer.timeline.on && !sheet.visible() {
                     renderer.feedback(frame_ms, last_gpu, raw * 1000.0);
                 }
-                let fade = if ctl.view.is_some() { 0.0 } else { rig.fade };
-                let bars = if ctl.view.is_some() { 0.0 } else { rig.bars };
+                let driving = drive.as_ref().is_some_and(|d| d.mode == drive::Mode::Drive);
+                let fade = if ctl.view.is_some() || driving { 0.0 } else { rig.fade };
+                let bars = if ctl.view.is_some() || driving { 0.0 } else { rig.bars };
                 let render_error = renderer.render(&mut gpu, &scene, &view, time, &weather, fade, bars).err();
                 let t_wait = Instant::now();
                 fence.wait((frame_no.wrapping_sub(1) % 2) as usize);
@@ -758,6 +823,9 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                     if let Some(e) = gpu.errors.first().or(render_error.as_ref()) {
                         text(font, 12, 24, 0xff60_60ff, 0.75, &e.chars().take(110).collect::<String>());
                     }
+                }
+                if let Some(d) = &drive {
+                    d.draw(ui, &mut gpu, place.accent, ctl.view.is_some());
                 }
                 let (w, h) = frame::SCALES[renderer.level()];
                 let stats = format!("{fps:.1} fps  {frame_ms:.1} ms  ·  {w}×{h}  ·  step {} of {}", renderer.governor.step + 1, renderer.profile.steps.len());
@@ -831,7 +899,8 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                     "clockMhz": clocks_now(),
                     "clockResets": clock_resets,
                     "sheet": sheet.open,
-                    "view": {"pos": view.pos.to_array(), "target": view.target.to_array(), "fov": view.fov_y, "mode": if rig.mode == Mode::Cinematic { "cinematic" } else { "free" }, "shot": rig.shot_name()},
+                    "view": {"pos": if drive.is_some() { look.pos.to_array() } else { view.pos.to_array() }, "target": if drive.is_some() { look.target.to_array() } else { view.target.to_array() }, "fov": view.fov_y, "mode": if rig.mode == Mode::Cinematic { "cinematic" } else { "free" }, "shot": if driving { "Drive" } else { rig.shot_name() }},
+                    "route": drive.as_ref().map(|d| d.status()),
                     "settings": {"msaa": s.msaa == Msaa::X4, "reflection": s.reflection, "haze": s.haze, "bloom": s.bloom, "rain": s.rain, "cullCw": s.cull_cw, "exposure": s.exposure, "maxLights": s.max_lights, "flat": s.flat, "scale": s.scale, "level": renderer.level(), "profile": renderer.profile.name, "step": renderer.governor.step, "boost": renderer.governor.boost, "gpuMs": renderer.governor.gpu_ms, "steps": renderer.profile.steps.len(), "hold": renderer.governor.hold, "budgetMs": renderer.profile.budget_ms, "fx": s.fx, "amortize": s.amortize, "reflSize": s.reflection_size, "hazeSize": renderer.step().haze_size, "hazeLights": renderer.step().haze_lights, "bloomFull": renderer.step().bloom_full, "streaks": s.streaks, "steam": s.steam, "detailMaps": s.detail_maps, "vertexLights": s.vertex_lights, "detailM": renderer.step().detail_m, "lodPixels": renderer.step().lod_pixels},
                     "uptime": started.elapsed().as_secs(),
                     "passes": renderer.timeline.passes.iter().map(|(n, ms)| json!([n, ms])).collect::<Vec<_>>(),
@@ -845,6 +914,9 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
             // Leave: the GPU finishes this place's frames before its memory goes.
             g::sceGxmFinish(ctx);
             renderer.release();
+            if let Some(d) = drive {
+                d.release();
+            }
             scene.release();
             app.frame_no = frame_no;
             app.manifest_state = manifest_state;

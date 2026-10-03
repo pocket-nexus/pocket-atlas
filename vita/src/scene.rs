@@ -107,6 +107,8 @@ pub(crate) struct Seq {
     path: String,
     f: File,
     pos: u64,
+    /// Where the pack starts in the file (a place pack nested in a route pack).
+    base: u64,
     scratch: Vec<u8>,
 }
 
@@ -117,7 +119,23 @@ pub(crate) fn find(sections: &[pc::Section], tag: [u8; 4]) -> Result<pc::Section
 
 impl Seq {
     pub(crate) fn open(path: &str) -> Result<Self, String> {
-        Ok(Self { path: path.into(), f: File::open(path).map_err(|e| format!("{path}: {e}"))?, pos: 0, scratch: vec![0; 64 * 1024] })
+        Self::open_at(path, 0)
+    }
+
+    /// A pack that starts `base` bytes into the file.
+    pub(crate) fn open_at(path: &str, base: u64) -> Result<Self, String> {
+        Ok(Self { path: path.into(), f: File::open(path).map_err(|e| format!("{path}: {e}"))?, pos: 0, base, scratch: vec![0; 64 * 1024] })
+    }
+
+    /// The section table of a container with its own magic and schema version.
+    pub(crate) fn sections_versioned(&mut self, magic: [u8; 4], version: u32) -> Result<Vec<pc::Section>, String> {
+        let mut head = [0u8; 16];
+        self.read_at(0, &mut head)?;
+        let count = u32::from_le_bytes(head[8..12].try_into().unwrap()) as usize;
+        let mut table = vec![0u8; 16 + count * 16];
+        table[..16].copy_from_slice(&head);
+        self.read_at(16, &mut table[16..])?;
+        pc::Pack::parse_header_versioned(&table, magic, version).map_err(|e| format!("{}: {e}", self.path))
     }
 
     /// The section table of a pack container (place or atlas pack, by magic).
@@ -139,6 +157,7 @@ impl Seq {
     }
 
     pub(crate) fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+        let offset = offset + self.base;
         if offset < self.pos {
             self.f = File::open(&self.path).map_err(|e| format!("{}: {e}", self.path))?;
             self.pos = 0;
@@ -163,9 +182,17 @@ impl Scene {
     /// # Safety
     /// GXM initialised; call from the render thread.
     pub unsafe fn load(path: &str, progress: impl FnMut(usize, usize, &str)) -> Result<Self, String> {
+        Self::load_at(path, 0, progress)
+    }
+
+    /// Loads the place pack that starts `base` bytes into `path` (a route's kit).
+    ///
+    /// # Safety
+    /// As [`Scene::load`].
+    pub unsafe fn load_at(path: &str, base: u64, progress: impl FnMut(usize, usize, &str)) -> Result<Self, String> {
         let mut vram = Arena::new(Kind::Cdram, 16 << 20);
         let mut main = Arena::new(Kind::Main, 8 << 20);
-        match Self::load_in(path, progress, &mut vram, &mut main) {
+        match Self::load_in(path, base, progress, &mut vram, &mut main) {
             Ok(mut s) => {
                 s.vram = vram;
                 s.main = main;
@@ -181,9 +208,9 @@ impl Scene {
         }
     }
 
-    unsafe fn load_in(path: &str, mut progress: impl FnMut(usize, usize, &str), vram: &mut Arena, main: &mut Arena) -> Result<Self, String> {
+    unsafe fn load_in(path: &str, base: u64, mut progress: impl FnMut(usize, usize, &str), vram: &mut Arena, main: &mut Arena) -> Result<Self, String> {
         let t0 = std::time::Instant::now();
-        let mut f = Seq::open(path)?;
+        let mut f = Seq::open_at(path, base)?;
         let pack = f.sections(pc::MAGIC)?;
         let (s_meta, s_tex, s_geom, s_anim) = (find(&pack, pc::TAG_META)?, find(&pack, pc::TAG_TEXTURES)?, find(&pack, pc::TAG_GEOMETRY)?, find(&pack, pc::TAG_ANIMATION)?);
 

@@ -57,7 +57,9 @@ export type PlaceKind =
   | "dusk-vista"
   | "night-coast"
   | "interior"
-  | "rooftop";
+  | "rooftop"
+  // A route (a road driven end to end, `src/routes`): weather × road.
+  | "snow-road";
 
 /** One place on the globe: a remembered spot, not a whole city. */
 export interface PlaceDef {
@@ -90,6 +92,8 @@ export interface PlaceDef {
   featured?: boolean;
   /** Cinematic shot the preview card is captured from. */
   preview?: string;
+  /** A route: a real road driven from one end to the other (`src/routes/<id>`), with its length. */
+  route?: { from: string; to: string; km: number };
   load?: () => Promise<PlaceModule>;
 }
 

@@ -22,6 +22,7 @@ mod pica;
 mod procedural;
 mod psp;
 mod psp_products;
+mod route;
 mod textures;
 
 use geometry::Vertex;
@@ -33,12 +34,12 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Instant;
 
-struct Args {
-    input: PathBuf,
-    output: PathBuf,
-    cell: f32,
-    tex_cap: u32,
-    target: ir::Target,
+pub(crate) struct Args {
+    pub(crate) input: PathBuf,
+    pub(crate) output: PathBuf,
+    pub(crate) cell: f32,
+    pub(crate) tex_cap: u32,
+    pub(crate) target: ir::Target,
 }
 
 fn fail(message: impl std::fmt::Display) -> ! {
@@ -137,7 +138,7 @@ fn lod_bounds(cell: Cell) -> Vec<f32> {
 // ------------------------------------------------------------------ builder
 
 #[derive(Default)]
-struct Blobs {
+pub(crate) struct Blobs {
     tex: Vec<u8>,
     geom: Vec<u8>,
     anim: Vec<u8>,
@@ -624,6 +625,19 @@ fn main() {
         }
         return;
     }
+    if cli.get(1).is_some_and(|s| s == "route") {
+        // RouteIR directory → a route pack (Vita).
+        let get = |k: &str| cli.iter().position(|x| x == k).and_then(|i| cli.get(i + 1)).cloned();
+        let input = PathBuf::from(get("--in").unwrap_or_else(|| fail("route: missing --in <RouteIR directory>")));
+        let target = ir::Target::parse(&get("--target").unwrap_or_else(|| "vita".into())).unwrap_or_else(|e| fail(e));
+        if target != ir::Target::Vita {
+            fail(format!("routes have no {} lowering; the RouteIR remains intact", target.name()));
+        }
+        let name = input.file_name().and_then(|n| n.to_str()).unwrap_or("route").to_string();
+        let output = get("--out").map(PathBuf::from).unwrap_or_else(|| input.join(format!("{name}.route")));
+        route::cook(&input, &output, get("--tex").and_then(|v| v.parse().ok()).unwrap_or(1024)).unwrap_or_else(|e| fail(e));
+        return;
+    }
     if std::env::args().nth(1).as_deref() == Some("atlas") {
         let argv: Vec<String> = std::env::args().collect();
         let get = |k: &str| argv.iter().position(|x| x == k).and_then(|i| argv.get(i + 1)).cloned();
@@ -643,6 +657,41 @@ fn main() {
     }
     std::fs::create_dir_all(a.output.parent().unwrap_or(std::path::Path::new("."))).expect("output directory");
     a.input = root;
+    let Cooked { meta, blobs, log } = cook_place(&a, manifest.name);
+    let stats = meta.stats.clone();
+    if a.target != ir::Target::Vita {
+        let source = source::Scene { meta, blobs };
+        match a.target {
+            ir::Target::Pica => pica::cook(&source, &a.output, a.tex_cap.min(1024)),
+            ir::Target::Psp => psp::cook(&source, &a.output),
+            ir::Target::Vita => unreachable!(),
+        }
+        std::fs::write(a.output.with_extension("log"), log.join("\n") + "\n").unwrap();
+        return;
+    }
+    let pack = place_pack(&meta, &blobs);
+    std::fs::write(&a.output, &pack).unwrap();
+    std::fs::write(a.output.with_extension("log"), log.join("\n") + "\n").unwrap();
+    println!("{}", serde_json::to_string_pretty(&stats).unwrap());
+    println!("wrote {} ({:.1} MiB)", a.output.display(), pack.len() as f64 / 1048576.0);
+}
+
+/// A place after the shared passes and the Vita lowering: its table and the
+/// blobs the table addresses.
+pub(crate) struct Cooked {
+    pub meta: pc::Meta,
+    pub blobs: Blobs,
+    pub log: Vec<String>,
+}
+
+/// The Vita `.place` container of a cooked place.
+pub(crate) fn place_pack(meta: &pc::Meta, blobs: &Blobs) -> Vec<u8> {
+    let meta_json = serde_json::to_vec(meta).unwrap();
+    pc::write(&[(pc::TAG_META, &meta_json, 16), (pc::TAG_TEXTURES, &blobs.tex, 4096), (pc::TAG_GEOMETRY, &blobs.geom, 4096), (pc::TAG_ANIMATION, &blobs.anim, 16)])
+}
+
+/// Cooks the PlaceIR at `a.input` for `a.target`.
+pub(crate) fn cook_place(a: &Args, place: String) -> Cooked {
     let t0 = Instant::now();
     let glb = a.input.join("scene.gltf");
     // EXT_mesh_gpu_instancing is listed as required; the crate does not know
@@ -660,6 +709,13 @@ fn main() {
     for anim in doc.animations() {
         for ch in anim.channels() {
             animated.insert(ch.target().node().index());
+        }
+    }
+    // Nodes a runtime drives itself (`driven`: a route's car) keep their
+    // hierarchy like animated ones, without a track.
+    for n in doc.nodes() {
+        if pc_of(n.extras()).get("driven").and_then(|v| v.as_bool()) == Some(true) {
+            animated.insert(n.index());
         }
     }
     let door_names: Vec<String> = ["left", "right"].iter().filter_map(|k| sx.get("doors").and_then(|d| d.get(*k)).and_then(|v| v.as_str()).map(String::from)).collect();
@@ -1671,7 +1727,6 @@ fn main() {
     } else {
         pc::Post::default()
     };
-    let place = manifest.name;
     let meta = pc::Meta {
         version: pc::VERSION,
         name: place,
@@ -1699,30 +1754,11 @@ fn main() {
         day_sky,
         post,
         vista_haze: extras::vista_haze(&sx["haze"]),
+        snow: extras::snow(&sx["snow"]),
         stats: stats.clone(),
     };
-    if a.target != ir::Target::Vita {
-        let source = source::Scene { meta, blobs: cook.blobs };
-        match a.target {
-            ir::Target::Pica => pica::cook(&source, &a.output, a.tex_cap.min(1024)),
-            ir::Target::Psp => psp::cook(&source, &a.output),
-            ir::Target::Vita => unreachable!(),
-        }
-        std::fs::write(a.output.with_extension("log"), cook.log.join("\n") + "\n").unwrap();
-        return;
-    }
-    let meta_json = serde_json::to_vec(&meta).unwrap();
-    let pack = pc::write(&[
-        (pc::TAG_META, &meta_json, 16),
-        (pc::TAG_TEXTURES, &cook.blobs.tex, 4096),
-        (pc::TAG_GEOMETRY, &cook.blobs.geom, 4096),
-        (pc::TAG_ANIMATION, &cook.blobs.anim, 16),
-    ]);
-    std::fs::write(&a.output, &pack).unwrap();
-    std::fs::write(a.output.with_extension("log"), cook.log.join("\n") + "\n").unwrap();
-    println!("{}", serde_json::to_string_pretty(&stats).unwrap());
-    println!("wrote {} ({:.1} MiB)", a.output.display(), pack.len() as f64 / 1048576.0);
     let _ = Vec4::ZERO;
+    Cooked { meta, blobs: cook.blobs, log: cook.log }
 }
 
 #[cfg(test)]

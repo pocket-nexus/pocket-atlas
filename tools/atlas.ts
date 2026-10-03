@@ -4,6 +4,8 @@
 //
 //   bun tools/atlas.ts cook [--place ID]            # scene.glb → <place>.place
 //   bun tools/atlas.ts cook-atlas                   # web export-atlas → atlas.pack (globe + places)
+//   bun tools/atlas.ts cook-route [--route ID]      # RouteIR (.pocket-build/routes/ID) → ID.route
+//   bun tools/atlas.ts drive [--route ID] [--kmh 60] [--from 0] [--to 5]  # frame times along a route on autopilot
 //   bun tools/atlas.ts serve                         # USB host (keep running)
 //   bun tools/atlas.ts build  [--title P3B1D7273] [--debug]
 //   bun tools/atlas.ts vpk                          # standalone PKAT00001 VPK
@@ -152,6 +154,18 @@ async function fontFaces(): Promise<string[]> {
   return ["--latin", `${inter}/Inter-Regular.ttf`, "--latin-bold", `${inter}/Inter-Bold.ttf`, "--cjk", cjk[0]!, "--cjk-bold", cjk[1]!];
 }
 
+/** The route a command cooks or measures. */
+const ROUTE = value("--route", "hokkaido-r237");
+const ROUTES_DIR = resolve(ROOT, ".pocket-build/routes");
+
+/** Every cooked route pack: [id, path]. */
+function cookedRoutes(): [string, string][] {
+  if (!existsSync(ROUTES_DIR)) return [];
+  return readdirSync(ROUTES_DIR)
+    .map((id): [string, string] => [id, `${ROUTES_DIR}/${id}/${id}.route`])
+    .filter(([, path]) => existsSync(path));
+}
+
 /** Every cooked place pack: [id, path]. */
 function cookedPlaces(): [string, string][] {
   if (!existsSync(PLACES_DIR)) return [];
@@ -173,15 +187,23 @@ function copyIfChanged(src: string, dst: string): boolean {
 function sync(): void {
   // The device never creates directories on host0: (stat-style requests stall
   // the USB channel); every directory it writes into exists up front.
-  for (const dir of ["shaders", "gxp", "errors", "places"]) mkdirSync(`${SHARE}/${dir}`, { recursive: true });
+  for (const dir of ["shaders", "gxp", "errors", "places", "routes"]) mkdirSync(`${SHARE}/${dir}`, { recursive: true });
   cpSync(`${APP_DIR}/shaders`, `${SHARE}/shaders`, { recursive: true });
   // The device polls this one file and reloads the sources when it changes.
   const stamp = createHash("sha256");
   for (const f of readdirSync(`${APP_DIR}/shaders`).sort()) stamp.update(f).update(readFileSync(`${APP_DIR}/shaders/${f}`));
   writeFileSync(`${SHARE}/shaders/stamp`, stamp.digest("hex"));
   const places = cookedPlaces();
-  if (!places.length) throw new Error(`no cooked place under ${PLACES_DIR}: run \`bun tools/atlas.ts cook\` first`);
+  const routes = cookedRoutes();
+  if (!places.length && !routes.length) throw new Error(`no cooked place under ${PLACES_DIR}: run \`bun tools/atlas.ts cook\` first`);
   const copied = places.filter(([id, path]) => copyIfChanged(path, `${SHARE}/places/${id}.place`)).map(([id]) => id);
+  // A route streams its cells with seeks, which the USB share does not serve:
+  // the device copies the pack to its memory card when this stamp changes.
+  for (const [id, path] of routes) {
+    if (copyIfChanged(path, `${SHARE}/routes/${id}.route`)) copied.push(id);
+    const stamp = createHash("sha256").update(readFileSync(path)).digest("hex");
+    if (!existsSync(`${SHARE}/routes/${id}.stamp`) || readFileSync(`${SHARE}/routes/${id}.stamp`, "utf8") !== stamp) writeFileSync(`${SHARE}/routes/${id}.stamp`, stamp);
+  }
   if (existsSync(ATLAS_PACK) && copyIfChanged(ATLAS_PACK, `${SHARE}/atlas.pack`)) copied.push("atlas");
   console.log(`atlas: synced shaders${copied.length ? ` and ${copied.join(", ")}` : ""} to ${SHARE}`);
 }
@@ -209,8 +231,8 @@ async function lint(): Promise<void> {
     ["standard_f.cg", ["LIGHTS=0", "INTERIOR", "ALBEDO_MAP"]], ["unlit_f.cg", ["ALBEDO_MAP", "VERTEX_COLOR", "FOG", "ALPHA_TEST"]],
     ["glass_f.cg", ["LIGHTS=4", "FOG"]], ["glass_f.cg", ["LIGHTS=0", "REFLECTION"]], ["window_f.cg", ["FOG"]], ["window_f.cg", ["REFLECTION"]],
     ["products_f.cg", []], ["skyline_f.cg", []], ["tower_f.cg", []], ["sky_v.cg", []], ["sky_f.cg", []],
-    ...["STREAK", "SPLASH", "DRIP", "STEAM", "BEACON"].map((d): [string, string[]] => ["fx_v.cg", [d]]),
-    ...["STREAK", "SPLASH", "STEAM", "BEACON"].map((d): [string, string[]] => ["fx_f.cg", [d]]),
+    ...["STREAK", "SPLASH", "DRIP", "STEAM", "BEACON", "FLAKE"].map((d): [string, string[]] => ["fx_v.cg", [d]]),
+    ...["STREAK", "SPLASH", "STEAM", "BEACON", "FLAKE"].map((d): [string, string[]] => ["fx_f.cg", [d]]),
     ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "SUN_SPEC", "ALBEDO_MAP", "NORMAL_MAP", "ORM_MAP", "FOG"]], ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "ALPHA_TEST", "ALBEDO_MAP", "EMISSION_MAP", "FOG"]],
     ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "FAR", "ALBEDO_MAP", "FOG"]], ["shadow_f.cg", []], ["shadow_f.cg", ["ALPHA_TEST"]], ["fill_f.cg", []], ["sky_day_f.cg", []], ["sky_day_f.cg", ["TWILIGHT"]],
     ["globe_v.cg", []], ["globe_f.cg", []], ["marker_v.cg", []], ["marker_f.cg", []], ["ui_v.cg", []], ["ui_f.cg", []], ["ui_f.cg", ["TEX"]], ["text_v.cg", []], ["text_f.cg", []], ["surface_v.cg", ["WAVES"]], ["water_f.cg", ["SUN", "FOG"]], ["water_f.cg", []], ["water_f.cg", ["SUN", "FOG", "SHALLOW"]], ["surface_v.cg", ["WAVES", "COLOR"]], ["surface_v.cg", ["FLAT"]], ["surface_v.cg", ["BAKED", "FLAT"]],
@@ -414,9 +436,12 @@ async function vpk(): Promise<void> {
   mkdirSync(`${stage}/places`, { recursive: true });
   const places = cookedPlaces();
   for (const [id, path] of places) cpSync(path, `${stage}/places/${id}.place`);
+  const routes = cookedRoutes();
+  if (routes.length) mkdirSync(`${stage}/routes`, { recursive: true });
+  for (const [id, path] of routes) cpSync(path, `${stage}/routes/${id}.route`);
   if (!existsSync(ATLAS_PACK)) throw new Error(`${ATLAS_PACK} missing: run \`bun tools/atlas.ts cook-atlas\` first`);
   cpSync(ATLAS_PACK, `${stage}/atlas.pack`);
-  console.log(`atlas: staged ${hashes.length} programs, the atlas and ${places.map(([id]) => id).join(", ")} in ${stage}`);
+  console.log(`atlas: staged ${hashes.length} programs, the atlas and ${[...places, ...routes].map(([id]) => id).join(", ")} in ${stage}`);
   await build({ standalone: true, assets: stage });
 }
 
@@ -447,6 +472,41 @@ async function shots(): Promise<void> {
   }
 }
 
+// Frame times along a route with the autopilot driving: the car is placed at
+// `--from` km and drives to `--to` km at up to `--kmh`; every half second the
+// device's frame time, draws, triangles and cell state are read. The verdict
+// for a route: every stretch holds the profile's frame period at step 0.
+async function driveRun(): Promise<void> {
+  const [from, to, kmh] = [Number(value("--from", "0")), Number(value("--to", "3")), Number(value("--kmh", "60"))];
+  const view = value("--view", "chase");
+  mkdirSync(SHARE, { recursive: true });
+  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ place: ROUTE, renderProfile: RENDER, drive: { km: from, auto: kmh, view }, nonce: Date.now() }) + "\n");
+  await settle();
+  const rows: { km: number; ms: number; cpu: number; draws: number; tris: number; ready: number; missing: number; step: number; kmh: number }[] = [];
+  const deadline = Date.now() + ((to - from) / Math.max(5, kmh)) * 3600_000 * 2.5 + 60_000;
+  while (Date.now() < deadline) {
+    await Bun.sleep(500);
+    const e = engine();
+    const r = e.route;
+    if (!r) continue;
+    rows.push({ km: r.km, ms: e.frameMs, cpu: e.cpuSubmitMs, draws: e.main?.draws ?? 0, tris: e.main?.tris ?? 0, ready: r.cells.ready, missing: r.cells.missing, step: e.settings.step, kmh: r.kmh });
+    if (r.km >= to) break;
+  }
+  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ place: ROUTE, renderProfile: RENDER, drive: { auto: 0 }, nonce: Date.now() }) + "\n");
+  if (!rows.length) throw new Error("the device reported no route (is it running the route?)");
+  console.log(`render profile ${RENDER}, ${view} view, autopilot up to ${kmh} km/h`);
+  console.log("km        frame ms  max ms   cpu ms  draws   tris    cells  missing  steps");
+  for (let k = Math.floor(from); k < to; k++) {
+    const part = rows.filter((r) => r.km >= k && r.km < k + 1).slice(k === Math.floor(from) ? 4 : 0);
+    if (!part.length) continue;
+    const mean = (f: (r: (typeof rows)[number]) => number) => part.reduce((s, r) => s + f(r), 0) / part.length;
+    const max = (f: (r: (typeof rows)[number]) => number) => Math.max(...part.map(f));
+    console.log(
+      `${`${k}–${k + 1}`.padEnd(8)} ${mean((r) => r.ms).toFixed(1).padStart(8)} ${max((r) => r.ms).toFixed(1).padStart(7)} ${mean((r) => r.cpu).toFixed(1).padStart(8)} ${Math.round(max((r) => r.draws)).toString().padStart(6)} ${Math.round(max((r) => r.tris) / 1000).toString().padStart(5)}k ${Math.round(max((r) => r.ready)).toString().padStart(7)} ${Math.round(max((r) => r.missing)).toString().padStart(8)}  ${[...new Set(part.map((r) => r.step))].join(",")}`,
+    );
+  }
+}
+
 // Copies the standalone VPK to ux0:data/pocket-atlas/ through the running
 // development build, ready to install from VitaShell.
 async function pushVpk(): Promise<void> {
@@ -471,6 +531,10 @@ else if (command === "bench") await bench();
 else if (command === "profile") await profile();
 else if (command === "shots") await shots();
 else if (command === "sweep") await sweep();
+else if (command === "drive") await driveRun();
+else if (command === "cook-route") {
+  await $`cargo run --release --locked -p pocket3d-place-cook -- route --target vita --in ${ROUTES_DIR}/${ROUTE}`.cwd(ROOT);
+}
 else if (command === "sync") sync();
 else if (command === "ctl") {
   mkdirSync(SHARE, { recursive: true });

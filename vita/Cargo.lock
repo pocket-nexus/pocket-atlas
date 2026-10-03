@@ -73,6 +73,7 @@ version = "0.1.0"
 dependencies = [
  "glam",
  "pocket-vita-gxm",
+ "pocket3d-drive",
  "pocket3d-place",
  "pocketjs-vita",
  "serde_json",
@@ -87,6 +88,10 @@ dependencies = [
  "vita2d-sys",
  "vitasdk-sys",
 ]
+
+[[package]]
+name = "pocket3d-drive"
+version = "0.1.0"
 
 [[package]]
 name = "pocket3d-place"

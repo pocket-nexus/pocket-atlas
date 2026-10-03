@@ -1,6 +1,6 @@
 // Particle fragments; destination alpha (eye distance) is never written.
 //
-// Defines (one of): STREAK (also drips), SPLASH, STEAM, BEACON.
+// Defines (one of): STREAK (also drips), SPLASH, STEAM, BEACON, FLAKE.
 
 uniform sampler2D uPuddles; // noise source for steam
 uniform float4 uOpacity;    // opacity, -
@@ -38,6 +38,13 @@ float4 main(
     float a = smoothstep(1.0, 0.0, r + (n - 0.5) * 0.6);
     a = a * a * vLife.y * uOpacity.x;
     return float4(vColor * a * 0.28, a * 0.16);
+#endif
+#ifdef FLAKE
+    // Corner coordinates run −0.5 … 0.5 across and along the flake.
+    half e = (half)1.0 - abs(vUv.x) * (half)2.0;
+    half along = (half)1.0 - abs(vUv.y) * (half)2.0;
+    half a = smoothstep((half)0.0, (half)0.6, e) * smoothstep((half)0.0, (half)0.35, along) * vLife.y * (half)uOpacity.x;
+    return float4(vColor * a, a);
 #endif
 #ifdef BEACON
     float d = length((float2)vUv);

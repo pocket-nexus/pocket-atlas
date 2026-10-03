@@ -1,0 +1,91 @@
+{
+ "version": 1,
+ "id": "hokkaido-r237",
+ "surveyed": "2026-10-03",
+ "sources": [
+  "© OpenStreetMap contributors (ODbL)",
+  "国土地理院 標高タイル DEM10B"
+ ],
+ "frame": {
+  "system": "JGD2011 / Japan Plane Rectangular CS XII",
+  "lat0": 44,
+  "lon0": 142.25,
+  "k0": 0.9999,
+  "north0": -52000,
+  "east0": 14000,
+  "origin": {
+   "lat": 43.53180751524754,
+   "lon": 142.42321130623836
+  }
+ },
+ "axes": "+X east, −Z north, y metres above sea level",
+ "step": 5,
+ "samples": 10165,
+ "length": 50820,
+ "elevation": {
+  "min": 128.5,
+  "max": 293.2,
+  "start": 128.5,
+  "end": 170
+ },
+ "start": {
+  "name": "Nishi-Goryō, Asahikawa",
+  "native": "旭川市西御料",
+  "lat": 43.7186,
+  "lon": 142.3725
+ },
+ "end": {
+  "name": "Furano Marché",
+  "native": "フラノマルシェ",
+  "lat": 43.3421,
+  "lon": 142.3862
+ },
+ "names": [
+  {
+   "s": 0,
+   "name": "国道237号",
+   "ref": "237"
+  },
+  {
+   "s": 32130,
+   "name": "上富良野バイパス",
+   "ref": "237"
+  },
+  {
+   "s": 36470,
+   "name": "国道237号",
+   "ref": "237"
+  },
+  {
+   "s": 50330,
+   "name": "国道38号",
+   "ref": "38;237"
+  }
+ ],
+ "limits": [
+  {
+   "s": 0,
+   "kmh": 60
+  },
+  {
+   "s": 3565,
+   "kmh": 40
+  },
+  {
+   "s": 4665,
+   "kmh": 50
+  }
+ ],
+ "features": {
+  "road": 3372,
+  "point": 933,
+  "rail": 106,
+  "building": 14670,
+  "water": 361,
+  "land": 2011,
+  "waterway": 946,
+  "tower": 159,
+  "power": 33,
+  "treeRow": 32
+ }
+}

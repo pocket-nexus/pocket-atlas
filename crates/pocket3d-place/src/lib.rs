@@ -21,6 +21,7 @@
 pub mod atlas;
 pub mod color;
 pub mod meta;
+pub mod route;
 
 pub use meta::*;
 
@@ -103,11 +104,16 @@ impl<'a> Pack<'a> {
 
     /// [`Pack::parse_header`] for a container with another magic.
     pub fn parse_header_as(bytes: &[u8], magic: [u8; 4]) -> Result<Vec<Section>, Error> {
+        Self::parse_header_versioned(bytes, magic, VERSION)
+    }
+
+    /// [`Pack::parse_header`] for a container with its own magic and schema version.
+    pub fn parse_header_versioned(bytes: &[u8], magic: [u8; 4], expected: u32) -> Result<Vec<Section>, Error> {
         if bytes.get(0..4) != Some(&magic[..]) {
             return Err(Error::Magic);
         }
         let version = u32_at(bytes, 4)?;
-        if version != VERSION {
+        if version != expected {
             return Err(Error::Version(version));
         }
         let count = u32_at(bytes, 8)? as usize;
