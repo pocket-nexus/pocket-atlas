@@ -28,6 +28,7 @@ import {
 import { PLACES } from "../web/src/places/registry";
 import { isIPodAsset, selectIPodPlaces } from "./atlas-ipod-catalog";
 import { validateDrawableCapture } from "./atlas-ipod-capture";
+import { collectObservation, parseObservationOptions } from "./atlas-ipod-observe";
 const root = resolve(import.meta.dir, "..");
 const args = Bun.argv.slice(2),
   command = args[0] ?? "build";
@@ -283,6 +284,7 @@ async function device<T>(
   operation: (
     ssh: (s: string) => string,
     scp: (from: string, to: string, download?: boolean) => void,
+    stream: (script: string) => Bun.Subprocess<"ignore", "pipe", "pipe">,
   ) => Promise<T> | T,
 ) {
   const ids = run(["idevice_id", "-l"]).split("\n");
@@ -365,7 +367,10 @@ async function device<T>(
       }
     }
     if (!ready) throw new Error("USB SSH unavailable");
-    return await operation(ssh, scp);
+    return await operation(ssh, scp, (script) => Bun.spawn(
+      ["ssh", "-p", String(port), ...auth, "root@127.0.0.1", script],
+      { stdin: "ignore", stdout: "pipe", stderr: "pipe" },
+    ));
   } finally {
     tunnel.kill();
     await tunnel.exited;
@@ -492,6 +497,14 @@ else if (command === "status") {
     // worker. Settle after those operations, before reading its saved window.
     if (quiet) await Bun.sleep(quiet * 1000);
     console.log(ssh(`cat ${shellQuote(app.Container + "/tmp/" + file)}`));
+  });
+}
+else if (command === "observe") {
+  const options = parseObservationOptions(args);
+  await device(async (ssh, _scp, stream) => {
+    const app = installed(ssh);
+    const summary = await collectObservation(stream, app.Container + "/tmp", options);
+    if (!summary.normalPlaybackEvidence) process.exitCode = 1;
   });
 }
 else if (command === "ctl")

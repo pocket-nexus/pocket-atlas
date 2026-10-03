@@ -118,6 +118,7 @@ export function assessWindow(before: Timing, after: Timing, fps: number) {
     excludedFrames: excluded,
     requiredSamples,
     fps,
+    windowSeconds: after.intervalMs.samples * after.intervalMs.mean / 1000,
     renderMs: after.renderMs,
     presentMs: after.presentMs,
     workMs: after.workMs,
@@ -209,7 +210,9 @@ async function main() {
   if (baseline.memoryWarningBatches !== 0)
     throw new Error("Normal acceptance requires a process with no memory pressure fallback");
   const save = () => writeFileSync(join(options.directory, "receipt.json"), JSON.stringify({
-    schemaVersion: 2,
+    schemaVersion: 3,
+    scenario: "fixed-shot-midpoint-frozen-time",
+    scope: "Per-shot recent-frame stress samples at time 25; not a live-tour FPS range or a comfort verdict",
     buildId: receipt.buildId,
     timing: "render-worker-present; rolling steady windows; capture excluded; UI reported separately",
     polling: "USB identity/lookup before a 2–20s quiet interval; a rolling window plus 2s publication margin when within the bound",
@@ -289,7 +292,7 @@ async function main() {
         row.drawable = { ...drawable, internalWidth: captured.renderWidth, internalHeight: captured.renderHeight };
         row.nativeUI = nativeUI;
         row.ui = ui;
-        console.log(`${place.id}/${shot} ${row.result}: ${measurement.fps.toFixed(2)} fps; interval p95 ${measurement.intervalMs.p95.toFixed(2)} ms; work p95 ${measurement.workMs.p95.toFixed(2)} ms; ${measurement.steadyFrames} steady frames; strict 30fps budget ${measurement.meets30FpsBudget ? "met" : "not met"}`);
+        console.log(`${place.id}/${shot} fixed midpoint / frozen t=25 ${row.result}: ${measurement.fps.toFixed(2)} fps over last ${measurement.windowSeconds.toFixed(2)} s; interval p95 ${measurement.intervalMs.p95.toFixed(2)} ms; work p95 ${measurement.workMs.p95.toFixed(2)} ms; ${measurement.steadyFrames} steady frames; strict 30fps budget ${measurement.meets30FpsBudget ? "met" : "not met"}`);
       } catch (error) {
         row.result = "failed";
         row.reason = String(error);

@@ -4,6 +4,12 @@ Native ARMv7 / OpenGL ES 2.0 renderer with a UIKit directory, rotatable globe an
 
 SGX is the default, with a fixed **480×320** scene and drawable; it does not reduce resolution to reach its 30 fps target. Retina Reference uses the full material profile and a 960×640 drawable for detail comparison. A system-memory fallback selects SGX at 480×320. UIKit has an independent Retina container and main-thread display link at both settings. Capture receipts record actual layer scales and PNG dimensions. UI callback rate does not establish the 3D frame rate; use completed render-worker presentation timings below.
 
+## Accepted performance baseline
+
+The user accepted the current iPod touch 4 renderer's visual quality and comfort on 2026-10-04. The baseline is revision `71ec7920b6b32639f5e88e56174e4891ccee5f6e`, installed build `d656d25c1c7522ac1dd04f92` (executable SHA256 `79b011c08fdc96e4bcee154ba93f6ff0fc213da6eb5e8a9779d9862900c64b49`), with the SGX 480×320 profile and independent Retina UI. The artifact identity, device measurements and acceptance limits are recorded in [PR #15](https://github.com/pocket-nexus/pocket-atlas/pull/15).
+
+This is acceptance of that renderer's observed experience, not certification that every view sustains 30 fps. Future demos retain the 30 fps target; this acceptance does not lower their performance standard or introduce a lower minimum. Compare later renderer changes against the same scene, camera path, animation, quality and effects, keeping picture quality and frame-time tails alongside throughput. Report subjective comfort, completed 3D presentation cadence and UIKit callback cadence separately.
+
 ## Ownership
 
 Atlas owns the GLES renderer, UIKit shell and the independent PlaceIR → typed scene analysis → iPod lowering. The runtime reads its own `PLIP` v1 ABI; Vita and other device packs are rejected as compiler input. Shared material, lighting, animation and color semantics live in `pocket-atlas-model`; the cooker owns float scene analysis and target lowering, `pocket3d-place` owns byte layouts, and `vita/shaders` supplies shared material algorithms. The versioned `ipod30` profile records the SGX535 target, 480×320 scene, 960×640 physical display and texture recipe. The actual SGX EAGL drawable is 480×320; UIKit uses the independent Retina container. Compiler receipts bind the source, profile, compiler, pack and sidecars; they do not establish device performance. The pinned PocketJS dependency supplies the ARMv7 target, legacy SDK resolver, startup objects and the MobileInstallation transaction. No PocketJS files are modified.
@@ -69,6 +75,7 @@ bun tools/atlas-ipod.ts deploy       # package, install, byte-exact bundle readb
 bun tools/atlas-ipod.ts launch
 bun tools/atlas-ipod.ts status
 bun tools/atlas-ipod.ts status --ui  # independent UIKit cadence
+bun tools/atlas-ipod.ts observe --seconds 120  # read-only live playback / manual interaction
 bun tools/atlas-ipod.ts ctl '{"place":"tokyo-konbini","shot":0,"time":3,"quality":0}'
 bun tools/atlas-ipod.ts capture --out .pocket-build/validation/ipod/scene.png
 bun tools/atlas-ipod.ts capture-ui --out .pocket-build/validation/ipod/ui.png
@@ -102,6 +109,14 @@ bun tools/atlas-ipod-acceptance.ts --quality 0 --width 0 --warmup 2 --seconds 90
 # Optional full-profile comparison, allowing longer for 120 presentations:
 bun tools/atlas-ipod-acceptance.ts --quality 1 --width 0 --seconds 180
 ```
+
+The camera sweep is a **fixed-shot, frozen-time benchmark**, not the frame-rate range of a continuous tour. Each camera is held at its authored midpoint at animation time 25. Its reported FPS covers the last 120 accepted presentation intervals (the receipt includes that window's actual duration), not the entire measurement deadline. Keep this repeatable workload for regressions; failure of its strict 30 fps gate is not a human comfort verdict.
+
+For actual use, run `observe` while the scene plays or a person operates it. It never sends controls or freezes the camera. After USB discovery/authentication/lookup and a 12-second warmup, one SSH connection reads the existing scene and UI status files every two seconds for 120 seconds. For a transport-interference control, use `observe --seconds 60 --interval 60`: it reads only the two endpoints, with no intervening polling. Compare equivalent workloads, not different camera paths. Receipts and original samples remain under `.pocket-build/validation/ipod/`.
+
+The observation reports total presentation-counter change divided by host elapsed time, separate UI callback counts, observed camera modes/shots, and sampled recent-window FPS/p95. Host endpoint times have the existing roughly twice-per-second publication lag; these are approximate cross-checks. The recent windows overlap, so their minimum is a **sampled window minimum**, their p95 values cannot be pooled into a session p95, and sample counts are not a distribution of session time. Camera/settings transitions, pauses, stale status and excluded frames remain visible; invalid normal-playback evidence returns a nonzero status. Observation reports measurements without inventing a new acceptance threshold. Future-demo acceptance needs the complete relevant motion paths, worst authored views, frame-time tails and physical interaction assessment, not just an average or a short clean sample.
+
+Both tools count successful `presentRenderbuffer:` returns on the GL worker. They do not measure optical display scanout. No GPU profiling waits or pixel captures occur inside the observation interval. The observer does not rebuild or modify the accepted app.
 
 `--quality` accepts 0, 1 or 2 and defaults to 0. `--width 0` uses the profile’s fixed resolution. `--seconds` is the measurement deadline per shot, after warmup; it is not a short FPS sampling interval. Each view requires at least 120 fresh, non-excluded presentations after warmup and full 120-sample work/interval windows. Target resize, loading and capture exclusions cannot satisfy this count. The script marks insufficient evidence `incomplete` and invalid state `failed`, returning a nonzero exit status in either case.
 
