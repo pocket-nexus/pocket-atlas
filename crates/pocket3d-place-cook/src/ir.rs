@@ -153,13 +153,13 @@ impl Manifest {
                     target.name()
                 ));
             }
-            if target == Target::Psp && matches!(feature.as_str(), "material:water" | "day-sky") {
+            if target == Target::Psp && matches!(feature.as_str(), "material:water") {
                 return Err(format!("{}: {feature} has no PSP lowering", self.name));
             }
         }
-        if target == Target::Psp && self.kind != "night-street" {
+        if target == Target::Psp && !matches!(self.kind.as_str(), "night-street" | "daytime-street") {
             return Err(format!(
-                "{}: PSP currently supports the night-street effect set, got {}",
+                "{}: PSP supports night-street and daytime-street effects, got {}",
                 self.name, self.kind
             ));
         }

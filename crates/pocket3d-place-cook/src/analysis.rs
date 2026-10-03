@@ -2,6 +2,8 @@
 use crate::{source as pc, extras, textures, env, bake, geometry, occlusion, procedural, ir, Args};
 #[path = "palette.rs"]
 mod palette;
+#[path = "audio.rs"]
+pub mod audio;
 use geometry::Vertex;
 use glam::{Mat3, Mat4, Quat, Vec2, Vec3};
 use gltf::khr_lights_punctual::Kind as LightType;
@@ -1608,6 +1610,7 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
         day_sky,
         post,
         vista_haze: extras::vista_haze(&sx["haze"]),
+        audio: audio::read(&sx["audio"]).unwrap_or_else(|e| panic!("audio: {e}")),
         stats: stats.clone(),
     };
     (scene, cook.log)

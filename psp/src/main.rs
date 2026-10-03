@@ -73,9 +73,12 @@ unsafe fn run() {
             }
         }
     };
+    let pack_hash = pp::fingerprint(bytes);
     let mut scene = scene::Scene::new(bytes, h);
     let mut rig = camera::Rig::new(scene.shots[0]);
     let mut gpu = renderer::Renderer::new(&scene);
+    let audio_recipe = pp::slice::<f32>(bytes, h.audio).unwrap();
+    audio::configure((!audio_recipe.is_empty()).then_some(audio_recipe));
     audio::start();
     sceCtrlSetSamplingCycle(0);
     sceCtrlSetSamplingMode(CtrlMode::Analog);
@@ -140,6 +143,7 @@ unsafe fn run() {
                 paused = command.pause;
                 rain = command.rain;
                 reflection = command.reflection;
+                muted = command.muted;
                 if command.shot >= 0 && (command.shot as usize) < scene.shots.len() {
                     rig.cut(command.shot as usize, scene.shots);
                     rig.shot_time = scene.shots[rig.shot].duration * 0.5;
@@ -172,6 +176,17 @@ unsafe fn run() {
             scene.walkable,
         );
         scene.update(time, rig.pos);
+        let right = (rig.target - rig.pos)
+            .normalize()
+            .cross(glam::Vec3::Y)
+            .normalize();
+        audio::update(
+            time,
+            rig.pos.to_array(),
+            right.to_array(),
+            muted,
+            paused || frozen >= 0.0,
+        );
         let indoors = scene
             .dry
             .iter()
@@ -221,6 +236,10 @@ unsafe fn run() {
                 draws: stats.draws,
                 triangles: stats.triangles,
                 pack_bytes: len,
+                pack_hash,
+                pack_version: h.version,
+                audio_ready: audio::ready(),
+                muted,
                 rain,
                 reflection,
                 paused,

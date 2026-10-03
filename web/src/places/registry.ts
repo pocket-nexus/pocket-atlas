@@ -98,7 +98,7 @@ export const PLACES: PlaceDef[] = [
   },
   {
     id: "sangubashi-crossing",
-    targets: ["vita"],
+    targets: ["vita", "3ds", "psp"],
     name: "Sangubashi in Bloom",
     native: "桜の参宮橋３号踏切",
     locality: "Yoyogi, Tokyo",

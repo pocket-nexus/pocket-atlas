@@ -9,6 +9,7 @@ pub struct Command {
     pub pause: bool,
     pub rain: bool,
     pub reflection: bool,
+    pub muted: bool,
     nonce: u32,
 }
 impl Command {
@@ -26,6 +27,7 @@ impl Command {
             rain: flag(fields.next()?)?,
             reflection: flag(fields.next()?)?,
             nonce: fields.next()?.parse().ok()?,
+            muted: flag(fields.next()?)?,
         };
         (fields.next().is_none()
             && command.shot >= -1
@@ -47,6 +49,10 @@ pub struct Status<'a> {
     pub draws: u32,
     pub triangles: u32,
     pub pack_bytes: usize,
+    pub pack_hash: u32,
+    pub pack_version: u32,
+    pub audio_ready: bool,
+    pub muted: bool,
     pub rain: bool,
     pub reflection: bool,
     pub paused: bool,
@@ -109,7 +115,7 @@ impl Session {
                 "\"time\":{:.2},\"fps\":{:.2},\"frameMs\":{:.2},\"workMs\":{:.2},",
                 "\"gpuWaitMs\":{:.2},\"maxWorkMs\":{:.2},\"draws\":{},\"triangles\":{},",
                 "\"packBytes\":{},\"rain\":{},\"reflection\":{},\"paused\":{},",
-                "\"freeCamera\":{},\"controlNonce\":{}}}\n"
+                "\"freeCamera\":{},\"controlNonce\":{},\"packHash\":{},\"packVersion\":{},\"audioReady\":{},\"muted\":{},\"build\":\"{}\"}}\n"
             ),
             s.frame,
             shot,
@@ -127,7 +133,12 @@ impl Session {
             s.reflection,
             s.paused,
             s.free_camera,
-            self.nonce.unwrap_or(0)
+            self.nonce.unwrap_or(0),
+            s.pack_hash,
+            s.pack_version,
+            s.audio_ready,
+            s.muted,
+            option_env!("ATLAS_BUILD_ID").unwrap_or("unknown")
         );
         let fd = sceIoOpen(
             b"host0:/status.json\0".as_ptr(),

@@ -37,7 +37,9 @@ passes, while `vita.rs`, `pica.rs` and `psp.rs` own their encodings. `main.rs`
 handles the CLI. The analysis representation is not a serialized interchange
 format or a shared scene language for OpenStrike. Device format names/versions remain
 unchanged so this step does not require a runtime format migration. PICA pins
-its PLCE envelope to v5 and its binary table to v3 independently of Vita v6.
+its PLCE envelope to v5 and its binary table to v4 independently of Vita v7.
+PSP uses PLPS v2. Native runtimes reject older animation/material layouts;
+re-cook each affected target when updating the application.
 Previously a Vita version bump leaked into PICA output and the C reader rejected
 it; the integration test now checks cooked output using the runtime's C format
 header and header validator.
@@ -117,8 +119,9 @@ need device headroom measurements.
 ## Capability, release eligibility and evidence
 
 `check --target` rejects known missing lowerings before cooking. Currently
-PICA/GE reject city-light fields and vista height haze. GE also rejects daytime
-sky, water and kinds outside the supported night-street effect set. It does not
+PICA/GE reject city-light fields and vista height haze. GE supports the
+night-street and daytime-street effect sets, including a cooked day sky,
+clouds and sunlight; it still rejects water and unsupported place kinds. It does not
 silently treat light-field point records as triangle records. Unsupported
 material annotations fail rather than falling back to a standard material.
 This is an initial capability gate, not an exhaustive Three.js feature checker.
@@ -179,6 +182,29 @@ the installed runtime build, device, camera/quality settings, measured frame
 windows and captures. A section-size check does not prove combined allocation
 headroom, visual fidelity or a frame-time bound. No device certificate is
 inferred from a successful compile.
+
+Native animation formats retain full authored loop samples while deduplicating
+constant and identical tracks. PICA v4 stores compact TRS tracks with quaternion
+interpolation and an affine fallback. PSP v2 uses its own compact tracks and GE
+vertex layouts, with measured position error recorded in compile receipts.
+These encodings are chosen from source floats by each backend, never from Vita
+vertices or animation bytes.
+
+`psp30` revision 2 makes its geometry recipe explicit: daytime streets use
+8 m static cells, a 1 pixel LOD error, at most 5 mm packed vertex position
+error, 0.25 texel UV error and 6 mm packed translation error. An explicit
+`--cell` overrides the cell recipe; other targets and night streets retain
+their own existing policy. These are acceptance limits for an encoding, not
+promises that every batch is quantized: oversized or stricter inputs retain
+source float data. Empty LODs with a positive error intentionally omit
+subpixel parts; they must not fall back to full geometry.
+
+Optional `extras.pocketAtlas.audio` v1 describes procedural wind, birds and a
+railway pass. Typed analysis validates its timing and gains; native lowerings
+store a small parameter record, not sampled PCM. The native mixers follow the
+scene clock and camera, silence paused or muted playback, and restart envelopes
+on seeks. Audio initialization and a person's listening check remain distinct
+from a successful cook or host synthesis test.
 
 Backends return complete artifacts to the CLI. Profile and reader checks run
 before publication; a rejected budget leaves an existing output pack and its

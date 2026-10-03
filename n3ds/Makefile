@@ -13,7 +13,7 @@ CFLAGS := -O3 -g -Wall -Wextra -std=gnu11 -ffunction-sections -fdata-sections -m
   -D__3DS__ -DPOCKETJS_RUNTIME_SLOT='"pocket-atlas"' \
   -include $(BUILD)/config.h -I$(PICA_KERNEL) -I$(SOURCE) -I$(BUILD) -I$(POCKET)/src -I$(POCKET)/include -I$(DEVKITPRO)/libctru/include
 LDFLAGS := -specs=3dsx.specs $(ARCH) -Wl,--gc-sections -Wl,-Map,$(BUILD)/atlas.map
-OBJECTS := $(addprefix $(BUILD)/,main.o scene.o browser.o settings.o assets.o frame_guard.o scene_shbin.o wet_shbin.o water_shbin.o browser_shbin.o devserver.o dev_protocol.o native.o hbldr.o soc.o)
+OBJECTS := $(addprefix $(BUILD)/,main.o scene.o audio.o browser.o settings.o assets.o frame_guard.o scene_shbin.o wet_shbin.o water_shbin.o browser_shbin.o devserver.o dev_protocol.o native.o hbldr.o soc.o)
 .PHONY: all
 all: $(OUT)
 $(BUILD):
@@ -24,7 +24,7 @@ $(BUILD)/%_shbin.s $(BUILD)/%_shbin.h &: $(BUILD)/%.shbin
 	cd $(BUILD) && $(DEVKITPRO)/tools/bin/bin2s -a 4 -H $*_shbin.h $*.shbin > $*_shbin.s
 $(BUILD)/%_shbin.o: $(BUILD)/%_shbin.s
 	$(CC) $(ARCH) -c $< -o $@
-$(addprefix $(BUILD)/,main.o scene.o browser.o settings.o assets.o frame_guard.o): $(BUILD)/%.o: $(SOURCE)/%.c $(wildcard $(SOURCE)/*.h) $(wildcard $(PICA_KERNEL)/*.h) $(BUILD)/config.h $(BUILD)/scene_shbin.h $(BUILD)/wet_shbin.h $(BUILD)/water_shbin.h $(BUILD)/browser_shbin.h | $(BUILD)
+$(addprefix $(BUILD)/,main.o scene.o audio.o browser.o settings.o assets.o frame_guard.o): $(BUILD)/%.o: $(SOURCE)/%.c $(wildcard $(SOURCE)/*.h) $(wildcard $(PICA_KERNEL)/*.h) $(BUILD)/config.h $(BUILD)/scene_shbin.h $(BUILD)/wet_shbin.h $(BUILD)/water_shbin.h $(BUILD)/browser_shbin.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 $(addprefix $(BUILD)/,devserver.o dev_protocol.o native.o hbldr.o soc.o): $(BUILD)/%.o: $(POCKET)/src/%.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@

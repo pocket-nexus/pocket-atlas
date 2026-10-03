@@ -30,6 +30,11 @@ impl<'a> Scene<'a> {
                     && a.material == d.material
                     && a.flags == d.flags
                     && a.node == d.node
+                    && a.vertex_format == d.vertex_format
+                    && a.pos_offset == d.pos_offset
+                    && a.pos_scale == d.pos_scale
+                    && a.uv_offset == d.uv_offset
+                    && a.uv_scale == d.uv_scale
                     && d.weights.count == 0
             }) {
                 g.push(i);
@@ -74,7 +79,31 @@ impl<'a> Scene<'a> {
         let a = f as usize;
         let b = (a + 1) % frames;
         let t = f - a as f32;
-        core::array::from_fn(|i| values[a * N + i] * (1.0 - t) + values[b * N + i] * t)
+        let flip = N == 7
+            && (3..7)
+                .map(|i| values[a * N + i] * values[b * N + i])
+                .sum::<f32>()
+                < 0.0;
+        core::array::from_fn(|i| {
+            values[a * N + i] * (1.0 - t)
+                + values[b * N + i] * (if flip && i >= 3 { -t } else { t })
+        })
+    }
+    fn node_track(&self, node: &pp::Node, time: f32) -> [f32; 7] {
+        if node.track_encoding == 0 {
+            return self.track::<7>(node.track, time);
+        }
+        let keys = pp::slice::<pp::PackedTrs>(self.bytes, node.track).unwrap();
+        let f = (time * self.header.fps) % keys.len() as f32;
+        let a = f as usize;
+        let b = (a + 1) % keys.len();
+        let t = f - a as f32;
+        let (a, b) = (
+            pp::decode_trs(node, &keys[a]),
+            pp::decode_trs(node, &keys[b]),
+        );
+        let flip = (3..7).map(|i| a[i] * b[i]).sum::<f32>() < 0.0;
+        core::array::from_fn(|i| a[i] * (1.0 - t) + b[i] * (if flip && i >= 3 { -t } else { t }))
     }
     pub fn update(&mut self, time: f32, eye: Vec3) {
         let open =
@@ -82,7 +111,7 @@ impl<'a> Scene<'a> {
         self.door += (if open { 1.0 } else { 0.0 } - self.door) * 0.12;
         for (i, n) in self.nodes.iter().enumerate() {
             let (mut t, r) = if n.track.count > 0 {
-                let v = self.track::<7>(n.track, time);
+                let v = self.node_track(n, time);
                 (
                     Vec3::new(v[0], v[1], v[2]),
                     Quat::from_xyzw(v[3], v[4], v[5], v[6]).normalize(),

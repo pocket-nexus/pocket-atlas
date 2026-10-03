@@ -25,7 +25,7 @@ enum {
   SCENE_MOTION = 128
 };
 typedef struct {
-  bool reflection, rain, haze, glow, cinematic, hud, hold;
+  bool reflection, rain, haze, glow, cinematic, hud, hold, muted;
   unsigned step,
       lod_floor;  // lod_floor: 0..2 fixed, 3 automatic by asset features
   float exposure; // display exposure adjustment in EV, -2..2

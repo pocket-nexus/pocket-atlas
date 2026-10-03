@@ -3,6 +3,9 @@
 //! RGB565/RGBA4 mip chains are tiled offline, and lighting is converted to
 //! display-referred vertex colour because PICA200 has fixed TEV combiners.
 use crate::textures::{self, Rgba};
+use crate::native_sky::{grade, panorama, sun_occluder};
+#[cfg(test)]
+use crate::native_sky::{sky_radiance, cloud_overlay};
 use glam::{Mat4, Quat, Vec3};
 use pocket3d_place as pc;
 use std::collections::HashMap;
@@ -11,7 +14,7 @@ use crate::{artifact::Artifact, profile::Profile};
 // This schema belongs to PICA, independently of Vita's pc::VERSION.
 // tests/pipeline.rs verifies emitted packs against n3ds/src/format.h.
 const CONTAINER_VERSION: u32 = 5;
-const TABLE_VERSION: u32 = 3;
+const TABLE_VERSION: u32 = 4;
 
 fn u32s(out: &mut Vec<u8>, v: &[u32]) {
     for n in v {
@@ -45,10 +48,6 @@ fn srgb(x: f32) -> f32 {
 }
 fn byte(x: f32) -> u8 {
     (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
-}
-// The same authored AgX/ACES grade as the Vita's colour LUT.
-fn grade(c: Vec3, p: &pc::Post) -> Vec3 {
-    Vec3::from(pc::color::tone(c.to_array(), p))
 }
 fn hash(x: f32) -> f32 {
     (x.sin() * 43758.547).fract().abs()
@@ -146,6 +145,61 @@ fn rows(m: Mat4) -> [f32; 12] {
     let t = m.transpose();
     let a = t.to_cols_array();
     a[..12].try_into().unwrap()
+}
+
+// PICA v4 keeps every source sample. Repeated rigid transforms share a track;
+// constant transforms store one sample. TRS records retain f32 translation and
+// scale and quantize only the unit quaternion (snorm16, < 0.0001 rad error).
+// Non-TRS affine transforms, including shear, retain all twelve f32 components.
+fn trs(m: Mat4) -> Option<(Vec3, Quat, Vec3)> {
+    if !m.is_finite() || m.determinant().abs() < 1e-12 {
+        return None;
+    }
+    let (s, q, t) = m.to_scale_rotation_translation();
+    if !s.is_finite() || !q.is_finite() || !t.is_finite() {
+        return None;
+    }
+    let q = q.normalize();
+    let reconstructed = Mat4::from_scale_rotation_translation(s, q, t);
+    if m.to_cols_array().into_iter().zip(reconstructed.to_cols_array())
+        .any(|(a, b)| (a - b).abs() > 1e-5 * (1.0 + a.abs())) {
+        return None;
+    }
+    Some((t, if q.w < 0.0 { -q } else { q }, s))
+}
+
+fn animation_tracks(tracks: &[Vec<Mat4>]) -> (Vec<u8>, usize, usize) {
+    let mut out = vec![0; tracks.len() * 12];
+    let mut shared = HashMap::<(u32, Vec<u8>), u32>::new();
+    let mut affine = 0;
+    for (i, track) in tracks.iter().enumerate() {
+        assert!(!track.is_empty());
+        let samples = if track.iter().all(|m| *m == track[0]) { &track[..1] } else { track.as_slice() };
+        let decomposed = samples.iter().map(|&m| trs(m)).collect::<Option<Vec<_>>>();
+        let kind = if decomposed.is_some() { 1 } else { 0 };
+        let mut data = Vec::new();
+        if let Some(trs) = decomposed {
+            for (t, q, s) in trs {
+                fs(&mut data, &t.to_array());
+                fs(&mut data, &s.to_array());
+                for v in q.to_array() {
+                    data.extend(((v.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes());
+                }
+            }
+        } else {
+            affine += 1;
+            for &m in samples { fs(&mut data, &rows(m)); }
+        }
+        let offset = *shared.entry((kind, data.clone())).or_insert_with(|| {
+            let offset = out.len() as u32;
+            out.extend(data);
+            offset
+        });
+        let mut record = Vec::new();
+        u32s(&mut record, &[offset, samples.len() as u32, kind]);
+        out[i * 12..(i + 1) * 12].copy_from_slice(&record);
+    }
+    (out, shared.len(), affine)
 }
 
 fn repack_geometry(old_geom: Vec<u8>, draws: &mut [Vec<u8>]) -> Vec<u8> {
@@ -448,72 +502,6 @@ fn recover_structural_details(
     output
 }
 
-// Display-referred panoramas preserve authored day/twilight colour, sunlight
-// and clouds without spending fragment instructions or an HDR target on PICA.
-fn sky_radiance(s: &pc::DaySky, d: Vec3) -> Vec3 {
-    let h = d.y;
-    let mut color =
-        Vec3::from(s.horizon).lerp(Vec3::from(s.zenith), h.max(0.0).powf(s.gradient_power));
-    if h < 0.0 {
-        color =
-            Vec3::from(s.horizon).lerp(Vec3::from(s.ground), (-h * s.ground_blend).clamp(0.0, 1.0));
-    }
-    let mu = d.dot(Vec3::from(s.sun_direction)).max(0.0);
-    let smooth =
-        ((mu - s.disc_cos_outer) / (s.disc_cos_inner - s.disc_cos_outer).max(1e-6)).clamp(0.0, 1.0);
-    color += Vec3::from(s.sun_color)
-        * (s.glow
-            * (s.glow_wide[0] * mu.powf(s.glow_wide[1])
-                + s.glow_tight[0] * mu.powf(s.glow_tight[1]))
-            + s.disc * smooth * smooth * (3.0 - 2.0 * smooth));
-    if let Some(t) = &s.twilight {
-        let a = Vec3::new(d.x, 0.0, d.z)
-            .normalize_or(Vec3::Z)
-            .dot(Vec3::new(s.sun_direction[0], 0.0, s.sun_direction[2]).normalize_or(Vec3::Z))
-            .clamp(-1.0, 1.0);
-        let toward = (a + 1.0) * 0.5;
-        let away = (1.0 - a) * 0.5;
-        color += Vec3::from(t.band.color)
-            * ((-h.abs() / t.band.height.max(1e-5)).exp()
-                * (1.0 - t.band.sun_bias + t.band.sun_bias * toward.powf(t.band.sun_power)));
-        let z = (h - t.belt.elevation) / t.belt.width.max(1e-5);
-        color += Vec3::from(t.belt.color) * ((-z * z).exp() * away.powf(t.belt.power));
-        color *= 1.0
-            - t.shadow.strength
-                * (-h.abs() / t.shadow.height.max(1e-5)).exp()
-                * away.powf(t.shadow.power);
-    }
-    color
-}
-// Match a filtered GPU panorama sample (repeat azimuth, clamp elevation).
-fn bilinear(image: &Rgba, u: f32, v: f32) -> [f32; 4] {
-    let x = u * image.w as f32 - 0.5;
-    let y = v * image.h as f32 - 0.5;
-    let (ix, iy) = (x.floor() as i32, y.floor() as i32);
-    let (fx, fy) = (x - x.floor(), y - y.floor());
-    let pixel = |a: i32, b: i32| {
-        image.px[b.clamp(0, image.h as i32 - 1) as usize * image.w as usize
-            + a.rem_euclid(image.w as i32) as usize]
-    };
-    let (a, b, c, d) = (
-        pixel(ix, iy),
-        pixel(ix + 1, iy),
-        pixel(ix, iy + 1),
-        pixel(ix + 1, iy + 1),
-    );
-    std::array::from_fn(|k| {
-        (a[k] * (1.0 - fx) + b[k] * fx) * (1.0 - fy) + (c[k] * (1.0 - fx) + d[k] * fx) * fy
-    })
-}
-// Compute the premultiplied *display* contribution, after composing the
-// original HDR sky + cloud radiance through the authored tone curve. Simply
-// toning the cloud in isolation then blending display RGB darkens its rim.
-// Empty sky texels are exactly zero, so bilinear filtering cannot
-// introduce a black fringe (runtime blend is ONE, ONE_MINUS_SRC_ALPHA).
-fn cloud_overlay(base: Vec3, radiance: Vec3, alpha: f32, post: &pc::Post) -> Vec3 {
-    let target = grade(base * (1.0 - alpha) + radiance, post);
-    (target - grade(base, post) * (1.0 - alpha)).max(Vec3::ZERO)
-}
 fn tiled_rgba8(img: &Rgba) -> Vec<u8> {
     let mut out = vec![0; (img.w * img.h * 4) as usize];
     for y in 0..img.h {
@@ -531,46 +519,6 @@ fn tiled_rgba8(img: &Rgba) -> Vec<u8> {
         }
     }
     out
-}
-fn panorama(s: &pc::DaySky, post: &pc::Post, clouds: Option<&Rgba>) -> Rgba {
-    let (w, h) = if clouds.is_some() {
-        (1024, 512)
-    } else {
-        (512, 256)
-    };
-    let px = (0..h)
-        .flat_map(|y| {
-            (0..w).map(move |x| {
-                let az = (x as f32 + 0.5) / w as f32 * std::f32::consts::TAU;
-                let elevation = ((y as f32 + 0.5) / h as f32 - 0.5) * std::f32::consts::PI;
-                let d = Vec3::new(
-                    az.sin() * elevation.cos(),
-                    elevation.sin(),
-                    -az.cos() * elevation.cos(),
-                );
-                let (rgb, alpha) = if let Some(c) = clouds {
-                    let turn = az / std::f32::consts::TAU;
-                    let u = (turn * 2.0).fract();
-                    let lv = (elevation.max(0.0) / std::f32::consts::FRAC_PI_2).sqrt();
-                    let v = ((turn * 2.0).floor() + lv.clamp(0.5 / 512.0, 1.0 - 0.5 / 512.0)) * 0.5;
-                    let p = bilinear(c, u, v);
-                    let f = (d.y / s.fade_elevation.max(1e-5)).clamp(0.0, 1.0);
-                    let f = f * f * (3.0 - 2.0 * f);
-                    let radiance =
-                        (Vec3::from(s.cloud_sun) * p[1] + Vec3::from(s.cloud_ambient) * p[2]) * f;
-                    (
-                        cloud_overlay(sky_radiance(s, d), radiance, p[0] * f, post),
-                        p[0] * f,
-                    )
-                } else {
-                    (grade(sky_radiance(s, d), post), 1.0)
-                };
-                let c = rgb.map(linear);
-                [c.x, c.y, c.z, alpha]
-            })
-        })
-        .collect();
-    Rgba { w, h, px }
 }
 fn push_texture(src: &Rgba, alpha: bool, tex: &mut Vec<u8>, textures: &mut Vec<[u32; 8]>) -> u32 {
     align(tex, 128);
@@ -592,37 +540,6 @@ fn push_texture(src: &Rgba, alpha: bool, tex: &mut Vec<u8>, textures: &mut Vec<[
     ]);
     textures.len() as u32 - 1
 }
-fn sun_occluder(scene: &crate::source::Scene) -> Option<crate::occlusion::Occluder> {
-    let m = scene;
-    assert!(m.materials.iter().all(|m| !m.vertex_pbr), "PICA lowering requires source materials, not Vita PBR palettes");
-    m.sun.as_ref()?.shadow.as_ref()?;
-    let mut tris = Vec::new();
-    for d in &m.draws {
-        let mat = &m.materials[d.material as usize];
-        if d.node.is_some()
-            || d.skin.is_some()
-            || mat.kind == pc::Kind::Glass
-            || mat.kind == pc::Kind::Water
-            || mat.blend != pc::Blend::Opaque
-        {
-            continue;
-        }
-        for tri in d.indices().chunks_exact(3)
-        {
-            let p: Vec<Vec3> = tri.iter()
-                .map(|&v| scene.vertex(d, v as usize).pos)
-                .collect();
-            tris.push(crate::occlusion::Tri {
-                a: p[0],
-                e1: p[1] - p[0],
-                e2: p[2] - p[0],
-                opacity: if mat.alpha_test > 0.0 { 0.55 } else { 1.0 },
-            });
-        }
-    }
-    Some(crate::occlusion::Occluder::new(tris, 1, 2000.0))
-}
-
 /// Keep the two coarsest shared levels in PICA's three main-view slots.
 /// Extra fine rigid levels must not inflate LOD2 or its reflection proxy.
 fn main_lods<'a>(indices: &'a [u32], levels: &'a [crate::source::Lod]) -> impl Iterator<Item = (&'a [u32], u32, f32)> {
@@ -634,7 +551,6 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
     let m = scene;
     let mut tex = Vec::new();
     let mut geom = Vec::new();
-    let mut anim = Vec::new();
     let mut table = Vec::new();
     // PICA header: version and table counts, animation rate, scene atmosphere.
     let mut textures = Vec::new();
@@ -817,16 +733,9 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         .map(|(i, &n)| (n, i as u32))
         .collect();
     let matrices = used_nodes.len() + m.skins.iter().map(|s| s.joints.len()).sum::<usize>();
-    // Long transport loops need not repeat every rigid transform at 15 Hz.
-    // Reduce only if their palette would exceed the Old 3DS animation budget.
-    let decimate = ((m.frames.max(1) as usize * matrices.max(1) * 48).div_ceil(profile.recipe.animation_palette_bytes as usize))
-        .max(1) as u32;
-    let frames = m.frames.max(1).div_ceil(decimate);
-    let fps = if m.frames > 0 {
-        m.fps * frames as f32 / m.frames as f32
-    } else {
-        m.fps
-    };
+    let frames = m.frames.max(1);
+    let fps = m.fps;
+    let mut matrix_tracks = vec![Vec::with_capacity(frames as usize); matrices];
     let mut skin_base = Vec::new();
     let mut at = used_nodes.len();
     for s in &m.skins {
@@ -834,8 +743,7 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         at += s.joints.len();
     }
     let mut world0 = Vec::new();
-    for sampled in 0..frames {
-        let frame = (sampled as u64 * m.frames.max(1) as u64 / frames as u64) as u32;
+    for frame in 0..frames {
         let mut world = vec![Mat4::IDENTITY; m.nodes.len()];
         for (i, n) in m.nodes.iter().enumerate() {
             let (t, q) = if let Some(r) = &n.track {
@@ -847,21 +755,24 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
             let local = Mat4::from_scale_rotation_translation(Vec3::from(n.scale), q, t);
             world[i] = n.parent.map_or(local, |p| world[p as usize] * local);
         }
-        for &i in &used_nodes {
-            fs(&mut anim, &rows(world[i as usize]));
+        for (slot, &i) in used_nodes.iter().enumerate() {
+            matrix_tracks[slot].push(world[i as usize]);
         }
-        for s in &m.skins {
+        for (skin_id, s) in m.skins.iter().enumerate() {
             for (j, &n) in s.joints.iter().enumerate() {
-                let a = s.inverse_bind[j];
-                fs(
-                    &mut anim,
-                    &rows(world[n as usize] * Mat4::from_cols_slice(&a)),
+                matrix_tracks[skin_base[skin_id] + j].push(
+                    world[n as usize] * Mat4::from_cols_slice(&s.inverse_bind[j]),
                 );
             }
         }
-        if sampled == 0 {
+        if frame == 0 {
             world0 = world;
         }
+    }
+    let (encoded, unique_tracks, affine_tracks) = animation_tracks(&matrix_tracks);
+    let mut anim = encoded;
+    if anim.len() > profile.recipe.animation_palette_bytes as usize {
+        return Err(format!("PICA full-rate animation palette needs {} bytes (budget {}); source samples cannot be discarded", anim.len(), profile.recipe.animation_palette_bytes));
     }
     let track_start = anim.len();
     for track in &m.material_tracks {
@@ -915,9 +826,12 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
             if !mat.interior && !matches!(mat.kind, pc::Kind::Unlit | pc::Kind::Water) {
                 if let Some(sun) = &m.sun {
                     let direction = Vec3::from(sun.direction);
-                    let visibility = occluder
-                        .as_ref()
-                        .map_or(1.0, |o| o.ray_visibility(world, world_n, direction, 2000.0));
+                    // A moving object's exported rest pose may be hidden below
+                    // the world. Baking static occlusion there would shadow it
+                    // for the entire loop. PICA retains directional lighting;
+                    // only stationary geometry receives baked sun occlusion.
+                    let visibility = if d.node.is_some() || d.skin.is_some() { 1.0 }
+                        else { occluder.as_ref().map_or(1.0, |o| o.ray_visibility(world, world_n, direction, 2000.0)) };
                     light += Vec3::from(sun.radiance)
                         * (world_n.dot(direction).max(0.0)
                             * visibility
@@ -1086,7 +1000,7 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
             .fold(Vec3::splat(f32::MIN), |a, &p| a.max(p));
         let center = (lo + hi) * 0.5;
         let radius = (hi - lo).length() * 0.5;
-        // Bounds of skinned people follow their root at runtime.
+        // The runtime bounds skins using every weighted joint, not the root alone.
         let root = d
             .skin
             .map_or(u32::MAX, |s| node_map[&m.skins[s as usize].joints[0]]);
@@ -1375,18 +1289,22 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         fs(&mut table, &b[1]);
     }
     table.extend(&skin_data);
-    let summary = serde_json::json!({"target":"3ds","version":TABLE_VERSION,"name":m.name,"kind":m.kind,"sourceMaterials":m.materials.len(),"textures":textures.len(),"draws":draws.len(),"textureBytes":tex.len(),"geometryBytes":geom.len(),"animationBytes":anim.len(),"matrices":matrices,"frames":frames,"fps":fps,"features":features,"sourceNodes":m.nodes.len(),"camera":m.camera});
+    let mut audio = Vec::new();
+    if let Some(record) = crate::analysis::audio::native_record(m.audio.as_ref()) {
+        fs(&mut audio, &record);
+    }
+    let summary = serde_json::json!({"target":"3ds","version":TABLE_VERSION,"name":m.name,"kind":m.kind,"sourceMaterials":m.materials.len(),"textures":textures.len(),"draws":draws.len(),"textureBytes":tex.len(),"geometryBytes":geom.len(),"animationBytes":anim.len(),"uniqueAnimationTracks":unique_tracks,"affineAnimationTracks":affine_tracks,"matrices":matrices,"frames":frames,"fps":fps,"features":features,"sourceNodes":m.nodes.len(),"camera":m.camera,"audio":m.audio});
     let meta = serde_json::to_vec(&summary).unwrap();
-    let out = pc::write_versioned(pc::MAGIC, CONTAINER_VERSION, &[
-        (pc::TAG_META, &meta, 16),
-        (*b"PICA", &table, 16),
-        (pc::TAG_TEXTURES, &tex, 128),
-        (pc::TAG_GEOMETRY, &geom, 128),
+    let mut sections: Vec<([u8; 4], &[u8], u32)> = vec![
+        (pc::TAG_META, &meta, 16), (*b"PICA", &table, 16),
+        (pc::TAG_TEXTURES, &tex, 128), (pc::TAG_GEOMETRY, &geom, 128),
         (pc::TAG_ANIMATION, &anim, 16),
-    ]);
+    ];
+    if !audio.is_empty() { sections.push((*b"AUDI", &audio, 16)); }
+    let out = pc::write_versioned(pc::MAGIC, CONTAINER_VERSION, &sections);
     Ok(Artifact {
         bytes: out, summary,
-        sections: [("META",meta.len()),("PICA",table.len()),("TEXD",tex.len()),("GEOM",geom.len()),("ANIM",anim.len())].into_iter().map(|(k,v)|(k.into(),v)).collect(),
+        sections: sections.iter().map(|(tag,data,_)| (std::str::from_utf8(tag).unwrap().into(), data.len())).collect(),
         textures: textures.iter().enumerate().map(|(id,t)|serde_json::json!({"id":id,"width":t[0],"height":t[1],"format":t[2],"levels":t[3],"bytes":t[5]})).collect(),
     })
 }
@@ -1394,6 +1312,35 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn full_rate_tracks_share_constants_and_preserve_affine_shear() {
+        let constant = vec![Mat4::from_translation(Vec3::new(123.456, -1000.0, 7.0)); 960];
+        let moving: Vec<_> = (0..960).map(|i| Mat4::from_scale_rotation_translation(
+            Vec3::new(0.5, 2.0, 1.0), Quat::from_rotation_x(i as f32 * 1.7),
+            Vec3::new(i as f32 * 0.5, 0.0, 0.0))).collect();
+        let mut shear = Mat4::IDENTITY;
+        shear.y_axis.x = 0.2;
+        let (bytes, unique, affine) = animation_tracks(&[constant.clone(), constant, moving.clone(), vec![shear; 960]]);
+        let word = |at: usize| u32::from_le_bytes(bytes[at..at+4].try_into().unwrap());
+        assert_eq!((unique, affine), (3, 1));
+        assert_eq!(&bytes[0..12], &bytes[12..24]);
+        assert_eq!(word(4), 1);
+        assert_eq!(word(24+4), 960, "never decimate the 64-second loop");
+        assert_eq!(word(24+8), 1);
+        assert_eq!(word(36+8), 0, "shear must use lossless affine records");
+        let at = word(24) as usize;
+        for (i, expected) in moving.iter().enumerate() {
+            let sample = at + i * 32;
+            let t = Vec3::new(readf(&bytes, sample), readf(&bytes, sample+4), readf(&bytes, sample+8));
+            let s = Vec3::new(readf(&bytes, sample+12), readf(&bytes, sample+16), readf(&bytes, sample+20));
+            let q = Quat::from_array(std::array::from_fn(|k| i16::from_le_bytes(bytes[sample+24+k*2..sample+26+k*2].try_into().unwrap()) as f32 / 32767.0)).normalize();
+            let decoded = Mat4::from_scale_rotation_translation(s, q, t);
+            for p in [Vec3::ZERO, Vec3::ONE, Vec3::new(0.0, 0.3, 0.0)] {
+                assert!(decoded.transform_point3(p).distance(expected.transform_point3(p)) < 0.00015);
+            }
+        }
+        assert_eq!(bytes.len(), 48 + 32 + 960*32 + 48);
+    }
     #[test]
     fn fine_levels_do_not_replace_coarse_handheld_slots() {
         let levels: Vec<crate::source::Lod> = [0.01, 0.025, 0.06, 0.25].into_iter().enumerate().map(|(i, error)| crate::source::Lod { indices: vec![i as u32; 3], error }).collect();

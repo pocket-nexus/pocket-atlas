@@ -3,7 +3,8 @@
 `sangubashi-crossing` recreates the location of the final railway crossing in
 *5 Centimeters per Second*: Sangubashi No. 3 crossing, Yoyogi, Tokyo. No film
 characters, soundtrack, stills or downloaded photographs are shipped. All
-geometry, textures and audio are generated at load time.
+geometry, textures and audio are procedural. Native geometry and textures are
+compiled ahead of time; sound is synthesized on the device.
 
 ## Site references
 
@@ -85,7 +86,7 @@ bun scripts/export-place.ts --place sangubashi-crossing --seconds 64 \
   --base http://127.0.0.1:5198 --out ../.pocket-build/validation/sangubashi/export
 ```
 
-## Vita adaptation
+## Handheld source
 
 The default web geometry remains the full reference. `geometry=handheld`
 selects the shared daytime geometry profile: the train retains all eight
@@ -99,6 +100,8 @@ Windborne petals use ordinary glTF skins with at most 24 joints per batch;
 260 petals take 11 draws. Their size is baked into the vertices and their
 translation/rotation tracks loop continuously over the same 64 seconds as
 the railway. This exports their motion through the existing animation path.
+
+## Vita adaptation
 
 With the web server above running, from the repository root:
 
@@ -139,12 +142,13 @@ The export is sealed as PlaceIR before device lowering, following
 [the compiler architecture](../../../../docs/COMPILER.md). Palette packing of
 solid PBR factors into UVs belongs to the Vita lowering. Native targets use
 source geometry and pixels rather than decoding a Vita pack. The registry
-publishes this place for web and Vita only; 3DS/PSP support is not implied.
+publishes this place for web, Vita, 3DS and PSP.
 
 Vita PLCE and ATLS envelopes use version 7, and Vita Place META uses version 7.
 Older readers must reject the new vertex-PBR encoding. PICA keeps its separate
-PLCE v5 envelope and v3 table; PSP keeps PLPS v1. Re-cook the Vita places and
-atlas when updating the runtime.
+PLCE v5 envelope and v4 table; PSP uses PLPS v2. Re-cook the corresponding
+target's places when updating its runtime. Old native readers reject these
+new animation and geometry encodings.
 
 Atlas owns shaders, shared daytime materials, rigid moving shadows and quality
 policy. The pinned PocketJS `pocket-vita-gxm` owns target allocation and GXM
@@ -200,5 +204,87 @@ bun tools/atlas.ts shots --place sangubashi-crossing --seconds 146 \
 
 The measurement tools reject stale status, another native build, shader
 errors and a changed place rather than reporting another task's results.
-The existing native renderer has no audio path; procedural railway sound remains
-a web feature. Transport stays in PocketJS; this place adds no transport fork.
+The Vita renderer has no audio path. Web, 3DS and PSP consume the shared
+procedural railway audio recipe. Transport stays in PocketJS; this place adds
+no transport fork.
+
+## 3DS and PSP adaptation
+
+Both native targets lower the sealed source independently. They preserve all
+eight cars, the six camera paths, 260 skinned petals, warning signals and the
+full 64-second railway cycle at the source's 15 Hz animation sampling. Compact
+TRS tracks interpolate rotation with shortest-arc quaternions; constant and
+identical tracks share storage. This avoids skipping fast wheel or petal
+rotations to fit the animation budget.
+
+The shared fixed-function lowering bakes the authored sky and clouds into
+panoramas and static sunlight into vertex colour. Moving trains receive
+directional sunlight and hemisphere fill. They do not inherit occlusion from
+their hidden export pose. Native targets approximate the reference's lighting:
+there is no HDR bloom, screen-space AO or moving train shadow map.
+
+PICA v4 retains float geometry and uses per-joint bounds for skinned particles.
+PSP v2 uses native 16-bit GE vertices where a batch meets the recipe's error
+limit, retaining float vertices for skins and oversized batches. Camera-distance
+LOD selection preserves nearby train equipment and simplifies distant geometry.
+These encodings are produced from source floats, independently of Vita packing.
+The PSP daytime recipe uses 8 m static cells so long rails and distant planting
+do not keep unrelated geometry visible. Batch welding shares byte-identical
+GE vertices without changing geometry or reducing the train's detail.
+
+The optional audio record describes wind, birds, railway timing, position and
+gain. Both native renderers synthesize it from the scene clock, including seek,
+pause and mute; no recordings or film soundtrack are included. 3DS offers
+Sound in settings; Circle toggles PSP sound. A failed audio initialization is
+reported as `audioReady: false` while rendering remains available.
+
+After exporting the handheld source above:
+
+```sh
+bun tools/atlas-3ds.ts cook --place sangubashi-crossing
+bun tools/atlas-3ds-assets.ts
+bun tools/atlas-3ds.ts install --host 192.168.8.159
+bun tools/atlas-3ds.ts profile --place sangubashi-crossing --shots Train \
+  --time 19.73 --samples 60 --host 192.168.8.159
+bun tools/atlas-3ds.ts tour --place sangubashi-crossing --seconds 146 \
+  --host 192.168.8.159
+
+bun tools/atlas-psp.ts cook --place sangubashi-crossing
+# Reuse the exact share owned by the existing usbhostfs_pc process.
+bun tools/atlas-psp.ts run --place sangubashi-crossing --share /path/to/host0
+bun tools/atlas-psp.ts shots --time 19.73 --share /path/to/host0
+bun tools/atlas-psp.ts shots --live --share /path/to/host0
+bun tools/atlas-psp.ts package --place sangubashi-crossing --share /path/to/host0
+```
+
+PSP measurements require the device's build ID, pack version and pack fingerprint
+to match the staged SHA-256 receipt. Captures are taken after timing samples;
+`gpuWaitMs` measures the remaining GE wait, not serialized whole-frame GPU time.
+
+### Native validation status (2026-10-04)
+
+Host builds and format/runtime regression tests pass. Both formats retain
+960 samples over 64 seconds. PICA's scene pack is 32.25 MiB; the optimized PSP
+pack is 17.87 MiB, below its 18 MiB reader limit. The 3DS SD archive includes
+all five eligible scenes and its packaged files were verified against their
+SHA-256 manifest.
+
+An actual PSP release (`20b87b39ec9fc671`, first unoptimized pack) rendered the
+train and crossing correctly in captured frames, with `audioReady: true`.
+Five fixed Crossing windows at t=19.73 measured 7.49 fps; the first Train
+window measured 6.0 fps. Another task then replaced the running app with
+Lombard, and identity checks stopped the remaining measurements. Those
+numbers do not measure the subsequent LOD and spatial-cell fixes.
+
+Offline replay of the optimized PSP recipe reduces the six camera-path peak
+triangle counts by 7–26%, with identical moving-geometry counts. The PICA
+world-AABB culling fix reduces its step-0 Train peak from 138,190 to 129,017
+triangles without changing geometry. These are geometry counts, not device
+timings or a 30 fps claim.
+
+All five 3DS asset transfers were verified, but the machine became network
+unreachable before the new runtime installation could be confirmed. A later
+network check succeeded while another workspace was installing to that 3DS;
+the shared PSP was still running Lombard. Final
+3DS launch, PSP retest, six-view capture, live-loop performance, controls and
+listening checks remain pending device availability. Vita was not used.

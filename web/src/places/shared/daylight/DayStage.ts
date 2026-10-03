@@ -3,6 +3,7 @@ import type { PlaceDef, PlaceKind, Progress, StageContext } from "../../../core/
 import { Atlas } from "../atlas";
 import { Baker } from "../bake";
 import type { Box6, Shot, ShotKey } from "../camera";
+import type { AudioRecipe } from "../audio-recipe";
 import { batchStatic } from "../geo";
 import { PlaceStage } from "../stage";
 import { DayWorld } from "./context";
@@ -35,6 +36,7 @@ export interface DayPlace {
   loopSeconds?: number;
   metadata: Record<string, unknown>;
   audio?: DayAudio;
+  audioRecipe?: AudioRecipe;
   build(world: DayWorld, progress: Progress): Promise<void>;
 }
 
@@ -83,7 +85,7 @@ export class DayStage extends PlaceStage<DayWorld, DayAudio> {
       files: [{ name: "sky-clouds.png", texture: this.clouds }],
       meta: c => ({
         version: c.version, units: c.units, up: c.up, kind: s.kind,
-        ...s.metadata, fog: c.fog, hemisphere: c.hemisphere,
+        ...s.metadata, audio: s.audioRecipe, fog: c.fog, hemisphere: c.hemisphere,
         directionalLights: c.directionalLights, environment: c.environment,
         camera: c.camera, ...c.special, tracks: c.tracks, post: this.postMeta(),
         bake: { skyOcclusion: { rays: 48, reach: 1.5, foliage: 0.55 } },

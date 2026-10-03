@@ -29,6 +29,13 @@ jobs:
           mkdir -p .pocket-build/validation/ci
           rustc --edition=2021 --test vita/src/sun_bounds.rs -o .pocket-build/validation/ci/sun-bounds
           .pocket-build/validation/ci/sun-bounds
+      - name: Native audio DSP
+        run: |
+          mkdir -p .pocket-build/validation/ci
+          rustc --edition=2021 --test psp/src/audio.rs -D warnings -o .pocket-build/validation/ci/psp-audio
+          .pocket-build/validation/ci/psp-audio
+          cc -std=c11 -O2 -Wall -Wextra -Werror -DATLAS_AUDIO_TEST n3ds/src/audio.c -lm -o .pocket-build/validation/ci/3ds-audio
+          .pocket-build/validation/ci/3ds-audio
       - run: bun test test/texture-usage.test.ts
         working-directory: web
       - run: bun run build

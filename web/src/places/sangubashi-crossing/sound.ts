@@ -2,6 +2,13 @@ import { Vector3, type PerspectiveCamera } from "three";
 import type { AudioEngine } from "../../core/audio";
 import { RailwayAudio } from "../shared/railway-audio";
 import { PASS, RAIL_YAW } from "./rail";
+import { railwayAudioRecipe, type AudioRecipe } from "../shared/audio-recipe";
+
+export const AUDIO_RECIPE: AudioRecipe = {
+  version: 1, loopSeconds: PASS.period, windGain: 0.55,
+  birds: { gain: 0.025 * 0.55, first: 3, interval: 11, seed: 500 },
+  railway: railwayAudioRecipe(PASS, [Math.sin(RAIL_YAW) * 1.82, 0.102, Math.cos(RAIL_YAW) * 1.82], RAIL_YAW),
+};
 
 /** Quiet spring air and distant neighbourhood birds, with no borrowed soundtrack. */
 export class SpringAudio {
@@ -21,7 +28,7 @@ export class SpringAudio {
       const ctx = this.engine.ctx, bus = this.engine.bus();
       if (!ctx || !bus || this.out) return;
       const out = (this.out = ctx.createGain());
-      out.gain.value = 0; out.connect(bus); this.engine.ramp(out.gain, 0.55, 2);
+      out.gain.value = 0; out.connect(bus); this.engine.ramp(out.gain, AUDIO_RECIPE.windGain, 2);
       for (const [frequency, gain, kind] of [[950, 0.05, 1], [130, 0.06, 2]] as const) {
         const source = ctx.createBufferSource(); source.buffer = this.engine.noiseBuffer(7, kind); source.loop = true;
         const filter = ctx.createBiquadFilter(); filter.type = "lowpass"; filter.frequency.value = frequency;

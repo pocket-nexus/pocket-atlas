@@ -21,6 +21,7 @@ mod extras;
 mod geometry;
 mod ir;
 mod occlusion;
+mod native_sky;
 mod pica;
 mod procedural;
 mod psp;
@@ -172,6 +173,11 @@ fn main() {
     let mut a = args();
     let (root, manifest) = ir::prepare(&a.input).unwrap_or_else(|e| fail(e));
     a.profile.check(&manifest).unwrap_or_else(|e| fail(e));
+    if manifest.kind == "daytime-street" && !std::env::args().any(|v| v == "--cell") {
+        if let Some(geometry) = &a.profile.recipe.psp_geometry {
+            a.cell = geometry.daytime_cell_meters;
+        }
+    }
     if !std::env::args().any(|v| v == "--out") {
         let suffix = match a.target {
             ir::Target::Vita => "",

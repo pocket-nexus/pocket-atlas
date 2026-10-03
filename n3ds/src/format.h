@@ -3,14 +3,15 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
-// PLCE v5, PICA section v3. All integers and IEEE floats are little endian.
+// PLCE v5, PICA section v4. All integers and IEEE floats are little endian.
 // Cooker: crates/pocket3d-place-cook/src/pica.rs. GPU records contain no
 // pointers.
 #define ATLAS_PICA_CONTAINER_VERSION 5
-#define ATLAS_PICA_TABLE_VERSION 3
+#define ATLAS_PICA_TABLE_VERSION 4
 static inline bool atlas_pack_header_valid(const uint32_t header[4]) {
   return header[0] == 0x45434c50 &&
-         header[1] == ATLAS_PICA_CONTAINER_VERSION && header[2] == 5;
+         header[1] == ATLAS_PICA_CONTAINER_VERSION &&
+         (header[2] == 5 || header[2] == 6);
 }
 typedef struct {
   uint32_t version, textures, materials, draws, shots, matrices, frames, lights,
@@ -60,12 +61,25 @@ typedef struct {
   uint16_t joint[4];
   uint8_t weight[4];
 } AtlasSkin;
+// ANIM begins with one descriptor per logical matrix. Identical descriptors
+// may share sample bytes. A constant track has one sample, otherwise frames.
+// kind 0: 48-byte row-major affine matrix; kind 1: float translation[3],
+// float scale[3], snorm16 quaternion[4] (xyzw). Material tracks follow in ANIM.
+typedef struct {
+  uint32_t offset, count, kind;
+} AtlasAnimation;
+typedef struct {
+  float translation[3], scale[3];
+  int16_t rotation[4];
+} AtlasTrs;
 _Static_assert(sizeof(AtlasHeader) == 120, "PICA header");
 _Static_assert(sizeof(AtlasMaterial) == 92, "PICA material");
 _Static_assert(sizeof(AtlasDraw) == 96, "PICA draw");
 _Static_assert(sizeof(AtlasShot) == 92, "PICA shot");
 _Static_assert(sizeof(AtlasVertex) == 24, "PICA vertex");
 _Static_assert(sizeof(AtlasSkin) == 12, "PICA skin");
+_Static_assert(sizeof(AtlasAnimation) == 12, "PICA animation descriptor");
+_Static_assert(sizeof(AtlasTrs) == 32, "PICA TRS sample");
 enum {
   MAT_BLEND = 1,
   MAT_TWO_SIDED = 2,

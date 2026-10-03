@@ -138,6 +138,21 @@ fn one_ir_builds_three_repeatable_packs_without_web_export_or_vita_intermediate(
                 .status()
                 .unwrap()
                 .success());
+            let word = |at: usize| u32::from_le_bytes(first[at..at + 4].try_into().unwrap());
+            let pica = (0..word(8) as usize).map(|i| 16 + i * 16)
+                .find(|&at| &first[at..at + 4] == b"PICA").unwrap();
+            let table = word(pica + 4) as usize;
+            for old in [2u32, 3] {
+                let mut legacy = first.clone();
+                legacy[table..table + 4].copy_from_slice(&old.to_le_bytes());
+                std::fs::write(&output, legacy).unwrap();
+                assert!(!Command::new(&reader).arg(&output).status().unwrap().success(),
+                        "PICA v4 must reject old frame-major matrix tables");
+            }
+            for length in [0, 4, 15, 16, table + 119] {
+                std::fs::write(&output, &first[..length]).unwrap();
+                assert!(!Command::new(&reader).arg(&output).status().unwrap().success());
+            }
         } else {
             let pack = pocket3d_place::Pack::parse(&first).unwrap();
             assert!(pack.section(*b"PICA").is_err());
@@ -254,7 +269,7 @@ fn vita_palette_encoding_does_not_replace_native_uvs_or_material_factors() {
             assert_eq!(word(4), 5);
             let table = section(b"PICA");
             let geom = section(b"GEOM");
-            assert_eq!(word(table), 3);
+            assert_eq!(word(table), 4);
             let meta_section = (0..word(8) as usize).map(|i| 16 + i * 16)
                 .find(|&at| &bytes[at..at + 4] == b"META").unwrap();
             let meta_at = word(meta_section + 4) as usize;
@@ -387,7 +402,7 @@ fn skin_with_25_joints_lowers_independently_for_native_targets() {
             let (table, table_size) = section(b"PICA");
             let (anim, _) = section(b"ANIM");
             assert_eq!(word(4), 5);
-            assert_eq!(word(table), 3);
+            assert_eq!(word(table), 4);
             assert_eq!(word(table + 12), 1, "one skinned draw");
             assert_eq!(word(table + 20), 26, "one root transform plus all 25 joints");
             assert_eq!(word(table + 36), 36, "three 12-byte skin records");
@@ -398,8 +413,12 @@ fn skin_with_25_joints_lowers_independently_for_native_targets() {
                 assert_eq!(&bytes[at + 8..at + 12], &[255, 0, 0, 0]);
             }
             // The last referenced joint retains its transform, not a
-            // truncated/clamped palette entry. Matrices use float 3x4 rows.
-            assert_eq!(f32::from_bits(word(anim + 25 * 48 + 12)), 0.25);
+            // truncated/clamped palette entry. PICA v4 stores a typed track.
+            let track = anim + 25 * 12;
+            assert_eq!(word(track + 4), 1);
+            assert_eq!(word(track + 8), 1);
+            let sample = anim + word(track) as usize;
+            assert_eq!(f32::from_bits(word(sample)), 0.25);
         }
     }
 }
@@ -419,6 +438,22 @@ fn skin_without_joints_is_rejected_for_every_target() {
         let error = String::from_utf8_lossy(&result.stderr);
         assert!(error.contains("has no joints"), "{target}: {error}");
         assert!(!output.exists());
+    }
+}
+
+#[test]
+fn pica_runtime_animation_and_skin_bounds_contracts() {
+    let temp = Temp(std::env::temp_dir().join(format!("atlas-pica-motion-{}", std::process::id())));
+    std::fs::create_dir_all(&temp.0).unwrap();
+    let cooker = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for name in ["animation", "skin_bounds", "frustum"] {
+        let executable = temp.0.join(name);
+        let compile = Command::new("cc")
+            .args(["-std=c11", "-Wall", "-Wextra", "-Werror"])
+            .arg(cooker.join(format!("../../n3ds/tests/{name}.c")))
+            .args(["-lm", "-o"]).arg(&executable).output().unwrap();
+        assert!(compile.status.success(), "{name}: {}", String::from_utf8_lossy(&compile.stderr));
+        assert!(Command::new(executable).status().unwrap().success(), "{name}");
     }
 }
 

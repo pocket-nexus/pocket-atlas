@@ -2,7 +2,7 @@ import { Vector3 } from "three";
 import type { PlaceDef, Progress, StageContext } from "../../core/types";
 import type { Box6, Shot } from "../shared/camera";
 import { DayStage } from "../shared/daylight/DayStage";
-import { SpringAudio } from "./sound";
+import { AUDIO_RECIPE, SpringAudio } from "./sound";
 import { buildGardens, buildGround, buildNeighbourhood, buildStreetDetails, roadY } from "./world";
 import { buildPassingTrain, PASS } from "./rail";
 
@@ -33,6 +33,7 @@ export function createStage(ctx: StageContext, place: PlaceDef, progress: Progre
       references: ["https://fujisyuu01.hatenablog.jp/entry/14371167", "https://shinkaifan.com/past/5-centimeters-per-second/"],
     },
     audio: new SpringAudio(ctx.audio),
+    audioRecipe: AUDIO_RECIPE,
     build: async (world, progress) => {
       await progress(0.28, "Laying the double tracks"); buildGround(world);
       await progress(0.4, "Building the Yoyogi lane"); buildNeighbourhood(world);

@@ -1,5 +1,5 @@
 /** Shared PLCE/ATLS container gate for host tools. Payload schemas have
- * their own versions (AtlasMeta remains v1; PICA remains v3). */
+ * their own versions (AtlasMeta remains v1; PICA uses its own table version). */
 export const VITA_PACK_VERSION = 7;
 export const PICA_PACK_VERSION = 5;
 

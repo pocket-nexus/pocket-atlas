@@ -1,8 +1,8 @@
 # Nintendo 3DS renderer
 
-Pocket Atlas opens on an interactive globe and runs all four shared places on
+Pocket Atlas opens on an interactive globe and runs five shared places on
 an Old 3DS: Rainy Night Konbini, Suga Shrine Stairs, Radio Kaikan at Blue Hour,
-and Kamakura-Kōkōmae Crossing. The registry, globe maps, postcard previews,
+Kamakura-Kōkōmae Crossing, and Sangubashi in Bloom. The registry, globe maps, postcard previews,
 font, material annotations, camera shots, geometry and motion come from the
 same web exports and lossless PlaceIR as the Vita. PICA cooks independently
 from source geometry and textures; it does not read a Vita device pack. Rendering contains no
@@ -141,12 +141,14 @@ record has `complete: true`; interruptions and reconnects remain in the receipt.
 
 ## Native rendering
 
-The PLCE5 container's PICA3 section holds native materials, draws, tiled
+The PLCE5 container's PICA4 section holds native materials, draws, tiled
 RGB565/RGBA4 mip chains, RGBA8 clouds, 24-byte vertices and interpolated
 animation palettes.
 The cooker applies the authored AgX/ACES grade, baked irradiance and static
-sun occlusion. It keeps only referenced animation matrices; long loops retain
-their duration even if matrix sampling must be reduced to fit memory.
+sun occlusion. It keeps only referenced animation tracks, deduplicates constants and identical
+tracks, and stores compact translation/rotation/scale samples where possible.
+Quaternion interpolation retains rigid shape; the 64-second Sangubashi loop
+keeps all 15 Hz source samples. Non-TRS matrices retain an affine fallback.
 
 Day/twilight skies use a cooked panorama and a separate drifting cloud layer.
 Cloud colors are premultiplied before bilinear filtering to avoid dark halos

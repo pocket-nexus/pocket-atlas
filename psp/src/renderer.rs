@@ -15,6 +15,8 @@ pub struct Renderer {
     bound_texture: u32,
     indices: alloc::vec::Vec<Align16<[u16; 8]>>,
     index_cursor: usize,
+    selected: alloc::vec::Vec<pp::Span>,
+    sky_vertices: alloc::vec::Vec<pp::Vertex>,
 }
 pub struct Stats {
     pub draws: u32,
@@ -75,6 +77,40 @@ fn hash(mut n: u32) -> f32 {
     ((n >> 22) ^ n) as f32 / 4294967296.0
 }
 
+// A retained camera-centred sphere; UVs match the shared panorama's
+// azimuth + elevation convention. The pole seam has duplicated UVs.
+fn sky_dome() -> alloc::vec::Vec<pp::Vertex> {
+    let mut out = alloc::vec::Vec::new();
+    let vertex = |x: usize, y: usize| {
+        let u = x as f32 / 32.0;
+        let v = y as f32 / 16.0;
+        let az = u * core::f32::consts::TAU;
+        let el = (v - 0.5) * core::f32::consts::PI;
+        pp::Vertex {
+            uv: [u, v],
+            color: 0xffffffff,
+            pos: [
+                libm::sinf(az) * libm::cosf(el) * 100.0,
+                libm::sinf(el) * 100.0,
+                -libm::cosf(az) * libm::cosf(el) * 100.0,
+            ],
+        }
+    };
+    for y in 0..16 {
+        for x in 0..32 {
+            out.extend([
+                vertex(x, y),
+                vertex(x + 1, y),
+                vertex(x, y + 1),
+                vertex(x + 1, y),
+                vertex(x + 1, y + 1),
+                vertex(x, y + 1),
+            ]);
+        }
+    }
+    out
+}
+
 impl Renderer {
     pub unsafe fn new(scene: &Scene) -> Self {
         sceGuInit();
@@ -126,13 +162,130 @@ impl Renderer {
             );
             sceKernelDcacheWritebackAll();
         }
+        let passes = if scene.materials.iter().any(|m| m.flags & pp::WET != 0) {
+            3
+        } else {
+            1
+        };
         Self {
             hot_texture,
             hot_address,
             bound_texture: pp::NONE,
-            indices: alloc::vec![Align16([0u16;8]);scene.draws.iter().map(|d|d.indices.count as usize).sum::<usize>()*3/8+scene.batches.len()*3+8],
+            indices: alloc::vec![Align16([0u16;8]);scene.draws.iter().map(|d|d.indices.count as usize).sum::<usize>()*passes/8+scene.batches.len()*passes+8],
             index_cursor: 0,
+            selected: scene.draws.iter().map(|d| d.indices).collect(),
+            sky_vertices: sky_dome(),
         }
+    }
+    unsafe fn bind_texture(&mut self, s: &Scene, id: u32) {
+        if self.bound_texture == id {
+            return;
+        }
+        self.bound_texture = id;
+        let t = &s.textures[id as usize];
+        let (format, bpp) = if t.format == pp::RGBA8888 {
+            (TexturePixelFormat::Psm8888, 4)
+        } else {
+            (TexturePixelFormat::Psm4444, 2)
+        };
+        sceGuTexMode(format, t.mips as i32 - 1, 0, 1);
+        let levels = [
+            MipmapLevel::None,
+            MipmapLevel::Level1,
+            MipmapLevel::Level2,
+            MipmapLevel::Level3,
+            MipmapLevel::Level4,
+            MipmapLevel::Level5,
+            MipmapLevel::Level6,
+        ];
+        let base = if id == self.hot_texture {
+            self.hot_address
+        } else {
+            s.bytes.as_ptr().add(t.pixels.offset as usize)
+        };
+        let mut offset = 0;
+        for level in 0..t.mips {
+            let (w, h) = (t.width >> level, t.height >> level);
+            sceGuTexImage(
+                levels[level as usize],
+                w as i32,
+                h as i32,
+                w as i32,
+                base.add(offset) as _,
+            );
+            offset += (w * h * bpp) as usize;
+        }
+        sceGuTexWrap(
+            if t.wrap & 1 != 0 {
+                GuTexWrapMode::Clamp
+            } else {
+                GuTexWrapMode::Repeat
+            },
+            if t.wrap & 2 != 0 {
+                GuTexWrapMode::Clamp
+            } else {
+                GuTexWrapMode::Repeat
+            },
+        );
+    }
+    unsafe fn sky(&mut self, s: &Scene, rig: &Rig, time: f32, stats: &mut Stats) {
+        if s.header.sky_texture == pp::NONE {
+            return;
+        }
+        matrix(MatrixMode::Model, Mat4::from_translation(rig.pos));
+        sceGuDisable(GuState::DepthTest);
+        sceGuDepthMask(1);
+        sceGuDisable(GuState::Fog);
+        sceGuDisable(GuState::CullFace);
+        sceGuDisable(GuState::AlphaTest);
+        sceGuDisable(GuState::Blend);
+        sceGuEnable(GuState::Texture2D);
+        sceGuTexScale(1.0, 1.0);
+        for (id, cloud) in [
+            (s.header.sky_texture, false),
+            (s.header.cloud_texture, true),
+        ] {
+            if id == pp::NONE {
+                continue;
+            }
+            self.bind_texture(s, id);
+            sceGuTexFilter(TextureFilter::Linear, TextureFilter::Linear);
+            sceGuTexOffset(
+                if cloud {
+                    time * s.header.cloud_drift
+                } else {
+                    0.0
+                },
+                0.0,
+            );
+            if cloud {
+                sceGuEnable(GuState::Blend);
+                // Panorama stores the premultiplied display contribution.
+                sceGuBlendFunc(
+                    BlendOp::Add,
+                    BlendFactor::Fix,
+                    BlendFactor::OneMinusSrcAlpha,
+                    0xffffff,
+                    0,
+                );
+            }
+            sceGuDrawArray(
+                GuPrimitive::Triangles,
+                VertexType::TEXTURE_32BITF
+                    | VertexType::COLOR_8888
+                    | VertexType::VERTEX_32BITF
+                    | VertexType::TRANSFORM_3D,
+                self.sky_vertices.len() as i32,
+                ptr::null(),
+                self.sky_vertices.as_ptr() as _,
+            );
+            stats.draws += 1;
+            stats.triangles += self.sky_vertices.len() as u32 / 3;
+        }
+        sceGuTexFilter(TextureFilter::LinearMipmapNearest, TextureFilter::Linear);
+        sceGuDisable(GuState::Blend);
+        sceGuDepthMask(0);
+        sceGuEnable(GuState::DepthTest);
     }
     unsafe fn draw(
         &mut self,
@@ -156,6 +309,11 @@ impl Renderer {
         let mut model = s.model(d);
         if mirror {
             model = Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0)) * model;
+        }
+        if d.vertex_format == 1 {
+            model = model
+                * Mat4::from_translation(Vec3::from(d.pos_offset))
+                * Mat4::from_scale(Vec3::from(d.pos_scale));
         }
         matrix(MatrixMode::Model, model);
         if mat.flags & pp::DOUBLE_SIDED != 0 {
@@ -206,59 +364,29 @@ impl Renderer {
             });
         }
         if mat.texture != pp::NONE {
-            let t = &s.textures[mat.texture as usize];
             sceGuEnable(GuState::Texture2D);
-            if self.bound_texture != mat.texture {
-                self.bound_texture = mat.texture;
-                sceGuTexMode(TexturePixelFormat::Psm4444, t.mips as i32 - 1, 0, 1);
-                let levels = [
-                    MipmapLevel::None,
-                    MipmapLevel::Level1,
-                    MipmapLevel::Level2,
-                    MipmapLevel::Level3,
-                    MipmapLevel::Level4,
-                    MipmapLevel::Level5,
-                    MipmapLevel::Level6,
-                ];
-                let base = if mat.texture == self.hot_texture {
-                    self.hot_address
-                } else {
-                    s.bytes.as_ptr().add(t.pixels.offset as usize)
-                };
-                let mut offset = 0;
-                for level in 0..t.mips {
-                    let (w, h) = (t.width >> level, t.height >> level);
-                    sceGuTexImage(
-                        levels[level as usize],
-                        w as i32,
-                        h as i32,
-                        w as i32,
-                        base.add(offset) as _,
-                    );
-                    offset += (w * h * 2) as usize;
-                }
-                sceGuTexWrap(
-                    if t.wrap & 1 != 0 {
-                        GuTexWrapMode::Clamp
-                    } else {
-                        GuTexWrapMode::Repeat
-                    },
-                    if t.wrap & 2 != 0 {
-                        GuTexWrapMode::Clamp
-                    } else {
-                        GuTexWrapMode::Repeat
-                    },
-                );
-            }
+            self.bind_texture(s, mat.texture);
             let f = if mat.frames > 0 {
                 (time * mat.fps) as u32 % mat.frames
             } else {
                 0
             };
-            sceGuTexScale(1.0 / mat.grid[0] as f32, 1.0 / mat.grid[1] as f32);
+            let scale = if d.vertex_format == 1 {
+                d.uv_scale
+            } else {
+                [1.0; 2]
+            };
+            let offset = if d.vertex_format == 1 {
+                d.uv_offset
+            } else {
+                [0.0; 2]
+            };
+            sceGuTexScale(scale[0] / mat.grid[0] as f32, scale[1] / mat.grid[1] as f32);
             sceGuTexOffset(
-                (f % mat.grid[0]) as f32 / mat.grid[0] as f32 + time * mat.uv_speed[0],
-                (f / mat.grid[0]) as f32 / mat.grid[1] as f32 + time * mat.uv_speed[1],
+                ((f % mat.grid[0]) as f32 + offset[0]) / mat.grid[0] as f32
+                    + time * mat.uv_speed[0],
+                ((f / mat.grid[0]) as f32 + offset[1]) / mat.grid[1] as f32
+                    + time * mat.uv_speed[1],
             );
         } else {
             sceGuDisable(GuState::Texture2D);
@@ -270,9 +398,11 @@ impl Renderer {
         };
         sceGuDrawArray(
             GuPrimitive::Triangles,
-            VertexType::TEXTURE_32BITF
-                | VertexType::COLOR_8888
-                | VertexType::VERTEX_32BITF
+            (if d.vertex_format == 1 {
+                VertexType::TEXTURE_16BIT | VertexType::VERTEX_16BIT
+            } else {
+                VertexType::TEXTURE_32BITF | VertexType::VERTEX_32BITF
+            }) | VertexType::COLOR_8888
                 | VertexType::INDEX_16BIT
                 | VertexType::TRANSFORM_3D,
             indices.0 as i32,
@@ -304,7 +434,7 @@ impl Renderer {
             let count: u32 = group
                 .iter()
                 .filter(|&&i| is_visible(i))
-                .map(|&i| s.draws[i].indices.count)
+                .map(|&i| self.selected[i].count)
                 .sum();
             if count == 0 {
                 continue;
@@ -312,7 +442,6 @@ impl Renderer {
             if group.len() == 1 || count as usize > pp::MAX_INDICES {
                 for &i in group {
                     if is_visible(i) {
-                        let d = &s.draws[i];
                         self.draw(
                             s,
                             i,
@@ -321,8 +450,8 @@ impl Renderer {
                             reflect,
                             stats,
                             (
-                                d.indices.count,
-                                s.bytes.as_ptr().add(d.indices.offset as usize) as _,
+                                self.selected[i].count,
+                                s.bytes.as_ptr().add(self.selected[i].offset as usize) as _,
                             ),
                         );
                     }
@@ -333,13 +462,12 @@ impl Renderer {
                 let mut at = 0;
                 for &i in group {
                     if is_visible(i) {
-                        let d = &s.draws[i];
                         ptr::copy_nonoverlapping(
-                            s.bytes.as_ptr().add(d.indices.offset as usize) as *const u16,
+                            s.bytes.as_ptr().add(self.selected[i].offset as usize) as *const u16,
                             indices.add(at),
-                            d.indices.count as usize,
+                            self.selected[i].count as usize,
                         );
-                        at += d.indices.count as usize;
+                        at += self.selected[i].count as usize;
                     }
                 }
                 pocket_psp_ge::cache::writeback_range(indices as *const c_void, count as usize * 2);
@@ -394,10 +522,17 @@ impl Renderer {
         let vp = projection * view;
         let clip = planes(vp);
         let mirror_clip = planes(vp * Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0)));
+        let projection_pixels = 272.0 / (2.0 * libm::tanf(rig.fov * core::f32::consts::PI / 360.0));
+        for (i, d) in s.draws.iter().enumerate() {
+            let (lo, hi) = s.bounds[i];
+            let near = (rig.pos - rig.pos.clamp(lo, hi)).length().max(0.5);
+            self.selected[i] = pp::select_lod(d, s.header.lod_pixels * near / projection_pixels);
+        }
+        self.sky(s, rig, time, &mut stats);
         sceGuEnable(GuState::Fog);
         sceGuFog(s.header.fog_near, s.header.fog_far, s.header.fog_color);
         sceGuEnable(GuState::DepthTest);
-        if reflect {
+        if reflect && s.materials.iter().any(|m| m.flags & pp::WET != 0) {
             sceGuEnable(GuState::StencilTest);
             sceGuStencilFunc(StencilFunc::Always, 1, 255);
             sceGuStencilOp(
