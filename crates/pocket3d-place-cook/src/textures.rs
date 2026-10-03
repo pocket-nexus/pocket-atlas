@@ -101,7 +101,7 @@ fn renormalize(img: &mut Rgba) {
     }
 }
 
-fn to_bytes(img: &Rgba, role: TexRole) -> Vec<u8> {
+pub(crate) fn to_bytes(img: &Rgba, role: TexRole) -> Vec<u8> {
     let srgb = role == TexRole::Color;
     let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
     img.px

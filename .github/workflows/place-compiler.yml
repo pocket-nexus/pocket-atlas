@@ -29,5 +29,7 @@ jobs:
           mkdir -p .pocket-build/validation/ci
           rustc --edition=2021 --test vita/src/sun_bounds.rs -o .pocket-build/validation/ci/sun-bounds
           .pocket-build/validation/ci/sun-bounds
+      - run: bun test test/texture-usage.test.ts
+        working-directory: web
       - run: bun run build
         working-directory: web

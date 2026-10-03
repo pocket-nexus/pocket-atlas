@@ -342,7 +342,7 @@ impl Renderer {
                         at += d.indices.count as usize;
                     }
                 }
-                sceKernelDcacheWritebackRange(indices as *const c_void, (count * 2) as u32);
+                pocket_psp_ge::cache::writeback_range(indices as *const c_void, count as usize * 2);
                 self.draw(
                     s,
                     group[0],

@@ -1,3 +1,4 @@
+import { exportedTextureUsages } from "./texture-usage";
 import {
   AnimationClip,
   CanvasTexture,
@@ -220,6 +221,8 @@ class Materials {
 
   private make(m: Material): Material {
     const pc = (clean(m.userData.pocketAtlas ?? {}) as Record<string, unknown>) ?? {};
+    const usage = exportedTextureUsages(m);
+    if (Object.keys(usage).length) pc.textureUsage = usage;
     if (pc.kind === "lights") {
       // A light field (shared/lights.ts, a ShaderMaterial on THREE.Points,
       // which GLTFExporter does not write): the annotation carries the

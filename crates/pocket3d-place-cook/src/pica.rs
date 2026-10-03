@@ -5,7 +5,8 @@
 use crate::textures::{self, Rgba};
 use glam::{Mat4, Quat, Vec3};
 use pocket3d_place as pc;
-use std::{collections::HashMap, path::Path};
+use std::collections::HashMap;
+use crate::{artifact::Artifact, profile::Profile};
 
 // This schema belongs to PICA, independently of Vita's pc::VERSION.
 // tests/pipeline.rs verifies emitted packs against n3ds/src/format.h.
@@ -48,26 +49,6 @@ fn byte(x: f32) -> u8 {
 // The same authored AgX/ACES grade as the Vita's colour LUT.
 fn grade(c: Vec3, p: &pc::Post) -> Vec3 {
     Vec3::from(pc::color::tone(c.to_array(), p))
-}
-fn decode(t: &pc::Texture, blob: &[u8]) -> Rgba {
-    let data = &blob[t.data.offset as usize..(t.data.offset + t.data.size) as usize];
-    let mut rgba = vec![0u8; (t.width * t.height * 4) as usize];
-    match t.format {
-        pc::TexFormat::Bc1 | pc::TexFormat::Bc3 | pc::TexFormat::Bc5 => {
-            let f = match t.format {
-                pc::TexFormat::Bc1 => texpresso::Format::Bc1,
-                pc::TexFormat::Bc3 => texpresso::Format::Bc3,
-                _ => texpresso::Format::Bc5,
-            };
-            f.decompress(data, t.width as usize, t.height as usize, &mut rgba);
-        }
-        pc::TexFormat::Rgba8 => {
-            let n = rgba.len();
-            rgba.copy_from_slice(&data[..n]);
-        }
-        _ => panic!("PICA material cannot sample {:?}", t.format),
-    }
-    textures::from_rgba8(t.width, t.height, &rgba, t.role)
 }
 fn hash(x: f32) -> f32 {
     (x.sin() * 43758.547).fract().abs()
@@ -612,8 +593,8 @@ fn push_texture(src: &Rgba, alpha: bool, tex: &mut Vec<u8>, textures: &mut Vec<[
     textures.len() as u32 - 1
 }
 fn sun_occluder(scene: &crate::source::Scene) -> Option<crate::occlusion::Occluder> {
-    let m = &scene.meta;
-    let bytes = scene.geometry();
+    let m = scene;
+    assert!(m.materials.iter().all(|m| !m.vertex_pbr), "PICA lowering requires source materials, not Vita PBR palettes");
     m.sun.as_ref()?.shadow.as_ref()?;
     let mut tris = Vec::new();
     for d in &m.draws {
@@ -626,12 +607,10 @@ fn sun_occluder(scene: &crate::source::Scene) -> Option<crate::occlusion::Occlud
         {
             continue;
         }
-        for tri in bytes[d.indices.offset as usize..(d.indices.offset + d.indices.size) as usize]
-            .chunks_exact(6)
+        for tri in d.indices().chunks_exact(3)
         {
-            let p: Vec<Vec3> = tri
-                .chunks_exact(2)
-                .map(|v| scene.vertex(d, u16::from_le_bytes([v[0], v[1]]) as usize).pos)
+            let p: Vec<Vec3> = tri.iter()
+                .map(|&v| scene.vertex(d, v as usize).pos)
                 .collect();
             tris.push(crate::occlusion::Tri {
                 a: p[0],
@@ -644,25 +623,15 @@ fn sun_occluder(scene: &crate::source::Scene) -> Option<crate::occlusion::Occlud
     Some(crate::occlusion::Occluder::new(tris, 1, 2000.0))
 }
 
-/// PICA has three main-view slots. The shared cooker may add fine rigid
-/// levels ahead of the existing coarse ones; retain the two coarsest so
-/// LOD2 and its reflection proxy keep their handheld geometry budget.
-fn main_lods<'a>(indices: &'a pc::Range, count: u32, levels: &'a [pc::DrawLod]) -> Vec<(&'a pc::Range, u32, f32)> {
-    std::iter::once((indices, count, 0.0))
-        .chain(levels.iter().skip(levels.len().saturating_sub(2)).map(|l| (&l.indices, l.index_count, l.error)))
-        .collect()
+/// Keep the two coarsest shared levels in PICA's three main-view slots.
+/// Extra fine rigid levels must not inflate LOD2 or its reflection proxy.
+fn main_lods<'a>(indices: &'a [u32], levels: &'a [crate::source::Lod]) -> impl Iterator<Item = (&'a [u32], u32, f32)> {
+    std::iter::once((indices, indices.len() as u32, 0.0))
+        .chain(levels.iter().skip(levels.len().saturating_sub(2)).map(|l| (l.indices.as_slice(), l.indices.len() as u32, l.error)))
 }
 
-pub fn cook(scene: &crate::source::Scene, output: &Path, cap: u32) {
-    assert!(
-        cap.is_power_of_two() && (64..=1024).contains(&cap),
-        "--tex must be a power of two in 64..1024"
-    );
-    let m = &scene.meta;
-    assert!(m.materials.iter().all(|m| !m.vertex_pbr), "PICA lowering requires source materials, not Vita PBR palettes");
-    let src_tex = scene.textures();
-    let src_geom = scene.geometry();
-    let src_anim = scene.animation();
+pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,String> {
+    let m = scene;
     let mut tex = Vec::new();
     let mut geom = Vec::new();
     let mut anim = Vec::new();
@@ -722,7 +691,7 @@ pub fn cook(scene: &crate::source::Scene, output: &Path, cap: u32) {
                     let id = ti.unwrap();
                     let d = decoded
                         .entry(id)
-                        .or_insert_with(|| decode(&m.textures[id as usize], src_tex));
+                        .or_insert_with(|| m.textures[id as usize].image());
                     Rgba {
                         w: d.w,
                         h: d.h,
@@ -742,15 +711,8 @@ pub fn cook(scene: &crate::source::Scene, output: &Path, cap: u32) {
                 // Authored 4K text atlases retain 1024 for the 400px display.
                 // The old Vita intermediate had already reduced these to 2K;
                 // testing 2K here incorrectly promotes ordinary source maps.
-                let limit = if src.w >= 4096
-                    || grid[0] > 1
-                    || grid[1] > 1
-                    || ti.is_some_and(|id| emissive_strips[id as usize])
-                {
-                    1024
-                } else {
-                    cap
-                };
+                let detail = src.w>=4096 || grid[0]>1 || grid[1]>1 || ti.is_some_and(|id| emissive_strips[id as usize]);
+                let limit = profile.pica_texture_cap(ti.and_then(|id|m.textures[id as usize].usage), detail);
                 let (w, h) = textures::pow2_fit(src.w, src.h, limit);
                 let (w, h) = (w.max(8), h.max(8));
                 let mut level = textures::resize(&src, w, h);
@@ -857,7 +819,7 @@ pub fn cook(scene: &crate::source::Scene, output: &Path, cap: u32) {
     let matrices = used_nodes.len() + m.skins.iter().map(|s| s.joints.len()).sum::<usize>();
     // Long transport loops need not repeat every rigid transform at 15 Hz.
     // Reduce only if their palette would exceed the Old 3DS animation budget.
-    let decimate = ((m.frames.max(1) as usize * matrices.max(1) * 48).div_ceil(10 * 1024 * 1024))
+    let decimate = ((m.frames.max(1) as usize * matrices.max(1) * 48).div_ceil(profile.recipe.animation_palette_bytes as usize))
         .max(1) as u32;
     let frames = m.frames.max(1).div_ceil(decimate);
     let fps = if m.frames > 0 {
@@ -877,21 +839,8 @@ pub fn cook(scene: &crate::source::Scene, output: &Path, cap: u32) {
         let mut world = vec![Mat4::IDENTITY; m.nodes.len()];
         for (i, n) in m.nodes.iter().enumerate() {
             let (t, q) = if let Some(r) = &n.track {
-                let p = r.offset as usize + frame as usize % (r.size as usize / 28) * 28;
-                (
-                    Vec3::new(
-                        readf(src_anim, p),
-                        readf(src_anim, p + 4),
-                        readf(src_anim, p + 8),
-                    ),
-                    Quat::from_xyzw(
-                        readf(src_anim, p + 12),
-                        readf(src_anim, p + 16),
-                        readf(src_anim, p + 20),
-                        readf(src_anim, p + 24),
-                    )
-                    .normalize(),
-                )
+                let sample = r[frame as usize % r.len()];
+                (Vec3::new(sample[0], sample[1], sample[2]), Quat::from_xyzw(sample[3], sample[4], sample[5], sample[6]).normalize())
             } else {
                 (Vec3::from(n.translation), Quat::from_array(n.rotation))
             };
@@ -903,8 +852,7 @@ pub fn cook(scene: &crate::source::Scene, output: &Path, cap: u32) {
         }
         for s in &m.skins {
             for (j, &n) in s.joints.iter().enumerate() {
-                let p = s.inverse_bind.offset as usize + j * 64;
-                let a: Vec<f32> = (0..16).map(|k| readf(src_anim, p + k * 4)).collect();
+                let a = s.inverse_bind[j];
                 fs(
                     &mut anim,
                     &rows(world[n as usize] * Mat4::from_cols_slice(&a)),
@@ -917,15 +865,12 @@ pub fn cook(scene: &crate::source::Scene, output: &Path, cap: u32) {
     }
     let track_start = anim.len();
     for track in &m.material_tracks {
-        let count = (track.data.size / 4).max(1);
+        let count = track.samples.len().max(1);
         for sampled in 0..frames {
             let frame = sampled as u64 * m.frames.max(1) as u64 / frames as u64;
             fs(
                 &mut anim,
-                &[readf(
-                    src_anim,
-                    track.data.offset as usize + (frame % count as u64) as usize * 4,
-                )],
+                &[track.samples[(frame % count as u64) as usize]],
             );
         }
     }
@@ -948,7 +893,7 @@ pub fn cook(scene: &crate::source::Scene, output: &Path, cap: u32) {
         align(&mut geom, 16);
         let vo = geom.len();
         let mut positions = Vec::new();
-        for i in 0..d.vertex_count as usize {
+        for i in 0..d.vertex_count() as usize {
             let v = scene.vertex(d, i);
             let pos = v.pos;
             let n = v.normal.normalize_or(Vec3::Y);
@@ -957,7 +902,7 @@ pub fn cook(scene: &crate::source::Scene, output: &Path, cap: u32) {
             let world = d
                 .node
                 .map_or(pos, |i| world0[i as usize].transform_point3(pos));
-            let mut light = if d.layout == pc::VertexLayout::Baked {
+            let mut light = if d.class == crate::source::VertexClass::Baked {
                 let k = v.light[3] as f32 / 255.0;
                 Vec3::new(v.light[0] as f32, v.light[1] as f32, v.light[2] as f32)
                     .map(|v| (v / 255.0 * k).powi(2) * 64.0)
@@ -1069,13 +1014,16 @@ pub fn cook(scene: &crate::source::Scene, output: &Path, cap: u32) {
             positions.push(pos);
         }
         let mut lod = Vec::new();
-        for (range, count, error) in main_lods(&d.indices, d.index_count, &d.lods) {
+        for (indices, count, error) in main_lods(d.indices(), d.lods())
+        {
+            if lod.len() == 3 {
+                break;
+            }
             align(&mut geom, 4);
             let off = geom.len();
-            geom.extend(&src_geom[range.offset as usize..(range.offset + range.size) as usize]);
+            geom.extend(indices.iter().flat_map(|&i| u16::try_from(i).expect("PICA index overflow").to_le_bytes()));
             lod.push((off as u32, count, error));
         }
-        // Missing slots alias the last range rather than duplicate payloads.
         while lod.len() < 3 {
             lod.push(*lod.last().unwrap());
         }
@@ -1096,7 +1044,7 @@ pub fn cook(scene: &crate::source::Scene, output: &Path, cap: u32) {
                 .fold(Vec3::splat(f32::MAX), Vec3::min);
         let scale = scale.max_element().max(0.001);
         let adapter =
-            meshopt::VertexDataAdapter::new(&geom[vo..vo + d.vertex_count as usize * 24], 24, 0)
+            meshopt::VertexDataAdapter::new(&geom[vo..vo + d.vertex_count() as usize * 24], 24, 0)
                 .unwrap();
         let mut error = 0.0;
         let proxy = if count > 36 {
@@ -1110,7 +1058,7 @@ pub fn cook(scene: &crate::source::Scene, output: &Path, cap: u32) {
         } else {
             indices
         };
-        let proxy = meshopt::optimize_vertex_cache(&proxy, d.vertex_count as usize);
+        let proxy = meshopt::optimize_vertex_cache(&proxy, d.vertex_count() as usize);
         align(&mut geom, 4);
         let po = geom.len() as u32;
         for &v in &proxy {
@@ -1119,7 +1067,7 @@ pub fn cook(scene: &crate::source::Scene, output: &Path, cap: u32) {
         lod.push((po, proxy.len() as u32, error * scale));
         let skoff = if let Some(s) = d.skin {
             let off = skin_data.len();
-            for i in 0..d.vertex_count as usize {
+            for i in 0..d.vertex_count() as usize {
                 let v = scene.vertex(d, i);
                 for &j in &v.joints {
                     skin_data.extend(((skin_base[s as usize] + j as usize) as u16).to_le_bytes());
@@ -1148,7 +1096,7 @@ pub fn cook(scene: &crate::source::Scene, output: &Path, cap: u32) {
             &[
                 d.material,
                 vo as u32,
-                d.vertex_count,
+                d.vertex_count(),
                 skoff,
                 d.node.map_or(u32::MAX, |n| node_map[&n]),
                 root,
@@ -1341,7 +1289,7 @@ pub fn cook(scene: &crate::source::Scene, output: &Path, cap: u32) {
             &mut textures,
         );
         if let Some(id) = sky.clouds {
-            let cloud = decode(&m.textures[id as usize], src_tex);
+            let cloud = m.textures[id as usize].image();
             cloud_texture = push_texture(
                 &panorama(sky, &m.post, Some(&cloud)),
                 true,
@@ -1427,15 +1375,6 @@ pub fn cook(scene: &crate::source::Scene, output: &Path, cap: u32) {
         fs(&mut table, &b[1]);
     }
     table.extend(&skin_data);
-    // Match the loader's per-section limits before publishing an unusable pack.
-    // Actual allocation headroom still needs device validation (skinning, FX,
-    // render targets and the host also consume memory).
-    for (name, bytes, mib) in [("table", table.len(), 4), ("textures", tex.len(), 12),
-        ("geometry", geom.len(), 24), ("animation", anim.len(), 16)] {
-        if bytes > mib * 1024 * 1024 {
-            crate::fail(format!("PICA {name} budget exceeded: {bytes} bytes > {mib} MiB"));
-        }
-    }
     let summary = serde_json::json!({"target":"3ds","version":TABLE_VERSION,"name":m.name,"kind":m.kind,"sourceMaterials":m.materials.len(),"textures":textures.len(),"draws":draws.len(),"textureBytes":tex.len(),"geometryBytes":geom.len(),"animationBytes":anim.len(),"matrices":matrices,"frames":frames,"fps":fps,"features":features,"sourceNodes":m.nodes.len(),"camera":m.camera});
     let meta = serde_json::to_vec(&summary).unwrap();
     let out = pc::write_versioned(pc::MAGIC, CONTAINER_VERSION, &[
@@ -1445,40 +1384,24 @@ pub fn cook(scene: &crate::source::Scene, output: &Path, cap: u32) {
         (pc::TAG_GEOMETRY, &geom, 128),
         (pc::TAG_ANIMATION, &anim, 16),
     ]);
-    std::fs::create_dir_all(output.parent().unwrap()).unwrap();
-    std::fs::write(output, &out).unwrap();
-    println!("{}", serde_json::to_string_pretty(&summary).unwrap());
-    println!(
-        "wrote {} ({:.2} MiB)",
-        output.display(),
-        out.len() as f64 / 1048576.0
-    );
+    Ok(Artifact {
+        bytes: out, summary,
+        sections: [("META",meta.len()),("PICA",table.len()),("TEXD",tex.len()),("GEOM",geom.len()),("ANIM",anim.len())].into_iter().map(|(k,v)|(k.into(),v)).collect(),
+        textures: textures.iter().enumerate().map(|(id,t)|serde_json::json!({"id":id,"width":t[0],"height":t[1],"format":t[2],"levels":t[3],"bytes":t[5]})).collect(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn main_view_keeps_coarse_lods_when_rigid_fine_levels_are_added() {
-        let base = pc::Range { offset: 0, size: 1200 };
-        let levels: Vec<_> = [(0.01, 300), (0.025, 180), (0.06, 90), (0.25, 0)]
-            .into_iter().enumerate().map(|(i, (error, count))| pc::DrawLod {
-                indices: pc::Range { offset: 1200 + i as u32 * 600, size: count * 2 },
-                index_count: count, error,
-            }).collect();
-        let selected = main_lods(&base, 600, &levels);
-        let records: Vec<_> = selected.iter().map(|(r, count, error)| (r.offset, r.size, *count, *error)).collect();
-        // Preserve the empty far level too: a vanished thin detail must not
-        // reappear because the converter retained its first fine LODs.
-        assert_eq!(records, [(0, 1200, 600, 0.0), (2400, 180, 90, 0.06), (3000, 0, 0, 0.25)]);
-        // Existing two-level packs select exactly their original main slots.
-        let ordinary = main_lods(&base, 600, &levels[2..]);
-        assert_eq!(ordinary.iter().map(|(r, _, _)| r.offset).collect::<Vec<_>>(), [0, 2400, 3000]);
-        // Fewer levels leave payloads unique; cook aliases the final range
-        // into unused slots instead of writing duplicate index buffers.
-        assert_eq!(main_lods(&base, 600, &[]).len(), 1);
-        assert_eq!(main_lods(&base, 600, &levels[3..]).len(), 2);
+    fn fine_levels_do_not_replace_coarse_handheld_slots() {
+        let levels: Vec<crate::source::Lod> = [0.01, 0.025, 0.06, 0.25].into_iter().enumerate().map(|(i, error)| crate::source::Lod { indices: vec![i as u32; 3], error }).collect();
+        let base = [4, 5, 6];
+        let selected: Vec<_> = main_lods(&base, &levels).collect();
+        assert_eq!(selected, vec![(base.as_slice(), 3, 0.0), (levels[2].indices.as_slice(), 3, 0.06), (levels[3].indices.as_slice(), 3, 0.25)]);
+        assert_eq!(main_lods(&base, &[]).count(), 1);
+        assert_eq!(main_lods(&base, &levels[..1]).count(), 2);
     }
 
     #[test]

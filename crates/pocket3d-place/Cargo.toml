@@ -6,5 +6,6 @@ license = "MIT"
 description = "Pocket Atlas place packs: GPU-ready geometry, textures, lights and animation for handheld renderers"
 
 [dependencies]
+pocket-atlas-model = { path = "../pocket-atlas-model" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

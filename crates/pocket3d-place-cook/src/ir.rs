@@ -13,10 +13,13 @@ use std::{
 
 pub const VERSION: u32 = 1;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Target {
+    #[serde(rename="vita")]
     Vita,
+    #[serde(rename="3ds")]
     Pica,
+    #[serde(rename="psp")]
     Psp,
 }
 impl Target {
@@ -74,6 +77,13 @@ fn scene_meta(doc: &Value) -> Result<&Value, String> {
 fn features(doc: &Value) -> Result<BTreeSet<String>, String> {
     let mut out = BTreeSet::new();
     for material in doc["materials"].as_array().into_iter().flatten() {
+        if let Some(usages)=material["extras"]["pocketAtlas"].get("textureUsage") {
+            let usages=usages.as_object().ok_or("textureUsage must map material slots to purposes")?;
+            for (slot,value) in usages {
+                if !matches!(slot.as_str(),"albedo"|"normal"|"orm"|"emission") {return Err(format!("unknown textureUsage slot {slot}"));}
+                serde_json::from_value::<crate::source::TextureUsage>(value.clone()).map_err(|_|format!("unknown textureUsage for {slot}: {value}"))?;
+            }
+        }
         if let Some(kind) = material["extras"]["pocketAtlas"]["kind"].as_str() {
             if !matches!(
                 kind,

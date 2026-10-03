@@ -1,4 +1,4 @@
-//! Triangle soup → quantized, chunked, indexed draws.
+//! Float geometry analysis: welding, chunking and bounded simplification.
 
 use glam::{Mat3, Mat4, Vec2, Vec3};
 use std::collections::HashMap;
@@ -58,44 +58,10 @@ pub fn tangents(pos: &[Vec3], nrm: &[Vec3], uv: &[Vec2], tris: &[[u32; 3]]) -> V
         .collect()
 }
 
-pub struct Built {
-    pub source: Vec<Vertex>,
-    pub vertices: Vec<u8>,
-    pub indices: Vec<u8>,
-    pub vertex_count: u32,
-    pub index_count: u32,
-    /// Coarser index lists over the same vertices (LOD1, LOD2), each with
-    /// its error from the full mesh (m).
-    pub lods: Vec<(Vec<u8>, u32, f32)>,
-    pub pos_offset: [f32; 3],
-    pub pos_scale: [f32; 3],
-    pub uv_offset: [f32; 2],
-    pub uv_scale: [f32; 2],
-    pub min: [f32; 3],
-    pub max: [f32; 3],
-}
-
-fn s16n(v: f32) -> i16 {
-    (v.clamp(-1.0, 1.0) * 32767.0).round() as i16
-}
-fn s8n(v: f32) -> i8 {
-    (v.clamp(-1.0, 1.0) * 127.0).round() as i8
-}
-
 /// Reorders triangles for the post-transform vertex cache.
 pub fn cache_order(tris: &[[u32; 3]], vertex_count: usize) -> Vec<[u32; 3]> {
     let flat: Vec<u32> = tris.iter().flatten().copied().collect();
     meshopt::optimize_vertex_cache(&flat, vertex_count).chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect()
-}
-
-fn u16_indices(tris: &[[u32; 3]]) -> Vec<u8> {
-    let mut idx = Vec::with_capacity(tris.len() * 6);
-    for t in tris {
-        for &i in t {
-            idx.extend((i as u16).to_le_bytes());
-        }
-    }
-    idx
 }
 
 /// Index triangle soup without crossing shading or deformation seams. Use
@@ -197,99 +163,6 @@ pub fn simplify(verts: &[Vertex], tris: &[[u32; 3]], keep: f32, max_error: f32, 
     Some((out.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect(), err))
 }
 
-/// Quantizes one draw (≤ 65 536 unique vertices) into the Static (24 B),
-/// Baked (28 B) or Skinned (32 B) layout. `lods`: reduced triangles over the
-/// same vertices and their errors, finest first.
-pub fn build(verts: &[Vertex], tris: &[[u32; 3]], layout: pocket3d_place::VertexLayout, lods: Vec<(Vec<[u32; 3]>, f32)>, encode_vita: bool) -> Built {
-    let skinned = layout == pocket3d_place::VertexLayout::Skinned;
-    let mut min = Vec3::splat(f32::MAX);
-    let mut max = Vec3::splat(f32::MIN);
-    let mut uvmin = Vec2::splat(f32::MAX);
-    let mut uvmax = Vec2::splat(f32::MIN);
-    for v in verts {
-        min = min.min(v.pos);
-        max = max.max(v.pos);
-        uvmin = uvmin.min(v.uv);
-        uvmax = uvmax.max(v.uv);
-    }
-    let center = (min + max) * 0.5;
-    let half = ((max - min) * 0.5).max(Vec3::splat(1e-4));
-    let uvc = (uvmin + uvmax) * 0.5;
-    let uvh = ((uvmax - uvmin) * 0.5).max(Vec2::splat(1e-5));
-    // Native lowerings keep the original float attributes and index space.
-    // Vita's quantized-byte dedup would merge distinct source values and
-    // must never remap this transient source through the packed records.
-    if !encode_vita {
-        return Built {
-            source: verts.to_vec(),
-            vertices: Vec::new(),
-            indices: u16_indices(&cache_order(tris, verts.len())),
-            vertex_count: verts.len() as u32,
-            index_count: (tris.len() * 3) as u32,
-            lods: lods.into_iter().map(|(t, e)| (u16_indices(&cache_order(&t, verts.len())), (t.len() * 3) as u32, e)).collect(),
-            pos_offset: center.to_array(),
-            pos_scale: half.to_array(),
-            uv_offset: uvc.to_array(),
-            uv_scale: uvh.to_array(),
-            min: min.to_array(),
-            max: max.to_array(),
-        };
-    }
-    let stride = layout.stride() as usize;
-    let mut out = Vec::with_capacity(verts.len() * stride);
-    for v in verts {
-        let q = (v.pos - center) / half;
-        for c in [q.x, q.y, q.z, 0.0] {
-            out.extend(s16n(c).to_le_bytes());
-        }
-        let n = v.normal.normalize_or_zero();
-        out.extend([s8n(n.x) as u8, s8n(n.y) as u8, s8n(n.z) as u8, 0]);
-        out.extend([s8n(v.tangent[0]) as u8, s8n(v.tangent[1]) as u8, s8n(v.tangent[2]) as u8, s8n(v.tangent[3]) as u8]);
-        let u = (v.uv - uvc) / uvh;
-        out.extend(s16n(u.x).to_le_bytes());
-        out.extend(s16n(u.y).to_le_bytes());
-        out.extend(v.color);
-        if layout == pocket3d_place::VertexLayout::Baked {
-            out.extend(v.light);
-        }
-        if skinned {
-            out.extend(v.joints);
-            out.extend(v.weights);
-        }
-    }
-    // Quantization makes some distinct source floats identical on the GPU
-    // (notably tangents recomputed independently for triangle soup). Dedup
-    // the complete packed record only after its bounds are fixed, so this
-    // step changes neither decoded attributes nor quantization precision.
-    let mut unique: HashMap<&[u8], u32> = HashMap::new();
-    let mut packed = Vec::with_capacity(out.len());
-    let remap: Vec<u32> = out.chunks_exact(stride).map(|bytes| {
-        *unique.entry(bytes).or_insert_with(|| {
-            let i = (packed.len() / stride) as u32;
-            packed.extend_from_slice(bytes);
-            i
-        })
-    }).collect();
-    let remap_tris = |ts: &[[u32; 3]]| -> Vec<[u32; 3]> {
-        ts.iter().map(|t| t.map(|i| remap[i as usize])).collect()
-    };
-    let vertex_count = (packed.len() / stride) as u32;
-    Built {
-        source: Vec::new(),
-        vertices: packed,
-        indices: u16_indices(&cache_order(&remap_tris(tris), vertex_count as usize)),
-        vertex_count,
-        index_count: (tris.len() * 3) as u32,
-        lods: lods.into_iter().map(|(t, e)| (u16_indices(&cache_order(&remap_tris(&t), vertex_count as usize)), (t.len() * 3) as u32, e)).collect(),
-        pos_offset: center.to_array(),
-        pos_scale: half.to_array(),
-        uv_offset: uvc.to_array(),
-        uv_scale: uvh.to_array(),
-        min: min.to_array(),
-        max: max.to_array(),
-    }
-}
-
 /// Splits a triangle soup (already deduplicated per source primitive) into
 /// groups of ≤ 65 536 vertices, remapping indices per group.
 /// Visible width of each vertex's connected part (parts joined by shared
@@ -370,8 +243,8 @@ fn part_widths(verts: &[Vertex], tris: &[[u32; 3]]) -> Vec<f32> {
 /// only the coarse one).
 /// Skinned meshes keep their topology: the simplifier's error metric does
 /// not include joint weights and cannot bound error after deformation.
-pub fn lods(verts: &[Vertex], tris: &[[u32; 3]], layout: pocket3d_place::VertexLayout, locked: &[bool], drop_parts: bool, bounds: &[f32], uv_weight: f32) -> Vec<(Vec<[u32; 3]>, f32)> {
-    if layout == pocket3d_place::VertexLayout::Skinned {
+pub fn lods(verts: &[Vertex], tris: &[[u32; 3]], layout: crate::source::VertexClass, locked: &[bool], drop_parts: bool, bounds: &[f32], uv_weight: f32) -> Vec<(Vec<[u32; 3]>, f32)> {
+    if layout == crate::source::VertexClass::Skinned {
         return Vec::new();
     }
     let widths = if drop_parts { part_widths(verts, tris) } else { vec![f32::MAX; verts.len()] };
@@ -618,7 +491,7 @@ pub fn product_card(src: &[Vertex]) -> (Vec<Vertex>, Vec<[u32; 3]>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pocket3d_place::VertexLayout;
+    use crate::source::VertexClass as VertexLayout;
 
     fn vertex(pos: Vec3) -> Vertex {
         Vertex {
@@ -629,79 +502,6 @@ mod tests {
             weights: [255, 0, 0, 0],
             ..Vertex::default()
         }
-    }
-
-    #[test]
-    fn weld_indexes_triangle_soup_without_changing_packed_vertices() {
-        let (a, b, c) = (vertex(Vec3::ZERO), vertex(Vec3::X), vertex(Vec3::Z));
-        let input = [a, b, c, a, b, c, vertex(Vec3::splat(100.0))];
-        let tris = [[0, 1, 2], [3, 4, 5]];
-        let (verts, indexed) = weld(&input, &tris);
-        assert_eq!(verts.len(), 3);
-        assert_eq!(indexed, [[0, 1, 2], [0, 1, 2]]);
-        // Across every packed layout, the indexed stream fetches exactly the
-        // bytes the original soup did. Ignore its unreferenced seventh vertex.
-        for layout in [VertexLayout::Static, VertexLayout::Baked, VertexLayout::Skinned] {
-            let old = build(&input[..6], &tris, layout, Vec::new(), true);
-            let new = build(&verts, &indexed, layout, Vec::new(), true);
-            let stride = layout.stride() as usize;
-            for (before, after) in old.indices.chunks_exact(2).zip(new.indices.chunks_exact(2)) {
-                let before = u16::from_le_bytes(before.try_into().unwrap()) as usize;
-                let after = u16::from_le_bytes(after.try_into().unwrap()) as usize;
-                assert_eq!(
-                    &old.vertices[before * stride..(before + 1) * stride],
-                    &new.vertices[after * stride..(after + 1) * stride],
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn packed_weld_merges_only_gpu_identical_attributes_and_remaps_lods() {
-        let a = vertex(Vec3::ZERO);
-        let mut tangent_noise = a;
-        tangent_noise.tangent[2] = 0.000001;
-        let mut other_joint = a;
-        other_joint.joints[0] = 1;
-        let verts = [a, vertex(Vec3::X), vertex(Vec3::Z), tangent_noise, other_joint];
-        let tris = [[0, 1, 2], [3, 1, 2], [4, 1, 2]];
-        let b = build(&verts, &tris, VertexLayout::Skinned, vec![(vec![[3, 1, 2], [4, 1, 2]], 0.06)], true);
-        assert_eq!(b.vertex_count, 4);
-        assert_eq!(b.index_count, 9);
-        let lod_indices: Vec<u16> = b.lods[0].0.chunks_exact(2).map(|i| u16::from_le_bytes(i.try_into().unwrap())).collect();
-        assert_eq!(lod_indices, [0, 1, 2, 3, 1, 2]);
-        // Joint index is the first byte following the 24-byte rigid layout.
-        assert_eq!(b.vertices[24], 0);
-        assert_eq!(b.vertices[3 * 32 + 24], 1);
-    }
-
-    #[test]
-    fn native_source_keeps_float_attributes_and_lod_index_space() {
-        let a = vertex(Vec3::ZERO);
-        let mut close = a;
-        close.pos.x = 0.0000001;
-        close.normal.x = 0.000001;
-        close.tangent[2] = 0.000001;
-        close.uv.x = 0.0000001;
-        let mut far = vertex(Vec3::X);
-        far.uv = Vec2::ONE;
-        let verts = [a, far, vertex(Vec3::Z), close];
-        let tris = [[0, 1, 2], [3, 1, 2]];
-        let levels = vec![(vec![[3, 1, 2]], 0.06)];
-        let native = build(&verts, &tris, VertexLayout::Skinned, levels.clone(), false);
-        let vita = build(&verts, &tris, VertexLayout::Skinned, levels, true);
-        assert_eq!(vita.vertex_count, 3, "Vita may merge GPU-identical records");
-        assert_eq!(native.vertex_count, 4, "native lowering must retain distinct source floats");
-        assert!(native.vertices.is_empty());
-        for (actual, source) in native.source.iter().zip(verts) {
-            assert_eq!(actual.pos.to_array().map(f32::to_bits), source.pos.to_array().map(f32::to_bits));
-            assert_eq!(actual.normal.to_array().map(f32::to_bits), source.normal.to_array().map(f32::to_bits));
-            assert_eq!(actual.tangent.map(f32::to_bits), source.tangent.map(f32::to_bits));
-            assert_eq!(actual.uv.to_array().map(f32::to_bits), source.uv.to_array().map(f32::to_bits));
-            assert_eq!((actual.color, actual.joints, actual.weights, actual.light), (source.color, source.joints, source.weights, source.light));
-        }
-        let indices: Vec<u16> = native.lods[0].0.chunks_exact(2).map(|i| u16::from_le_bytes(i.try_into().unwrap())).collect();
-        assert_eq!(indices, [3, 1, 2]);
     }
 
     #[test]

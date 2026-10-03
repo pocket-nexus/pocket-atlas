@@ -1,4 +1,5 @@
 #include "scene.h"
+#include <pocket_pica.h>
 #include "devserver.h"
 #include "navigation.h"
 #include "scene_shbin.h"
@@ -349,11 +350,8 @@ bool scene_load(const char *path, char *error, size_t capacity) {
         (t->format != 0 && t->format != 3 && t->format != 4) ||
         !range(t->offset, t->bytes, ts))
       goto invalid;
-    C3D_TexInitParams params = {t->width,  t->height,  t->levels - 1,
-                                t->format, GPU_TEX_2D, false};
-    if (!C3D_TexInitWithParams(&textures[i], NULL, params) ||
-        C3D_TexCalcTotalSize(textures[i].size, textures[i].maxLevel) !=
-            t->bytes ||
+    if (!pocket_pica_texture_init(&textures[i], t->width, t->height, t->levels,
+                                  t->format, t->bytes) ||
         !read_at(file, to + t->offset, textures[i].data, t->bytes))
       goto invalid;
     GPU_TEXTURE_WRAP_PARAM wrap[] = {GPU_REPEAT, GPU_CLAMP_TO_EDGE,
@@ -361,7 +359,8 @@ bool scene_load(const char *path, char *error, size_t capacity) {
     C3D_TexSetWrap(&textures[i], wrap[t->wrap_s % 3], wrap[t->wrap_t % 3]);
     C3D_TexSetFilter(&textures[i], GPU_LINEAR, GPU_LINEAR);
     C3D_TexSetFilterMipmap(&textures[i], GPU_LINEAR);
-    C3D_TexFlush(&textures[i]);
+    if (!pocket_pica_texture_publish(&textures[i], t->bytes))
+      goto invalid;
     if (i % 8 == 0)
       devserver_poll();
   }
@@ -1530,7 +1529,7 @@ void scene_free(void) {
   if (head && textures) {
     for (unsigned i = 0; i < head->textures; i++)
       if (textures[i].data)
-        C3D_TexDelete(&textures[i]);
+        pocket_pica_texture_destroy(&textures[i]);
   }
   if (head && skin_vertices) {
     for (unsigned i = 0; i < head->draws; i++)

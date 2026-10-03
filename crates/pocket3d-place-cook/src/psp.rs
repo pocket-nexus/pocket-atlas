@@ -3,9 +3,10 @@
 //! RGBA4444 swizzled textures and the original rigid/skeletal animation.
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
-use pocket3d_place as pc;
+use pocket_atlas_model as pc;
 use pocket3d_place_psp as pp;
-use std::{collections::HashMap, path::Path};
+use std::collections::HashMap;
+use crate::{artifact::Artifact, profile::Profile};
 
 pub(super) struct Writer(Vec<u8>);
 impl Writer {
@@ -34,33 +35,19 @@ pub(super) fn color(c: [f32; 3], alpha: f32) -> u32 {
         (alpha.clamp(0.0, 1.0) * 255.0) as u8,
     ])
 }
-fn float(b: &[u8], o: usize) -> f32 {
-    f32::from_le_bytes(b[o..o + 4].try_into().unwrap())
-}
 
 /// GE swizzle: 16-byte × 8-row blocks, not Morton order.
 pub(super) fn swizzle(pixels: &[u8], row: usize, height: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(pixels.len());
-    for y in (0..height).step_by(8) {
-        for x in (0..row).step_by(16) {
-            for dy in 0..8 {
-                out.extend_from_slice(&pixels[(y + dy) * row + x..(y + dy) * row + x + 16]);
-            }
-        }
-    }
-    out
+    pocket_psp_ge::swizzle::swizzle_rows(pixels, row, height).expect("valid GE texture rows")
 }
 
-pub fn cook(scene: &crate::source::Scene, output: &Path) {
-    let m = &scene.meta;
+pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,String> {
+    let m = scene;
     assert!(m.materials.iter().all(|m| !m.vertex_pbr), "PSP lowering requires source materials, not Vita PBR palettes");
     assert_eq!(
         m.kind, "night-street",
         "PSP currently supports the night-street material/effect set"
     );
-    let tex = scene.textures();
-    let geom = scene.geometry();
-    let anim = scene.animation();
     let mut w = Writer(vec![0; core::mem::size_of::<pp::Header>()]);
     let mut textures = Vec::new();
     let mut tex_map = HashMap::new();
@@ -70,31 +57,12 @@ pub fn cook(scene: &crate::source::Scene, output: &Path) {
                 continue;
             }
             let t = &m.textures[id as usize];
-            let source = &tex[t.data.offset as usize..(t.data.offset + t.data.size) as usize];
-            let mut rgba = vec![0; (t.width * t.height * 4) as usize];
-            match t.format {
-                pc::TexFormat::Bc1 => texpresso::Format::Bc1.decompress(
-                    source,
-                    t.width as usize,
-                    t.height as usize,
-                    &mut rgba,
-                ),
-                pc::TexFormat::Bc3 => texpresso::Format::Bc3.decompress(
-                    source,
-                    t.width as usize,
-                    t.height as usize,
-                    &mut rgba,
-                ),
-                pc::TexFormat::Rgba8 => {
-                    rgba.copy_from_slice(&source[..(t.width * t.height * 4) as usize])
-                }
-                _ => panic!("unsupported PSP colour texture {}", t.name),
-            }
+            let rgba = t.rgba8();
             let luminous = m.materials.iter().any(|m| {
                 m.albedo.or(m.emission) == Some(id)
                     && (m.emissive.iter().any(|&e| e > 0.1) || m.kind == pc::Kind::Unlit)
             });
-            let cap = if luminous { 512 } else { 128 };
+            let cap = profile.psp_texture_cap(t.usage,luminous);
             let width = t.width.next_power_of_two().min(cap).max(8);
             let height = t.height.next_power_of_two().min(cap).max(8);
             let img = image::RgbaImage::from_raw(t.width, t.height, rgba).unwrap();
@@ -206,22 +174,14 @@ pub fn cook(scene: &crate::source::Scene, output: &Path) {
         }
         // Coarse lists retain outlines and the bake's lighting boundaries.
         // No camera-specific scene copies: all six shots share these draws.
-        let indices = draw
-            .lods
-            .last()
-            .map(|l| &l.indices)
-            .unwrap_or(&draw.indices);
-        let source = &geom[indices.offset as usize..(indices.offset + indices.size) as usize];
+        let indices = draw.lods().last().map(|l| l.indices.as_slice()).unwrap_or(draw.indices());
         let mut remap = HashMap::<u16, u16>::new();
         let mut vertices = Vec::new();
         let mut weights = Vec::new();
         let mut out_indices = Vec::new();
-        let mut selected: Vec<u16> = source
-            .chunks_exact(2)
-            .map(|v| u16::from_le_bytes(v.try_into().unwrap()))
-            .collect();
+        let mut selected: Vec<u16> = indices.iter().map(|&i| u16::try_from(i).expect("GE index overflow")).collect();
         if draw.node.is_some() || draw.skin.is_some() {
-            let verts: Vec<_> = (0..draw.vertex_count as usize)
+            let verts: Vec<_> = (0..draw.vertex_count() as usize)
                 .map(|i| *scene.vertex(draw, i))
                 .collect();
             let tris: Vec<_> = selected
@@ -246,7 +206,7 @@ pub fn cook(scene: &crate::source::Scene, output: &Path) {
                 let uv = v.uv.to_array();
                 let vc = core::array::from_fn::<_, 3, _>(|i| pc::color::decode(v.color[i] as f32 / 255.0));
                 let normal = v.normal.normalize_or(Vec3::Y);
-                let irradiance = if draw.layout == pc::VertexLayout::Baked {
+                let irradiance = if draw.class == crate::source::VertexClass::Baked {
                     let a = v.light[3] as f32 / 255.0;
                     Vec3::from_array(core::array::from_fn(|i| {
                         (v.light[i] as f32 / 255.0 * a).powi(2) * 64.0
@@ -274,7 +234,7 @@ pub fn cook(scene: &crate::source::Scene, output: &Path) {
                     color: color((light * m.post.exposure).to_array(), alpha),
                     pos,
                 });
-                if draw.layout == pc::VertexLayout::Skinned {
+                if draw.class == crate::source::VertexClass::Skinned {
                     weights.push(pp::Weights {
                         joints: v.joints,
                         weights: v.weights,
@@ -293,9 +253,7 @@ pub fn cook(scene: &crate::source::Scene, output: &Path) {
                     .enumerate()
                     .map(|(i, &node)| pp::Joint {
                         node,
-                        inverse: core::array::from_fn(|k| {
-                            float(anim, skin.inverse_bind.offset as usize + i * 64 + k * 4)
-                        }),
+                        inverse: skin.inverse_bind[i],
                     })
                     .collect()
             })
@@ -322,23 +280,12 @@ pub fn cook(scene: &crate::source::Scene, output: &Path) {
             max: draw.max,
         });
     }
-    let mut copy_track = |r: Option<&pc::Range>| {
-        let floats: Vec<f32> = r
-            .map(|r| {
-                anim[r.offset as usize..(r.offset + r.size) as usize]
-                    .chunks_exact(4)
-                    .map(|v| f32::from_le_bytes(v.try_into().unwrap()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        w.push(&floats)
-    };
     let mut nodes: Vec<_> = m
         .nodes
         .iter()
         .map(|n| pp::Node {
             parent: n.parent.unwrap_or(pp::NONE),
-            track: copy_track(n.track.as_ref()),
+            track: w.push(&n.track.as_ref().map(|t| t.iter().flatten().copied().collect::<Vec<f32>>()).unwrap_or_default()),
             translation: n.translation,
             rotation: n.rotation,
             scale: n.scale,
@@ -351,7 +298,7 @@ pub fn cook(scene: &crate::source::Scene, output: &Path) {
             pos: l.position,
             color: color(l.color, 1.0),
             radius: l.radius,
-            track: copy_track(l.track.map(|t| &m.fog_tracks[t as usize].data)),
+            track: w.push(&l.track.map(|t| m.fog_tracks[t as usize].samples.iter().flatten().copied().collect::<Vec<f32>>()).unwrap_or_default()),
             reserved: 0,
         })
         .collect();
@@ -421,17 +368,13 @@ pub fn cook(scene: &crate::source::Scene, output: &Path) {
     }
     h.bytes = w.0.len() as u32;
     w.0[..core::mem::size_of::<pp::Header>()].copy_from_slice(bytemuck::bytes_of(&h));
-    println!(
+    crate::progress!(
         "PSP payload: {} bytes, {} textures, {} draws",
         w.0.len(),
         textures.len(),
         draws.len()
     );
-    pp::validate(&w.0).expect("PSP pack validation");
-    if let Some(parent) = output.parent() {
-        std::fs::create_dir_all(parent).unwrap();
-    }
-    std::fs::write(output, &w.0).unwrap();
+    pp::validate(&w.0).map_err(|e|format!("PSP pack: {e}"))?;
     let triangles: u32 = draws.iter().map(|d| d.indices.count / 3).sum();
     let vertices_total: u32 = draws
         .iter()
@@ -441,12 +384,10 @@ pub fn cook(scene: &crate::source::Scene, output: &Path) {
         .map(|v| v.1)
         .sum();
     let report = serde_json::json!({"target":"psp","draws":draws.len(),"triangles":triangles,"vertices":vertices_total,"textures":textures.len(),"bytes":w.0.len(),"animatedNodes":nodes.iter().filter(|n|n.track.count>0).count(),"skinnedDraws":draws.iter().filter(|d|d.weights.count>0).count(),"shots":shots.len()});
-    std::fs::write(
-        output.with_extension("json"),
-        serde_json::to_string_pretty(&report).unwrap(),
-    )
-    .unwrap();
-    println!("{report}");
+    Ok(Artifact {
+        bytes: w.0, summary: report, sections: Default::default(),
+        textures: textures.iter().enumerate().map(|(id,t)|serde_json::json!({"id":id,"width":t.width,"height":t.height,"levels":t.mips,"bytes":t.pixels.count})).collect(),
+    })
 }
 
 /// Share one vertex buffer across spatial chunks of the same material. The
