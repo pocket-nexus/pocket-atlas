@@ -18,6 +18,15 @@ The road's maximum width is 5.8 m, tapering beside the surveyed stairs. Treads a
 
 Lighting represents 2022-07-20 at 11:00 PDT: approximate solar azimuth 110.37°, elevation 56.13°, computed with the NOAA fractional-year equations. Camera positions and lenses are authored photographic estimates. The Postcard view is 1.8 m above the approach road, facing uphill at a 29° vertical field of view.
 
+## Robotaxi vehicles
+
+The traffic is one white Waymo Jaguar I-PACE and one gold Tesla Cybercab, 60 seconds apart on the existing 120-second downhill route. These are an authored fleet choice, not a claim that the Cybercab ran on this street in the 2022 lighting-reference photographs. Both models live in `shared/daylight/robotaxis.ts`; the scene owns only the route and scheduling. No renderer identifies either brand.
+
+- **Waymo:** [Waymo's fifth-generation Driver photographs and sensor diagram (2020-03-04)](https://waymo.com/blog/2020/03/introducing-5th-generation-waymo-driver/) determine the roof lidar/camera pod, forward fender sensors and rear quarter modules. [Jaguar specifications](https://chile.jaguar.com/jaguar-range/i-pace/specifications) give length 4.682 m, wheelbase 2.990 m, roof height 1.566 m and mirror width 2.139 m. Body width 1.895 m, wheel radius, sensor dimensions, trim and surfaces are photographic estimates. The door marking is typeset text, not traced logo artwork.
+- **Cybercab:** [Tesla's Q3 2024 update, photos 14–15](https://ir.tesla.com/_flysystem/s3/sec/000162828024043432/tsla-20241023-gen.pdf) supplies the gold two-door coupe silhouette, aero wheel covers, door outlines and closed rear deck. The [Tesla rider guide dimensions](https://www.tesla.com/robotaxi/riderguides/cybercab/en_us/GUID-3229BCDF-16D8-447B-BCED-77E3E067AFBB.html) give width 1.754 m and height 1.408 m; model length 4.42 m, wheelbase 2.74 m and tire radius 0.355 m are estimates from photographs, not published specifications. The [exterior guide](https://www.tesla.com/robotaxi/riderguides/cybercab/en_us/GUID-669E83C2-E7DE-40F4-9DBD-C9A32E7F6DFF.html) documents the front/rear lightbars. Doors stay closed during the drive.
+
+Sources were checked on 2026-10-04. Models, lettering and reflection textures are generated locally; reference photos are not shipped. Wheels have separate rigid tracks for steering/rolling, and opaque frame geometry leaves real window apertures to prevent the previous GE depth conflict. The larger Waymo envelope is checked against the surveyed curbs. Moving casters invalidate the shared web shadow cache; each native compiler keeps its existing lighting policy.
+
 ## Handheld pipeline
 
 Use the existing web export → sealed PlaceIR → independent target lowering. `daytime-slope` reuses Vita's sun/shadow/sky path and the PICA daytime bake; PSP's shared daylight bake adds a sky panorama and vertex sunlight/static shadows. PSP uses the separate `PLPS` v3 format. Moving-object lighting on the fixed-function targets is baked at the initial orientation; web ambient audio is not reproduced on the handhelds.

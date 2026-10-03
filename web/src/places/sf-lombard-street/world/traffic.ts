@@ -1,5 +1,5 @@
 import { CatmullRomCurve3, Matrix4, Vector3 } from "three";
-import { makeCar, type CarKind } from "../gfx/vehicles";
+import { makeRobotaxi, type RobotaxiKind } from "../../shared/daylight/robotaxis";
 import type { LombardWorld } from "./context";
 import { BLOCK_LENGTH, LOOP, heightAt, roadAt, site } from "./layout";
 
@@ -31,15 +31,16 @@ export function trafficPose(t:number,offset:number,wheelbase=2.55):TrafficPose {
 
 export function buildTraffic(w:LombardWorld):void {
   const root=w.group();root.name="slow-downhill-traffic";root.userData.dynamic=true;
-  const fleet:{kind:CarKind;color:number;offset:number}[]=[{kind:"hatch",color:0xe1e1d8,offset:8},{kind:"suv",color:0xaab0ae,offset:43},{kind:"sedan",color:0x633e44,offset:78}];
+  const fleet: { kind: RobotaxiKind; offset: number }[] = [{ kind: "waymo-ipace", offset: 8 }, { kind: "tesla-cybercab", offset: 68 }];
   for(const item of fleet) {
-    const car=makeCar(item.kind,item.color);root.add(car.root);
+    const car=makeRobotaxi(item.kind);root.add(car.root);
     const right=new Vector3(),up=new Vector3(),matrix=new Matrix4();
     w.update((_dt,t)=> {
       const pose=trafficPose(t,item.offset,car.wheelbase);
       car.root.position.copy(pose.position);car.root.position.y-=12*pose.sink;
       right.crossVectors(new Vector3(0,1,0),pose.forward).normalize();up.crossVectors(pose.forward,right).normalize();matrix.makeBasis(right,up,pose.forward);car.root.quaternion.setFromRotationMatrix(matrix);
       car.wheels.forEach((wheel,i)=>wheel.rotation.set(-pose.distance/car.wheelRadius,i<2?pose.steer:0,0,"YXZ"));
+      w.shadowsDirty = true;
     });
   }
 }

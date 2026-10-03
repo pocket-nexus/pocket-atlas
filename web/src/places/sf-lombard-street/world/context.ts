@@ -12,6 +12,7 @@ export type Updater = (dt: number, t: number) => void;
 export class LombardWorld {
   readonly root = new Group();
   readonly updaters: Updater[] = [];
+  shadowsDirty = false;
   /** No lamps are lit on this summer morning; kept for the exporter's shape. */
   readonly fogLights: ExportFogLight[] = [];
   readonly lib: DayLib;

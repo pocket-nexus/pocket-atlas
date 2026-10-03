@@ -111,7 +111,5 @@ export class DayStage extends PlaceStage<DayWorld, DayAudio> {
     for (const u of this.world.updaters) u(dt, time);
     this.sky.update(time, this.camera.position);
     this.audio.update(dt, this.camera, time);
-    if (this.world.shadowsDirty) this.ctx.renderer.shadowMap.needsUpdate = true;
-    this.world.shadowsDirty = false;
   }
 }

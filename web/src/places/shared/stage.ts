@@ -37,7 +37,7 @@ export abstract class PlaceStage<W extends ExportWorld = ExportWorld, A extends 
   protected readonly views: PlaceViews;
   protected readonly audio: A;
   protected baker!: Baker;
-  protected world!: W;
+  protected world!: W & { shadowsDirty?: boolean };
   protected post!: PlacePost;
   protected rig!: CameraRig;
   protected sun: DirectionalLight | null = null;
@@ -215,9 +215,10 @@ export abstract class PlaceStage<W extends ExportWorld = ExportWorld, A extends 
     const bars = u.get("uBars")!;
     bars.value += ((this.rig.mode === "cinematic" ? 1 : 0) - bars.value) * (1 - Math.exp(-dt * 2.5));
     // Static places reuse the map; an advance() with moving casters may invalidate it.
-    if (this.shadowFrames < 2) {
+    if (this.shadowFrames < 2 || this.world.shadowsDirty) {
       this.ctx.renderer.shadowMap.needsUpdate = true;
       this.shadowFrames++;
+      this.world.shadowsDirty = false;
     }
     this.post.render(dt);
   }
