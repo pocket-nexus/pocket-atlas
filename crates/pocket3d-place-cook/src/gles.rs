@@ -7,16 +7,22 @@ use std::path::Path;
 mod gles_clusters;
 #[path = "gles_colors.rs"]
 mod gles_colors;
+#[path = "gles_display_lods.rs"]
+mod gles_display_lods;
 #[path = "gles_effects.rs"]
 mod gles_effects;
 #[path = "gles_environment.rs"]
 mod gles_environment;
 #[path = "gles_geometry.rs"]
 mod gles_geometry;
+#[path = "gles_light_pages.rs"]
+mod gles_light_pages;
 #[path = "gles_products.rs"]
 mod gles_products;
 #[path = "gles_pvrtc.rs"]
 mod gles_pvrtc;
+#[path = "gles_skin_lods.rs"]
+mod gles_skin_lods;
 type Result<T> = std::result::Result<T, String>;
 
 /// SGX's fixed 320-pixel height needs centimetre-scale levels between the
@@ -96,6 +102,7 @@ pub fn cook(
         pc::TAG_ANIMATION,
         pc::ipod::TAG_PVRTC,
         pc::ipod::TAG_DISPLAY_CUBES,
+        pc::ipod::TAG_LIGHT_PAGES,
     ]
     .into_iter()
     .map(|tag| {
@@ -110,6 +117,9 @@ pub fn cook(
     summary["displayDraws"] = colors.draws.into();
     summary["displayBytes"] = colors.bytes.len().into();
     summary["clusterBytes"] = clusters.len().into();
+    if let Ok(pages) = p.section(pc::ipod::TAG_LIGHT_PAGES) {
+        summary["lightPageBytes"] = pages.len().into();
+    }
     use crate::artifact::Sidecar;
     Ok(crate::artifact::Artifact {
         bytes,
@@ -174,7 +184,7 @@ fn lower(
         return Err("iPod source does not accept the Vita vertex-PBR palette recipe".into());
     }
     let (mut meta, animation) = metadata(source)?;
-    let geometry = gles_geometry::lower(source, &mut meta)?;
+    let mut geometry = gles_geometry::lower(source, &mut meta)?;
     let mut pixels = Vec::new();
     for (i, t) in source.textures.iter().enumerate() {
         let (texture, raw, policy) = texture_input(t)?;
@@ -186,6 +196,42 @@ fn lower(
     }
     let recipe = gles_products::bake(source, &mut meta, &mut pixels)?;
     let mut ipod_recipes = gles_effects::bake(&mut meta, &mut pixels)?;
+    let mut window_draws = Vec::new();
+    let mut window_ray_draws = Vec::new();
+    for (i, draw) in meta.draws.iter().enumerate() {
+        if pc::ipod::window_params::eligible(
+            draw,
+            &meta.materials[draw.material as usize],
+            &geometry,
+        )? {
+            window_draws.push(u32::try_from(i).map_err(|_| "window draw index overflow")?);
+            if pc::ipod::window_ray_params::eligible(
+                draw,
+                &meta.materials[draw.material as usize],
+                &geometry,
+            )? {
+                window_ray_draws.push(i as u32);
+            }
+        }
+    }
+    if !window_ray_draws.is_empty() {
+        ipod_recipes.window_ray_params = Some(pc::ipod::WindowRayParams {
+            version: pc::ipod::window_ray_params::VERSION,
+            draws: window_ray_draws,
+        });
+    }
+    if !window_draws.is_empty() {
+        ipod_recipes.window_vertex_params = Some(pc::ipod::WindowVertexParams {
+            version: pc::ipod::window_params::VERSION,
+            draws: window_draws,
+        });
+    }
+    ipod_recipes.skin_lods = gles_skin_lods::build(source, &meta, &mut geometry, &animation)?;
+    ipod_recipes.display_lods = gles_display_lods::build(&meta, &mut geometry)?;
+    pc::ipod::display_lods::validate(&meta, &geometry, &ipod_recipes)?;
+    let (light_pages, page_recipe) = gles_light_pages::build(&meta, &geometry)?;
+    ipod_recipes.light_pages = page_recipe;
+
     let (display_cubes, cube_recipes) = gles_environment::bake(&meta, &pixels)?;
     ipod_recipes.display_cubes = cube_recipes;
     let mut compressed = Vec::new();
@@ -216,6 +262,9 @@ fn lower(
     }
     if !display_cubes.is_empty() {
         sections.push((pc::ipod::TAG_DISPLAY_CUBES, display_cubes.as_slice(), 16));
+    }
+    if !light_pages.is_empty() {
+        sections.push((pc::ipod::TAG_LIGHT_PAGES, light_pages.as_slice(), 16));
     }
     let mut total = 16usize + sections.len() * 16;
     for (_, data, align) in &sections {

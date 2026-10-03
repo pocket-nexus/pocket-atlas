@@ -1,6 +1,10 @@
 import { displayCubeFragment } from "./atlas-ipod-cube";
 import { hdrFragment } from "./atlas-ipod-hdr";
 import { wetVertex, wetFragment, wetResponseFragment, wetResolveFragment } from "./atlas-ipod-wet";
+import { windowParameterVertex, windowParameterFragment } from "./atlas-ipod-window";
+import { windowRayVertex, windowRayFragment } from "./atlas-ipod-window-ray";
+import { unrollSkinVertex } from "./atlas-ipod-skin";
+import { lowerGlsl100Arrays } from "./atlas-ipod-glsl";
 import { createHash } from "node:crypto";
 /** Translate the shared Cg material algorithms to GLES 2 using Khronos tools.
  * No generated shader copies belong in git. Sources remain in vita/shaders. */
@@ -99,6 +103,10 @@ export function shader(
     readFileSync(join(root, "tools/atlas-ipod-hdr.ts"), "utf8") +
     readFileSync(join(root, "tools/atlas-ipod-wet.ts"), "utf8") +
     readFileSync(join(root, "tools/atlas-ipod-cube.ts"), "utf8") +
+    readFileSync(join(root, "tools/atlas-ipod-window.ts"), "utf8") +
+    readFileSync(join(root, "tools/atlas-ipod-window-ray.ts"), "utf8") +
+    readFileSync(join(root, "tools/atlas-ipod-skin.ts"), "utf8") +
+    readFileSync(join(root, "tools/atlas-ipod-glsl.ts"), "utf8") +
     expand(name + ".cg") +
     JSON.stringify(Object.entries(defines).sort());
   const key =
@@ -109,6 +117,24 @@ export function shader(
   const hlsl = join(dir, key + ".hlsl"),
     spv = join(dir, key + ".spv");
   let source = expand(name + ".cg");
+  if (name === "surface_v" && defines.SKINNED && defines.SKIP_ZERO_WEIGHTS)
+    source = unrollSkinVertex(source);
+  if (defines.SGX_WINDOW_PARAMS) {
+    if (name === "surface_v") {
+      if (!defines.COLOR || !defines.TANGENT) throw new Error("Window parameters require COLOR and TANGENT");
+      source = windowParameterVertex(source, expand("common.cgh"));
+    } else if (name === "window_f" && !defines.REFLECTION) source = windowParameterFragment(source);
+    else throw new Error("Window parameters require the main interior-window pair");
+  }
+  if (defines.SGX_WINDOW_RAY_PARAMS) {
+    if (!defines.SGX_WINDOW_PARAMS) throw new Error("Window rays require the window parameter recipe");
+    if (name === "surface_v") {
+      if (!defines.STATIC_WORLD || defines.SKINNED || defines.FLAT || defines.DISPLAY_COLOR || defines.SUN)
+        throw new Error("Window rays require the static main window pair");
+      source = windowRayVertex(source);
+    } else if (name === "window_f" && !defines.REFLECTION) source = windowRayFragment(source);
+    else throw new Error("Window rays require the main interior-window pair");
+  }
   if (name === "lights_v" && defines.SGX_FIELD_APPEARANCE)
     source = fieldAppearanceVertex(source);
   if (name === "haze_f" && defines.SGX_HAZE_PREPARED) source = preparedHazeFragment(source);
@@ -158,6 +184,7 @@ export function shader(
     spv,
   ]);
   let glsl = run(["spirv-cross", spv, "--es", "--version", "100"]);
+  glsl = lowerGlsl100Arrays(glsl);
   // OpenGL has individual uniforms. Preserve the shared renderer's names
   // instead of exposing compiler-generated uniform-block instance names.
   const blocks = [...glsl.matchAll(/struct (\w+)\n\{\n([\s\S]*?)\n\};\n/g)];
@@ -179,7 +206,7 @@ export function shader(
   }
   // Link varyings by the common semantic rather than stage-local spelling.
   glsl = glsl.replace(
-    /\bo(World|Normal|Tangent|Uv2?|Screen|Color|Light|Haze|Ray|Grain|Fog|Depth|Local|ShadowUv|N|East|North|V|SunE|CloudE|Package|Appearance|WetFresnel|WetUv)\b/g,
+    /\bo(World|Normal|Tangent|Uv2?|Screen|Color|Light|Haze|Ray|Grain|Fog|Depth|Local|ShadowUv|N|East|North|V|SunE|CloudE|Package|Appearance|WetFresnel|WetUv|RoomA|RoomB|RoomC|WindowRay|WindowReflect)\b/g,
     "v$1",
   );
   if (name === "glass_f")

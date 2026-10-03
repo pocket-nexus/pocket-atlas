@@ -160,7 +160,9 @@ replaced by source precision and the display-state page compiler.
 and the runtime/cooker vertex contract. `META.version` is also 1. Surface
 attributes are little-endian f32: position at 0, normal at 12, tangent at 24,
 UV at 40; RGBA8 vertex color at 48. Static/Baked/Skinned strides are 52/56/60
-bytes; baked RGBM or skin joints/weights follow at 52. Light fields retain
+bytes; baked RGBM or skin joints/weights follow at 52. Non-LightPoint draws
+require identity position decode (`pos_offset = [0,0,0]`, `pos_scale = [1,1,1]`);
+loaders reject any other interpretation. Light fields retain
 the directly encoded 40-byte LightPoint records from shared analysis. Original
 material semantics, source draw identities, full indices, all LODs and complete
 animation tracks are retained. PLIP is not accepted by the Vita reader.
@@ -169,7 +171,7 @@ The SGX source-geometry policy adds 1, 2 and 4 cm LOD candidates for rigid
 draws before target encoding. It uses the shared simplifier's attribute weights,
 chunk-edge locks and complete-part detail policy, and keeps the original shared
 LOD indices/errors unchanged. Only useful intermediate levels are inserted;
-skinned topology is never simplified. Fine bounds are converted through the
+shared analysis never simplifies skinned topology. Fine bounds are converted through the
 shared world metric and include its base error; Vita/PICA/PSP policies are unchanged. The runtime's
 distance/error threshold is unchanged. These error values retain the shared
 simplifier/detail-removal meaning, not a new strict screen-space error guarantee.
@@ -280,6 +282,86 @@ and repeated pack/color/cluster bytes. Unit tests cover texture semantic
 filtering, malformed payloads, display state, precise full/LOD partitioning and
 Products bake/fallback contracts. Hardware acceptance at 480×320 remains a
 separate measurement; older sub-480 renders do not establish this target's budget.
+
+The optional `ipod_recipes.window_vertex_params` object is `{version: 1,
+draws: [...]}` with a nonempty, strictly increasing draw list. It moves
+triangle-constant window parameters and the clock-driven TV flicker to the
+vertex stage. Parallax, spatial room/TV illumination, local curtain detail and
+reflections remain in the fragment stage. Missing
+recipes retain the original fragment implementation, including on older packs.
+Reference always retains that implementation.
+
+The cooker and loader share `pc::ipod::window_params::eligible`. It reads original
+PLIP float UV and RGBA8 records, applies the draw UV decode, rejects animated UV
+or palette semantics, and checks all triangles in full and every LOD. Within
+each triangle, both `floor(UV)` components and both pane-dimension RG bytes must
+be identical. Referenced UV must stay at least
+`max(1/1024, 16*f32::EPSILON*max(abs(UV), 1))` away from integer boundaries.
+Empty coarse LODs are valid. Malformed ranges/indices or non-finite values fail;
+a semantic mismatch retains the original material. The margin is an explicit
+recipe eligibility rule, not a guarantee of bit-identical GPU interpolation.
+No CPU implementation of shader hashes, new vertex attribute, texture, or
+geometry approximation is introduced by this recipe. Loader revalidation and
+pipeline iff matching prevent a stale or forged draw declaration from selecting
+an incompatible shader.
+
+`ipod_recipes.skin_lods` is an optional version-1 SGX index recipe. Each draw
+entry contains `draw`, `sourceHash`, `payloadHash`, `affineBound` and `levels`
+(`DrawLod` records). New u16 source-local indices are appended to GEOM; the
+original vertices, full indices and `draw.lods` are unchanged. Only Optimized
+uses these additional levels. Reference retains the original topology.
+
+The pass currently accepts only opaque, depth-writing Standard skins without
+cutout, wet shading or animated emission. Standard interior and analytic
+normal/height emission shading remain supported; they do not introduce a
+procedural seed discontinuity. It groups
+triangles by all eight joint/weight bytes. Every triangle spanning different
+influences stays intact, and its vertices are locked. Coincident positions with
+different normal, tangent, UV, RGBA or influence records lock both sides. All
+triangles incident to those attribute seams remain unchanged, including
+degenerate sphere-pole triangles: positional simplifiers may otherwise merge
+coincident chart aliases even when their source indices are locked. All
+open/non-manifold edge endpoints are also locked, preserving boundaries shared
+by independently cooked draws. No weights or vertex attributes are rewritten.
+The ordinary attribute-aware simplifier runs within those regions, with no
+whole-part removal. Coverage alpha must be constant within a draw.
+
+For one influence tuple, skinning is one common affine map at every time:
+translation cancels from the error vector. Each joint's linear norm is bounded
+by the product of maximum absolute ancestor TRS scales and the inverse-bind
+operator bound; the tuple uses the byte-weighted sum of joint bounds. Tracks
+use the runtime's shortest-path normalized quaternion lerp, including the loop
+seam. Non-unit/zero quaternions, singular scales, projective/sheared inverse
+binds or non-finite bounds leave the full draw in use. Nested nonuniform TRS
+may induce world shear, which the product bound still covers. Calculations use
+f64, an explicit f32 arithmetic guard and upward rounding. Accumulated bind
+error is multiplied by the maximum tuple bound for the draw. These remain the
+shared simplifier's measured geometry/attribute errors; this is not a new
+Hausdorff or strict pixel-error claim, nor a pose-sampling substitute for the
+animation bound.
+
+The shared validator recomputes the animation bound and structural proof in
+both profiles. Source identity binds the original draw descriptor, vertex/full
+index bytes and one pack-wide identity of node/skin descriptors, loop timing,
+doors and all ANIM bytes. Payload identity binds the ordered new index ranges.
+It rejects changed mixed-influence triangles, missing seam vertices/edges,
+out-of-range indices, overlapping source ranges and non-monotonic levels.
+
+The parallel optional `display_lods` version-1 recipe has `draw`, `sourceHash`,
+`payloadHash` and `levels` entries for static Baked Standard opaque, depth-writing
+surfaces without cutout, wet/interior or emission-map/track/shade semantics.
+Its display shader does not consume tangents, so only bytes 24–40 of the source
+vertex are omitted from canonicalization. Position, normal, UV, RGBA and baked
+light retain their original bits. Additional u16 source-local indices live in
+the GEOM tail; original full/LOD indices, Reference and shadow inputs stay intact.
+Source identity includes the draw/material descriptors and original full/LOD
+bytes. Shared validation checks canonical representatives, component ownership,
+unchanged edges shared with all static neighboring materials and nonoverlapping
+skin/display tail ranges. `EffectiveLods` is the sole merge of nondominated
+original and derived tiers for Optimized CPU/GPU selection and IPCL generation.
+IPCL still binds the actual raw META and complete GEOM; no rewritten metadata
+or disguised source hash is introduced. Errors retain the existing measured
+attribute-weighted simplifier contract, not a Hausdorff or pixel guarantee.
 
 ## Profiles, recipes and compile receipts
 
@@ -407,6 +489,6 @@ well as Atlas's recipe/format source and dependency lock.
    renderer mechanism or authoring intent. The reviewed decision becomes a
    versioned deterministic pass; manual edits to generated packs are not inputs.
 
-This milestone supports the existing Vita, Old 3DS and PSP targets only. New
+This milestone supports the existing Vita, Old 3DS, PSP and iPod targets. New
 scene kinds still require measured capability records and visual acceptance.
 Steam Deck and AYN Thor are deferred; no renderer or profile for them is added.

@@ -63,6 +63,7 @@ describe("iPod physical acceptance evidence", () => {
     const expected = { renderWidth: 480, buildId: "build", place: "test-place", shot: 0, camera: [1, 2, 3], quality: 0, profile: false, nonce: "command", memoryWarningBatches: 0 };
     const state = {
       ...expected, lastCommand: "command", state: "running", glError: 0, fps: 30,
+      time: 25, cinematic: true, paused: false,
       profileDrawClass: 0, frameTiming: timing(), width: 480, height: 320, renderWidth: 480, renderHeight: 320,
     };
     expect(() => validateState(state, expected)).not.toThrow();
@@ -71,6 +72,9 @@ describe("iPod physical acceptance evidence", () => {
     expect(() => validateState({ ...state, memoryWarningBatches: NaN }, expected)).toThrow("Memory pressure");
     expect(() => validateState({ ...state, profileDrawClass: 7 }, expected)).toThrow("filter");
     expect(() => validateState({ ...state, lastCommand: "another" }, expected)).toThrow("changed");
+    expect(() => validateState({ ...state, time: 26 }, expected)).toThrow("playback changed");
+    expect(() => validateState({ ...state, cinematic: false }, expected)).toThrow("playback changed");
+    expect(() => validateState({ ...state, paused: true }, expected)).toThrow("playback changed");
     expect(() => validateState({ ...state, frameTiming: { ...timing(), source: "ui" } }, expected)).toThrow("render-worker");
     expect(() => validateState({ ...state, fps: 60 }, expected)).toThrow("inconsistent");
   });

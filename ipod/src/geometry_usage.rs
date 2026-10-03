@@ -59,14 +59,15 @@ fn map(spans: &[Span], offset: u32, size: u32) -> Option<u32> {
 }
 
 impl GeometryUsage {
-    /// `display_pages` is derived only from validated ColorFile page entries.
+    /// `display_pages` marks validated ColorFile or compiler light pages.
     /// If shader demand is unavailable, retain original shadow casters. No
     /// missing or stale manifest may remove geometry a future pass can read.
-    pub fn new(
+    pub fn new<'a>(
         meta: &pc::Meta,
         source_len: usize,
         display_pages: &[bool],
         needs_original_shadow: bool,
+        additional_indices: impl IntoIterator<Item = (&'a pc::Range, u32)>,
     ) -> Result<Self, String> {
         if display_pages.len() != meta.draws.len() || source_len > i32::MAX as usize {
             return Err("geometry residency draw count or byte limit".into());
@@ -92,7 +93,7 @@ impl GeometryUsage {
             if display
                 && (d.node.is_some()
                     || d.skin.is_some()
-                    || !matches!(d.layout, pc::VertexLayout::Static | pc::VertexLayout::Baked))
+                    || !matches!(d.layout, pc::VertexLayout::Static | pc::VertexLayout::Baked | pc::VertexLayout::Lights))
             {
                 return Err("geometry residency display page is not static".into());
             }
@@ -128,6 +129,30 @@ impl GeometryUsage {
                     });
                 }
             }
+        }
+        // Target-only LODs keep their source byte addresses. They are already
+        // semantically proved by the loader, but still require the same range,
+        // count and alignment checks as every original index upload.
+        for (range, count) in additional_indices {
+            checked_range(range, source_len)?;
+            if range.offset % 2 != 0 || count.checked_mul(2) != Some(range.size) {
+                return Err("geometry residency additional index layout mismatch".into());
+            }
+            if range.size == 0 {
+                continue;
+            }
+            indices
+                .try_reserve(1)
+                .map_err(|_| "geometry residency index allocation")?;
+            copies
+                .try_reserve(1)
+                .map_err(|_| "geometry residency range allocation")?;
+            indices.push(range.clone());
+            let start = range.offset & !3;
+            copies.push(pc::Range {
+                offset: start,
+                size: range.size + range.offset - start,
+            });
         }
         merge(&mut copies);
         merge(&mut indices);
@@ -258,7 +283,14 @@ mod tests {
         let (mut meta, source) = fixture();
         meta.draws.push(meta.draws[1].clone());
         let original = serde_json::to_vec(&meta).unwrap();
-        let usage = GeometryUsage::new(&meta, source.len(), &[true, false, false], false).unwrap();
+        let usage = GeometryUsage::new(
+            &meta,
+            source.len(),
+            &[true, false, false],
+            false,
+            core::iter::empty(),
+        )
+        .unwrap();
         assert_eq!(usage.bytes(), 168);
         assert_eq!(usage.vertex_offset(0), None);
         assert_eq!(usage.vertex_offset(1), Some(0));
@@ -283,12 +315,26 @@ mod tests {
     fn shadow_demand_retains_casters_and_all_display_geometry_can_be_absent() {
         let (mut meta, source) = fixture();
         meta.draws[1].cast_shadow = false;
-        let usage = GeometryUsage::new(&meta, source.len(), &[true, true], true).unwrap();
+        let usage = GeometryUsage::new(
+            &meta,
+            source.len(),
+            &[true, true],
+            true,
+            core::iter::empty(),
+        )
+        .unwrap();
         assert_eq!(usage.vertex_offset(0), Some(0));
         assert_eq!(usage.vertex_offset(1), None);
         assert_eq!(usage.index_offset(162, 3), Some(162));
         assert_eq!(usage.bytes(), 168);
-        let usage = GeometryUsage::new(&meta, source.len(), &[true, true], false).unwrap();
+        let usage = GeometryUsage::new(
+            &meta,
+            source.len(),
+            &[true, true],
+            false,
+            core::iter::empty(),
+        )
+        .unwrap();
         let mut compacted = source;
         usage.compact(&mut compacted).unwrap();
         assert!(compacted.is_empty());
@@ -313,7 +359,14 @@ mod tests {
         raw.lods.clear();
         meta.draws.push(raw);
         source.resize(336, 0);
-        let usage = GeometryUsage::new(&meta, source.len(), &[true, false, false], false).unwrap();
+        let usage = GeometryUsage::new(
+            &meta,
+            source.len(),
+            &[true, false, false],
+            false,
+            core::iter::empty(),
+        )
+        .unwrap();
         let mut compacted = source.clone();
         usage.compact(&mut compacted).unwrap();
         assert_eq!(usage.vertex_offset(0), None);
@@ -329,7 +382,9 @@ mod tests {
     #[test]
     fn rejects_bad_masks_ranges_layouts_and_changed_source_without_writing() {
         let (meta, source) = fixture();
-        assert!(GeometryUsage::new(&meta, source.len(), &[true], false).is_err());
+        assert!(
+            GeometryUsage::new(&meta, source.len(), &[true], false, core::iter::empty()).is_err()
+        );
         for mode in 0..5 {
             let mut bad = meta.clone();
             match mode {
@@ -339,12 +394,71 @@ mod tests {
                 3 => bad.draws[1].lods[0].indices.offset += 1,
                 _ => bad.draws[1].lods[0].indices.size = u32::MAX,
             }
-            assert!(GeometryUsage::new(&bad, source.len(), &[true, false], false).is_err());
+            assert!(GeometryUsage::new(
+                &bad,
+                source.len(),
+                &[true, false],
+                false,
+                core::iter::empty()
+            )
+            .is_err());
         }
-        let usage = GeometryUsage::new(&meta, source.len(), &[true, false], false).unwrap();
+        let usage = GeometryUsage::new(
+            &meta,
+            source.len(),
+            &[true, false],
+            false,
+            core::iter::empty(),
+        )
+        .unwrap();
         let mut short = source[..source.len() - 1].to_vec();
         let original = short.clone();
         assert!(usage.compact(&mut short).is_err());
         assert_eq!(short, original);
+    }
+    #[test]
+    fn derived_tail_is_uploaded_only_when_requested_with_exact_halfword_mapping() {
+        let (meta, mut source) = fixture();
+        source.resize(350, 0);
+        let range = pc::Range {
+            offset: 342,
+            size: 6,
+        };
+        source[342..348].copy_from_slice(&[1, 0, 2, 0, 0, 0]);
+        let usage =
+            GeometryUsage::new(&meta, source.len(), &[true, false], false, [(&range, 3)]).unwrap();
+        let mut compact = source.clone();
+        usage.compact(&mut compact).unwrap();
+        let at = usage.index_offset(342, 3).unwrap() as usize;
+        assert_eq!(at % 4, 2);
+        assert_eq!(&compact[at..at + 6], &source[342..348]);
+        let original = GeometryUsage::new(
+            &meta,
+            source.len(),
+            &[true, false],
+            false,
+            core::iter::empty(),
+        )
+        .unwrap();
+        assert!(original.index_offset(342, 3).is_none());
+        for bad in [
+            pc::Range {
+                offset: 343,
+                size: 6,
+            },
+            pc::Range {
+                offset: 348,
+                size: 6,
+            },
+            pc::Range {
+                offset: 342,
+                size: 4,
+            },
+        ] {
+            assert!(
+                GeometryUsage::new(&meta, source.len(), &[true, false], false, [(&bad, 3)])
+                    .is_err()
+            );
+        }
     }
 }

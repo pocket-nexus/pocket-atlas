@@ -31,6 +31,15 @@ struct Field {
     maximum: f32,
 }
 
+/// One compiler page. Original field indices remain separate for culling;
+/// only their final selected indices are remapped into this page.
+pub struct Page {
+    pub draw: usize,
+    pub first: usize,
+    pub count: usize,
+    fields: Vec<(usize, u32)>,
+}
+
 /// Immutable compact source data retained by Scene. No full GEOM copy.
 #[derive(Default)]
 pub struct Sources {
@@ -41,6 +50,7 @@ pub struct Sources {
     // Original LightPoint RGB/phase/geometry remains untouched.
     palette: Vec<[u8; 3]>,
     color_rows: Vec<u16>,
+    pages: Vec<Page>,
 }
 impl Sources {
     pub fn new(meta: &pc::Meta, geometry: &[u8]) -> Result<Self, String> {
@@ -166,6 +176,8 @@ impl Sources {
     pub fn bytes(&self) -> usize {
         self.fields.capacity() * size_of::<Field>() + self.points.capacity() * size_of::<Point>()
             + self.palette.capacity() * 3 + self.color_rows.capacity() * 2
+            + self.pages.capacity() * size_of::<Page>()
+            + self.pages.iter().map(|p| p.fields.capacity() * size_of::<(usize, u32)>()).sum::<usize>()
     }
     pub fn is_empty(&self) -> bool {
         self.points.is_empty()
@@ -175,6 +187,34 @@ impl Sources {
     pub fn color_offset(&self, draw: usize) -> Option<usize> {
         self.fields.binary_search_by_key(&draw, |f| f.draw).ok()
             .map(|i| self.fields[i].base * 2)
+    }
+    pub fn pages(&self) -> &[Page] { &self.pages }
+
+    pub fn with_pages(mut self, recipe: &pc::ipod::LightPages) -> Result<Self, String> {
+        let original = core::mem::take(&mut self.color_rows);
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(original.len()).map_err(|_| "light page color rows allocation")?;
+        self.pages.try_reserve_exact(recipe.pages.len()).map_err(|_| "light page lookup allocation")?;
+        for page in &recipe.pages {
+            let first = rows.len();
+            let mut fields = Vec::new();
+            fields.try_reserve_exact(page.fields.len()).map_err(|_| "light page field lookup allocation")?;
+            for entry in &page.fields {
+                let i = self.fields.binary_search_by_key(&(entry.draw as usize), |f| f.draw)
+                    .map_err(|_| "light page source field missing")?;
+                let field = &mut self.fields[i];
+                if rows.len() - first != entry.first as usize { return Err("light page source order mismatch".into()); }
+                rows.extend_from_slice(&original[field.base..field.base + field.count]);
+                field.base = first + entry.first as usize;
+                fields.push((i, entry.first));
+            }
+            if rows.len() - first != page.vertex_count as usize { return Err("light page source count mismatch".into()); }
+            self.pages.push(Page { draw: page.fields[0].draw as usize, first,
+                count: page.vertex_count as usize, fields });
+        }
+        if rows.len() != original.len() { return Err("light page source incomplete".into()); }
+        self.color_rows = rows;
+        Ok(self)
     }
 }
 
@@ -247,6 +287,8 @@ pub struct LightLod {
     weights: Vec<f32>,
     indices: Vec<u16>,
     draws: Vec<Draw>,
+    page_draws: Vec<Draw>,
+    remapped: Vec<u16>,
     visible: Vec<bool>,
     density: Vec<f32>,
     projected: Vec<Projection>,
@@ -262,6 +304,8 @@ impl LightLod {
             weights: Vec::new(),
             indices: Vec::new(),
             draws: Vec::new(),
+            page_draws: Vec::new(),
+            remapped: Vec::new(),
             visible: Vec::new(),
             density: Vec::new(),
             projected: Vec::new(),
@@ -277,6 +321,11 @@ impl LightLod {
             .try_reserve_exact(source.fields.len())
             .map_err(|_| "light LOD draws allocation")?;
         out.draws.resize(source.fields.len(), Draw::default());
+        if !source.pages.is_empty() {
+            out.page_draws.try_reserve_exact(source.pages.len()).map_err(|_| "light page draw allocation")?;
+            out.page_draws.resize(source.pages.len(), Draw::default());
+            out.remapped.try_reserve_exact(source.count).map_err(|_| "light page index allocation")?;
+        }
         out.visible
             .try_reserve_exact(source.fields.len())
             .map_err(|_| "light LOD visibility allocation")?;
@@ -301,6 +350,7 @@ impl LightLod {
             self.weights.capacity() * 4
                 + self.indices.capacity() * 2
                 + self.draws.capacity() * size_of::<Draw>()
+                + self.page_draws.capacity() * size_of::<Draw>() + self.remapped.capacity() * 2
                 + self.visible.capacity() * size_of::<bool>()
                 + self.density.capacity() * 4
                 + self.projected.capacity() * size_of::<Projection>(),
@@ -429,6 +479,25 @@ impl LightLod {
                 count: (self.indices.len() - first) as i32,
             };
         }
+        if !source.pages.is_empty() {
+            self.remapped.clear();
+            for (i, page) in source.pages.iter().enumerate() {
+                let first = self.remapped.len();
+                for &(field, base) in &page.fields {
+                    let draw = self.draws[field];
+                    let start = draw.index_offset / 2;
+                    for &index in &self.indices[start..start + draw.count as usize] {
+                        let mapped = (index as u32).checked_add(base)
+                            .filter(|&v| v < page.count as u32)
+                            .ok_or("light page remap outside vertices")?;
+                        self.remapped.push(u16::try_from(mapped).map_err(|_| "light page index overflow")?);
+                    }
+                }
+                self.page_draws[i] = Draw { weight_offset: page.first * 4,
+                    index_offset: first * 2, count: (self.remapped.len() - first) as i32 };
+            }
+            core::mem::swap(&mut self.indices, &mut self.remapped);
+        }
         Ok(())
     }
     fn prepare_with(
@@ -493,7 +562,7 @@ impl LightLod {
         })
     }
     pub fn draw(&self, source: &Sources, draw: usize) -> Option<Draw> {
-        if !self.valid {
+        if !self.valid || !source.pages.is_empty() {
             return None;
         }
         source
@@ -501,6 +570,9 @@ impl LightLod {
             .binary_search_by_key(&draw, |f| f.draw)
             .ok()
             .map(|i| self.draws[i])
+    }
+    pub fn page(&self, page: usize) -> Option<Draw> {
+        self.valid.then(|| self.page_draws.get(page).copied()).flatten()
     }
     pub fn buffers(&self) -> (u32, u32) {
         (self.buffers[self.slot * 2], self.buffers[self.slot * 2 + 1])
@@ -554,8 +626,66 @@ mod tests {
             count: n,
             palette: Vec::new(),
             color_rows: Vec::new(),
+            pages: Vec::new(),
         }
     }
+    #[test]
+    fn page_remap_preserves_original_visibility_density_weights_and_failed_uploads() {
+        fn fields() -> Sources {
+            let mut source = cloud(96);
+            source.fields = (0..3).map(|i| Field { draw: i, base: i*32, count: 32,
+                first: i*32, end: (i+1)*32, minimum: 2.0, maximum: 10.0 }).collect();
+            for (i, point) in source.points.iter_mut().enumerate() {
+                point.vertex = (i % 32) as u32;
+                point.position.x = (i / 32) as f32 * 0.01;
+            }
+            source.color_rows = (0..96).collect();
+            source
+        }
+        let original = fields();
+        let recipe = pc::ipod::LightPages { version: 1, source_hash: String::new(), payload_hash: String::new(),
+            pages: vec![
+                pc::ipod::LightPage { vertices: pc::Range { offset:0, size:64*48 }, vertex_count:64,
+                    fields: vec![pc::ipod::LightPageField {draw:0,first:0},pc::ipod::LightPageField {draw:2,first:32}] },
+                pc::ipod::LightPage { vertices: pc::Range {offset:64*48,size:32*48},vertex_count:32,
+                    fields:vec![pc::ipod::LightPageField {draw:1,first:0}] },
+            ] };
+        let paged = fields().with_pages(&recipe).unwrap();
+        assert_eq!(paged.color_rows(), (0..32).chain(64..96).chain(32..64).collect::<Vec<_>>());
+        let mut old_lod = LightLod::cpu(&original).unwrap();
+        let mut new_lod = LightLod::cpu(&paged).unwrap();
+        for (step, hidden) in [None,Some(0),Some(2),Some(1),None].into_iter().enumerate() {
+            let mut camera = view();
+            camera.eye.x = step as f32 * 0.002;
+            camera.vp.w_axis.x = step as f32 * 0.003;
+            old_lod.prepare_with(&original,camera,|draw| Some(draw)!=hidden,|_,_,_|Ok(())).unwrap();
+            new_lod.prepare_with(&paged,camera,|draw| Some(draw)!=hidden,|_,_,_|Ok(())).unwrap();
+            for (i, field) in original.fields.iter().enumerate() {
+                let mapped = &paged.fields[i];
+                assert_eq!(&old_lod.weights[field.base..field.base+field.count],
+                    &new_lod.weights[mapped.base..mapped.base+mapped.count]);
+            }
+            for (page_index, page) in paged.pages().iter().enumerate() {
+                let actual = new_lod.page(page_index).unwrap();
+                let expected:Vec<_> = page.fields.iter().flat_map(|&(field,base)| {
+                    let draw = old_lod.draw(&original,field).unwrap();
+                    old_lod.indices[draw.index_offset/2..draw.index_offset/2+draw.count as usize]
+                        .iter().map(move |&i| i+base as u16)
+                }).collect();
+                assert_eq!(&new_lod.indices[actual.index_offset/2..actual.index_offset/2+actual.count as usize], &expected);
+                assert_eq!(actual.weight_offset,page.first*4);
+            }
+            assert!(new_lod.draw(&paged,0).is_none(), "source-local ranges must never index a paged buffer");
+        }
+        let mut camera=view();camera.eye.x=2.0;
+        assert!(new_lod.prepare_with(&paged,camera,|_|true,|_,_,_|Err("injected upload".into())).is_err());
+        assert!(new_lod.page(0).is_none());
+        let mut uploads=0;
+        new_lod.prepare_with(&paged,camera,|_|true,|_,_,_|{uploads+=1;Ok(())}).unwrap();
+        assert_eq!(uploads,1);
+        assert!(new_lod.page(0).is_some());
+    }
+
     #[test]
     fn source_classification_preserves_motion_blink_and_snorm_constant_paths() {
         let (mut meta, _, _) = crate::validation::tests::fixture();
@@ -769,6 +899,57 @@ mod tests {
             .is_err());
         assert!(lod.draw(&source, 0).is_none());
     }
+    #[test]
+    #[ignore = "set POCKET_ATLAS_VALIDATION_PACKS to cooked packs; offline selection only"]
+    fn real_light_pages_preserve_every_selected_point_and_weight_while_camera_moves() {
+        let dir = std::env::var("POCKET_ATLAS_VALIDATION_PACKS").unwrap();
+        let mut checked = 0;
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|s| s.to_str()) != Some("place") { continue; }
+            let bytes=std::fs::read(&path).unwrap();
+            let pack=pc::ipod::parse(&bytes).unwrap();
+            let metadata:pc::ipod::Metadata=serde_json::from_slice(pack.section(pc::TAG_META).unwrap()).unwrap();
+            let Some(recipe)=&metadata.ipod_recipes.light_pages else {continue};
+            let meta=&metadata.scene;
+            let geometry=pack.section(pc::TAG_GEOMETRY).unwrap();
+            pc::ipod::light_pages::validate(meta,geometry,pack.section(pc::ipod::TAG_LIGHT_PAGES).unwrap(),recipe).unwrap();
+            let source=Sources::new(meta,geometry).unwrap();
+            let paged=Sources::new(meta,geometry).unwrap().with_pages(recipe).unwrap();
+            let mut old=LightLod::cpu(&source).unwrap();let mut new=LightLod::cpu(&paged).unwrap();
+            for shot in &meta.camera.shots {for fraction in [0.0f32,0.5,1.0] {
+                let eye=Vec3::from(shot.from.pos).lerp(Vec3::from(shot.to.pos),fraction);
+                let target=Vec3::from(shot.from.target).lerp(Vec3::from(shot.to.target),fraction);
+                let fov=shot.from.fov+(shot.to.fov-shot.from.fov)*fraction;
+                let vp=glam::camera::rh::proj::opengl::perspective(fov.to_radians(),1.5,0.25,100000.0)
+                    *glam::camera::rh::view::look_at_mat4(eye,target,Vec3::Y);
+                let view=View{vp,eye,width:480,height:320,tan_half:libm::tanf(fov.to_radians()*0.5),point_limit:64.0};
+                let visible=|i:usize|{let d=&meta.draws[i];crate::effects::in_frustum(vp,Vec3::from(d.min),Vec3::from(d.max))};
+                old.select(&source,view,visible).unwrap();new.select(&paged,view,visible).unwrap();
+                assert_eq!(old.indices.len(),new.indices.len());
+                for (i, field) in source.fields.iter().enumerate() {
+                    let mapped=&paged.fields[i];
+                    assert_eq!(&old.weights[field.base..field.base+field.count],&new.weights[mapped.base..mapped.base+mapped.count]);
+                }
+                for (page_index,page) in paged.pages.iter().enumerate() {
+                    let mut expected=Vec::new();
+                    for &(i,base) in &page.fields {
+                        let range=old.draws[i];
+                        expected.extend(old.indices[range.index_offset/2..range.index_offset/2+range.count as usize]
+                            .iter().map(|&v|v+base as u16));
+                    }
+                    let range=new.page_draws[page_index];
+                    assert_eq!(&new.indices[range.index_offset/2..range.index_offset/2+range.count as usize],&expected);
+                }
+                std::println!("{} {} fraction {}: {} identical points/weights, {} fields -> {} pages",
+                    meta.name,shot.name,fraction,new.indices.len(),old.draws.iter().filter(|d|d.count>0).count(),
+                    new.page_draws.iter().filter(|d|d.count>0).count());
+                checked+=1;
+            }}
+        }
+        assert!(checked>0);
+    }
+
     #[test]
     #[ignore = "set POCKET_ATLAS_VALIDATION_PACKS to cooked packs; offline selection only"]
     fn measured_real_field_reduction_and_selection_cost() {

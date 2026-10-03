@@ -826,11 +826,7 @@ impl App {
             }
             s.update(time, self.eye, dt);
             r.profile = self.profile;
-            r.profile_class = if self.profile {
-                self.profile_draw_class
-            } else {
-                0
-            };
+            r.profile_class = self.profile_draw_class;
             if let Err(error) = r.frame(
                 s,
                 self.eye,
@@ -1001,7 +997,7 @@ impl App {
             "quality": self.quality,
             "memoryWarningBatches": self.memory_warning_batches,
             "profile": self.profile,
-            "profileDrawClass": if self.profile { self.profile_draw_class } else { 0 },
+            "profileDrawClass": self.profile_draw_class,
             "camera": self.eye.to_array(),
             "target": self.target.to_array(),
             "fov": self.fov,

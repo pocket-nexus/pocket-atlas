@@ -1226,6 +1226,11 @@ impl Effects {
                 ]);
             }
         }
+        if scene.light_page_buffer != 0 && fields.iter().flatten().any(|p| {
+            !p[1].attrs[1] || !p[1].attrs[3] || !p[1].attrs[6]
+        }) {
+            return Err("light pages require cached phase, appearance and density field attributes".into());
+        }
         let has_fields = fields.iter().any(Option::is_some);
         let atmosphere = &scene.meta.atmosphere;
         let has_haze = haze_contributes(
@@ -1431,8 +1436,7 @@ impl Effects {
                            // the destination's depth alpha; hardware blending must stay off.
         if self.performance {
             glEnable(GL_BLEND);
-            glBlendFunc(GL_ONE, GL_ONE);
-            glColorMask(1, 1, 1, 0);
+            glBlendFuncSeparate(GL_ONE, GL_ONE, 0, GL_ONE);
         } else {
             glDisable(GL_BLEND);
         }
@@ -1440,8 +1444,9 @@ impl Effects {
             let black = crate::gpu::tone_black(&scene.meta.post);
             let tan_half = libm::tanf(fov_degrees * core::f32::consts::PI / 360.0);
             let use_lod = self.performance
-                && !scene.light_lod_source.is_empty()
+                && (!scene.light_lod_source.is_empty() || scene.light_page_buffer != 0)
                 && self.fields.iter().flatten().all(|p| p[1].attrs[3]);
+            let paged = self.performance && scene.light_page_buffer != 0;
             if use_lod {
                 if self.light_lod.is_none() {
                     self.light_lod =
@@ -1466,14 +1471,15 @@ impl Effects {
             let mut current_field = None;
             let mut field_globals = [false; 2];
             let mut field_parameters = [None; 2];
-            for (draw, d) in scene
-                .meta
-                .draws
-                .iter()
-                .enumerate()
-                .filter(|(_, d)| d.layout == pc::VertexLayout::Lights)
-            {
-                if !in_frustum(vp, Vec3::from(d.min), Vec3::from(d.max)) {
+            let field_count = if paged { scene.light_lod_source.pages().len() } else { scene.meta.draws.len() };
+            for entry in 0..field_count {
+                let page = paged.then(|| &scene.light_lod_source.pages()[entry]);
+                let draw = page.map_or(entry, |p| p.draw);
+                let d = &scene.meta.draws[draw];
+                if d.layout != pc::VertexLayout::Lights { continue; }
+                // Paged selection already used each original field's frustum;
+                // a representative field must never cull the entire page.
+                if !paged && !in_frustum(vp, Vec3::from(d.min), Vec3::from(d.max)) {
                     continue;
                 }
                 let material = &scene.meta.materials[d.material as usize];
@@ -1487,10 +1493,8 @@ impl Effects {
                 let phase_cached = self.performance && program.attrs[1];
                 let lod_draw = if use_lod {
                     Some(
-                        self.light_lod
-                            .as_ref()
-                            .unwrap()
-                            .draw(&scene.light_lod_source, draw)
+                        if paged { self.light_lod.as_ref().unwrap().page(entry) }
+                        else { self.light_lod.as_ref().unwrap().draw(&scene.light_lod_source, draw) }
                             .ok_or_else(|| format!("missing light LOD draw {draw}"))?,
                     )
                 } else {
@@ -1499,13 +1503,15 @@ impl Effects {
                 if lod_draw.is_some_and(|d| d.count == 0) {
                     continue;
                 }
-                let geometry_offset = scene.gpu_vertex_offset(draw)
-                    .ok_or("missing resident light field geometry")? as usize;
+                let geometry_offset = if paged {
+                    scene.ipod_recipes.light_pages.as_ref().unwrap().pages[entry].vertices.offset as usize
+                } else { scene.gpu_vertex_offset(draw).ok_or("missing resident light field geometry")? as usize };
+                let geometry_buffer = if paged { scene.light_page_buffer } else { scene.geometry };
                 let program_changed = current_field != Some(field_kind);
                 if program_changed {
                     program.bind();
                     current_field = Some(field_kind);
-                    glBindBuffer(GL_ARRAY_BUFFER, scene.geometry);
+                    glBindBuffer(GL_ARRAY_BUFFER, geometry_buffer);
                     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
                     for i in 0..8 {
                         glDisableVertexAttribArray(i);
@@ -1534,7 +1540,7 @@ impl Effects {
                 }
                 program.v(
                     "uDequant",
-                    &[
+                    &if paged { [1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0] } else { [
                         d.pos_scale[0],
                         d.pos_scale[1],
                         d.pos_scale[2],
@@ -1543,7 +1549,7 @@ impl Effects {
                         d.pos_offset[1],
                         d.pos_offset[2],
                         0.0,
-                    ],
+                    ] },
                 );
                 let scale = self.height as f32 / 272.0;
                 let min = (field.min_pixels * scale).max(2.0).min(self.point_limit);
@@ -1573,13 +1579,13 @@ impl Effects {
                 }
                 // Slot 1 below has a separate immutable VBO. Rebind GEOM
                 // every draw before defining its packed attributes.
-                glBindBuffer(GL_ARRAY_BUFFER, scene.geometry);
+                glBindBuffer(GL_ARRAY_BUFFER, geometry_buffer);
                 for (slot, n, kind, normalized, offset) in [
-                    (0, 4, 0x1402, 1, 0),
-                    (4, 4, GL_UNSIGNED_BYTE, 1, 8),
-                    (5, 2, GL_FLOAT, 0, 12),
-                    (2, 4, GL_FLOAT, 0, 20),
-                    (7, 4, GL_UNSIGNED_BYTE, 0, 36),
+                    (0, 4, if paged { GL_FLOAT } else { 0x1402 }, (!paged) as u8, 0),
+                    (4, 4, GL_UNSIGNED_BYTE, 1, if paged {16} else {8}),
+                    (5, 2, GL_FLOAT, 0, if paged {20} else {12}),
+                    (2, 4, GL_FLOAT, 0, if paged {28} else {20}),
+                    (7, 4, GL_UNSIGNED_BYTE, 0, if paged {44} else {36}),
                 ] {
                     if program.attrs[slot as usize] {
                         if program_changed {
@@ -1590,17 +1596,17 @@ impl Effects {
                             n,
                             kind,
                             normalized,
-                            pc::LIGHT_POINT_STRIDE as i32,
+                            if paged { pc::ipod::light_pages::STRIDE as i32 } else { pc::LIGHT_POINT_STRIDE as i32 },
                             (geometry_offset + offset) as *const _,
                         );
                     }
                 }
                 if phase_cached {
-                    let offset = scene
+                    let offset = if let Some(page) = page { Some((page.first * 8) as u32) } else { scene
                         .light_phase_offsets
                         .get(draw)
                         .copied()
-                        .flatten()
+                        .flatten() }
                         .filter(|_| scene.light_phase_buffer != 0)
                         .ok_or_else(|| format!("missing light phases for draw {draw}"))?;
                     glBindBuffer(GL_ARRAY_BUFFER, scene.light_phase_buffer);
@@ -1611,7 +1617,7 @@ impl Effects {
                 }
                 if program.attrs[6] {
                     let appearance = self.field_appearance.as_ref().ok_or("missing field appearance rows")?;
-                    let offset = scene.light_lod_source.color_offset(draw)
+                    let offset = page.map(|p| p.first * 2).or_else(|| scene.light_lod_source.color_offset(draw))
                         .ok_or_else(|| format!("missing field appearance offset {draw}"))?;
                     glBindBuffer(GL_ARRAY_BUFFER, appearance.rows);
                     glEnableVertexAttribArray(6);
@@ -1702,7 +1708,7 @@ impl Effects {
                         self.particle_grade.as_ref().unwrap(),
                         changed,
                     )?;
-                    glBlendFunc(GL_ONE, if k == 3 { 0x0303 } else { GL_ONE }); // ONE_MINUS_SRC_ALPHA
+                    glBlendFuncSeparate(GL_ONE, if k == 3 { 0x0303 } else { GL_ONE }, 0, GL_ONE); // ONE_MINUS_SRC_ALPHA
                 }
                 p.v("uBlend", &[if k == 3 { 3.0 } else { 2.0 }, 0.0, 0.0, 0.0]);
                 p.mat("uViewProj", vp);

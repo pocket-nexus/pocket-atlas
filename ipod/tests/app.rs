@@ -29,6 +29,7 @@ static BOUND_PROGRAM: AtomicU32 = AtomicU32::new(0);
 static RAW_GL_ERROR: AtomicU32 = AtomicU32::new(0);
 static RENDERER_GL_ERROR: AtomicU32 = AtomicU32::new(0);
 static INDEX_DETACHES: AtomicUsize = AtomicUsize::new(0);
+static SUBMITTED_CLASS: AtomicU32 = AtomicU32::new(0);
 
 fn read(path: &str) -> Result<Vec<u8>, String> {
     Ok(if path.ends_with("catalog.json") {
@@ -193,6 +194,7 @@ mod renderer {
             _: bool,
             _: bool,
         ) -> Result<(), String> {
+            SUBMITTED_CLASS.store(self.profile_class as u32, SeqCst);
             if FAIL_FRAME.load(SeqCst) {
                 return Err("injected particle upload failure".into());
             }
@@ -376,6 +378,17 @@ fn failed_resize_waits_for_retry_and_profile_reloads_preserve_camera_clock_and_d
     assert_eq!(full["time"], initial["time"]);
     assert_eq!(LOADS.load(SeqCst), 2);
     assert_eq!(CONSTRUCTED_DOOR.load(SeqCst), 0.73f32.to_bits());
+    app.command(br#"{"profile":false,"profileDrawClass":7}"#);
+    let filtered = unsafe { presented(&mut app) };
+    assert_eq!(filtered["profile"], false);
+    assert_eq!(filtered["profileDrawClass"], 7);
+    assert_eq!(SUBMITTED_CLASS.load(SeqCst), 7, "asynchronous diagnostics reach the renderer");
+    assert_eq!(filtered["frameTiming"]["workMs"]["samples"], 1);
+    app.command(br#"{"profileDrawClass":0}"#);
+    let normal = unsafe { presented(&mut app) };
+    assert_eq!(SUBMITTED_CLASS.load(SeqCst), 0);
+    assert_eq!(normal["profileDrawClass"], 0);
+    assert_eq!(normal["frameTiming"]["workMs"]["samples"], 1);
     assert_eq!(BUILDS.load(SeqCst), 2);
     assert_eq!(INDEX_DETACHES.load(SeqCst), 1);
     assert_eq!(

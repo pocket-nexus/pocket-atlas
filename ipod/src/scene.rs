@@ -48,6 +48,100 @@ struct DisplayIndices {
     state: u32,
     indices: Vec<u16>,
 }
+/// One affine transform applies to every vertex with the same exact UNORM8
+/// influence tuple. Keep its bind-space box once; pose updates visit tuples,
+/// never the full vertex stream. This also fixes culling for bodies extending
+/// beyond the former joint-zero +/-2m heuristic.
+struct InfluenceBounds {
+    tuple: [u8; 8],
+    min: Vec3,
+    max: Vec3,
+}
+struct SkinBounds {
+    source: pc::Range,
+    skin: u32,
+    groups: Vec<InfluenceBounds>,
+    min: Vec3,
+    max: Vec3,
+}
+impl SkinBounds {
+    fn build(meta: &pc::Meta, geometry: &[u8]) -> Result<Vec<Self>, String> {
+        use alloc::collections::BTreeMap;
+        let mut sources = BTreeMap::new();
+        for d in &meta.draws {
+            if let Some(skin) = d.skin {
+                sources
+                    .entry((d.vertices.offset, d.vertices.size, skin))
+                    .or_insert(d);
+            }
+        }
+        let mut out = Vec::new();
+        for ((_, _, skin), d) in sources {
+            let mut tuples = BTreeMap::<[u8; 8], (Vec3, Vec3)>::new();
+            for v in pc::parts::slice(geometry, &d.vertices)?.chunks_exact(60) {
+                let p = Vec3::from(pc::ipod::floats::<3>(v, 0)?);
+                let tuple = v[52..60].try_into().unwrap();
+                let entry = tuples.entry(tuple).or_insert((p, p));
+                entry.0 = entry.0.min(p);
+                entry.1 = entry.1.max(p);
+            }
+            out.push(Self {
+                source: d.vertices.clone(),
+                skin,
+                groups: tuples
+                    .into_iter()
+                    .map(|(tuple, (min, max))| InfluenceBounds { tuple, min, max })
+                    .collect(),
+                min: Vec3::ZERO,
+                max: Vec3::ZERO,
+            });
+        }
+        Ok(out)
+    }
+    fn update(&mut self, palette: &[f32]) {
+        let mut min = Vec3::splat(f32::INFINITY);
+        let mut max = Vec3::splat(f32::NEG_INFINITY);
+        for group in &self.groups {
+            let mut rows = [[0f32; 4]; 3];
+            let mut magnitude = [0f32; 3];
+            let position_magnitude = group.min.abs().max(group.max.abs());
+            for k in 0..4 {
+                // Match the shader's normalized byte weights. Do not divide
+                // by their sum: legacy source palettes need not sum to 255.
+                let weight = group.tuple[k + 4] as f32 / 255.0;
+                if weight == 0.0 {
+                    continue;
+                }
+                let at = group.tuple[k] as usize * 12;
+                for r in 0..3 {
+                    let values = &palette[at + r * 4..at + r * 4 + 4];
+                    magnitude[r] += weight
+                        * (Vec3::from_slice(values).abs().dot(position_magnitude)
+                            + values[3].abs());
+                    for c in 0..4 {
+                        rows[r][c] += weight * values[c];
+                    }
+                }
+            }
+            let center = (group.min + group.max) * 0.5;
+            let extent = (group.max - group.min) * 0.5;
+            let transformed =
+                Vec3::from_array(rows.map(|r| Vec3::from_slice(&r).dot(center) + r[3]));
+            let spread = Vec3::from_array(rows.map(|r| Vec3::from_slice(&r).abs().dot(extent)));
+            // Center/extent equals union of the eight affine-transformed
+            // corners. Pad f32 accumulation/interpolation rounding outward.
+            // Include magnitudes before palette cancellation: averaging rows
+            // and transforming is algebraically equal to the shader's sum of
+            // transformed points but has a different f32 operation order.
+            let pad = (Vec3::from_array(magnitude) + transformed.abs() + spread + Vec3::ONE)
+                * (64.0 * f32::EPSILON);
+            min = min.min(transformed - spread - pad);
+            max = max.max(transformed + spread + pad);
+        }
+        self.min = min;
+        self.max = max;
+    }
+}
 pub struct Scene {
     /// Performance assets are loaded together and never required by Retina.
     pub performance: bool,
@@ -57,6 +151,7 @@ pub struct Scene {
     /// Atmosphere and material environment strength are included before grading.
     pub display_environments: Vec<u32>,
     index_overrides: Vec<DisplayIndices>,
+    effective_lods: pc::ipod::display_lods::EffectiveLods,
     pub ipod_recipes: pc::ipod::Recipes,
     display_environment_textures: Vec<u32>,
     pub geometry: u32,
@@ -65,6 +160,8 @@ pub struct Scene {
     /// Per-point sin/cos of the decoded phase; display fields use slot 1.
     /// The original packed LightPoint stream remains authoritative.
     pub light_phase_buffer: u32,
+    /// Validated IPLF float vertices; only Optimized owns this buffer.
+    pub light_page_buffer: u32,
     pub light_phase_offsets: Vec<Option<u32>>,
     pub light_lod_source: crate::light_lod::Sources,
     pub vaos: Vec<u32>,
@@ -72,6 +169,7 @@ pub struct Scene {
     pub world: Vec<Mat4>,
     // Fixed 3x4 row palettes; shared by all draws and passes using a skin.
     bone_palettes: Vec<Vec<f32>>,
+    skin_bounds: Vec<SkinBounds>,
     pub lights: Vec<Light>,
     pub emissive: Vec<f32>,
     pub door: f32,
@@ -154,6 +252,25 @@ impl LightPhases {
         }
         Ok(Self { data, offsets })
     }
+
+    fn for_pages(meta: &pc::Meta, geometry: &[u8], recipe: &pc::ipod::LightPages) -> Result<Self, String> {
+        let count = recipe.pages.iter().try_fold(0usize, |n, p| n.checked_add(p.vertex_count as usize))
+            .ok_or("light page phase count overflow")?;
+        let mut data = Vec::new();
+        data.try_reserve_exact(count).map_err(|_| "light page phase allocation")?;
+        let mut offsets = vec![None; meta.draws.len()];
+        for page in &recipe.pages {
+            for field in &page.fields {
+                let draw = &meta.draws[field.draw as usize];
+                offsets[field.draw as usize] = Some(u32::try_from(data.len() * 8)
+                    .map_err(|_| "light page phase offset overflow")?);
+                for vertex in pc::parts::slice(geometry, &draw.vertices)?.chunks_exact(pc::LIGHT_POINT_STRIDE) {
+                    data.push(Self::pair(i16::from_le_bytes([vertex[6], vertex[7]])));
+                }
+            }
+        }
+        Ok(Self { data, offsets })
+    }
 }
 
 /// Temporary upload data for Products; the original vertex/index payload and
@@ -227,7 +344,11 @@ struct IndexCache {
 }
 
 impl IndexCache {
+    #[cfg(test)]
     fn new(meta: &pc::Meta, geometry: &[u8], display: &[ColorEntry]) -> Result<Self, String> {
+        Self::with_lods(meta, geometry, display, &Default::default())
+    }
+    fn with_lods(meta: &pc::Meta, geometry: &[u8], display: &[ColorEntry], lods: &pc::ipod::display_lods::EffectiveLods) -> Result<Self, String> {
         let mut float_draws = vec![false; meta.draws.len()];
         for c in display.iter().filter(|c| c.page.is_some()) {
             float_draws[c.draw as usize] = true;
@@ -247,22 +368,22 @@ impl IndexCache {
             .iter()
             .enumerate()
             .filter(|(i, d)| eligible(*i, d))
-            .try_fold(0usize, |n, (_, d)| {
-                n.checked_add(d.lods.len()).and_then(|n| n.checked_add(1))
+            .try_fold(0usize, |n, (i, _)| {
+                n.checked_add(lods.get(meta, i).len()).and_then(|n| n.checked_add(1))
             })
             .ok_or("CPU index range count overflow")?;
         let mut ranges: Vec<pc::Range> = Vec::new();
         ranges
             .try_reserve_exact(count)
             .map_err(|_| "CPU index table allocation failed")?;
-        for (_, d) in meta
+        for (i, d) in meta
             .draws
             .iter()
             .enumerate()
             .filter(|(i, d)| eligible(*i, d))
         {
             for (range, count) in core::iter::once((&d.indices, d.index_count))
-                .chain(d.lods.iter().map(|l| (&l.indices, l.index_count)))
+                .chain(lods.get(meta,i).iter().map(|l| (&l.indices, l.index_count)))
             {
                 if count.checked_mul(2) != Some(range.size) || range.offset % 2 != 0 {
                     return Err("CPU index range size/alignment mismatch".into());
@@ -880,6 +1001,19 @@ impl Scene {
             return Err("display cube section alignment".into());
         }
         crate::texture_storage::validate_display_cube_ranges(&ipod_recipes, cube_section.map(|s| s.size))?;
+        let light_section = sections.iter().find(|s| s.tag == pc::ipod::TAG_LIGHT_PAGES);
+        match (&ipod_recipes.light_pages, light_section) {
+            (None, None) => {},
+            (Some(_), Some(section)) => {
+                let expected = meta.draws.iter().filter(|d| d.layout == pc::VertexLayout::Lights)
+                    .try_fold(0u32, |n, d| d.vertex_count.checked_mul(pc::ipod::light_pages::STRIDE as u32)
+                        .and_then(|size| n.checked_add(size))).ok_or("light page section size overflow")?;
+                if section.align < 16 || section.offset % 16 != 0 || section.size != expected {
+                    return Err("light page section size or alignment".into());
+                }
+            },
+            _ => return Err("light page recipe/section presence mismatch".into()),
+        }
         let tex = section(pc::TAG_TEXTURES)?;
         let geom = section(pc::TAG_GEOMETRY)?;
         let animation = section(pc::TAG_ANIMATION)?;
@@ -940,16 +1074,19 @@ impl Scene {
             textures: vec![0; meta.textures.len()],
             display_environments: vec![0; meta.materials.len()],
             index_overrides: Vec::new(),
+            effective_lods: Default::default(),
             display_environment_textures: Vec::new(),
             ipod_recipes,
             geometry: 0,
             geometry_source_bytes: geom.size as usize,
             geometry_usage: None,
             light_phase_buffer: 0,
+            light_page_buffer: 0,
             light_phase_offsets: Vec::new(),
             light_lod_source: crate::light_lod::Sources::default(),
             vaos: vec![0; meta.draws.len()],
             world: vec![Mat4::IDENTITY; meta.nodes.len()],
+            skin_bounds: Vec::new(),
             bone_palettes: meta
                 .skins
                 .iter()
@@ -1120,8 +1257,35 @@ impl Scene {
         }
         let mut data = file.section(geom)?;
         validation::validate_geometry(&scene.meta, &data)?;
+        let light_payload = if let Some(recipe) = &scene.ipod_recipes.light_pages {
+            let payload = file.section(light_section.unwrap())?;
+            pc::ipod::light_pages::validate(&scene.meta, &data, &payload, recipe)?;
+            if performance { Some(payload) } else { None }
+        } else { None };
+        scene.skin_bounds = SkinBounds::build(&scene.meta, &data)?;
+        validation::validate_window_parameters(&scene.meta, &scene.ipod_recipes, &data)?;
+        if let Some(recipe) = &scene.ipod_recipes.skin_lods {
+            // iPod ARMv7 and the host harness are little-endian. Borrow the
+            // already decoded immutable f32 allocation; retaining a second
+            // ANIM staging buffer would add several MiB at peak load.
+            #[cfg(target_endian = "little")]
+            let animation = core::slice::from_raw_parts(scene.anim.as_ptr().cast::<u8>(), scene.anim.len() * 4);
+            #[cfg(target_endian = "big")]
+            let animation_storage: Vec<u8> = scene.anim.iter().flat_map(|f| f.to_le_bytes()).collect();
+            #[cfg(target_endian = "big")]
+            let animation = &animation_storage;
+            pc::ipod::skin_lods::validate(&scene.meta, &data, animation, recipe)?;
+        }
+        pc::ipod::display_lods::validate(&scene.meta, &data, &scene.ipod_recipes)?;
+        if performance {
+            scene.effective_lods = pc::ipod::display_lods::EffectiveLods::new(&scene.meta, &scene.ipod_recipes)?;
+        }
+
         let colors = if performance {
             scene.light_lod_source = crate::light_lod::Sources::new(&scene.meta, &data)?;
+            if let Some(recipe) = &scene.ipod_recipes.light_pages {
+                scene.light_lod_source = core::mem::take(&mut scene.light_lod_source).with_pages(recipe)?;
+            }
             ColorFile::load(
                 path,
                 &scene.meta,
@@ -1133,22 +1297,30 @@ impl Scene {
         } else {
             None
         };
+        if performance {
+            for entry in scene.ipod_recipes.display_lods.iter().flat_map(|r| &r.draws) {
+                if !colors.as_ref().is_some_and(|c| c.draws.iter().any(|d| d.draw == entry.draw && d.page.is_some() && d.flags & (16 | 32 | 64) == 0)) {
+                    return Err("display LOD requires a validated dry float display page".into());
+                }
+            }
+        }
         if let Some(colors) = &colors {
             colors.validate_float_geometry(&scene.meta, &data)?;
             scene.index_overrides = colors.validate_index_overrides(&scene.meta, &data)?;
         }
         if performance {
-            scene.index_cache = IndexCache::new(
+            scene.index_cache = IndexCache::with_lods(
                 &scene.meta,
                 &data,
                 colors.as_ref().map_or(&[], |c| &c.draws),
+                &scene.effective_lods,
             )?;
         }
         if let Some(colors) = &colors {
             for entry in colors.draws.iter().filter(|c| c.page.is_some()) {
                 let d = &scene.meta.draws[entry.draw as usize];
                 for (r, n) in core::iter::once((&d.indices, d.index_count))
-                    .chain(d.lods.iter().map(|l| (&l.indices, l.index_count)))
+                    .chain(scene.effective_lods.get(&scene.meta,entry.draw as usize).iter().map(|l| (&l.indices, l.index_count)))
                 {
                     if n > 0 {
                         let indices = scene
@@ -1167,7 +1339,7 @@ impl Scene {
                 }
             }
         }
-        scene.cpu_index_bytes = scene.index_cache.bytes()
+        scene.cpu_index_bytes = scene.effective_lods.bytes() + scene.index_cache.bytes()
             + scene.index_overrides.capacity() * core::mem::size_of::<DisplayIndices>()
             + scene.index_overrides.iter().map(|o| o.indices.capacity() * 2).sum::<usize>();
         if let Some(mut clusters) = if performance {
@@ -1175,18 +1347,20 @@ impl Scene {
         } else {
             None
         } {
-            if clusters.len > crate::mesh_clusters::max_file_bytes(&scene.meta)? {
+            if clusters.len > crate::mesh_clusters::max_file_bytes_with_lods(&scene.meta, &scene.effective_lods)? {
                 return Err("cluster sidecar exceeds source geometry budget".into());
             }
             let bytes = clusters.read(0, clusters.len)?;
             let parsed =
-                crate::mesh_clusters::MeshClusters::parse(&bytes, &scene.meta, &meta_bytes, &data)?;
+                crate::mesh_clusters::MeshClusters::parse_with_lods(&bytes, &scene.meta, &meta_bytes, &data, &scene.effective_lods)?;
             scene.cpu_index_bytes += parsed.bytes();
             scene.mesh_clusters = Some(parsed);
         }
         drop(meta_bytes);
         let phases = if performance {
-            LightPhases::new(&scene.meta, &data)?
+            if let Some(recipe) = &scene.ipod_recipes.light_pages {
+                LightPhases::for_pages(&scene.meta, &data, recipe)?
+            } else { LightPhases::new(&scene.meta, &data)? }
         } else {
             LightPhases {
                 data: Vec::new(),
@@ -1208,12 +1382,21 @@ impl Scene {
                     display_pages[entry.draw as usize] = true;
                 }
             }
+            for field in scene.ipod_recipes.light_pages.iter().flat_map(|r| &r.pages).flat_map(|p| &p.fields) {
+                display_pages[field.draw as usize] = true;
+            }
             let usage = crate::geometry_usage::GeometryUsage::new(
                 &scene.meta, data.len(), &display_pages,
                 texture_plan.as_ref().is_none_or(|p| p.needs_original_shadow()),
+                scene.ipod_recipes.skin_lods.iter().flat_map(|r| &r.draws).flat_map(|d| &d.levels).map(|l| (&l.indices,l.index_count)),
             )?;
             usage.compact(&mut data)?;
             scene.geometry_usage = Some(usage);
+        } else if scene.ipod_recipes.skin_lods.is_some() || scene.ipod_recipes.display_lods.is_some() {
+            // Validation above reads the whole source plus recipe payload.
+            // Reference uploads only original ranges, never derived indices.
+            data.truncate(pc::ipod::display_lods::source_end(&scene.meta)? as usize);
+            scene.geometry_source_bytes = data.len();
         }
         // All source hashes, vertices, LODs, clusters and auxiliary CPU data
         // were validated above. Only now may the upload discard unused bytes.
@@ -1227,6 +1410,15 @@ impl Scene {
             glBufferData(GL_ARRAY_BUFFER, data.len() as _, data.as_ptr() as _, GL_STATIC_DRAW);
             check_gl("upload scene geometry")?;
             scene.gpu_bytes += data.len();
+        }
+        if let Some(payload) = light_payload {
+            glGenBuffers(1, &mut scene.light_page_buffer);
+            check_gl("create light page buffer")?;
+            if scene.light_page_buffer == 0 { return Err("GLES did not allocate light page buffer".into()); }
+            glBindBuffer(GL_ARRAY_BUFFER, scene.light_page_buffer);
+            glBufferData(GL_ARRAY_BUFFER, payload.len() as _, payload.as_ptr() as _, GL_STATIC_DRAW);
+            check_gl("upload light pages")?;
+            scene.gpu_bytes += payload.len();
         }
         if !phases.data.is_empty() {
             glGenBuffers(1, &mut scene.light_phase_buffer);
@@ -1523,6 +1715,7 @@ impl Scene {
                 out.copy_from_slice(&rows(m));
             }
         }
+        for bounds in &mut self.skin_bounds { bounds.update(&self.bone_palettes[bounds.skin as usize]); }
         for (i, l) in self.meta.lights.iter().enumerate() {
             let (pos, dir) = l
                 .node
@@ -1571,8 +1764,25 @@ impl Scene {
             .map(|n| self.world[n as usize])
             .unwrap_or(Mat4::IDENTITY)
     }
+    /// Only Scene loading can establish this proof. Reference validates the
+    /// same recipe but continues to compile its original material programs.
+    pub fn window_vertex_params(&self, draw: usize) -> bool {
+        u32::try_from(draw).ok().is_some_and(|draw| {
+            self.ipod_recipes.window_vertex_params.as_ref()
+                .is_some_and(|recipe| recipe.draws.binary_search(&draw).is_ok())
+        })
+    }
+    pub fn window_ray_params(&self, draw: usize) -> bool {
+        u32::try_from(draw).ok().is_some_and(|draw| {
+            self.ipod_recipes.window_ray_params.as_ref()
+                .is_some_and(|recipe| recipe.draws.binary_search(&draw).is_ok())
+        })
+    }
     /// Index ranges in the original GEOM address space, retained only in the
     /// performance profile for opaque, depth-writing baked draws and LODs.
+    pub fn effective_lods(&self, draw: usize) -> &[pc::DrawLod] {
+        self.effective_lods.get(&self.meta, draw)
+    }
     pub fn indices(&self, offset: u32, count: u32) -> Option<&[u16]> {
         self.index_cache.get(offset, count)
     }
@@ -1620,9 +1830,10 @@ impl Scene {
             return (Vec3::from(d.min), Vec3::from(d.max));
         }
         if let Some(s) = d.skin {
-            let root = self.world[self.meta.skins[s as usize].joints[0] as usize]
-                .transform_point3(Vec3::ZERO);
-            return (root - Vec3::splat(2.0), root + Vec3::splat(2.0));
+            let index = self.skin_bounds.binary_search_by_key(&(d.vertices.offset,d.vertices.size,s),
+                |b|(b.source.offset,b.source.size,b.skin)).expect("validated skin bounds");
+            let bounds=&self.skin_bounds[index];
+            return (bounds.min,bounds.max);
         }
         let m = self.model(d);
         let c = (Vec3::from(d.min) + Vec3::from(d.max)) * 0.5;
@@ -1639,6 +1850,7 @@ impl Drop for Scene {
         unsafe {
             if self.geometry == 0
                 && self.light_phase_buffer == 0
+                && self.light_page_buffer == 0
                 && self.ldr_color_buffer == 0
                 && self.package_buffer == 0
                 && self
@@ -1658,6 +1870,7 @@ impl Drop for Scene {
             glDeleteBuffers(1, &self.ldr_color_buffer);
             glDeleteBuffers(1, &self.package_buffer);
             glDeleteBuffers(1, &self.light_phase_buffer);
+            glDeleteBuffers(1, &self.light_page_buffer);
             // The same buffer holds vertices and indices; delete it once.
             glDeleteBuffers(1, &self.geometry);
             glDeleteTextures(self.textures.len() as _, self.textures.as_ptr());
@@ -2154,10 +2367,10 @@ mod tests {
     fn float_fixture() -> (pc::Meta, Vec<u8>, Vec<f32>) {
         let (mut meta, _, animation) = crate::validation::tests::fixture();
         let draw = &mut meta.draws[0];
-        // Nonzero source floats and nonidentity legacy decode values ensure
-        // this fixture cannot accidentally pass through the old snorm ABI.
-        draw.pos_offset = [13.0, -7.0, 3.0];
-        draw.pos_scale = [2.0, 3.0, 5.0];
+        // Nonzero source floats distinguish the float ABI from old snorm.
+        // PLIP surface positions have identity decode; UV decode is retained.
+        draw.pos_offset = [0.0;3];
+        draw.pos_scale = [1.0;3];
         draw.uv_offset = [9.0, -2.0];
         draw.uv_scale = [4.0, 8.0];
         let mut geometry = Vec::new();
@@ -2183,6 +2396,123 @@ mod tests {
         };
         geometry.extend([0, 0, 1, 0, 2, 0]);
         (meta, geometry, animation)
+    }
+
+    fn window_fixture() -> (pc::Meta, Vec<u8>, Vec<f32>, pc::ipod::Recipes) {
+        let (mut meta, _, animation) = float_fixture();
+        meta.materials[0].kind = pc::Kind::InteriorWindow;
+        meta.materials[0].vertex_color = true;
+        let draw = &mut meta.draws[0];
+        draw.uv_scale = [1.0; 2];
+        draw.uv_offset = [0.0; 2];
+        draw.vertex_count = 4;
+        let mut geometry = Vec::new();
+        for (pos, uv) in [
+            ([0.125, 0.25, 0.375], [3.1, 7.1]),
+            ([0.875, 0.25, 0.375], [3.9, 7.1]),
+            ([0.125, 0.875, 0.625], [3.1, 7.9]),
+            // Referenced only by the coarse LOD, so corrupting this vertex
+            // must fail despite a valid full-resolution triangle.
+            ([0.125, 0.875, 0.625], [3.2, 7.8]),
+        ] {
+            geometry.extend(float_vertex(pc::VertexLayout::Static, pos, uv, [17, 89, 201, 255]));
+        }
+        draw.vertices.size = geometry.len() as u32;
+        draw.indices = pc::Range { offset: geometry.len() as u32, size: 6 };
+        geometry.extend([0u16, 1, 2].into_iter().flat_map(u16::to_le_bytes));
+        draw.lods = vec![pc::DrawLod {
+            indices: pc::Range { offset: geometry.len() as u32, size: 6 },
+            index_count: 3, error: 0.1,
+        }];
+        geometry.extend([0u16, 1, 3].into_iter().flat_map(u16::to_le_bytes));
+        draw.lods.push(pc::DrawLod {
+            indices: pc::Range { offset: geometry.len() as u32, size: 0 },
+            index_count: 0, error: 0.2,
+        });
+        let mut recipes = pc::ipod::Recipes::default();
+        recipes.window_vertex_params = Some(pc::ipod::WindowVertexParams {
+            version: pc::ipod::window_params::VERSION, draws: vec![0],
+        });
+        (meta, geometry, animation, recipes)
+    }
+
+    fn window_pack(meta: &pc::Meta, geometry: &[u8], animation: &[f32], recipes: &pc::ipod::Recipes) -> Vec<u8> {
+        let metadata = serde_json::to_vec(&pc::ipod::Metadata {
+            scene: meta.clone(), ipod_recipes: recipes.clone(),
+        }).unwrap();
+        let animation: Vec<u8> = animation.iter().flat_map(|v| v.to_le_bytes()).collect();
+        pc::write_versioned(pc::ipod::MAGIC, pc::ipod::VERSION, &[
+            (pc::TAG_META, &metadata, 16),
+            (pc::TAG_TEXTURES, &[255; 64], 16),
+            (pc::TAG_GEOMETRY, geometry, 16),
+            (pc::TAG_ANIMATION, &animation, 16),
+        ])
+    }
+
+    #[test]
+    fn window_recipe_proves_all_original_lods_in_both_profiles_and_preserves_geometry() {
+        let _lock = SERIAL.lock().unwrap();
+        let (meta, geometry, animation, recipes) = window_fixture();
+        for performance in [false, true] {
+            reset(None);
+            GL.lock().unwrap().capture_buffers = true;
+            let file = PackFile::write(&window_pack(&meta, &geometry, &animation, &recipes));
+            let scene = unsafe { Scene::load_for_profile(file.path(), performance) }.unwrap();
+            assert!(scene.window_vertex_params(0));
+            assert!(!scene.window_vertex_params(1));
+            assert!(!scene.window_vertex_params(usize::MAX));
+            assert_eq!(serde_json::to_vec(&scene.meta).unwrap(), serde_json::to_vec(&meta).unwrap());
+            assert_eq!(GL.lock().unwrap().buffer_data[&scene.geometry], geometry);
+            drop(scene);
+            released();
+        }
+        // No recipe remains compatible, including geometry outside the proof.
+        let mut outside = geometry;
+        outside[40..44].copy_from_slice(&3.0f32.to_le_bytes());
+        for performance in [false, true] {
+            reset(None);
+            let file = PackFile::write(&window_pack(&meta, &outside, &animation, &pc::ipod::Recipes::default()));
+            let scene = unsafe { Scene::load_for_profile(file.path(), performance) }.unwrap();
+            assert!(!scene.window_vertex_params(0));
+            drop(scene);
+            released();
+        }
+    }
+
+    #[test]
+    fn window_recipe_corruption_is_rejected_instead_of_trusting_the_draw_list() {
+        let _lock = SERIAL.lock().unwrap();
+        let (meta, geometry, animation, recipes) = window_fixture();
+        for performance in [false, true] {
+            for fault in 0..11 {
+                let mut m = meta.clone();
+                let mut g = geometry.clone();
+                let mut r = recipes.clone();
+                let recipe = r.window_vertex_params.as_mut().unwrap();
+                match fault {
+                    0 => recipe.version += 1,
+                    1 => recipe.draws.clear(),
+                    2 => recipe.draws.push(0),
+                    3 => recipe.draws = vec![1, 0],
+                    4 => recipe.draws = vec![u32::MAX],
+                    5 => m.materials[0].kind = pc::Kind::Standard,
+                    6 => m.materials[0].uv_anim = Some(pc::UvAnim {
+                        cols: 1, rows: 1, frames: 1, fps: 1.0,
+                        scroll: [0.1, 0.0], phase: 0.0,
+                    }),
+                    7 => g[40..44].copy_from_slice(&3.0f32.to_le_bytes()),
+                    8 => g[3 * 52 + 40..3 * 52 + 44].copy_from_slice(&4.2f32.to_le_bytes()),
+                    9 => g[3 * 52 + 48] ^= 1,
+                    10 => g[3 * 52 + 49] ^= 1,
+                    _ => unreachable!(),
+                }
+                reset(None);
+                let file = PackFile::write(&window_pack(&m, &g, &animation, &r));
+                let error = unsafe { Scene::load_for_profile(file.path(), performance) }.err().unwrap();
+                assert!(error.contains("window parameters"), "profile {performance}, fault {fault}: {error}");
+                released();
+            }
+        }
     }
 
     fn reset(fail: Option<&'static str>) {
@@ -3767,6 +4097,8 @@ mod tests {
             if pipeline_path.exists() {
                 let pipelines: serde_json::Value =
                     serde_json::from_slice(&std::fs::read(pipeline_path).unwrap()).unwrap();
+                let cfg: crate::pipelines::Pipelines = serde_json::from_value(pipelines.clone()).unwrap();
+                cfg.validate_windows(scene.meta.draws.len(), |i| scene.window_vertex_params(i)).unwrap();
                 let mut cache = BTreeMap::<String, BTreeSet<String>>::new();
                 let mut declarations = |pair: &serde_json::Value| {
                     let mut names = BTreeSet::new();
@@ -3838,7 +4170,7 @@ mod tests {
                 + scene.light_phase_offsets.capacity() * core::mem::size_of::<Option<u32>>()
                 + scene.ldr_vaos.capacity() * 4
                 + scene.display_environment_textures.capacity() * 4;
-            for d in &scene.meta.draws {
+            for (di,d) in scene.meta.draws.iter().enumerate() {
                 let m = &scene.meta.materials[d.material as usize];
                 if d.layout == pc::VertexLayout::Baked
                     && d.node.is_none()
@@ -3847,7 +4179,7 @@ mod tests {
                     && m.depth_write
                 {
                     for (r, n) in core::iter::once((&d.indices, d.index_count))
-                        .chain(d.lods.iter().map(|l| (&l.indices, l.index_count)))
+                        .chain(scene.effective_lods(di).iter().map(|l| (&l.indices, l.index_count)))
                     {
                         if n > 0 {
                             assert_eq!(scene.indices(r.offset, n).unwrap().len(), n as usize);
@@ -3885,6 +4217,162 @@ mod tests {
             count += 1;
         }
         assert!(count > 0);
+    }
+
+    #[test]
+    fn window_ray_recipe_requires_its_source_proof_in_both_profiles() {
+        let _lock = SERIAL.lock().unwrap();
+        let (mut meta, mut geometry, animation, mut recipes) = window_fixture();
+        meta.draws[0].node = None;
+        for vertex in geometry[..meta.draws[0].vertices.size as usize].chunks_exact_mut(52) {
+            for (offset,value) in [(12,0.0f32),(16,0.0),(20,1.0),(24,1.0),(28,0.0),(32,0.0),(36,1.0)] {
+                vertex[offset..offset+4].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+        recipes.window_ray_params = Some(pc::ipod::WindowRayParams { version:1, draws:vec![0] });
+        for performance in [false,true] {
+            reset(None);
+            let file=PackFile::write(&window_pack(&meta,&geometry,&animation,&recipes));
+            let scene=unsafe { Scene::load_for_profile(file.path(),performance) }.unwrap();
+            assert!(scene.window_ray_params(0));assert!(!scene.window_ray_params(usize::MAX));
+            drop(scene);released();
+            for fault in 0..6 {
+                let mut r=recipes.clone();let mut g=geometry.clone();
+                match fault {
+                    0=>r.window_vertex_params=None,
+                    1=>r.window_ray_params.as_mut().unwrap().version=2,
+                    2=>r.window_ray_params.as_mut().unwrap().draws.clear(),
+                    3=>r.window_ray_params.as_mut().unwrap().draws.push(0),
+                    4=>r.window_ray_params.as_mut().unwrap().draws=vec![u32::MAX],
+                    5=>g[3*52+24..3*52+28].copy_from_slice(&0.5f32.to_le_bytes()),
+                    _=>unreachable!(),
+                }
+                reset(None);
+                let file=PackFile::write(&window_pack(&meta,&g,&animation,&r));
+                let error=unsafe {Scene::load_for_profile(file.path(),performance)}.err().unwrap();
+                assert!(error.contains("window rays"),"{fault}: {error}");released();
+            }
+        }
+    }
+
+    fn light_page_fixture() -> (pc::Meta, Vec<u8>, Vec<f32>, pc::ipod::Recipes, Vec<u8>) {
+        let (mut meta, mut geometry, animation)=float_fixture();
+        let mut material=meta.materials[0].clone();
+        material.kind=pc::Kind::Lights;material.lights=Some(pc::LightField {
+            min_pixels:2.0,max_pixels:8.0,period:120.0,gain:1.0,..Default::default() });
+        meta.materials.push(material.clone());
+        material.lights.as_mut().unwrap().gain=2.0;meta.materials.push(material);
+        for field in 0..3 {
+            while geometry.len()%4!=0 {geometry.push(0);}
+            let mut draw=meta.draws[0].clone();
+            draw.material=if field==1 {2}else{1};draw.layout=pc::VertexLayout::Lights;
+            draw.node=None;draw.skin=None;draw.cast_shadow=false;draw.lods.clear();
+            draw.indices=pc::Range::default();draw.index_count=2;draw.vertex_count=2;
+            draw.vertices=pc::Range {offset:geometry.len() as u32,size:80};
+            draw.pos_scale=[1.;3];draw.pos_offset=[field as f32,0.,0.];
+            draw.min=[-1.;3];draw.max=[4.;3];
+            for i in 0..2 {
+                let mut point=[0u8;40];
+                point[6..8].copy_from_slice(&((field*1000+i*327) as i16).to_le_bytes());
+                point[8..12].copy_from_slice(&[field as u8 *60,i as u8*80,100,255]);
+                point[12..16].copy_from_slice(&1.0f32.to_le_bytes());
+                point[16..20].copy_from_slice(&0.01f32.to_le_bytes());
+                point[20..24].copy_from_slice(&(field as f32*0.2).to_le_bytes());
+                point[32..36].copy_from_slice(&(i as f32).to_le_bytes());
+                point[36]=i as u8;point[37]=if i==0{255}else{128};
+                geometry.extend(point);
+            }
+            meta.draws.push(draw);
+        }
+        let mut recipe=pc::ipod::LightPages {version:1,source_hash:pc::ipod::light_pages::source_hash(&meta,&geometry).unwrap(),
+            payload_hash:String::new(),pages:Vec::new()};
+        let mut payload=Vec::new();
+        for fields in [vec![1u32,3],vec![2]] {
+            let start=payload.len();let mut entries=Vec::new();let mut count=0;
+            for index in fields {
+                let d=&meta.draws[index as usize];
+                entries.push(pc::ipod::LightPageField {draw:index,first:count});
+                for original in pc::parts::slice(&geometry,&d.vertices).unwrap().chunks_exact(40) {
+                    payload.extend(pc::ipod::light_pages::vertex(original,d).unwrap());
+                }
+                count+=d.vertex_count;
+            }
+            recipe.pages.push(pc::ipod::LightPage {vertices:pc::Range {offset:start as u32,size:(payload.len()-start) as u32},
+                vertex_count:count,fields:entries});
+        }
+        recipe.payload_hash=pc::ipod::light_pages::payload_hash(&payload);
+        let recipes=pc::ipod::Recipes {light_pages:Some(recipe),..Default::default()};
+        (meta,geometry,animation,recipes,payload)
+    }
+    fn light_page_pack(meta:&pc::Meta,geometry:&[u8],animation:&[f32],recipes:&pc::ipod::Recipes,payload:Option<&[u8]>) -> Vec<u8> {
+        let metadata=serde_json::to_vec(&pc::ipod::Metadata {scene:meta.clone(),ipod_recipes:recipes.clone()}).unwrap();
+        let anim:Vec<_>=animation.iter().flat_map(|x|x.to_le_bytes()).collect();
+        let mut sections=vec![(pc::TAG_META,metadata.as_slice(),16),(pc::TAG_GEOMETRY,geometry,16),
+            (pc::TAG_TEXTURES,&[255u8;64],16),(pc::TAG_ANIMATION,anim.as_slice(),16)];
+        if let Some(data)=payload {sections.push((pc::ipod::TAG_LIGHT_PAGES,data,16));}
+        pc::write_versioned(pc::ipod::MAGIC,pc::ipod::VERSION,&sections)
+    }
+    #[test]
+    fn compiler_light_pages_replace_only_optimized_geometry_and_reorder_original_phases() {
+        let _lock=SERIAL.lock().unwrap();
+        let (meta,geometry,animation,recipes,payload)=light_page_fixture();
+        for performance in [true,false] {
+            reset(None);GL.lock().unwrap().capture_buffers=true;
+            let file=PackFile::write(&light_page_pack(&meta,&geometry,&animation,&recipes,Some(&payload)));
+            let scene=unsafe{Scene::load_for_profile(file.path(),performance)}.unwrap();
+            let state=GL.lock().unwrap();
+            if performance {
+                assert_eq!(state.buffer_data[&scene.light_page_buffer],payload);
+                assert_eq!(state.buffer_data[&scene.geometry],geometry[..162]);
+                assert_eq!(scene.light_phase_offsets,[None,Some(0),Some(32),Some(16)]);
+                let expected:Vec<_>=[1usize,3,2].into_iter().flat_map(|i| {
+                    pc::parts::slice(&geometry,&meta.draws[i].vertices).unwrap().chunks_exact(40)
+                        .flat_map(|p|LightPhases::pair(i16::from_le_bytes([p[6],p[7]])).into_iter().flat_map(f32::to_le_bytes))
+                }).collect();
+                assert_eq!(state.buffer_data[&scene.light_phase_buffer],expected);
+                assert!(scene.gpu_vertex_offset(1).is_none());
+                assert!(scene.gpu_vertex_offset(2).is_none());
+                assert_eq!(scene.light_lod_source.pages().len(),2);
+            } else {
+                assert_eq!(scene.light_page_buffer,0);assert_eq!(scene.light_phase_buffer,0);
+                assert_eq!(state.buffer_data[&scene.geometry],geometry);
+                assert_eq!(scene.gpu_vertex_offset(1),Some(meta.draws[1].vertices.offset));
+            }
+            assert_eq!(serde_json::to_vec(&scene.meta).unwrap(),serde_json::to_vec(&meta).unwrap());
+            drop(state);drop(scene);released();
+        }
+        for fail in ["zero color buffer","color buffer","color upload"] {
+            reset(Some(fail));
+            let file=PackFile::write(&light_page_pack(&meta,&geometry,&animation,&recipes,Some(&payload)));
+            assert!(unsafe {Scene::load(file.path())}.is_err(),"{fail}");released();
+        }
+    }
+    #[test]
+    fn light_page_source_payload_and_group_proofs_are_required_in_both_profiles() {
+        let _lock=SERIAL.lock().unwrap();
+        let (meta,geometry,animation,recipes,payload)=light_page_fixture();
+        for performance in [false,true] { for fault in 0..11 {
+            let mut r=recipes.clone();let mut p=payload.clone();let mut m=meta.clone();
+            let recipe=r.light_pages.as_mut().unwrap();
+            match fault {
+                0=>recipe.version=2,
+                1=>recipe.source_hash="bad".into(),
+                2=>recipe.payload_hash="bad".into(),
+                3=>recipe.pages[1].vertices.offset=0,
+                4=>recipe.pages[0].fields[1].draw=1,
+                5=>recipe.pages[0].fields[1].first=1,
+                6=>{p[16]^=1;recipe.payload_hash=pc::ipod::light_pages::payload_hash(&p);},
+                7=>{m.materials[1].lights.as_mut().unwrap().gain=3.0;recipe.source_hash=pc::ipod::light_pages::source_hash(&m,&geometry).unwrap();recipe.pages[0].fields[1].draw=2;recipe.pages[1].fields[0].draw=3;},
+                8=>r.light_pages=None,
+                9=>{},
+                10=>{m.draws[1].pos_offset[0]+=1.0;recipe.source_hash=pc::ipod::light_pages::source_hash(&m,&geometry).unwrap();},
+                _=>unreachable!(),
+            }
+            reset(None);
+            let file=PackFile::write(&light_page_pack(&m,&geometry,&animation,&r,if fault==9{None}else{Some(&p)}));
+            let error=unsafe{Scene::load_for_profile(file.path(),performance)}.err().unwrap();
+            assert!(error.contains("light page"),"{fault}: {error}");released();
+        }}
     }
 
     #[test]
@@ -4887,5 +5375,253 @@ mod tests {
             }
         }
         assert!(count > 0, "no eligible scene environment");
+    }    fn skin_recipe_fixture() -> (pc::Meta, Vec<u8>, Vec<f32>, pc::ipod::Recipes) {
+        let (mut meta, _, mut animation) = float_fixture();
+        let mut geometry = Vec::new();
+        for p in [[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]] {
+            geometry.extend(float_vertex(
+                pc::VertexLayout::Skinned,
+                p,
+                [0., 0.],
+                [255; 4],
+            ));
+        }
+        let d = &mut meta.draws[0];
+        d.layout = pc::VertexLayout::Skinned;
+        d.node = None;
+        d.skin = Some(0);
+        d.vertices.size = geometry.len() as u32;
+        d.indices = pc::Range {
+            offset: geometry.len() as u32,
+            size: 12,
+        };
+        d.index_count = 6;
+        d.lods.clear();
+        geometry.extend([0u16, 1, 2, 0, 1, 2].into_iter().flat_map(u16::to_le_bytes));
+        meta.skins.push(pc::Skin {
+            joints: vec![0],
+            inverse_bind: pc::Range {
+                offset: animation.len() as u32 * 4,
+                size: 64,
+            },
+        });
+        animation.extend(Mat4::IDENTITY.to_cols_array());
+        let bytes: Vec<_> = animation.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let d = &meta.draws[0];
+        let topology = pc::ipod::skin_lods::Topology::new(d, &geometry).unwrap();
+        let affine_bound = topology
+            .affine_bound(
+                &pc::ipod::skin_lods::joint_bounds(&meta, 0, &bytes)
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+        let hash = pc::ipod::skin_lods::animation_hash(&meta, &bytes).unwrap();
+        let source_hash = pc::ipod::skin_lods::source_hash(d, &geometry, hash).unwrap();
+        let level = pc::DrawLod {
+            indices: pc::Range {
+                offset: geometry.len() as u32,
+                size: 6,
+            },
+            index_count: 3,
+            error: 0.01,
+        };
+        geometry.extend([0u16, 1, 2].into_iter().flat_map(u16::to_le_bytes));
+        let levels = vec![level];
+        let payload_hash = pc::ipod::skin_lods::payload_hash(&levels, &geometry).unwrap();
+        let recipe = pc::ipod::SkinLods {
+            version: 1,
+            draws: vec![pc::ipod::SkinLodDraw {
+                draw: 0,
+                source_hash,
+                payload_hash,
+                affine_bound,
+                levels,
+            }],
+        };
+        pc::ipod::skin_lods::validate(&meta, &geometry, &bytes, &recipe).unwrap();
+        (
+            meta,
+            geometry,
+            animation,
+            pc::ipod::Recipes {
+                skin_lods: Some(recipe),
+                ..Default::default()
+            },
+        )
     }
+    #[test]
+    fn derived_skin_lods_map_tail_gpu_ranges_and_reference_keeps_original_only() {
+        let _lock = SERIAL.lock().unwrap();
+        let (meta, geometry, animation, recipes) = skin_recipe_fixture();
+        let tail = &recipes.skin_lods.as_ref().unwrap().draws[0].levels[0].indices;
+        let file = PackFile::write(&window_pack(&meta, &geometry, &animation, &recipes));
+        for performance in [true, false] {
+            reset(None);
+            GL.lock().unwrap().capture_buffers = true;
+            let scene = unsafe { Scene::load_for_profile(file.path(), performance) }.unwrap();
+            assert!(scene.meta.draws[0].lods.is_empty());
+            assert_eq!(
+                scene.effective_lods(0).len(),
+                if performance { 1 } else { 0 }
+            );
+            let state = GL.lock().unwrap();
+            let uploaded = &state.buffer_data[&scene.geometry];
+            assert_eq!(
+                uploaded,
+                &geometry[..if performance {
+                    geometry.len()
+                } else {
+                    tail.offset as usize
+                }]
+            );
+            assert_eq!(
+                scene.gpu_index_offset(tail.offset, 3),
+                if performance { Some(tail.offset) } else { None }
+            );
+            drop(state);
+            drop(scene);
+            released();
+        }
+        for fail in ["buffer", "geometry upload", "vaos", "attributes"] {
+            reset(Some(fail));
+            assert!(unsafe { Scene::load(file.path()) }.is_err(), "{fail}");
+            released();
+        }
+        for mode in 0..4 {
+            let mut bad = recipes.clone();
+            let draw = &mut bad.skin_lods.as_mut().unwrap().draws[0];
+            match mode {
+                0 => draw.levels[0].indices.offset = 0,
+                1 => draw.payload_hash = "0".repeat(16),
+                2 => draw.affine_bound *= 0.5,
+                _ => draw.draw = u32::MAX,
+            }
+            let bad = PackFile::write(&window_pack(&meta, &geometry, &animation, &bad));
+            for performance in [true, false] {
+                reset(None);
+                assert!(unsafe { Scene::load_for_profile(bad.path(), performance) }.is_err());
+                released();
+            }
+        }
+    }
+    #[test]
+    fn skin_pose_bounds_enclose_mixed_influences_nonuniform_scale_and_stretched_limbs() {
+        let (mut meta, mut geometry, _, _) = skin_recipe_fixture();
+        meta.skins[0].joints.push(0);
+        let positions = [
+            Vec3::new(-3., 1., 2.),
+            Vec3::new(4., -2., 1.),
+            Vec3::new(1., 5., -3.),
+        ];
+        let tuples = [
+            [0, 1, 0, 0, 128, 127, 0, 0],
+            [0, 1, 0, 0, 128, 127, 0, 0],
+            [1, 0, 0, 0, 255, 0, 0, 0],
+        ];
+        for (i, p) in positions.iter().enumerate() {
+            for (k, f) in p.to_array().iter().enumerate() {
+                geometry[i * 60 + k * 4..i * 60 + k * 4 + 4].copy_from_slice(&f.to_le_bytes());
+            }
+            geometry[i * 60 + 52..i * 60 + 60].copy_from_slice(&tuples[i]);
+        }
+        let mut bounds = SkinBounds::build(&meta, &geometry).unwrap();
+        assert_eq!(bounds[0].groups.len(), 2);
+        for t in [0., 0.3, 0.7, 1.] {
+            let matrices = [
+                Mat4::from_scale_rotation_translation(
+                    Vec3::new(2., 0.5, 1.),
+                    Quat::from_rotation_y(t),
+                    Vec3::new(30., 0., 0.),
+                ),
+                Mat4::from_scale_rotation_translation(
+                    Vec3::new(0.25, 3., 1.5),
+                    Quat::from_rotation_z(t * 2.),
+                    Vec3::new(-10., 20., 0.),
+                ),
+            ];
+            let palette: Vec<_> = matrices.into_iter().flat_map(rows).collect();
+            bounds[0].update(&palette);
+            for (p, tuple) in positions.iter().zip(tuples) {
+                let mut expected = Vec3::ZERO;
+                for k in 0..4 {
+                    expected +=
+                        matrices[tuple[k] as usize].transform_point3(*p) * (tuple[k + 4] as f32 / 255.);
+                }
+                assert!(
+                    expected.cmpge(bounds[0].min).all() && expected.cmple(bounds[0].max).all(),
+                    "{expected:?} outside {:?}..{:?}",
+                    bounds[0].min,
+                    bounds[0].max
+                );
+            }
+            assert!(bounds[0].max.x > 2. && bounds[0].max.y > 2.);
+        }
+        // A zero-weight slot has no influence, even with a distant palette.
+        let old = (bounds[0].min, bounds[0].max);
+        let capacity = bounds[0].groups.capacity();
+        assert!(old.0.is_finite() && old.1.is_finite());
+        assert_eq!(bounds[0].groups.capacity(), capacity);
+    }
+
+    #[test]
+    fn skin_pose_bounds_pad_pre_cancellation_magnitudes() {
+        let x = f32::from_bits(1.0f32.to_bits() + 1);
+        let mut b = SkinBounds {
+            source: pc::Range {
+                offset: 0,
+                size: 60,
+            },
+            skin: 0,
+            groups: vec![InfluenceBounds {
+                tuple: [0, 1, 0, 0, 128, 127, 0, 0],
+                min: Vec3::new(x, 0., 0.),
+                max: Vec3::new(x, 0., 0.),
+            }],
+            min: Vec3::ZERO,
+            max: Vec3::ZERO,
+        };
+        let palette = [
+            1e8, 0., 0., -1e8, 0., 1., 0., 0., 0., 0., 1., 0., -1e8, 0., 0., 1e8, 0., 1., 0., 0., 0.,
+            0., 1., 0.,
+        ];
+        b.update(&palette);
+        let expected = (1e8 * x - 1e8) * (128.0 / 255.0) + (-1e8 * x + 1e8) * (127.0 / 255.0);
+        assert!(
+            b.min.x <= expected && b.max.x >= expected,
+            "{}..{} excludes {expected}",
+            b.min.x,
+            b.max.x
+        );
+    }
+
+    #[test]
+    fn target_lod_view_keeps_reference_tiers_and_rejects_cross_recipe_overlap() {
+        let (mut meta, mut geometry, _, mut recipes) = skin_recipe_fixture();
+        let original = serde_json::to_vec(&meta).unwrap();
+        let view = pc::ipod::display_lods::EffectiveLods::new(&meta, &recipes).unwrap();
+        assert_eq!(view.get(&meta, 0).len(), 1);
+        assert_eq!(serde_json::to_vec(&meta).unwrap(), original);
+        let source = recipes.skin_lods.as_ref().unwrap().draws[0].levels[0].indices.clone();
+        let mut display = pc::ipod::DisplayLodDraw {
+            draw: 1, source_hash: String::new(), payload_hash: String::new(),
+            levels: vec![pc::DrawLod {indices:source.clone(),index_count:3,error:0.1}],
+        };
+        recipes.display_lods=Some(pc::ipod::DisplayLods{version:1,draws:vec![display.clone()]});
+        assert!(pc::ipod::display_lods::validate_ranges(&meta,&geometry,&recipes).unwrap_err().contains("overlap"));
+        display.levels[0].indices.offset += source.size;
+        geometry.extend([0u8;6]);
+        recipes.display_lods.as_mut().unwrap().draws[0]=display;
+        pc::ipod::display_lods::validate_ranges(&meta,&geometry,&recipes).unwrap();
+        // The immutable source levels remain available to Reference. Only
+        // the Optimized view drops a tier dominated by a lower-error recipe.
+        meta.draws[0].index_count=18;
+        meta.draws[0].lods=vec![pc::DrawLod{indices:source.clone(),index_count:12,error:0.02},pc::DrawLod{indices:source.clone(),index_count:6,error:0.08}];
+        recipes.skin_lods=None;
+        recipes.display_lods=Some(pc::ipod::DisplayLods{version:1,draws:vec![pc::ipod::DisplayLodDraw{draw:0,source_hash:String::new(),payload_hash:String::new(),levels:vec![pc::DrawLod{indices:source.clone(),index_count:9,error:0.03},pc::DrawLod{indices:source,index_count:3,error:0.05}]}]});
+        let view=pc::ipod::display_lods::EffectiveLods::new(&meta,&recipes).unwrap();
+        assert_eq!(view.get(&meta,0).iter().map(|l|l.index_count).collect::<Vec<_>>(),[12,9,3]);
+        assert_eq!(meta.draws[0].lods.iter().map(|l|l.index_count).collect::<Vec<_>>(),[12,6]);
+    }
+
 }

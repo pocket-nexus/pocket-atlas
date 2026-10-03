@@ -60,6 +60,7 @@ unsafe extern "C" {
     pub fn glBindBuffer(target: GLenum, buffer: GLuint);
     pub fn glBindTexture(target: GLenum, texture: GLuint);
     pub fn glBlendFunc(source: GLenum, destination: GLenum);
+    pub fn glBlendFuncSeparate(source_rgb: GLenum, destination_rgb: GLenum, source_alpha: GLenum, destination_alpha: GLenum);
     pub fn glColorMask(red: GLboolean, green: GLboolean, blue: GLboolean, alpha: GLboolean);
     pub fn glBufferData(target: GLenum, size: GLsizeiptr, data: *const c_void, usage: GLenum);
     pub fn glBufferSubData(target: GLenum, offset: isize, size: GLsizeiptr, data: *const c_void);

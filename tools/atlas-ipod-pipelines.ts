@@ -25,12 +25,22 @@ const fragments: Record<string, string> = {
   water: "water_f",
   lights: "lights_f",
 };
-function pair(scene: any, d: any, mirror: boolean, tier: number, output: "scene" | "coverage" = "scene") {
+function pair(scene: any, d: any, mirror: boolean, tier: number, output: "scene" | "coverage" = "scene", windowVertexParams = false, windowRayParams = false) {
   const m = scene.materials[d.material];
   const f: Record<string, number> = {
     LIGHTS: ["standard", "glass"].includes(m.kind) ? 2 : 0,
   };
   const v: Record<string, number> = {};
+  if (windowVertexParams) {
+    if (m.kind !== "interior_window" || tier !== 3 || mirror || output !== "scene")
+      throw new Error("Window vertex parameters require the display main window pair");
+    v.SGX_WINDOW_PARAMS = f.SGX_WINDOW_PARAMS = 1;
+  }
+  if (windowRayParams) {
+    if (!windowVertexParams || d.node != null || d.skin != null || d.layout === "skinned")
+      throw new Error("Window rays require the static window parameter recipe");
+    v.SGX_WINDOW_RAY_PARAMS = f.SGX_WINDOW_RAY_PARAMS = 1;
+  }
   if (output === "coverage") {
     if (m.kind !== "water" || tier !== 3 || mirror || m.blend !== "opaque" || !m.depth_write)
       throw new Error("Coverage response requires opaque display water");
@@ -206,9 +216,52 @@ export function performanceReflectionPair(scene: any, draw: any, compile = pair)
     ? compile(scene, draw, true, 3) : null;
 }
 
+/** The compiler and runtime both prove all full/LOD triangles. This reader
+ * only enforces the versioned recipe's table shape; it never infers eligibility
+ * from a material name or substitutes a missing proof. */
+export function windowParameterDraws(scene: any): Set<number> {
+  const recipe = scene.ipod_recipes?.window_vertex_params;
+  if (recipe == null) return new Set();
+  if (recipe.version !== 1 || !Array.isArray(recipe.draws))
+    throw new Error("Unsupported window vertex parameter recipe");
+  let previous = -1;
+  for (const index of recipe.draws) {
+    const draw = scene.draws[index], material = draw && scene.materials[draw.material];
+    if (!Number.isInteger(index) || index <= previous || !material ||
+        material.kind !== "interior_window" || material.uv_anim != null || material.vertex_pbr || draw.layout === "lights")
+      throw new Error("Invalid window vertex parameter draw");
+    previous = index;
+  }
+  return new Set(recipe.draws);
+}
+
+/** Shape/identity validation only: shared Rust proves the source frames. */
+export function windowRayDraws(scene: any): Set<number> {
+  const recipe = scene.ipod_recipes?.window_ray_params;
+  if (recipe == null) return new Set();
+  if (recipe.version !== 1 || !Array.isArray(recipe.draws) || !recipe.draws.length)
+    throw new Error("Unsupported window ray parameter recipe");
+  const parameters = windowParameterDraws(scene);
+  let previous = -1;
+  for (const index of recipe.draws) {
+    const draw = scene.draws[index];
+    if (!Number.isInteger(index) || index <= previous || !parameters.has(index) ||
+        draw.node != null || draw.skin != null || draw.layout === "skinned" || draw.layout === "lights")
+      throw new Error("Invalid window ray parameter draw");
+    previous = index;
+  }
+  return new Set(recipe.draws);
+}
+
+export function performanceMainPair(scene: any, draw: any, enabled: boolean, rays = false, compile = pair): string[] {
+  return compile(scene, draw, false, 3, "scene", enabled, rays);
+}
+
 if (import.meta.main) {
 for (const place of selectIPodPlaces(PLACES)) {
   const m = meta(place.id);
+  const windowParameters = windowParameterDraws(m);
+  const windowRays = windowRayDraws(m);
   const colorPath = join(root, `.pocket-build/ipod/assets/${place.id}.ipod-color.json`);
   const colors = new Map<number, { texture: number | null; flags: number; page?: number | null }>();
   if (existsSync(colorPath)) {
@@ -216,6 +269,8 @@ for (const place of selectIPodPlaces(PLACES)) {
     if (color.version !== 2 && color.version !== 3) throw new Error(`Unsupported display color version: ${place.id}`);
     for (const draw of color.draws) colors.set(draw.draw, draw);
   }
+  for (const index of windowParameters)
+    if (colors.has(index)) throw new Error("Window vertex parameters cannot replace display-color vertices");
   writeShadowPipelines(place.id, m);
   const pairs = m.draws.map((d: any, i: number) =>
     d.layout === "lights"
@@ -225,10 +280,12 @@ for (const place of selectIPodPlaces(PLACES)) {
           display_float: colors.get(i)?.page != null,
           display_texture: colors.get(i)?.texture ?? null,
           display_flags: colors.get(i)?.flags ?? 0,
+          window_vertex_params: windowParameters.has(i),
+          window_ray_params: windowRays.has(i),
           detail: pair(m, d, false, 0),
           far: pair(m, d, false, m.materials[d.material].wet ? 1 : 2),
           reflection: pair(m, d, true, 2),
-          ...waterPrograms(m, d, colors.has(i) ? colorPair(m, d, colors.get(i)!) : pair(m, d, false, 3),
+          ...waterPrograms(m, d, colors.has(i) ? colorPair(m, d, colors.get(i)!) : performanceMainPair(m, d, windowParameters.has(i), windowRays.has(i)),
             () => pair(m, d, false, 3, "coverage")),
           performance_reflection: performanceReflectionPair(m, d),
           wet_response: (colors.get(i)?.flags ?? 0) & 16 ? colorPair(m, d, colors.get(i)!, true) : null,

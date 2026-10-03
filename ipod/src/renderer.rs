@@ -191,6 +191,8 @@ impl Renderer {
             let m = &s.meta.materials[s.meta.draws[i].material as usize];
             m.kind == pc::Kind::Water && m.blend == pc::Blend::Opaque && m.depth_write
         })?;
+        cfg.validate_windows(s.meta.draws.len(), |i| s.window_vertex_params(i))?;
+        cfg.validate_window_rays(s.meta.draws.len(), |i| s.window_ray_params(i))?;
         let Compiled {
             programs,
             draws,
@@ -522,8 +524,7 @@ impl Renderer {
             if d.layout == pc::VertexLayout::Lights {
                 continue;
             }
-            if self.profile
-                && match self.profile_class {
+            if match self.profile_class {
                     1 => d.layout != pc::VertexLayout::Baked || m.kind == pc::Kind::Glass,
                     2 => (d.node.is_none() && d.skin.is_none()) || m.kind == pc::Kind::Glass,
                     3 => m.kind != pc::Kind::Water,
@@ -572,7 +573,7 @@ impl Renderer {
             } else {
                 0
             };
-            let lod = d.lods.iter().rev().find(|l| {
+            let lod = s.effective_lods(i).iter().rev().find(|l| {
                 l.error
                     < distance.max(1.0)
                         * if mirror {
@@ -1279,7 +1280,7 @@ impl Renderer {
                 if cull { glEnable(GL_CULL_FACE); } else { glDisable(GL_CULL_FACE); }
                 if self.performance && blend != pc::Blend::Opaque {
                     glEnable(GL_BLEND);
-                    glBlendFunc(
+                    glBlendFuncSeparate(
                         if blend == pc::Blend::Alpha {
                             GL_SRC_ALPHA
                         } else {
@@ -1290,8 +1291,9 @@ impl Renderer {
                         } else {
                             0x0303
                         },
+                        0,
+                        GL_ONE,
                     );
-                    glColorMask(1, 1, 1, 0);
                 } else {
                     glDisable(GL_BLEND);
                     glColorMask(1, 1, 1, 1);
@@ -1359,8 +1361,9 @@ impl Renderer {
     }
     // The HDR framebuffer-fetch path retains its device-proven completion
     // boundaries. Display blending is submitted asynchronously and EAGL
-    // presentation provides backpressure. Normal telemetry excludes GPU waits;
-    // explicit profiling includes it as synchronized pass time.
+    // presentation provides backpressure. Normal timing has no explicit
+    // glFinish, but includes any implicit driver waits in submitted calls.
+    // Diagnostic profiling adds explicit completion to each measured pass.
     unsafe fn end_pass(&mut self, stage: usize, started: f64, complete: bool) -> f64 {
         let submitted = crate::atlas_seconds();
         if complete || self.profile {

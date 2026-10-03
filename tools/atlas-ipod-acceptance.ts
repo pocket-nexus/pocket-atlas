@@ -26,6 +26,9 @@ type Status = {
   place: string;
   shot: number;
   camera: number[];
+  time: number;
+  cinematic: boolean;
+  paused: boolean;
   quality: number;
   profile: boolean;
   profileDrawClass: number;
@@ -76,6 +79,10 @@ export function validateState(state: Status, expected: Expected) {
     throw new Error(`Diagnostic mesh filter remains active: profileDrawClass=${state.profileDrawClass}`);
   if (expected.nonce && state.lastCommand !== expected.nonce)
     throw new Error("Scene command changed during the measurement window");
+  // Physical UI actions do not change the debug command nonce. A user may
+  // leave the camera still while resuming animation or selecting walk mode.
+  if (state.time !== 25 || state.cinematic !== true || state.paused !== false)
+    throw new Error("Fixed scene time or cinematic playback changed during acceptance");
   if (!Array.isArray(state.camera) || state.camera.length !== 3 ||
       expected.camera.some((value, index) => !Number.isFinite(state.camera[index]) || Math.abs(value - state.camera[index]) > .002))
     throw new Error("Acknowledged camera does not match the authored shot midpoint");
@@ -199,6 +206,8 @@ async function main() {
   const results: Record<string, any>[] = [];
   const baseline: Status = JSON.parse(await command("status"));
   if (baseline.buildId !== receipt.buildId) throw new Error("Installed build differs from local receipt");
+  if (baseline.memoryWarningBatches !== 0)
+    throw new Error("Normal acceptance requires a process with no memory pressure fallback");
   const save = () => writeFileSync(join(options.directory, "receipt.json"), JSON.stringify({
     schemaVersion: 2,
     buildId: receipt.buildId,

@@ -49,9 +49,18 @@ pub fn eligible(meta: &pc::Meta, d: &pc::Draw) -> bool {
             m.kind == pc::Kind::Standard && m.blend == pc::Blend::Opaque && m.depth_write
         })
 }
-fn budget(meta: &pc::Meta) -> Result<[usize; 5], String> {
+fn budget(
+    meta: &pc::Meta,
+    lods: &pc::ipod::display_lods::EffectiveLods,
+) -> Result<[usize; 5], String> {
     let mut sizes = [meta.draws.len(), 0, 0, 0, 0];
-    for d in meta.draws.iter().filter(|d| eligible(meta, d)) {
+    for (i, d) in meta
+        .draws
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| eligible(meta, d))
+    {
+        let levels = lods.get(meta, i);
         let groups = d.index_count as usize / 3;
         sizes[1] = sizes[1]
             .checked_add(groups)
@@ -59,11 +68,11 @@ fn budget(meta: &pc::Meta) -> Result<[usize; 5], String> {
         sizes[2] = sizes[2]
             .checked_add(
                 groups
-                    .checked_mul(d.lods.len() + 1)
+                    .checked_mul(levels.len() + 1)
                     .ok_or("level budget overflow")?,
             )
             .ok_or("level budget overflow")?;
-        for n in core::iter::once(d.index_count).chain(d.lods.iter().map(|l| l.index_count)) {
+        for n in core::iter::once(d.index_count).chain(levels.iter().map(|l| l.index_count)) {
             sizes[3] = sizes[3]
                 .checked_add(n as usize / 3)
                 .ok_or("cluster budget overflow")?;
@@ -83,8 +92,15 @@ fn file_bytes(sizes: [usize; 5]) -> Result<usize, String> {
         })
         .ok_or_else(|| "cluster file budget overflow".into())
 }
+#[cfg(test)]
 pub fn max_file_bytes(meta: &pc::Meta) -> Result<usize, String> {
-    file_bytes(budget(meta)?)
+    max_file_bytes_with_lods(meta, &Default::default())
+}
+pub fn max_file_bytes_with_lods(
+    meta: &pc::Meta,
+    lods: &pc::ipod::display_lods::EffectiveLods,
+) -> Result<usize, String> {
+    file_bytes(budget(meta, lods)?)
 }
 #[derive(Clone, Copy)]
 pub struct Cluster {
@@ -368,11 +384,24 @@ fn contains(lo: [f32; 3], hi: [f32; 3], p: [f32; 3]) -> bool {
     (0..3).all(|k| p[k] >= lo[k] && p[k] <= hi[k])
 }
 impl MeshClusters {
+    #[cfg(test)]
     pub fn parse(
         bytes: &[u8],
         meta: &pc::Meta,
         meta_bytes: &[u8],
         geometry: &[u8],
+    ) -> Result<Self, String> {
+        Self::parse_with_lods(bytes, meta, meta_bytes, geometry, &Default::default())
+    }
+    /// Source identity is raw META + complete GEOM. Selection may additionally
+    /// contain validated target recipe tiers; Meta is never rewritten to fake
+    /// the header identity or the original full-component ownership proof.
+    pub fn parse_with_lods(
+        bytes: &[u8],
+        meta: &pc::Meta,
+        meta_bytes: &[u8],
+        geometry: &[u8],
+        lods: &pc::ipod::display_lods::EffectiveLods,
     ) -> Result<Self, String> {
         if bytes.len() < HEADER
             || &bytes[..4] != b"IPCL"
@@ -381,7 +410,7 @@ impl MeshClusters {
         {
             return Err("invalid cluster header".into());
         }
-        if bytes.len() > max_file_bytes(meta)? {
+        if bytes.len() > max_file_bytes_with_lods(meta, lods)? {
             return Err("cluster file exceeds geometry budget".into());
         }
         if u64_at(bytes, 8)? != hash(meta_bytes)
@@ -395,7 +424,10 @@ impl MeshClusters {
             *n = u32_at(bytes, 32 + k * 4)? as usize;
         }
         if sizes[0] != meta.draws.len()
-            || sizes.into_iter().zip(budget(meta)?).any(|(n, max)| n > max)
+            || sizes
+                .into_iter()
+                .zip(budget(meta, lods)?)
+                .any(|(n, max)| n > max)
             || file_bytes(sizes)? != bytes.len()
         {
             return Err("cluster payload size/count mismatch".into());
@@ -472,7 +504,11 @@ impl MeshClusters {
             let mut owners = reserve::<u32>(roots.len())?;
             owners.resize(roots.len(), u32::MAX);
             let sources: Vec<_> = core::iter::once((&d.indices, d.index_count, 0.0))
-                .chain(d.lods.iter().map(|l| (&l.indices, l.index_count, l.error)))
+                .chain(
+                    lods.get(meta, di)
+                        .iter()
+                        .map(|l| (&l.indices, l.index_count, l.error)),
+                )
                 .collect();
             let mut actual = reserve::<Vec<[u16; 3]>>(sources.len())?;
             for (_, n, _) in &sources {

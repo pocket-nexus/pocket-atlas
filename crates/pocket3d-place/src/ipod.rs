@@ -5,6 +5,11 @@ use alloc::{string::String, vec::Vec};
 use serde::{Deserialize, Serialize};
 pub mod display_environment;
 pub mod display_indices;
+pub mod display_lods;
+pub mod skin_lods;
+pub mod window_params;
+pub mod light_pages;
+pub mod window_ray_params;
 
 /// Color sidecar v3 replacement for one complete source LOD. Both ranges are
 /// byte ranges: `source` in GEOM, `indices` after the vertex prefix in the color
@@ -24,11 +29,96 @@ pub struct DisplayIndexOverride {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Recipes {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light_pages: Option<LightPages>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_ray_params: Option<WindowRayParams>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steam_coverage: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pvrtc: Vec<PvrtcTexture>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub display_cubes: Vec<DisplayCube>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_vertex_params: Option<WindowVertexParams>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skin_lods: Option<SkinLods>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_lods: Option<DisplayLods>,
+}
+
+/// Source-equivalent SGX light vertices, grouped only by field shader inputs.
+/// Ranges address IPLF, never the original GEOM used by Reference.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LightPages {
+    pub version: u32,
+    pub source_hash: String,
+    pub payload_hash: String,
+    pub pages: Vec<LightPage>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LightPage {
+    pub vertices: crate::Range,
+    pub vertex_count: u32,
+    pub fields: Vec<LightPageField>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LightPageField {
+    pub draw: u32,
+    pub first: u32,
+}
+pub const TAG_LIGHT_PAGES: [u8; 4] = *b"IPLF";
+
+/// SGX diffuse-only index tiers. Tangents are not consumed by this path;
+/// source vertices and original Reference LODs remain unchanged.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisplayLods {
+    pub version: u32,
+    pub draws: Vec<DisplayLodDraw>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DisplayLodDraw {
+    pub draw: u32,
+    pub source_hash: String,
+    pub payload_hash: String,
+    pub levels: Vec<crate::DrawLod>,
+}
+
+/// Optional SGX index-only simplification. Original source/Reference topology
+/// and every vertex attribute remain unchanged. Ranges address the GEOM tail.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkinLods {
+    pub version: u32,
+    pub draws: Vec<SkinLodDraw>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkinLodDraw {
+    pub draw: u32,
+    pub source_hash: String,
+    pub payload_hash: String,
+    pub affine_bound: f32,
+    pub levels: Vec<crate::DrawLod>,
+}
+
+/// Draws whose complete full/LOD topology proves constant window seed and
+/// pane dimensions per triangle. Absence retains the fragment implementation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowVertexParams {
+    pub version: u32,
+    pub draws: Vec<u32>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowRayParams {
+    pub version: u32,
+    pub draws: Vec<u32>,
 }
 
 /// Display-referred environment recipe. Original ENV/TEXD remains the source

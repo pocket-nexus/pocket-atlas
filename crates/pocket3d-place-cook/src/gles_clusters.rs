@@ -70,7 +70,7 @@ struct Group {
     bounds: Bounds,
     levels: Vec<BTreeMap<[i64; 3], Cluster>>,
 }
-fn groups(d: &pc::Draw, geometry: &[u8]) -> Result<Vec<Group>> {
+fn groups(d: &pc::Draw, lods:&[pc::DrawLod], geometry: &[u8]) -> Result<Vec<Group>> {
     let roots = pc::ipod::components(d, geometry)?;
     let mut parts = BTreeMap::<u32, Bounds>::new();
     for (i, &r) in roots.iter().enumerate() {
@@ -90,12 +90,12 @@ fn groups(d: &pc::Draw, geometry: &[u8]) -> Result<Vec<Group>> {
         cells.insert(r, cell);
         let group = bins.entry(cell).or_insert_with(|| Group {
             bounds: Bounds::new(),
-            levels: (0..=d.lods.len()).map(|_| BTreeMap::new()).collect(),
+            levels: (0..=lods.len()).map(|_| BTreeMap::new()).collect(),
         });
         group.bounds.extend(&b);
     }
     for (level, (range, count)) in core::iter::once((&d.indices, d.index_count))
-        .chain(d.lods.iter().map(|l| (&l.indices, l.index_count)))
+        .chain(lods.iter().map(|l| (&l.indices, l.index_count)))
         .enumerate()
     {
         if count % 3 != 0 || count.checked_mul(2) != Some(range.size) {
@@ -138,18 +138,21 @@ fn groups(d: &pc::Draw, geometry: &[u8]) -> Result<Vec<Group>> {
 pub(super) fn adapt(source: &[u8]) -> Result<Vec<u8>> {
     let pack = pc::ipod::parse(source).map_err(|e| e.to_string())?;
     let meta_bytes = pack.section(pc::TAG_META).map_err(|e| e.to_string())?;
-    let meta = pack.meta().map_err(|e| e.to_string())?;
+    let metadata: pc::ipod::Metadata = serde_json::from_slice(meta_bytes).map_err(|e|e.to_string())?;
+    let meta = metadata.scene;
+    let effective = pc::ipod::display_lods::EffectiveLods::new(&meta,&metadata.ipod_recipes)?;
     let geometry = pack.section(pc::TAG_GEOMETRY).map_err(|e| e.to_string())?;
     let (mut draws, mut group_data, mut levels, mut bounds, mut indices) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let (mut ng, mut nl, mut nc, mut ni) = (0, 0, 0, 0);
-    for d in &meta.draws {
+    for (di,d) in meta.draws.iter().enumerate() {
+        let lods=effective.get(&meta,di);
         word(&mut draws, ng)?;
         if !eligible(&meta, d) {
             word(&mut draws, 0)?;
             continue;
         }
-        let all = groups(d, geometry)?;
+        let all = groups(d, lods, geometry)?;
         if all.is_empty() || (all.len() == 1 && all[0].levels.iter().all(|l| l.len() <= 1)) {
             word(&mut draws, 0)?;
             continue;
@@ -161,7 +164,7 @@ pub(super) fn adapt(source: &[u8]) -> Result<Vec<u8>> {
             word(&mut group_data, group.levels.len())?;
             group.bounds.bytes(d, &mut group_data);
             for (k, clusters) in group.levels.into_iter().enumerate() {
-                let error = if k == 0 { 0.0 } else { d.lods[k - 1].error };
+                let error = if k == 0 { 0.0 } else { lods[k - 1].error };
                 levels.extend(error.to_le_bytes());
                 word(&mut levels, nc)?;
                 word(&mut levels, clusters.len())?;
@@ -212,7 +215,7 @@ pub(super) fn adapt(source: &[u8]) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 #[path = "../../../ipod/src/mesh_clusters.rs"]
-mod runtime;
+pub(super) mod runtime;
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -13,6 +13,10 @@ struct DrawPrograms {
     display_texture: Option<u32>,
     #[serde(default)]
     display_flags: u32,
+    #[serde(default)]
+    window_vertex_params: bool,
+    #[serde(default)]
+    window_ray_params: bool,
     detail: [String; 2],
     far: [String; 2],
     reflection: [String; 2],
@@ -96,6 +100,33 @@ impl Pipelines {
         if self.draws.len() != count || self.draws.iter().enumerate().any(|(i, d)|
             d.as_ref().is_some_and(|d| d.water_response.is_some()) != eligible(i)) {
             return Err("pipeline water response does not match opaque water material".into());
+        }
+        Ok(())
+    }
+    /// A pipeline flag cannot opt a draw into the window specialization. The
+    /// compiler recipe was re-proved against original GEOM by the Scene loader;
+    /// both profiles check this binding, but only Optimized compiles the pair.
+    pub fn validate_windows(
+        &self,
+        count: usize,
+        proved: impl Fn(usize) -> bool,
+    ) -> Result<(), String> {
+        if self.draws.len() != count
+            || self.draws.iter().enumerate().any(|(i, d)| {
+                d.as_ref().is_some_and(|d| d.window_vertex_params) != proved(i)
+                    || d.as_ref().is_some_and(|d| d.window_vertex_params && d.display_color)
+            })
+        {
+            return Err("pipeline window parameters do not match proved geometry".into());
+        }
+        Ok(())
+    }
+    pub fn validate_window_rays(&self, count: usize, proved: impl Fn(usize) -> bool) -> Result<(), String> {
+        if self.draws.len() != count || self.draws.iter().enumerate().any(|(i, d)| {
+            d.as_ref().is_some_and(|d| d.window_ray_params) != proved(i)
+                || d.as_ref().is_some_and(|d| d.window_ray_params && (!d.window_vertex_params || d.display_color))
+        }) {
+            return Err("pipeline window rays do not match proved geometry".into());
         }
         Ok(())
     }
@@ -228,6 +259,67 @@ mod tests {
                     .len(),
                 3
             );
+        }
+    }
+
+    #[test]
+    fn window_program_flag_requires_exact_proved_draws_and_preserves_reference() {
+        // Missing flags on old pipeline tables retain the original path.
+        assert!(config().validate_windows(3, |_| false).is_ok());
+        for flag in [false, true] {
+            for proved in [false, true] {
+                let mut cfg = config();
+                cfg.draws[0].as_mut().unwrap().window_vertex_params = flag;
+                assert_eq!(cfg.validate_windows(3, |i| i == 0 && proved).is_ok(),
+                    flag == proved, "flag {flag}, proof {proved}");
+            }
+        }
+        assert!(config().validate_windows(2, |_| false).is_err());
+        assert!(config().validate_windows(3, |i| i == 2).is_err());
+        let mut invalid = config();
+        let draw = invalid.draws[0].as_mut().unwrap();
+        draw.window_vertex_params = true;
+        draw.display_color = true;
+        assert!(invalid.validate_windows(3, |i| i == 0).is_err());
+
+        for performance in [false, true] {
+            let mut cfg = config();
+            let draw = cfg.draws[0].as_mut().unwrap();
+            draw.window_vertex_params = true;
+            draw.performance = ["window-params-v".into(), "window-params-f".into()];
+            draw.performance_reflection = Some(["v".into(), "window-mirror".into()]);
+            cfg.validate_windows(3, |i| i == 0).unwrap();
+            let result = cfg.compile(performance, |pair| Ok(pair[1].clone())).unwrap();
+            let slots = result.draws[0];
+            if performance {
+                assert_eq!(result.programs[slots[3]], "window-params-f");
+                assert_eq!(result.programs[slots[2]], "window-mirror");
+            } else {
+                assert_eq!(result.programs[slots[0]], "detail");
+                assert_eq!(result.programs[slots[1]], "far");
+                assert_eq!(result.programs[slots[2]], "reflection");
+                assert!(!result.programs.iter().any(|p| p.starts_with("window-")));
+            }
+        }
+    }
+
+    #[test]
+    fn window_ray_flag_is_proof_bound_and_never_enables_reference_or_mirror_variant() {
+        for performance in [false,true] {
+            let mut cfg=config();
+            assert!(cfg.validate_window_rays(3, |_|false).is_ok());
+            assert!(cfg.validate_window_rays(3, |i|i==0).is_err());
+            let d=cfg.draws[0].as_mut().unwrap();
+            d.window_ray_params=true;
+            assert!(cfg.validate_window_rays(3, |i|i==0).is_err());
+            let d=cfg.draws[0].as_mut().unwrap();
+            d.window_vertex_params=true;
+            d.performance=["ray-v".into(),"ray-f".into()];
+            d.performance_reflection=Some(["original-v".into(),"mirror-f".into()]);
+            cfg.validate_window_rays(3, |i|i==0).unwrap();
+            let compiled=cfg.compile(performance, |pair|Ok(pair[1].clone())).unwrap();
+            assert_eq!(compiled.programs[compiled.draws[0][3]],if performance {"ray-f"} else {"detail"});
+            assert_eq!(compiled.programs[compiled.draws[0][2]],if performance {"mirror-f"} else {"reflection"});
         }
     }
 

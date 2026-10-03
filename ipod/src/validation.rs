@@ -101,6 +101,50 @@ fn require(ok: bool, label: &str, reason: &str) -> Result {
         Err(format!("{label}: {reason}"))
     }
 }
+
+/// Window parameters may leave the fragment stage only after checking every
+/// original triangle, including all selectable LODs. The optional recipe is a
+/// request for this proof, never an authority over the geometry itself.
+pub fn validate_window_parameters(
+    meta: &pc::Meta,
+    recipes: &pc::ipod::Recipes,
+    geometry: &[u8],
+) -> Result {
+    if let Some(ray) = &recipes.window_ray_params {
+        require(ray.version == pc::ipod::window_ray_params::VERSION && !ray.draws.is_empty()
+            && ray.draws.windows(2).all(|p| p[0] < p[1]), "window rays", "recipe version or draw order")?;
+        for &index in &ray.draws {
+            require(recipes.window_vertex_params.as_ref().is_some_and(|r| r.draws.binary_search(&index).is_ok()),
+                "window rays", "missing window parameter proof")?;
+            let draw = meta.draws.get(index as usize).ok_or("window rays: draw reference")?;
+            let material = meta.materials.get(draw.material as usize).ok_or("window rays: material reference")?;
+            require(pc::ipod::window_ray_params::eligible(draw, material, geometry)?,
+                "window rays", "original geometry does not satisfy the recipe")?;
+        }
+    }
+    let Some(recipe) = &recipes.window_vertex_params else {
+        return Ok(());
+    };
+    require(
+        recipe.version == pc::ipod::window_params::VERSION
+            && !recipe.draws.is_empty()
+            && recipe.draws.windows(2).all(|pair| pair[0] < pair[1]),
+        "window parameters",
+        "recipe version or draw order",
+    )?;
+    for &index in &recipe.draws {
+        let draw = meta.draws.get(index as usize)
+            .ok_or("window parameters: draw reference")?;
+        let material = meta.materials.get(draw.material as usize)
+            .ok_or("window parameters: material reference")?;
+        require(
+            pc::ipod::window_params::eligible(draw, material, geometry)?,
+            "window parameters",
+            "original geometry does not satisfy the recipe",
+        )?;
+    }
+    Ok(())
+}
 fn finite(values: &[f32], label: &str) -> Result {
     require(
         values.iter().all(|v| v.is_finite()),
@@ -337,6 +381,7 @@ pub fn validate(meta: &pc::Meta, geom_bytes: usize, tex_bytes: usize, anim: &[f3
         reference(d.node, meta.nodes.len(), &label)?;
         reference(d.skin, meta.skins.len(), &label)?;
         finite_fields!(&label; d.pos_offset,d.pos_scale,d.uv_offset,d.uv_scale);
+        require(d.layout == pc::VertexLayout::Lights || (d.pos_scale == [1.0;3] && d.pos_offset == [0.0;3]), &label, "PLIP float positions require identity dequantization")?;
         bounds(d.min, d.max, &label)?;
         require(
             d.vertex_count > 0 && d.vertex_count <= 65536,
@@ -1021,4 +1066,13 @@ pub(crate) mod tests {
         }
         assert!(count > 0);
     }
+    #[test]
+    fn float_surface_positions_reject_nonidentity_legacy_dequant() {
+        for field in 0..2 {
+            let (mut meta,geometry,animation)=fixture();
+            if field==0 {meta.draws[0].pos_offset[0]=1.0;} else {meta.draws[0].pos_scale[2]=2.0;}
+            assert!(validate(&meta,geometry.len(),64,&animation).unwrap_err().contains("identity dequantization"));
+        }
+    }
+
 }
