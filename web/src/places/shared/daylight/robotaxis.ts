@@ -1,7 +1,7 @@
-import { BoxGeometry, BufferGeometry, Color, CylinderGeometry, Float32BufferAttribute, Group, Mesh, MeshStandardMaterial, Quaternion, Vector3 } from "three";
+import { BoxGeometry, BufferGeometry, Color, CylinderGeometry, Float32BufferAttribute, Group, Mesh, MeshStandardMaterial, Quaternion, Raycaster, Vector3 } from "three";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { canvas, toTexture } from "../canvas";
-import { glazedPanel } from "./glazing";
+import { vehicleShell, type VehicleShellProfile } from "./vehicle-shell";
 
 export type RobotaxiKind = "waymo-ipace" | "tesla-cybercab";
 export interface RobotaxiModel { root: Group; wheels: Group[]; wheelRadius: number; wheelbase: number; }
@@ -11,6 +11,36 @@ export const ROBOTAXI_DIMENSIONS = {
   "waymo-ipace": { length: 4.682, width: 1.895, height: 1.566, wheelbase: 2.990, wheelRadius: .365, envelopeWidth: 2.14 },
   "tesla-cybercab": { length: 4.42, width: 1.754, height: 1.408, wheelbase: 2.74, wheelRadius: .355, envelopeWidth: 1.754 },
 } as const;
+
+// Cross sections are photographic estimates, in metres: Z, half width, sill,
+// window belt, centre crown, roof half width. The roof and shoulder are one
+// loft; both the windscreen and side openings cut this same outer surface.
+export const ROBOTAXI_PROFILES: Record<RobotaxiKind, VehicleShellProfile> = {
+  "waymo-ipace": {
+    wheelbase: 2.990, wheelRadius: .365,
+    sideWindows: [[-1.73,-.43],[-.37,1.12]], windscreen: [.48,1.19], rearWindow: [-1.98,-1.38],
+    sections: [
+      [-2.341,.80,.36,.90,.94,.68], [-2.11,.91,.28,1.035,1.075,.76],
+      [-1.80,.942,.255,1.065,1.24,.755], [-1.495,.9475,.25,1.055,1.43,.733],
+      [-1.04,.910,.245,1.02,1.535,.715], [-.43,.890,.245,.997,1.566,.703],
+      [.15,.908,.245,.997,1.554,.697], [.48,.929,.25,1.006,1.482,.697],
+      [1.19,.9475,.255,.974,1.016,.841], [1.495,.945,.26,.958,.999,.843],
+      [1.97,.897,.30,.825,.876,.780], [2.341,.752,.36,.703,.748,.639],
+    ],
+  },
+  "tesla-cybercab": {
+    wheelbase: 2.74, wheelRadius: .355,
+    sideWindows: [[-.96,1.12]], windscreen: [.31,1.22],
+    sections: [
+      [-2.21,.768,.275,.895,.941,.66], [-1.94,.852,.225,.973,1.013,.717],
+      [-1.37,.877,.21,.972,1.183,.723], [-.96,.859,.20,.938,1.320,.707],
+      [-.53,.836,.20,.909,1.390,.691], [-.06,.827,.20,.881,1.408,.674],
+      [.31,.841,.20,.874,1.366,.665], [.74,.861,.21,.879,1.180,.717],
+      [1.22,.877,.22,.871,.944,.766], [1.37,.875,.23,.864,.918,.770],
+      [1.78,.835,.25,.788,.839,.730], [2.21,.685,.30,.601,.661,.582],
+    ],
+  },
+};
 
 type Point = [number, number, number];
 const DARK = 0x191e22, RUBBER = 0x171b1e, CHROME = 0x9da5aa;
@@ -51,6 +81,18 @@ function cylinder(out: BufferGeometry[], radius: number, height: number, at: Poi
   g.applyQuaternion(new Quaternion().setFromUnitVectors(new Vector3(0, 1, 0), direction));
   g.translate(...at); out.push(g);
 }
+function wheelDisc(out: BufferGeometry[], radius: number, x: number, color: number, segments: number): void {
+  const positions = [x,0,0], uv = [.5,.5], indices: number[] = [];
+  for (let i=0;i<segments;i++) {
+    const a=i*Math.PI*2/segments;
+    positions.push(x,Math.cos(a)*radius,Math.sin(a)*radius);
+    uv.push(.5+Math.cos(a)*.5,.5+Math.sin(a)*.5);
+    const b=1+i,c=1+(i+1)%segments;
+    indices.push(...(x>0?[0,b,c]:[0,c,b]));
+  }
+  const g=new BufferGeometry();g.setAttribute("position",new Float32BufferAttribute(positions,3));
+  g.setAttribute("uv",new Float32BufferAttribute(uv,2));g.setIndex(indices);g.computeVertexNormals();out.push(paint(g,color));
+}
 function merged(root: Group, geometry: BufferGeometry[], material: MeshStandardMaterial, name: string): void {
   const mesh = new Mesh(mergeGeometries(geometry, false)!, material); mesh.name = name; mesh.castShadow = true; root.add(mesh);
   geometry.forEach(g => g.dispose());
@@ -63,58 +105,50 @@ export function makeRobotaxi(kind: RobotaxiKind): RobotaxiModel {
   const waymo = kind === "waymo-ipace", d = ROBOTAXI_DIMENSIONS[kind];
   const w = d.width / 2, half = d.length / 2, r = d.wheelRadius, wb = d.wheelbase;
   const color = waymo ? 0xeceded : 0xb9a077, solid: BufferGeometry[] = [], glass: BufferGeometry[] = [];
-  // Longitudinal shoulder sections. Wheel arches remove bodywork rather than
-  // painting black circles over a closed side; silhouettes survive target LOD.
-  const sections = waymo
-    ? [[-half, .86, .37, .92], [-half + .32, .99, .29, 1.01], [-1.45, 1, .27, 1.03], [1.48, 1, .26, .96], [half - .24, .93, .31, .81], [half, .78, .36, .71]]
-    : [[-half, .89, .26, .85], [-half + .28, 1, .22, .91], [-1.25, 1, .21, .96], [1.37, 1, .21, .86], [half - .25, .92, .28, .65], [half, .76, .32, .59]];
-  const samples = [...new Set([...sections.map(s => s[0]), ...[-wb / 2, wb / 2].flatMap(z => Array.from({ length: 13 }, (_, i) => z + (i / 6 - 1) * r * 1.08))])].sort((a, b) => a - b);
-  const rings = samples.map(z => {
-    const next = sections.findIndex(s => s[0] > z), i = next < 0 ? sections.length - 2 : Math.max(0, next - 1);
-    const a = sections[i], b = sections[i + 1], t = Math.max(0, Math.min(1, (z - a[0]) / (b[0] - a[0])));
-    const s = a[1] + (b[1] - a[1]) * t, hi = a[3] + (b[3] - a[3]) * t;
-    let lo = a[2] + (b[2] - a[2]) * t;
-    for (const wheelZ of [-wb / 2, wb / 2]) { const dz = z - wheelZ, rr = r * 1.08; if (Math.abs(dz) < rr) lo = Math.max(lo, r + Math.sqrt(rr * rr - dz * dz)); }
-    return [[-w*s,lo,z],[-w*s,hi-.075,z],[-w*s*.9,hi,z],[w*s*.9,hi,z],[w*s,hi-.075,z],[w*s,lo,z],[w*s*.77,lo-.035,z],[-w*s*.77,lo-.035,z]] as Point[];
-  });
-  for (let j = 0; j < rings.length - 1; j++) for (let k = 0; k < 8; k++) quad(solid, [rings[j+1][k], rings[j+1][(k+1)%8], rings[j][(k+1)%8], rings[j][k]], color);
-  for (const [ring, front] of [[rings[0], false], [rings.at(-1)!, true]] as const) {
-    for (const face of [[ring[1],ring[4],ring[5],ring[0]], [ring[1],ring[2],ring[3],ring[4]], [ring[0],ring[5],ring[6],ring[7]]]) quad(solid, front ? face.reverse() : face, color);
-  }
-  const belt = waymo ? 1.01 : .94, back = waymo ? -1.84 : -1.11, front = waymo ? 1.05 : 1.29;
-  const roofBack = waymo ? -1.23 : -.48, roofFront = waymo ? .36 : .18, rw = w * (waymo ? .77 : .79), roof = d.height;
-  const panel = (corners: Parameters<typeof glazedPanel>[0], options: Parameters<typeof glazedPanel>[1] = {}) => {
-    const g = glazedPanel(corners, { left: .035, right: .965, bottom: .055, top: .95, ...options });
-    solid.push(...g.frame.map(f => paint(f, waymo ? 0x242c31 : color))); glass.push(paint(g.glass, 0xb6c7d0));
+  const shell = vehicleShell(ROBOTAXI_PROFILES[kind]);
+  solid.push(paint(shell.paint, color)); glass.push(paint(shell.glass, 0xb6c7d0));
+  const body = new Mesh(shell.paint, paintMat), projector = new Raycaster();
+  const onBody = (p: Point, direction: Point, offset = .006): Point => {
+    projector.set(new Vector3(...p), new Vector3(...direction));
+    const hit = projector.intersectObject(body, false)[0];
+    if (!hit) throw new Error(`Vehicle trim misses the shell: ${kind} ${p}`);
+    return hit.point.addScaledVector(projector.ray.direction, -offset).toArray() as Point;
   };
-  quad(solid, [[-rw,roof,roofFront],[rw,roof,roofFront],[rw,roof,roofBack],[-rw,roof,roofBack]], waymo ? DARK : color);
-  panel([[-w*.90,belt,front],[w*.90,belt,front],[rw,roof,roofFront],[-rw,roof,roofFront]], { bow: .045, columns: 8, rows: 4 });
-  if (waymo) panel([[w*.90,belt,back],[-w*.90,belt,back],[-rw,roof,roofBack],[rw,roof,roofBack]], { bow: .025, columns: 4, rows: 2 });
-  else {
-    // Cybercab's closed gold fastback has no rear window.
-    quad(solid, [[w*.80,.85,-half],[-w*.80,.85,-half],[-rw,roof,roofBack],[rw,roof,roofBack]], color);
-    for (const s of [-1, 1]) {
-      const p: Point[] = [[s*w*.80,.85,-half],[s*w*.94,belt,back],[s*rw,roof,roofBack]];
-      quad(solid, s > 0 ? p.reverse() : p, color);
+  const bodyLine = (side: number, path: [z: number,y: number][], width: number, tint: number) => {
+    const sampled: [number,number][] = [];
+    for(let i=0;i<path.length-1;i++) {
+      const a=path[i],b=path[i+1],steps=Math.ceil(Math.hypot(b[0]-a[0],b[1]-a[1])/.22);
+      for(let k=0;k<steps;k++)sampled.push([a[0]+(b[0]-a[0])*k/steps,a[1]+(b[1]-a[1])*k/steps]);
+    }
+    sampled.push(path.at(-1)!);
+    for(let i=0;i<sampled.length-1;i++) {
+      const a=sampled[i],b=sampled[i+1],len=Math.hypot(b[0]-a[0],b[1]-a[1]);
+      const dy=(b[0]-a[0])/len*width*.5,dz=-(b[1]-a[1])/len*width*.5;
+      const points=[[side*3,a[1]-dy,a[0]-dz],[side*3,b[1]-dy,b[0]-dz],
+        [side*3,b[1]+dy,b[0]+dz],[side*3,a[1]+dy,a[0]+dz]]
+        .map(p=>onBody(p as Point,[-side,0,0],.008));
+      quad(solid,side>0?points.reverse():points,tint);
+    }
+  };
+  for(const side of [-1,1]) {
+    if(waymo) {
+      bodyLine(side,[[-.40,.974],[-.405,.64],[-.43,.32]],.0045,0x7c8588);
+      bodyLine(side,[[-1.05,.32],[-.45,.30],[.18,.31],[.95,.355]],.034,0x263239);
+    } else {
+      bodyLine(side,[[-.952,.914],[-.79,.34],[.64,.32],[1.00,.69],[1.095,.849]],.004,0x7c705b);
+      bodyLine(side,[[-.87,.244],[.0,.222],[.84,.255]],.029,0x34342d);
     }
   }
-  for (const s of [-1, 1]) {
-    const x = s*w*.94, xr = s*rw;
-    if (waymo) {
-      panel([[x,belt,back],[x,belt,-.37],[xr,roof,-.37],[xr,roof,roofBack]], { flip: s > 0 });
-      panel([[x,belt,-.37],[x,belt,front],[xr,roof,roofFront],[xr,roof,-.37]], { flip: s > 0 });
-      box(solid,.025,.021,.21,s*w*1.003,.85,.18,CHROME); box(solid,.025,.021,.21,s*w*1.003,.88,-.99,CHROME);
-      box(solid,.008,.51,.012,s*w*1.005,.71,-.36,DARK);
-      box(solid,.12,.035,.05,s*(w+.02),1.09,.69,DARK);
-      box(solid,.12,.10,.22,s*(w+.062),1.11,.68,color); box(solid,.105,.065,.012,s*(w+.062),1.11,.565,CHROME);
-      box(solid,.016,.017,2.68,s*w*.953,1.018,-.25,CHROME);
-    } else {
-      panel([[x,belt,back],[x,belt,front],[xr,roof,roofFront],[xr,roof,roofBack]], { flip: s > 0 });
-      box(solid,.012,.49,.011,s*w*.972,.66,-.98,0x635d50);
-      // Flush release/camera in the B pillar, no handles or mirror stalks.
-      box(solid,.017,.036,.047,s*w*.95,1.02,-.91,DARK);
+  const roof = d.height;
+  if (waymo) {
+    for (const s of [-1,1]) {
+      // Small trim follows the sculpted belt instead of becoming a boxy cabin.
+      box(solid,.019,.018,.17,s*w*.973,.84,.14,CHROME);
+      box(solid,.019,.018,.17,s*w*.963,.86,-.91,CHROME);
+      box(solid,.10,.030,.05,s*(w-.015),1.04,.74,DARK);
+      box(solid,.13,.09,.20,s*(w+.045),1.075,.70,color);
+      box(solid,.115,.057,.010,s*(w+.045),1.075,.598,CHROME);
     }
-    box(solid,.022,.065,d.length-.58,s*w*.95,.26,0,DARK);
   }
   if (waymo) {
     box(solid,.88,.22,.034,0,.57,half+.012,DARK);
@@ -122,8 +156,9 @@ export function makeRobotaxi(kind: RobotaxiKind): RobotaxiModel {
     box(solid,.08,.028,.04,0,.58,half+.037,CHROME);
     box(solid,1.42,.072,.06,0,.355,half-.035,DARK);
     for (const s of [-1,1]) {
-      const lamp: Point[] = [[s*.46,.744,2.255],[s*.80,.814,2.06],[s*.76,.834,2.035],[s*.435,.774,2.23]];
-      quad(solid,s>0?lamp:lamp.reverse(),0xd6e2e5);
+      const lamp = [[s*.46,3,2.255],[s*.77,3,2.06],[s*.72,3,2.035],[s*.435,3,2.23]]
+        .map(p => onBody(p as Point,[0,-1,0]));
+      quad(solid,s>0?lamp.reverse():lamp,0xd6e2e5);
       box(solid,.49,.055,.045,s*.62,.938,-half+.05,0x8e171e,s*-.17);
       box(solid,.13,.12,.35,s*(w-.04),.97,1.51,color);
       cylinder(solid,.095,.022,[s*(w+.03),.96,1.52],DARK,new Vector3(s,0,0));
@@ -132,6 +167,8 @@ export function makeRobotaxi(kind: RobotaxiKind): RobotaxiModel {
       box(solid,.16,.19,.32,s*(w-.032),.71,-1.99,color);
       cylinder(solid,.074,.027,[s*(w+.052),.72,-2.01],DARK,new Vector3(s,0,0));
       box(solid,.047,.058,1.52,s*.61,roof+.045,-.28,0x353e43);
+      box(solid,.055,.070,.08,s*.61,roof+.001,-.78,0x353e43);
+      box(solid,.055,.070,.08,s*.61,roof+.001,.20,0x353e43);
     }
     const deck = paint(new CylinderGeometry(.66,.66,.095,24),color); deck.scale(1,1,.79); deck.translate(0,roof+.13,-.08);solid.push(deck);
     const visor = paint(new CylinderGeometry(.625,.625,.067,24),DARK);visor.scale(1,1,.79);visor.translate(0,roof+.19,-.08);solid.push(visor);
@@ -152,24 +189,37 @@ export function makeRobotaxi(kind: RobotaxiKind): RobotaxiModel {
   }
   box(solid,.43,.12,.025,0,.47,-half-.026,0xddded9);
   for(let i=0;i<6;i++)box(solid,.023,.046,.007,-.105+i*.041,.47,-half-.042,0x353a40);
-  merged(root,solid,paintMat,"sculpted-body-lights-sensors"); merged(root,glass,glassMat,"open-cabin-glazing");
   if(waymo && markingMat) {
     const labels:BufferGeometry[]=[];
-    for(const s of [-1,1]) {const x=s*(w+.015),p:Point[]=[[x,.73,.56],[x,.73,-.13],[x,.90,-.13],[x,.90,.56]];quad(labels,s>0?p:[p[1],p[0],p[3],p[2]],0xffffff);}
+    for (const s of [-1,1]) for (let i=0;i<4;i++) {
+      const a=.56-i*.69/4,b=.56-(i+1)*.69/4;
+      const p = [[s*3,.73,a],[s*3,.73,b],[s*3,.90,b],[s*3,.90,a]]
+        .map(p => onBody(p as Point,[-s,0,0],.009));
+      quad(labels,s>0?p:[p[1],p[0],p[3],p[2]],0xffffff);
+      const uv=labels.at(-1)!.getAttribute("uv");
+      for(let j=0;j<uv.count;j++) uv.setX(j,((s>0?i:3-i)+uv.getX(j))/4);
+    }
     merged(root,labels,markingMat,"Waymo-door-lettering");
   }
+  merged(root,solid,paintMat,"sculpted-body-lights-sensors"); merged(root,glass,glassMat,"open-cabin-glazing");
   const wheels:Group[]=[];
   for(const z of [wb/2,-wb/2])for(const s of [-1,1]) {
     const wheel=new Group();wheel.name=`${z>0?"front":"rear"}-${s>0?"right":"left"}-wheel`;wheel.position.set(s*(w-.113),r,z);root.add(wheel);wheels.push(wheel);
     const parts:BufferGeometry[]=[];
     cylinder(parts,r,.20,[0,0,0],RUBBER,new Vector3(1,0,0),r,24);
-    cylinder(parts,r*.79,.208,[0,0,0],waymo?0x4e575c:0x98815e,new Vector3(1,0,0),r*.79,24);
+    for(const side of [-1,1]) {
+      wheelDisc(parts,r*.79,side*.104,waymo?0x4e575c:color,24);
+      wheelDisc(parts,waymo?.062:.047,side*.113,waymo?DARK:0x756344,8);
+    }
     if(waymo) {
-      for(let i=0;i<10;i++){const g=paint(new BoxGeometry(.216,.021,r*1.52),CHROME);g.rotateX(i*Math.PI/5);parts.push(g);}
-      cylinder(parts,.062,.227,[0,0,0],DARK,new Vector3(1,0,0),.062,12);
-    } else {
-      cylinder(parts,r*.69,.216,[0,0,0],color,new Vector3(1,0,0),r*.69,24);
-      cylinder(parts,.047,.221,[0,0,0],0x756344,new Vector3(1,0,0),.047,12);
+      for (const side of [-1,1]) for (let i=0;i<5;i++) {
+        const a=i*Math.PI*2/5, b=a+.15, x=side*.107;
+        const points:Point[]=[[x,Math.sin(a)*.045,Math.cos(a)*.045],
+          [x,Math.sin(a)*r*.75,Math.cos(a)*r*.75],
+          [x,Math.sin(b)*r*.75,Math.cos(b)*r*.75],
+          [x,Math.sin(b)*.045,Math.cos(b)*.045]];
+        quad(parts,side>0?points.reverse():points,CHROME);
+      }
     }
     merged(wheel,parts,paintMat,"tire-and-wheel");
   }
