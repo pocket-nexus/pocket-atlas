@@ -410,6 +410,16 @@ mod tests {
         assert!(m.check_target(Target::Psp).is_err());
     }
     #[test]
+    fn psp_daylight_admission_keeps_water_and_vista_effects_explicit() {
+        for kind in ["daytime-street", "daytime-slope"] {
+            let mut m = Manifest { version: VERSION, name: "day".into(),
+                kind: kind.into(), features: ["day-sky".into()].into(), files: vec![] };
+            assert!(m.check_target(Target::Psp).is_ok());
+            m.features.insert("material:water".into());
+            assert!(m.check_target(Target::Psp).is_err());
+        }
+    }
+    #[test]
     fn resources_cannot_escape_the_ir() {
         for path in ["../key", "/tmp/file", "https:x", "a\\b", "..", ""] {
             assert!(local_name(path).is_err());

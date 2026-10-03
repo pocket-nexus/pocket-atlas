@@ -239,6 +239,7 @@ fn emit(
         height: height as u32,
         wrap: 3,
         mips: 1,
+        format: pp::RGBA4444,
     });
     let matid = materials.len() as u32;
     materials.push(pp::Material {

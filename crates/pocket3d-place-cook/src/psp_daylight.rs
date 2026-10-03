@@ -95,38 +95,37 @@ pub(super) fn sky(
     let clouds = sky
         .clouds
         .map(|i| crate::pica::decode(&m.textures[i as usize], tex));
-    // Keep the sky in RGBA4444 like scene textures; mip 0 only because this
-    // camera-centered panorama is never minified beyond the display width.
+    // Smooth gradients use native RGBA8888. Ordered 4-bit dither becomes a
+    // visible world-locked checkerboard when a panorama texel spans the screen.
+    // Other textures keep their independent compact encoding.
     let (width, height) = (512u32, 256u32);
-    let mut pixels = Vec::with_capacity((width * height * 2) as usize);
+    let mut pixels = Vec::with_capacity((width * height * 4) as usize);
     for y in 0..height {
         for x in 0..width {
             let az = (x as f32 + 0.5) / width as f32 * std::f32::consts::TAU;
             let el = ((y as f32 + 0.5) / height as f32 - 0.5) * std::f32::consts::PI;
             let d = Vec3::new(az.sin() * el.cos(), el.sin(), -az.cos() * el.cos());
             let c = graded(sky_sample(sky, d, clouds.as_ref()), 1.0, &m.post).to_le_bytes();
-            // Ordered dither breaks 4-bit sky bands without animated noise.
-            const BAYER: [[u32; 4]; 4] =
-                [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
-            let threshold = BAYER[y as usize % 4][x as usize % 4];
-            let q = |v: u8| ((v as u32 * 15 * 16 / 255 + threshold) / 16).min(15) as u16;
-            pixels.extend((q(c[0]) | q(c[1]) << 4 | q(c[2]) << 8 | 0xf000).to_le_bytes());
+            pixels.extend(c);
         }
     }
     let texture = textures.len() as u32;
     textures.push(pp::Texture {
         pixels: w.push(&super::swizzle(
             &pixels,
-            width as usize * 2,
+            width as usize * 4,
             height as usize,
         )),
         width,
         height,
         wrap: 2,
         mips: 1,
+        format: pp::RGBA8888,
     });
     let mut vertices = Vec::new();
-    let (columns, rows) = (48, 24);
+    // The display resolves the panorama, not dome tessellation. Match the
+    // native fixed-function sky budget and retain continuous UV seams.
+    let (columns, rows) = (32, 16);
     let point = |x: i32, y: i32| {
         let u = x as f32 / columns as f32;
         let v = y as f32 / rows as f32;

@@ -29,6 +29,9 @@ fn ok(args: &[&str]) {
     );
 }
 fn fixture(root: &Path, width: u32, height: u32) {
+    fixture_material(root, width, height, None);
+}
+fn fixture_material(root: &Path, width: u32, height: u32, roughness: Option<f32>) {
     std::fs::create_dir_all(root).unwrap();
     // A non-power-of-two source texture ensures native targets apply their own fit.
     let mut png = std::io::Cursor::new(Vec::new());
@@ -40,7 +43,7 @@ fn fixture(root: &Path, width: u32, height: u32) {
     let image_start = bin.len();
     bin.extend(png.into_inner());
     let shot = json!({"pos":[0,1,3],"target":[0,0,0],"fov":45});
-    let document = json!({
+    let mut document = json!({
         "asset":{"version":"2.0"}, "scene":0,
         "scenes":[{"nodes":[0],"extras":{"pocketAtlas":{
             "kind":"night-street", "camera":{"shots":[{"name":"Front","from":shot,"to":shot,"duration":12}]}
@@ -53,6 +56,11 @@ fn fixture(root: &Path, width: u32, height: u32) {
         "bufferViews":[{"buffer":0,"byteLength":36},{"buffer":0,"byteOffset":image_start,"byteLength":bin.len()-image_start}],
         "accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}]
     });
+    if let Some(roughness) = roughness {
+        document["materials"][0]["pbrMetallicRoughness"]["roughnessFactor"] = json!(roughness);
+        document["materials"][0].as_object_mut().unwrap().remove("extensions");
+        document.as_object_mut().unwrap().remove("extensionsUsed");
+    }
     let glb = gltf::binary::Glb {
         header: gltf::binary::Header {
             magic: *b"glTF",
@@ -183,4 +191,27 @@ fn pica_does_not_treat_an_ordinary_2k_source_texture_as_a_text_atlas() {
     let table = word(section + 4) as usize;
     assert_eq!(word(table + 4), 1, "one texture");
     assert_eq!((word(table + 120), word(table + 124)), (256, 256));
+}
+
+#[test]
+fn psp_glossy_colour_preserves_source_precision_and_native_mip_layout() {
+    let temp = Temp(std::env::temp_dir().join(format!("atlas-gloss-{}", std::process::id())));
+    for (roughness, format, bpp) in [(0.2, pocket3d_place_psp::RGBA8888, 4),
+        (0.8, pocket3d_place_psp::RGBA4444, 2)] {
+        let source = temp.0.join("surface");
+        fixture_material(&source, 32, 16, Some(roughness));
+        let output = temp.0.join("surface.place");
+        ok(&["--in", source.to_str().unwrap(), "--target", "psp", "--out", output.to_str().unwrap()]);
+        let bytes = std::fs::read(output).unwrap();
+        let h = pocket3d_place_psp::validate(&bytes).unwrap();
+        let t = &pocket3d_place_psp::slice::<pocket3d_place_psp::Texture>(&bytes, h.textures).unwrap()[0];
+        assert_eq!(t.format, format);
+        assert_eq!(t.mips, 2);
+        assert_eq!(t.pixels.count, (32 * 16 + 16 * 8) * bpp);
+        if format == pocket3d_place_psp::RGBA8888 {
+            let pixel = t.pixels.offset as usize;
+            assert_eq!(&bytes[pixel..pixel + 4], &[170, 120, 70, 255]);
+            assert_eq!(&bytes[pixel + 32 * 16 * 4..pixel + 32 * 16 * 4 + 4], &[170, 120, 70, 255]);
+        }
+    }
 }

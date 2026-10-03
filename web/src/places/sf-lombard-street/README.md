@@ -20,7 +20,7 @@ Lighting represents 2022-07-20 at 11:00 PDT: approximate solar azimuth 110.37°,
 
 ## Handheld pipeline
 
-Use the existing web export → canonical `.place` cook → native target cook. `daytime-slope` reuses Vita's sun/shadow/sky path and the PICA daytime bake; PSP's shared daylight bake adds a sky panorama and vertex sunlight/static shadows. PSP uses the separate `PLPS` v2 format. Moving-object lighting on the fixed-function targets is baked at the initial orientation; web ambient audio is not reproduced on the handhelds.
+Use the existing web export → sealed PlaceIR → independent target lowering. `daytime-slope` reuses Vita's sun/shadow/sky path and the PICA daytime bake; PSP's shared daylight bake adds a sky panorama and vertex sunlight/static shadows. PSP uses the separate `PLPS` v3 format. Moving-object lighting on the fixed-function targets is baked at the initial orientation; web ambient audio is not reproduced on the handhelds.
 
 ```sh
 (cd web && bun scripts/export-place.ts --place sf-lombard-street --seconds 120)

@@ -4,7 +4,7 @@
 use bytemuck::{Pod, Zeroable};
 
 pub const MAGIC: u32 = u32::from_le_bytes(*b"PLPS");
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 pub const MAX_BYTES: usize = 18 * 1024 * 1024;
 pub const NONE: u32 = u32::MAX;
 pub const ALPHA: u32 = 1;
@@ -58,6 +58,19 @@ pub struct Texture {
     pub height: u32,
     pub wrap: u32,
     pub mips: u32,
+    /// Explicit target encoding; sky gradients need more precision than cutouts.
+    pub format: u32,
+}
+pub const RGBA4444: u32 = 0;
+pub const RGBA8888: u32 = 1;
+impl Texture {
+    pub fn bytes_per_pixel(&self) -> Option<u32> {
+        match self.format {
+            RGBA4444 => Some(2),
+            RGBA8888 => Some(4),
+            _ => None,
+        }
+    }
 }
 #[repr(C)]
 #[derive(Clone, Copy, Default, Pod, Zeroable)]
@@ -187,8 +200,9 @@ pub fn validate(bytes: &[u8]) -> Result<&Header, &'static str> {
         {
             return Err("texture mips");
         }
+        let bpp = t.bytes_per_pixel().ok_or("texture format")?;
         let size: u32 = (0..t.mips)
-            .map(|m| (t.width >> m) * (t.height >> m) * 2)
+            .map(|m| (t.width >> m) * (t.height >> m) * bpp)
             .sum();
         if t.pixels.offset % 16 != 0 || t.pixels.count != size {
             return Err("texture layout");

@@ -32,8 +32,9 @@ capability checks. `source.rs` describes transient shared-pass output; it is not
 a serialized interchange format. `main.rs` still orchestrates the existing
 analysis and Vita writer; `pica.rs` and `psp.rs` own native lowerings. Existing
 `pocket3d-place::Meta` types are reused internally during this migration. They
-are not the public definition of PlaceIR. Device format names/versions remain
-unchanged so this step does not require a runtime format migration. PICA pins
+are not the public definition of PlaceIR. Milestone 1 retained device format
+versions; the later PSP daylight update uses PLPS v3 and requires re-cooking
+PSP assets with its matching renderer. PICA pins
 its PLCE envelope to v5 and its binary table to v3 independently of Vita v6.
 Previously a Vita version bump leaked into PICA output and the C reader rejected
 it; the integration test now checks cooked output using the runtime's C format
@@ -92,7 +93,8 @@ is never a compiler input. The removed `--pica-from` and `psp --in <pack>` forms
 fail with a migration message.
 
 `--tex` retains the Vita/PICA texture cap setting; PSP currently uses its own
-128/512-pixel material policy. Output suffixes do not identify a universal pack:
+128-pixel night / 256-pixel day material cap (512 for luminous maps). Output
+suffixes do not identify a universal pack:
 PICA has its own table and geometry layout; PSP uses the separate PLPS header.
 PICA's higher-resolution exceptions inspect the authored 4K text-atlas
 convention, animation grids and emissive strips. Ordinary 2K source maps obey
@@ -105,8 +107,11 @@ need device headroom measurements.
 ## Capability, release eligibility and evidence
 
 `check --target` rejects known missing lowerings before cooking. Currently
-PICA/GE reject city-light fields and vista height haze. GE also rejects daytime
-sky, water and kinds outside the supported night-street effect set. It does not
+PICA/GE reject city-light fields and vista height haze. GE also rejects water
+and kinds outside night streets and dry daytime
+streets/slopes. Its shared daytime lowering bakes the sky and sun from the IR;
+PLPS v3 records per-texture precision (RGBA8888 gradients/glossy maps, compact
+RGBA4444 for other surfaces) and a bounded sky mesh. It does not
 silently treat light-field point records as triangle records. Unsupported
 material annotations fail rather than falling back to a standard material.
 This is an initial capability gate, not an exhaustive Three.js feature checker.

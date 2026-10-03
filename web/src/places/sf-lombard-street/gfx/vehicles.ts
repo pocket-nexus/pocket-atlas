@@ -1,6 +1,7 @@
 import { BoxGeometry, BufferGeometry, Color, CylinderGeometry, Float32BufferAttribute, Group, Mesh, MeshStandardMaterial } from "three";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { canvas, toTexture } from "../../shared/canvas";
+import { glazedPanel } from "../../shared/daylight/glazing";
 
 export type CarKind="hatch"|"suv"|"sedan";
 export interface CarModel { root:Group; wheels:Group[]; wheelRadius:number; wheelbase:number; }
@@ -52,25 +53,21 @@ export function makeCar(kind:CarKind,bodyColor:number):CarModel {
     quad(solid,frontCap?top.reverse():top,bodyColor);quad(solid,frontCap?bottom.reverse():bottom,bodyColor);
   }
   const back=sedan?-1.18:-1.48,front=.98,roofBack=sedan?-.75:-1.03,roofFront=.40,belt=.87,roofWidth=w*.80;
-  // Closed cabin faces; dark glazing sits proud of each frame by a few millimetres.
-  quad(solid,[[-roofWidth,roof,roofBack],[roofWidth,roof,roofBack],[w*.94,belt,back],[-w*.94,belt,back]],bodyColor);
+  // A real frame surrounds each opening, preserving the same depth contract
+  // in web, Vita, PICA and GE instead of layering glass over closed bodywork.
+  const panel=(corners:Parameters<typeof glazedPanel>[0],color:number,options:Parameters<typeof glazedPanel>[1]={})=> {
+    const result=glazedPanel(corners,options);
+    solid.push(...result.frame.map(g=>paint(g,bodyColor)));glass.push(paint(result.glass,color));
+  };
   quad(solid,[[-roofWidth,roof,roofFront],[roofWidth,roof,roofFront],[roofWidth,roof,roofBack],[-roofWidth,roof,roofBack]],bodyColor);
-  quad(solid,[[-w*.88,belt,front],[w*.88,belt,front],[roofWidth,roof,roofFront],[-roofWidth,roof,roofFront]],bodyColor);
-  // The windscreen has a shallow transverse bow, with a continuous reflection map.
-  { const positions:number[]=[],uv:number[]=[],index:number[]=[];
-    for(let row=0;row<2;row++)for(let j=0;j<=8;j++) {const s=j/8,x=(s*2-1)*(row?roofWidth*.93:w*.80),y=row?roof-.075:belt+.08,z=(row?roofFront+.055:front+.009)+Math.sin(s*Math.PI)*.068;positions.push(x,y,z);uv.push(s,row);}
-    for(let j=0;j<8;j++)index.push(j,j+1,j+10,j,j+10,j+9);
-    const g=new BufferGeometry();g.setAttribute("position",new Float32BufferAttribute(positions,3));g.setAttribute("uv",new Float32BufferAttribute(uv,2));g.setIndex(index);g.computeVertexNormals();glass.push(paint(g,0xc5d4d8));
-  }
-  quad(glass,[[w*.81,belt+.07,back-.008],[-w*.81,belt+.07,back-.008],[-roofWidth*.93,roof-.08,roofBack-.03],[roofWidth*.93,roof-.08,roofBack-.03]],0xa0b3b9);
+  panel([[-w*.88,belt,front],[w*.88,belt,front],[roofWidth,roof,roofFront],[-roofWidth,roof,roofFront]],0xc5d4d8,{bow:.068,columns:8,rows:4});
+  panel([[w*.94,belt,back],[-w*.94,belt,back],[-roofWidth,roof,roofBack],[roofWidth,roof,roofBack]],0xa0b3b9);
   for(const sign of [-1,1]) {
     const x=sign*w*.945,xr=sign*roofWidth;
-    const side:[[number,number,number],[number,number,number],[number,number,number],[number,number,number]]=[[x,belt,back],[x,belt,front],[xr,roof,roofFront],[xr,roof,roofBack]];
-    quad(solid,sign<0?side:[side[3],side[2],side[1],side[0]],bodyColor);
-    // Two panes split by a genuine opaque B pillar and thin rubber seals.
+    // Adjacent open frames share a B pillar; no hidden full side quad.
     const middle=-.28;
-    const panes=[[[x*1.008,belt+.08,back+.12],[x*1.008,belt+.08,middle-.065],[xr*1.018,roof-.085,middle-.065],[xr*1.018,roof-.085,roofBack+.075]],[[x*1.008,belt+.08,middle+.065],[x*1.008,belt+.08,front-.15],[xr*1.018,roof-.085,roofFront-.08],[xr*1.018,roof-.085,middle+.065]]] as [number,number,number][][];
-    for(const pane of panes)quad(glass,sign<0?pane:[pane[3],pane[2],pane[1],pane[0]],0xacbdc5);
+    panel([[x,belt,back],[x,belt,middle],[xr,roof,middle],[xr,roof,roofBack]],0xacbdc5,{flip:sign>0});
+    panel([[x,belt,middle],[x,belt,front],[xr,roof,roofFront],[xr,roof,middle]],0xacbdc5,{flip:sign>0});
     box(solid,.025,.035,2.65,sign*w*.987,belt-.04,-.08,CHROME);
     box(solid,.034,.023,.18,sign*w*1.008,.76,.19,CHROME);box(solid,.034,.023,.18,sign*w*1.008,.76,-.89,CHROME);
     box(solid,.024,.025,length-.45,sign*w*.91,.35,0,DARK);

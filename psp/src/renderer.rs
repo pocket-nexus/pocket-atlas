@@ -75,6 +75,13 @@ fn hash(mut n: u32) -> f32 {
     ((n >> 22) ^ n) as f32 / 4294967296.0
 }
 
+fn texture_format(t: &pp::Texture) -> TexturePixelFormat {
+    match t.format {
+        pp::RGBA8888 => TexturePixelFormat::Psm8888,
+        _ => TexturePixelFormat::Psm4444, // Pack validation rejects other encodings.
+    }
+}
+
 impl Renderer {
     pub unsafe fn new(scene: &Scene) -> Self {
         sceGuInit();
@@ -210,7 +217,7 @@ impl Renderer {
             sceGuEnable(GuState::Texture2D);
             if self.bound_texture != mat.texture {
                 self.bound_texture = mat.texture;
-                sceGuTexMode(TexturePixelFormat::Psm4444, t.mips as i32 - 1, 0, 1);
+                sceGuTexMode(texture_format(t), t.mips as i32 - 1, 0, 1);
                 let levels = [
                     MipmapLevel::None,
                     MipmapLevel::Level1,
@@ -235,7 +242,7 @@ impl Renderer {
                         w as i32,
                         base.add(offset) as _,
                     );
-                    offset += (w * h * 2) as usize;
+                    offset += (w * h * t.bytes_per_pixel().unwrap()) as usize;
                 }
                 sceGuTexWrap(
                     if t.wrap & 1 != 0 {
@@ -458,7 +465,7 @@ impl Renderer {
         sceGuDisable(GuState::AlphaTest);
         sceGuDisable(GuState::CullFace);
         sceGuEnable(GuState::Texture2D);
-        sceGuTexMode(TexturePixelFormat::Psm4444, 0, 0, 1);
+        sceGuTexMode(texture_format(texture), 0, 0, 1);
         sceGuTexImage(
             MipmapLevel::None,
             texture.width as i32,

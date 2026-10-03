@@ -10,8 +10,8 @@ from source geometry and textures; it does not read a Vita device pack. Renderin
 scene-name branches. PocketJS owns the unchanged paired debug transport and
 native installer; Atlas owns the application and its content-addressed packs.
 
-The native catalog uses an explicit supported-kind list: `night-street`,
-`daytime-slope`, `daytime-street`, `dusk-street` and `daytime-coast`.
+The native catalog uses explicit per-place `targets` eligibility in the web
+registry; PlaceIR validates the authored feature set before device lowering.
 Griffith Observatory's existing `dusk-vista` renderer requires light fields
 and distance/height-dependent vista haze that PICA does not yet implement.
 Its marker, details and preview remain visible, with **Unavailable on 3DS**;
@@ -89,7 +89,7 @@ The upper screen shows a real rotating globe, location markers and a postcard.
 The lower screen contains the touchable place lists and details:
 
 - Circle pad rotates the globe. D-pad up/down selects a place; left/right zooms.
-- L/R changes Featured, Explore, Saved and Search. Explore sorts all 18 places
+- L/R changes Featured, Explore, Saved and Search. Explore sorts all 19 places
   by distance from the globe's facing point.
 - A enters an available place. Planned places remain browseable but cannot be entered.
 - X opens the system keyboard. Every search word must match a name, locality,

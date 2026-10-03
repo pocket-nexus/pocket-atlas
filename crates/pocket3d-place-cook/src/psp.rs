@@ -92,6 +92,16 @@ pub fn cook(scene: &crate::source::Scene, output: &Path) {
                 m.albedo.or(m.emission) == Some(id)
                     && (m.emissive.iter().any(|&e| e > 0.1) || m.kind == pc::Kind::Unlit)
             });
+            // Glossy colour maps carry smooth reflected gradients. Keep their
+            // original precision; 4-bit ramps turn into moving contour bands.
+            // Aggregate all uses before deduplication, independent of names.
+            let smooth = m.materials.iter().any(|m| {
+                m.albedo.or(m.emission) == Some(id)
+                    && (m.kind == pc::Kind::Glass
+                        || (m.kind == pc::Kind::Standard && m.roughness <= 0.25))
+            });
+            let format = if smooth { pp::RGBA8888 } else { pp::RGBA4444 };
+            let bpp = if smooth { 4 } else { 2 };
             let cap = if luminous { 512 } else if daytime { 256 } else { 128 };
             let width = t.width.next_power_of_two().min(cap).max(8);
             let height = t.height.next_power_of_two().min(cap).max(8);
@@ -103,14 +113,14 @@ pub fn cook(scene: &crate::source::Scene, output: &Path) {
             let mut mips = 0;
             loop {
                 let (mw, mh) = level.dimensions();
-                let pixels: Vec<u8> = level
+                let pixels: Vec<u8> = if smooth { level.as_raw().clone() } else { level
                     .pixels()
                     .flat_map(|p| {
                         let q = |v: u8| (v as u16 * 15 + 127) / 255;
                         (q(p[0]) | q(p[1]) << 4 | q(p[2]) << 8 | q(p[3]) << 12).to_le_bytes()
                     })
-                    .collect();
-                chain.extend(swizzle(&pixels, mw as usize * 2, mh as usize));
+                    .collect() };
+                chain.extend(swizzle(&pixels, mw as usize * bpp, mh as usize));
                 mips += 1;
                 if mw <= 8 || mh <= 8 {
                     break;
@@ -131,6 +141,7 @@ pub fn cook(scene: &crate::source::Scene, output: &Path) {
                 wrap: (t.wrap_s != pc::Wrap::Repeat) as u32
                     | ((t.wrap_t != pc::Wrap::Repeat) as u32) << 1,
                 mips,
+                format,
             });
         }
     }
@@ -641,19 +652,33 @@ mod tests {
             } else {
                 assert_eq!(h.rain, 0);
                 assert_eq!(h.lights.count, 0);
-                assert_eq!(h.sky_vertices.count, 48 * 24 * 6);
+                assert_eq!(h.sky_vertices.count, 32 * 16 * 6);
                 let t =
                     &pp::slice::<pp::Texture>(&bytes, h.textures).unwrap()[h.sky_texture as usize];
                 assert_eq!((t.width, t.height), (512, 256));
-                let pixels = pp::slice::<u16>(
+                assert_eq!(t.format, pp::RGBA8888);
+                let pixels = pp::slice::<u32>(
                     &bytes,
                     pp::Span {
                         offset: t.pixels.offset,
-                        count: t.pixels.count / 2,
+                        count: t.pixels.count / 4,
                     },
                 )
                 .unwrap();
-                assert!(pixels.iter().all(|v| v & 0xf000 == 0xf000));
+                assert!(pixels.iter().all(|v| v & 0xff000000 == 0xff000000));
+                // This fixture has no directional glow/clouds: a sky row must
+                // stay azimuth-invariant, with no magnified Bayer checkerboard.
+                let pixel = |x: usize, y: usize| {
+                    let byte = ((y / 8) * (512 * 4 / 16) + x * 4 / 16) * 128
+                        + (y % 8) * 16 + x * 4 % 16;
+                    pixels[byte / 4]
+                };
+                for y in [90, 128, 170, 220] {
+                    for x in 1..512 {
+                        assert_eq!(pixel(x, y), pixel(0, y));
+                    }
+                }
+                assert!(pixels.iter().any(|v| v.to_le_bytes()[0] % 17 != 0));
                 assert_ne!(
                     pixels[0],
                     pixels[pixels.len() - 1],
@@ -668,6 +693,13 @@ mod tests {
                 let head = bytemuck::from_bytes_mut::<pp::Header>(&mut bad[..144]);
                 head.sky_texture = head.textures.count;
                 assert_eq!(pp::validate(&bad).err(), Some("sky geometry"));
+                let mut bad = bytes.clone();
+                let at = h.textures.offset as usize
+                    + h.sky_texture as usize * core::mem::size_of::<pp::Texture>() + 24;
+                bad[at..at + 4].copy_from_slice(&99u32.to_le_bytes());
+                assert_eq!(pp::validate(&bad).err(), Some("texture format"));
+                bad[at..at + 4].copy_from_slice(&pp::RGBA4444.to_le_bytes());
+                assert_eq!(pp::validate(&bad).err(), Some("texture layout"));
             }
         }
     }
