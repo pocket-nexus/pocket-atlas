@@ -12,6 +12,7 @@ import {
   type Object3D,
 } from "three";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
+import { identifySources, sourceIds } from "./provenance";
 
 
 /**
@@ -132,8 +133,9 @@ function normalizeForMerge(g: BufferGeometry, color: 0 | 3 | 4): BufferGeometry 
  * the material uses them. Meshes under `userData.dynamic` are left alone.
  */
 export function batchStatic(root: Object3D): { before: number; after: number } {
+  identifySources(root);
   root.updateMatrixWorld(true);
-  type Batch = { material: Material; cast: boolean; receive: boolean; layers: number; renderOrder: number; culled: boolean; color: 0 | 3 | 4; geos: BufferGeometry[]; worldUv: boolean };
+  type Batch = { material: Material; cast: boolean; receive: boolean; layers: number; renderOrder: number; culled: boolean; color: 0 | 3 | 4; geos: BufferGeometry[]; worldUv: boolean; sources: Set<string> };
   const groups = new Map<string, Batch>();
   const remove: Mesh[] = [];
   let before = 0;
@@ -150,13 +152,14 @@ export function batchStatic(root: Object3D): { before: number; after: number } {
     const key = `${mat.uuid}|${m.castShadow}|${m.receiveShadow}|${m.layers.mask}|${m.renderOrder}|${m.frustumCulled}|${vc}`;
     let grp = groups.get(key);
     if (!grp) {
-      grp = { material: mat, cast: m.castShadow, receive: m.receiveShadow, layers: m.layers.mask, renderOrder: m.renderOrder, culled: m.frustumCulled, color: vc ? 3 : 0, geos: [], worldUv: !!mat.userData.worldUV };
+      grp = { material: mat, cast: m.castShadow, receive: m.receiveShadow, layers: m.layers.mask, renderOrder: m.renderOrder, culled: m.frustumCulled, color: vc ? 3 : 0, geos: [], worldUv: !!mat.userData.worldUV, sources: new Set() };
       groups.set(key, grp);
     }
     if (vc && m.geometry.getAttribute("color")?.itemSize === 4) grp.color = 4;
     const g = m.geometry.clone();
     g.applyMatrix4(m.matrixWorld);
     grp.geos.push(g);
+    for (const id of sourceIds(m)) grp.sources.add(id);
     remove.push(m);
   });
   for (const m of remove) m.removeFromParent();
@@ -179,6 +182,7 @@ export function batchStatic(root: Object3D): { before: number; after: number } {
     mesh.frustumCulled = grp.culled;
     mesh.matrixAutoUpdate = false;
     mesh.name = `batch:${grp.material.name || grp.material.type}`;
+    mesh.userData.pocketAtlas = { sources: [...grp.sources].sort() };
     root.add(mesh);
     after++;
   }

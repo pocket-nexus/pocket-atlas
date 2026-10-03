@@ -154,7 +154,7 @@ export class DayLib {
 
   /** Painted text on the road (止まれ): an alpha-tested stencil. */
   roadText(tex: Texture): MeshStandardMaterial {
-    return this.memo(`roadtext-${tex.uuid}`, () => {
+    const material = this.memo(`roadtext-${tex.uuid}`, () => {
       const m = new MeshStandardMaterial({
         color: 0xdcdcd4,
         map: tex,
@@ -166,6 +166,9 @@ export class DayLib {
       });
       return m;
     });
+    // UUID is an in-memory cache key, never a serialized authoring identity.
+    material.name = "roadtext";
+    return material;
   }
 
   ground(): MeshStandardMaterial {

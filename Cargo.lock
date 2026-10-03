@@ -400,9 +400,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "pocket-atlas-model"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "pocket-psp-ge"
+version = "0.1.0"
+
+[[package]]
 name = "pocket3d-place"
 version = "0.1.0"
 dependencies = [
+ "pocket-atlas-model",
  "serde",
  "serde_json",
 ]
@@ -418,6 +431,8 @@ dependencies = [
  "half",
  "image",
  "meshopt",
+ "pocket-atlas-model",
+ "pocket-psp-ge",
  "pocket3d-place",
  "pocket3d-place-psp",
  "rayon",

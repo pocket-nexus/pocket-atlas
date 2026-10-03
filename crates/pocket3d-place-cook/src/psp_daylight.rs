@@ -1,7 +1,7 @@
 //! Shared fixed-function daylight: authored sky/grade baked into one panorama,
 //! directional diffuse light baked at vertices, static world-space shadows.
 use glam::{Mat4, Quat, Vec3};
-use pocket3d_place as pc;
+use pocket_atlas_model as pc;
 use pocket3d_place_psp as pp;
 
 pub(super) fn enabled(kind: &str) -> bool {
@@ -25,15 +25,14 @@ pub(super) fn graded(c: Vec3, alpha: f32, post: &pc::Post) -> u32 {
 
 /// Dynamic objects keep a first-frame light bake. Transform their normals
 /// with the inverse transpose, including nonuniformly scaled parent nodes.
-pub(super) fn world_matrices(m: &pc::Meta, anim: &[u8]) -> Vec<Mat4> {
+pub(super) fn world_matrices(m: &crate::source::Scene) -> Vec<Mat4> {
     let mut world = Vec::with_capacity(m.nodes.len());
     for n in &m.nodes {
-        let (translation, rotation) = if let Some(track) = &n.track {
-            let at = track.offset as usize;
+        let (translation, rotation) = if let Some(track) = n.track.as_ref().and_then(|t| t.first()) {
             (
-                Vec3::from_array(core::array::from_fn(|i| super::float(anim, at + i * 4))),
+                Vec3::from_array(core::array::from_fn(|i| track[i])),
                 Quat::from_array(core::array::from_fn(|i| {
-                    super::float(anim, at + 12 + i * 4)
+                    track[3 + i]
                 }))
                 .normalize(),
             )
@@ -84,8 +83,7 @@ fn sky_sample(sky: &pc::DaySky, d: Vec3, clouds: Option<&crate::textures::Rgba>)
 }
 
 pub(super) fn sky(
-    m: &pc::Meta,
-    tex: &[u8],
+    m: &crate::source::Scene,
     w: &mut super::Writer,
     textures: &mut Vec<pp::Texture>,
 ) -> (pp::Span, u32) {
@@ -94,7 +92,7 @@ pub(super) fn sky(
     };
     let clouds = sky
         .clouds
-        .map(|i| crate::pica::decode(&m.textures[i as usize], tex));
+        .map(|i| m.textures[i as usize].image());
     // Smooth gradients use native RGBA8888. Ordered 4-bit dither becomes a
     // visible world-locked checkerboard when a panorama texel spans the screen.
     // Other textures keep their independent compact encoding.

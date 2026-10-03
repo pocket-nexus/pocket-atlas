@@ -1,4 +1,5 @@
 #include "scene.h"
+#include <pocket_pica.h>
 #include "devserver.h"
 #include "navigation.h"
 #include "scene_shbin.h"
@@ -9,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <mbedtls/sha256.h>
 AtlasStats atlas = {.reflection = true,
                     .rain = true,
                     .haze = true,
@@ -181,7 +183,7 @@ static bool make_effect_textures(void) {
   C3D_TexFlush(&glow);
   return true;
 }
-bool scene_load(const char *path, char *error, size_t capacity) {
+bool scene_load(const char *path, const char *expected_sha256, char *error, size_t capacity) {
   // Call only once the previous GPU frame has retired: resources may still
   // be referenced by its command list. Choices deliberately survive unload.
   scene_free();
@@ -190,6 +192,24 @@ bool scene_load(const char *path, char *error, size_t capacity) {
     snprintf(error, capacity, "cannot open %s", path);
     return false;
   }
+  // Verify the opened content-addressed asset, not just its filename and size.
+  mbedtls_sha256_context hash;
+  mbedtls_sha256_init(&hash);
+  bool valid = mbedtls_sha256_starts_ret(&hash, 0) == 0;
+  unsigned char buffer[4096], digest[32];
+  size_t n;
+  while (valid && (n = fread(buffer, 1, sizeof buffer, file)) != 0)
+    valid = mbedtls_sha256_update_ret(&hash, buffer, n) == 0;
+  valid = valid && !ferror(file) && mbedtls_sha256_finish_ret(&hash, digest) == 0;
+  mbedtls_sha256_free(&hash);
+  char actual[65];
+  if (valid) for (unsigned i = 0; i < 32; i++) snprintf(actual + i * 2, 3, "%02x", digest[i]);
+  if (!valid || !expected_sha256 || strcmp(actual, expected_sha256)) {
+    snprintf(error, capacity, "place SHA-256 mismatch");
+    fclose(file);
+    return false;
+  }
+  rewind(file);
   uint32_t header[4], sect[5][4];
   long length;
   fseek(file, 0, SEEK_END);
@@ -349,11 +369,8 @@ bool scene_load(const char *path, char *error, size_t capacity) {
         (t->format != 0 && t->format != 3 && t->format != 4) ||
         !range(t->offset, t->bytes, ts))
       goto invalid;
-    C3D_TexInitParams params = {t->width,  t->height,  t->levels - 1,
-                                t->format, GPU_TEX_2D, false};
-    if (!C3D_TexInitWithParams(&textures[i], NULL, params) ||
-        C3D_TexCalcTotalSize(textures[i].size, textures[i].maxLevel) !=
-            t->bytes ||
+    if (!pocket_pica_texture_init(&textures[i], t->width, t->height, t->levels,
+                                  t->format, t->bytes) ||
         !read_at(file, to + t->offset, textures[i].data, t->bytes))
       goto invalid;
     GPU_TEXTURE_WRAP_PARAM wrap[] = {GPU_REPEAT, GPU_CLAMP_TO_EDGE,
@@ -361,7 +378,8 @@ bool scene_load(const char *path, char *error, size_t capacity) {
     C3D_TexSetWrap(&textures[i], wrap[t->wrap_s % 3], wrap[t->wrap_t % 3]);
     C3D_TexSetFilter(&textures[i], GPU_LINEAR, GPU_LINEAR);
     C3D_TexSetFilterMipmap(&textures[i], GPU_LINEAR);
-    C3D_TexFlush(&textures[i]);
+    if (!pocket_pica_texture_publish(&textures[i], t->bytes))
+      goto invalid;
     if (i % 8 == 0)
       devserver_poll();
   }
@@ -1530,7 +1548,7 @@ void scene_free(void) {
   if (head && textures) {
     for (unsigned i = 0; i < head->textures; i++)
       if (textures[i].data)
-        C3D_TexDelete(&textures[i]);
+        pocket_pica_texture_destroy(&textures[i]);
   }
   if (head && skin_vertices) {
     for (unsigned i = 0; i < head->draws; i++)

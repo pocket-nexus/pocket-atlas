@@ -4,13 +4,14 @@ DEVKITARM ?= $(DEVKITPRO)/devkitARM
 CC := $(DEVKITARM)/bin/arm-none-eabi-gcc
 BUILD := /atlas/.pocket-build/3ds/build
 SOURCE := /atlas/n3ds/src
+PICA_KERNEL := /atlas/vendor/pocketjs/devices/3ds/pocket-3ds-pica/include
 POCKET := /atlas/vendor/pocketjs/hosts/3ds
 OUT := /atlas/dist/3ds/pocket-atlas.3dsx
 ROMFS := /atlas/.pocket-build/3ds/romfs
 ARCH := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 CFLAGS := -O3 -g -Wall -Wextra -std=gnu11 -ffunction-sections -fdata-sections -mword-relocations $(ARCH) \
   -D__3DS__ -DPOCKETJS_RUNTIME_SLOT='"pocket-atlas"' \
-  -include $(BUILD)/config.h -I$(SOURCE) -I$(BUILD) -I$(POCKET)/src -I$(POCKET)/include -I$(DEVKITPRO)/libctru/include
+  -include $(BUILD)/config.h -I$(PICA_KERNEL) -I$(SOURCE) -I$(BUILD) -I$(POCKET)/src -I$(POCKET)/include -I$(DEVKITPRO)/libctru/include -I$(DEVKITPRO)/portlibs/3ds/include
 LDFLAGS := -specs=3dsx.specs $(ARCH) -Wl,--gc-sections -Wl,-Map,$(BUILD)/atlas.map
 OBJECTS := $(addprefix $(BUILD)/,main.o scene.o browser.o settings.o assets.o frame_guard.o scene_shbin.o wet_shbin.o water_shbin.o browser_shbin.o devserver.o dev_protocol.o native.o hbldr.o soc.o)
 .PHONY: all
@@ -23,12 +24,12 @@ $(BUILD)/%_shbin.s $(BUILD)/%_shbin.h &: $(BUILD)/%.shbin
 	cd $(BUILD) && $(DEVKITPRO)/tools/bin/bin2s -a 4 -H $*_shbin.h $*.shbin > $*_shbin.s
 $(BUILD)/%_shbin.o: $(BUILD)/%_shbin.s
 	$(CC) $(ARCH) -c $< -o $@
-$(addprefix $(BUILD)/,main.o scene.o browser.o settings.o assets.o frame_guard.o): $(BUILD)/%.o: $(SOURCE)/%.c $(wildcard $(SOURCE)/*.h) $(BUILD)/config.h $(BUILD)/scene_shbin.h $(BUILD)/wet_shbin.h $(BUILD)/water_shbin.h $(BUILD)/browser_shbin.h | $(BUILD)
+$(addprefix $(BUILD)/,main.o scene.o browser.o settings.o assets.o frame_guard.o): $(BUILD)/%.o: $(SOURCE)/%.c $(wildcard $(SOURCE)/*.h) $(wildcard $(PICA_KERNEL)/*.h) $(BUILD)/config.h $(BUILD)/scene_shbin.h $(BUILD)/wet_shbin.h $(BUILD)/water_shbin.h $(BUILD)/browser_shbin.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 $(addprefix $(BUILD)/,devserver.o dev_protocol.o native.o hbldr.o soc.o): $(BUILD)/%.o: $(POCKET)/src/%.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 $(BUILD)/atlas.elf: $(OBJECTS)
-	$(CC) $(LDFLAGS) $^ -L$(DEVKITPRO)/libctru/lib -lcitro3d -lctru -lm -o $@
+	$(CC) $(LDFLAGS) $^ -L$(DEVKITPRO)/libctru/lib -L$(DEVKITPRO)/portlibs/3ds/lib -lcitro3d -lmbedcrypto -lctru -lm -o $@
 $(BUILD)/atlas.smdh: $(POCKET)/icon.png | $(BUILD)
 	$(DEVKITPRO)/tools/bin/smdhtool --create 'Pocket Atlas' 'A globe of places' 'Pocket Nexus' $< $@
 $(OUT): $(BUILD)/atlas.elf $(BUILD)/atlas.smdh $(ROMFS)/manifest.json

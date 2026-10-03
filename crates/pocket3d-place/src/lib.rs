@@ -19,7 +19,7 @@
 //! the same container with magic "ATLS".
 
 pub mod atlas;
-pub mod color;
+pub use pocket_atlas_model::color;
 pub mod meta;
 
 pub use meta::*;

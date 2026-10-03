@@ -254,3 +254,10 @@ Radio Kaikan at Blue Hour holds 30.0 fps at step 0 in every shot with the camera
 ## License
 
 MIT
+
+## Creator toolchain
+
+See [Authoring a place](docs/AUTHORING.md) for `defineDayPlace`, the compatible
+`createStage` adapter, unified export/IR/recipe commands, reproducibility limits
+and identity-bound device evidence. Start from the typechecked
+[daytime template](web/examples/day-place.ts); keep scene-family changes in Atlas.

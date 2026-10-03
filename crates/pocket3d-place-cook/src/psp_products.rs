@@ -2,7 +2,7 @@
 //! bakes the Products material, not a photograph of a scene or camera shot:
 //! cards remain world geometry and work from the free camera and mirror.
 use super::psp::{color, swizzle, Writer};
-use pocket3d_place as pc;
+use crate::source as pc;
 use pocket3d_place_psp as pp;
 use std::collections::BTreeMap;
 
@@ -15,27 +15,15 @@ pub fn cook(
     materials: &mut Vec<pp::Material>,
     draws: &mut Vec<pp::Draw>,
 ) {
-    let meta = &scene.meta;
-    let geom = scene.geometry();
-    let tex = scene.textures();
-    let ids = &draw
-        .lods
-        .last()
-        .map(|l| &l.indices)
-        .unwrap_or(&draw.indices);
+    let meta = scene;
+    let ids = draw.lods().last().map(|l| l.indices.as_slice()).unwrap_or(draw.indices());
     let mut planes: BTreeMap<(usize, i32), Vec<([f32; 3], [f32; 3], [u8; 4])>> = BTreeMap::new();
     // A product_card has four triangles, front and back. Each side's two
     // triangles share the same normal; process only its positive side.
     let mut cards: BTreeMap<(usize, i32, [i32; 4]), ([f32; 3], [f32; 3], [u8; 4])> =
         BTreeMap::new();
-    for tri in geom[ids.offset as usize..(ids.offset + ids.size) as usize].chunks_exact(6) {
-        let verts: Vec<&crate::geometry::Vertex> = tri
-            .chunks_exact(2)
-            .map(|b| {
-                let i = u16::from_le_bytes(b.try_into().unwrap()) as usize;
-                scene.vertex(draw, i)
-            })
-            .collect();
+    for tri in ids.chunks_exact(3) {
+        let verts: Vec<&crate::geometry::Vertex> = tri.iter().map(|&i| scene.vertex(draw, i as usize)).collect();
         let axis = if verts[0].normal.x.abs() > verts[0].normal.z.abs() {
             0
         } else {
@@ -63,18 +51,7 @@ pub fn cook(
         planes.entry((axis, plane)).or_default().push(card);
     }
     let t = &meta.textures[mat.albedo.unwrap() as usize];
-    let mut art = vec![0u8; (t.width * t.height * 4) as usize];
-    let src = &tex[t.data.offset as usize..(t.data.offset + t.data.size) as usize];
-    match t.format {
-        pc::TexFormat::Bc1 => {
-            texpresso::Format::Bc1.decompress(src, t.width as usize, t.height as usize, &mut art)
-        }
-        pc::TexFormat::Bc3 => {
-            texpresso::Format::Bc3.decompress(src, t.width as usize, t.height as usize, &mut art)
-        }
-        pc::TexFormat::Rgba8 => art.copy_from_slice(&src[..(t.width * t.height * 4) as usize]),
-        _ => panic!("product art format"),
-    }
+    let art = t.rgba8();
     let ph = |n: f32| {
         let v = (n * 12.9898).sin() * 43758.5453;
         v - v.floor()

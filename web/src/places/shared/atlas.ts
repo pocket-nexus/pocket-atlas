@@ -1,3 +1,4 @@
+import { textureUsage, type TextureUsage } from "./texture-usage";
 import { BufferAttribute, type BufferGeometry, type CanvasTexture } from "three";
 import { canvas, toTexture, type Ctx } from "./canvas";
 
@@ -131,6 +132,8 @@ export function extrudeEdges(g: Ctx, x: number, y: number, w: number, h: number,
 }
 
 export interface AtlasOptions {
+  /** Declare lettering or surface data independently of atlas resolution. */
+  usage?: TextureUsage;
   /** "shelf" (default) or "skyline" (mixed sizes, many signs). */
   packer?: "shelf" | "skyline";
   /** Border around every cell (pixels), filled by edge extrusion. Default 16. */
@@ -169,6 +172,7 @@ export class Atlas {
     }
     this.texture = toTexture(c);
     this.texture.flipY = true;
+    if (opts.usage) textureUsage(this.texture, opts.usage);
   }
 
   /** Share of the canvas area taken by cells and their borders. */

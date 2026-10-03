@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "id": "old3ds30",
+  "revision": 1,
+  "target": "3ds",
+  "host": {
+    "os": "horizon",
+    "abi": "armv6k-eabihf"
+  },
+  "gpu": "pica200",
+  "presentation": {
+    "targetFps": 30,
+    "renderWidth": 400,
+    "renderHeight": 240,
+    "displayWidth": 400,
+    "displayHeight": 240,
+    "auxiliary": [
+      320,
+      240
+    ]
+  },
+  "recipe": {
+    "revision": 1,
+    "textureCap": 256,
+    "detailTextureCap": 1024,
+    "emissiveTextureCap": 1024,
+    "animationPaletteBytes": 10485760,
+    "maxMeshVertices": 65535,
+    "maxFieldPoints": 16384
+  },
+  "budgets": {
+    "maxPackBytes": null,
+    "sections": {
+      "PICA": 4194304,
+      "TEXD": 12582912,
+      "GEOM": 25165824,
+      "ANIM": 16777216
+    }
+  },
+  "disabledFeatures": []
+}

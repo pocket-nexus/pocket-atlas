@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "psp30",
+  "revision": 2,
+  "target": "psp",
+  "host": {
+    "os": "psp",
+    "abi": "mipsel-eabi"
+  },
+  "gpu": "ge",
+  "presentation": {
+    "targetFps": 30,
+    "renderWidth": 480,
+    "renderHeight": 272,
+    "displayWidth": 480,
+    "displayHeight": 272,
+    "auxiliary": null
+  },
+  "recipe": {
+    "revision": 1,
+    "textureCap": 128,
+    "daylightTextureCap": 256,
+    "detailTextureCap": 512,
+    "emissiveTextureCap": 512,
+    "animationPaletteBytes": 10485760,
+    "maxMeshVertices": 65535,
+    "maxFieldPoints": 16384
+  },
+  "budgets": {
+    "maxPackBytes": 18874368,
+    "sections": {}
+  },
+  "disabledFeatures": []
+}

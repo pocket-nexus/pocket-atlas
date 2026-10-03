@@ -3,7 +3,7 @@
 
 use super::Prim;
 use glam::{Mat3, Mat4, Vec2};
-use pocket3d_place as pc;
+use pocket_atlas_model as pc;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 fn eligible(m: &pc::Material) -> bool {
