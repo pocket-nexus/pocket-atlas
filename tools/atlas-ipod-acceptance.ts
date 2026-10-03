@@ -1,8 +1,10 @@
+import { readIPodMetadata } from "./atlas-ipod-pack";
 /** Physical-device camera sweep. Only render-worker presentation windows
  * establish cadence; UIKit callbacks and capture I/O are separate evidence. */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { PLACES } from "../web/src/places/registry";
+import { selectIPodPlaces } from "./atlas-ipod-catalog";
 
 const root = resolve(import.meta.dir, "..");
 const requiredSamples = 120;
@@ -38,7 +40,7 @@ type Status = {
   renderWidth: number;
   renderHeight: number;
 };
-type Expected = { buildId: string; place: string; shot: number; quality: number; profile: boolean; camera: number[]; nonce?: string; memoryWarningBatches: number };
+type Expected = { renderWidth: number; buildId: string; place: string; shot: number; quality: number; profile: boolean; camera: number[]; nonce?: string; memoryWarningBatches: number };
 
 export function parseOptions(args: string[]) {
   const option = (name: string, fallback: string) => {
@@ -77,6 +79,8 @@ export function validateState(state: Status, expected: Expected) {
   if (!Array.isArray(state.camera) || state.camera.length !== 3 ||
       expected.camera.some((value, index) => !Number.isFinite(state.camera[index]) || Math.abs(value - state.camera[index]) > .002))
     throw new Error("Acknowledged camera does not match the authored shot midpoint");
+  if (state.renderWidth !== expected.renderWidth || state.renderHeight !== Math.floor(expected.renderWidth * 2 / 3))
+    throw new Error("Internal scene resolution changed during acceptance");
   const timing = state.frameTiming;
   if (!timing || timing.source !== "render-worker-present" || timing.windowCapacity < requiredSamples ||
       !Number.isInteger(timing.presentedFrames) || !Number.isInteger(timing.excludedFrames) ||
@@ -172,13 +176,7 @@ async function command(...args: string[]): Promise<string> {
 }
 
 function meta(id: string) {
-  const bytes = readFileSync(join(root, ".pocket-build/ipod/assets", id + ".place"));
-  for (let i = 0; i < bytes.readUInt32LE(8); i++) {
-    const at = 16 + i * 16;
-    if (bytes.toString("ascii", at, at + 4) === "META")
-      return JSON.parse(bytes.toString("utf8", bytes.readUInt32LE(at + 4), bytes.readUInt32LE(at + 4) + bytes.readUInt32LE(at + 8)));
-  }
-  throw new Error(`${id}: META missing`);
+  return readIPodMetadata(join(root, ".pocket-build/ipod/assets", id + ".place"));
 }
 
 /** Place the quiet interval after USB identity/installer queries. A complete
@@ -192,8 +190,8 @@ export function nextQuietSampleDelayMs(before: Timing, after: Timing, remainingM
 
 async function main() {
   const options = parseOptions(Bun.argv.slice(2));
-  const places = PLACES.filter((place) => place.status === "live" && place.load && (!options.selected || place.id === options.selected));
-  if (!places.length) throw new Error("No matching live places");
+  const places = selectIPodPlaces(PLACES, options.selected);
+  if (!places.length) throw new Error("No matching iPod release places");
   const scenes = places.map((place) => ({ place, shots: meta(place.id).camera.shots }));
   const expectedShots = scenes.reduce((count, scene) => count + scene.shots.length, 0);
   const receipt = JSON.parse(readFileSync(join(root, ".pocket-build/ipod/Payload/PocketAtlas.app/build-receipt.json"), "utf8"));
@@ -229,6 +227,7 @@ async function main() {
       try {
         const expected: Expected = {
           buildId: receipt.buildId, place: place.id, shot, quality: options.quality, profile: options.profile,
+          renderWidth: options.width || (options.quality === 1 ? 960 : 480),
           memoryWarningBatches: baseline.memoryWarningBatches,
           camera: shots[shot].from.pos.map((value: number, index: number) => (value + shots[shot].to.pos[index]) / 2),
         };

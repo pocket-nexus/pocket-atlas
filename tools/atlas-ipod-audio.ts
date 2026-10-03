@@ -15,7 +15,9 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
+import { readIPodMetadata } from "./atlas-ipod-pack";
 import { PLACES } from "../web/src/places/registry";
+import { selectIPodPlaces } from "./atlas-ipod-catalog";
 
 const root = resolve(import.meta.dir, "..");
 const work = join(root, ".pocket-build/validation/ipod/audio");
@@ -24,36 +26,14 @@ const args = Bun.argv.slice(2);
 const selected = args.includes("--place")
   ? args[args.indexOf("--place") + 1]
   : undefined;
-const places = PLACES.filter(
-  (place) =>
-    place.status === "live" &&
-    place.load &&
-    (!selected || place.id === selected),
-);
+const places = selectIPodPlaces(PLACES, selected);
 if (!places.length)
-  throw new Error(`No live place matched ${selected ?? "the catalog"}`);
+  throw new Error(`No iPod release place matched ${selected ?? "the catalog"}`);
 mkdirSync(work, { recursive: true });
 mkdirSync(assets, { recursive: true });
 
 function metadata(id: string) {
-  const bytes = readFileSync(
-    join(root, `.pocket-build/places/${id}/${id}.place`),
-  );
-  if (bytes.toString("ascii", 0, 4) !== "PLCE")
-    throw new Error(`${id}: not a place pack`);
-  const count = bytes.readUInt32LE(8);
-  for (let i = 0; i < count; ++i) {
-    const at = 16 + i * 16;
-    if (bytes.toString("ascii", at, at + 4) !== "META") continue;
-    return JSON.parse(
-      bytes.toString(
-        "utf8",
-        bytes.readUInt32LE(at + 4),
-        bytes.readUInt32LE(at + 4) + bytes.readUInt32LE(at + 8),
-      ),
-    );
-  }
-  throw new Error(`${id}: no metadata`);
+  return readIPodMetadata(join(assets, `${id}.place`));
 }
 
 function run(command: string[]) {

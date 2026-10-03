@@ -1,7 +1,7 @@
 //! Optional connected-part LOD groups and lossless visibility clusters.
-//! The original PLCE, attributes, full geometry and every LOD remain untouched.
+//! The original PLIP, attributes, full geometry and every LOD remain untouched.
 use pocket3d_place as pc;
-use std::{collections::BTreeMap, path::Path};
+use std::collections::BTreeMap;
 type Result<T> = std::result::Result<T, String>;
 const CELL: f64 = 16.0;
 const PART_CELL: f64 = 4.0;
@@ -71,14 +71,14 @@ struct Group {
     levels: Vec<BTreeMap<[i64; 3], Cluster>>,
 }
 fn groups(d: &pc::Draw, geometry: &[u8]) -> Result<Vec<Group>> {
-    let roots = pc::parts::components(d, geometry)?;
+    let roots = pc::ipod::components(d, geometry)?;
     let mut parts = BTreeMap::<u32, Bounds>::new();
     for (i, &r) in roots.iter().enumerate() {
         if r != u32::MAX {
             parts
                 .entry(r)
                 .or_insert_with(Bounds::new)
-                .point(pc::parts::position(d, geometry, i as u16)?);
+                .point(pc::ipod::position(d, geometry, i as u16)?);
         }
     }
     let mut bins = BTreeMap::<[i64; 3], Group>::new();
@@ -112,9 +112,9 @@ fn groups(d: &pc::Draw, geometry: &[u8]) -> Result<Vec<Group>> {
                 return Err("LOD triangle crosses full connected components".into());
             }
             let positions = [
-                pc::parts::position(d, geometry, ids[0])?,
-                pc::parts::position(d, geometry, ids[1])?,
-                pc::parts::position(d, geometry, ids[2])?,
+                pc::ipod::position(d, geometry, ids[0])?,
+                pc::ipod::position(d, geometry, ids[1])?,
+                pc::ipod::position(d, geometry, ids[2])?,
             ];
             let cell = core::array::from_fn(|k| {
                 ((positions[0][k] as f64 + positions[1][k] as f64 + positions[2][k] as f64)
@@ -136,7 +136,7 @@ fn groups(d: &pc::Draw, geometry: &[u8]) -> Result<Vec<Group>> {
     Ok(bins.into_values().collect())
 }
 pub(super) fn adapt(source: &[u8]) -> Result<Vec<u8>> {
-    let pack = pc::Pack::parse(source).map_err(|e| e.to_string())?;
+    let pack = pc::ipod::parse(source).map_err(|e| e.to_string())?;
     let meta_bytes = pack.section(pc::TAG_META).map_err(|e| e.to_string())?;
     let meta = pack.meta().map_err(|e| e.to_string())?;
     let geometry = pack.section(pc::TAG_GEOMETRY).map_err(|e| e.to_string())?;
@@ -209,12 +209,6 @@ pub(super) fn adapt(source: &[u8]) -> Result<Vec<u8>> {
     }
     Ok(out)
 }
-pub(super) fn write(source: &[u8], path: &Path) -> Result<()> {
-    let bytes = adapt(source)?;
-    std::fs::write(path.with_extension("ipod-clusters.bin"), &bytes).map_err(|e| e.to_string())?;
-    println!("  4 m connected-part LOD groups / 16 m clusters: {:.2} MiB CPU sidecar (original geometry/LODs retained)", bytes.len() as f64 / 1048576.);
-    Ok(())
-}
 
 #[cfg(test)]
 #[path = "../../../ipod/src/mesh_clusters.rs"]
@@ -223,22 +217,33 @@ mod runtime;
 mod tests {
     use super::*;
     fn fixture() -> (pc::Meta, Vec<u8>) {
-        let (mut m, _, g) = super::super::gles_geometry::tests::fixture();
+        let (mut m, _, mut g) = super::super::gles_geometry::tests::fixture();
         for d in &mut m.draws {
-            d.pos_scale[0] = 32.;
+            for v in
+                g[d.vertices.offset as usize..][..d.vertices.size as usize].chunks_exact_mut(56)
+            {
+                let x = f32::from_le_bytes(v[..4].try_into().unwrap()) * 32.;
+                v[..4].copy_from_slice(&x.to_le_bytes());
+            }
             d.min[0] -= 32.;
             d.max[0] += 32.;
         }
         (m, g)
     }
     fn source(m: &pc::Meta, g: &[u8]) -> Vec<u8> {
-        pc::write(&[
-            (pc::TAG_META, &serde_json::to_vec(m).unwrap(), 16),
-            (pc::TAG_GEOMETRY, g, 16),
-        ])
+        pc::write_versioned(
+            pc::ipod::MAGIC,
+            pc::ipod::VERSION,
+            &[
+                (pc::TAG_META, &serde_json::to_vec(m).unwrap(), 16),
+                (pc::TAG_GEOMETRY, g, 16),
+                (pc::TAG_TEXTURES, &[], 16),
+                (pc::TAG_ANIMATION, &[], 16),
+            ],
+        )
     }
     fn read(bytes: &[u8], source: &[u8]) -> Result<runtime::MeshClusters> {
-        let p = pc::Pack::parse(source).unwrap();
+        let p = pc::ipod::parse(source).unwrap();
         runtime::MeshClusters::parse(
             bytes,
             &p.meta().unwrap(),
@@ -288,9 +293,9 @@ mod tests {
         d.vertex_count = 8;
         d.vertices = pc::Range {
             offset: 0,
-            size: 8 * 28,
+            size: 8 * 56,
         };
-        let mut g = vec![0; 8 * 28];
+        let mut g = vec![0; 8 * 56];
         for (i, p) in [
             [-8.0, 0.0],
             [-7.0, 0.0],
@@ -305,8 +310,7 @@ mod tests {
         .enumerate()
         {
             for k in 0..2 {
-                g[i * 28 + k * 2..i * 28 + k * 2 + 2]
-                    .copy_from_slice(&((p[k] / d.pos_scale[k] * 32767.0) as i16).to_le_bytes());
+                g[i * 56 + k * 4..i * 56 + k * 4 + 4].copy_from_slice(&(p[k] as f32).to_le_bytes());
             }
         }
         d.indices = pc::Range {
@@ -414,15 +418,15 @@ mod tests {
         let (mut m, mut g) = separate_parts();
         // Join the independent faces through one exact position seam while
         // retaining their separate UV/color vertex identities.
-        let pos = g[..6].to_vec();
-        g[4 * 28..4 * 28 + 6].copy_from_slice(&pos);
+        let pos = g[..12].to_vec();
+        g[4 * 56..4 * 56 + 12].copy_from_slice(&pos);
         let d = &m.draws[0];
-        let roots = pc::parts::components(d, &g).unwrap();
+        let roots = pc::ipod::components(d, &g).unwrap();
         assert!(roots.iter().all(|r| *r == roots[0]));
         // A large shared page may include vertices unused by this draw.
         m.draws[0].index_count = 6;
         m.draws[0].indices.size = 12;
-        let roots = pc::parts::components(&m.draws[0], &g).unwrap();
+        let roots = pc::ipod::components(&m.draws[0], &g).unwrap();
         assert!(roots[..4].iter().all(|r| *r != u32::MAX));
         assert!(roots[4..].iter().all(|r| *r == u32::MAX));
     }
@@ -500,7 +504,7 @@ mod tests {
             assert_eq!(count, n as usize);
         }
         assert_eq!(
-            pc::Pack::parse(&src)
+            pc::ipod::parse(&src)
                 .unwrap()
                 .section(pc::TAG_GEOMETRY)
                 .unwrap(),

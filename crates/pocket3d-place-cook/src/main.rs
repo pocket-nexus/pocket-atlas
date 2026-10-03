@@ -40,6 +40,7 @@ struct Args {
     cell: f32,
     tex_cap: u32,
     target: ir::Target,
+    ipod_pvrtctool: Option<PathBuf>,
 }
 
 fn fail(message: impl std::fmt::Display) -> ! {
@@ -50,9 +51,12 @@ fn fail(message: impl std::fmt::Display) -> ! {
 fn args() -> Args {
     let a: Vec<String> = std::env::args().collect();
     let get = |k: &str| a.iter().position(|x| x == k).and_then(|i| a.get(i + 1)).cloned();
+    if a.iter().any(|s| s == "--ipod-pvrtctool") && get("--ipod-pvrtctool").is_none_or(|s| s.is_empty() || s.starts_with("--")) {
+        fail("--ipod-pvrtctool requires an explicit executable path");
+    }
     let input = PathBuf::from(get("--in").unwrap_or_else(|| ".pocket-build/places/tokyo-konbini".into()));
     if a.iter().any(|v| v == "--pica-from") || a.get(1).is_some_and(|v| v == "psp") {
-        fail("device packs are no longer compiler inputs; use --in <PlaceIR or web export directory> --target <vita|3ds|psp>");
+        fail("device packs are no longer compiler inputs; use --in <PlaceIR or web export directory> --target <vita|3ds|psp|ipod>");
     }
     let output = get("--out").map(PathBuf::from).unwrap_or_else(|| {
         if a.get(1).is_some_and(|v| v == "import") { input.join("place.ir") }
@@ -64,6 +68,7 @@ fn args() -> Args {
         output,
         cell: get("--cell").and_then(|v| v.parse().ok()).unwrap_or(32.0),
         tex_cap: get("--tex").and_then(|v| v.parse().ok()).unwrap_or(1024),
+        ipod_pvrtctool: get("--ipod-pvrtctool").map(PathBuf::from),
     }
 }
 
@@ -144,6 +149,7 @@ struct Blobs {
     anim: Vec<u8>,
     // Float vertices for native target lowering; never serialized as a Vita pack.
     meshes: Vec<Vec<Vertex>>,
+    texture_policy: HashMap<u32, source::TexturePolicy>,
 }
 
 impl Blobs {
@@ -169,7 +175,7 @@ struct Cook<'a> {
     target: ir::Target,
     blobs: Blobs,
     textures: Vec<pc::Texture>,
-    tex_keys: HashMap<(usize, u8, bool, (u32, u32)), u32>,
+    tex_keys: HashMap<(usize, u8, bool, (u32, u32), (u32, u32)), u32>,
     materials: Vec<pc::Material>,
     mat_keys: HashMap<usize, u32>,
     material_names: HashMap<String, u32>,
@@ -185,8 +191,11 @@ impl<'a> Cook<'a> {
     /// `cells`: a flipbook's (columns, rows), (1, 1) otherwise.
     fn texture(&mut self, tex: gltf::Texture, role: pc::TexRole, alpha_wanted: bool, cap: u32, cells: (u32, u32)) -> u32 {
         let image = tex.source().index();
-        // A flipbook keeps a shorter mip chain than the same image elsewhere.
-        let key = (image, role as u8, alpha_wanted, cells);
+        let sampler = tex.sampler();
+        // A flipbook has a shorter mip chain; wrapping is texture state too.
+        // Use the resolved modes so equivalent explicit/default samplers alias.
+        let wraps = (sampler.wrap_s().as_gl_enum(), sampler.wrap_t().as_gl_enum());
+        let key = (image, role as u8, alpha_wanted, cells, wraps);
         if let Some(&i) = self.tex_keys.get(&key) {
             return i;
         }
@@ -218,7 +227,6 @@ impl<'a> Cook<'a> {
             gltf::texture::WrappingMode::ClampToEdge => pc::Wrap::Clamp,
             gltf::texture::WrappingMode::MirroredRepeat => pc::Wrap::Mirror,
         };
-        let sampler = tex.sampler();
         let name = img_name(self.doc, image);
         self.log.push(format!("texture {name} {:?} {}x{} → {:?} {}x{} ×{} ({} KiB)", role, img.width, img.height, enc.format, enc.width, enc.height, enc.mips, enc.data.len() / 1024));
         self.textures.push(pc::Texture {
@@ -236,6 +244,7 @@ impl<'a> Cook<'a> {
             lod_bias: 0.0,
         });
         let i = (self.textures.len() - 1) as u32;
+        self.blobs.texture_policy.insert(i, source::TexturePolicy { cells, max_mips: 32 });
         self.tex_keys.insert(key, i);
         i
     }
@@ -614,18 +623,7 @@ fn push_draw(b: geometry::Built, material: u32, layout: pc::VertexLayout, node: 
 
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("gles") {
-        let argv: Vec<String> = std::env::args().collect();
-        let get = |k: &str| argv.iter().position(|x| x == k).and_then(|i| argv.get(i + 1));
-        let input = std::path::Path::new(get("--in").expect("gles --in PATH"));
-        let output = std::path::Path::new(get("--out").expect("gles --out PATH"));
-        let cap = get("--tex").and_then(|s| s.parse().ok()).unwrap_or(1024);
-        if let Some(profile) = get("--geometry") {
-            let profile = gles::GeometryProfile::parse(profile).unwrap_or_else(|e| panic!("{e}"));
-            gles::cook_with_profile(input, output, cap, profile);
-        } else {
-            gles::cook(input, output, cap);
-        }
-        return;
+        fail("device packs are no longer compiler inputs; use --in <PlaceIR or web export directory> --target ipod");
     }
 
     let cli: Vec<String> = std::env::args().collect();
@@ -652,10 +650,13 @@ fn main() {
         return;
     }
     let mut a = args();
+    if a.ipod_pvrtctool.is_some() && a.target != ir::Target::Ipod {
+        fail("--ipod-pvrtctool is only valid for --target ipod");
+    }
     let (root, manifest) = ir::prepare(&a.input).unwrap_or_else(|e| fail(e));
     manifest.check_target(a.target).unwrap_or_else(|e| fail(e));
     if !std::env::args().any(|v| v == "--out") {
-        let suffix = match a.target { ir::Target::Vita => "", ir::Target::Pica => ".3ds", ir::Target::Psp => ".psp" };
+        let suffix = match a.target { ir::Target::Vita => "", ir::Target::Pica => ".3ds", ir::Target::Psp => ".psp", ir::Target::Ipod => ".ipod" };
         a.output = a.input.join(format!("{}{suffix}.place", manifest.name));
     }
     std::fs::create_dir_all(a.output.parent().unwrap_or(std::path::Path::new("."))).expect("output directory");
@@ -1295,7 +1296,12 @@ fn main() {
         let drop_parts = locks.is_some() && m.kind == pc::Kind::Standard && m.emissive.iter().all(|&e| e <= 0.0) && m.emission.is_none();
         for (v, t) in geometry::split(verts, tris) {
             let locked: Vec<bool> = v.iter().map(|v| locks.is_some_and(|l| l.contains(&geometry::pos_bits(v.pos)))).collect();
-            let b = geometry::build(&v, &t, layout, geometry::lods(&v, &t, &locked, drop_parts, bounds), a.target == ir::Target::Vita);
+            let lods = if a.target == ir::Target::Ipod && node.is_none() && skin.is_none() {
+                gles::source_lods(&v, &t, &locked, drop_parts, bounds)
+            } else {
+                geometry::lods(&v, &t, &locked, drop_parts, bounds)
+            };
+            let b = geometry::build(&v, &t, layout, lods, a.target == ir::Target::Vita);
             push_draw(b, material, layout, node, skin, no_reflect, blobs, draws);
         }
     };
@@ -1546,6 +1552,7 @@ fn main() {
                 data: img.px.iter().flat_map(|p| p.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)).collect() }
         };
         let data = Blobs::push(&mut cook.blobs.tex, &enc.data, 4096);
+        cook.blobs.texture_policy.insert(cook.textures.len() as u32, source::TexturePolicy { cells: (1, 1), max_mips: mips });
         cook.log.push(format!("effect {name} {:?} {}x{} ×{} ({} KiB)", enc.format, enc.width, enc.height, enc.mips, enc.data.len() / 1024));
         cook.textures.push(pc::Texture {
             name: name.into(),
@@ -1627,7 +1634,10 @@ fn main() {
                 rows.extend_from_slice(&img.as_raw()[(y * w * 4) as usize..((y + 1) * w * 4) as usize]);
             }
             let src = textures::from_rgba8(w, h, &rows, pc::TexRole::Data);
-            let e = textures::encode_as(&src, pc::TexRole::Data, pc::TexFormat::Rgba8, 1024, 1);
+            let e = if a.target == ir::Target::Vita { textures::encode_as(&src, pc::TexRole::Data, pc::TexFormat::Rgba8, 1024, 1) } else {
+                textures::Encoded { format: pc::TexFormat::Rgba8, width:w, height:h, mips:1, data:rows }
+            };
+            cook.blobs.texture_policy.insert(cook.textures.len() as u32, source::TexturePolicy { cells: (1, 1), max_mips: 1 });
             let data = Blobs::push(&mut cook.blobs.tex, &e.data, 4096);
             cook.textures.push(pc::Texture {
                 name: "sky-clouds".into(),
@@ -1724,6 +1734,7 @@ fn main() {
         match a.target {
             ir::Target::Pica => pica::cook(&source, &a.output, a.tex_cap.min(1024)),
             ir::Target::Psp => psp::cook(&source, &a.output),
+            ir::Target::Ipod => gles::cook(&source, &a.output, a.tex_cap, a.ipod_pvrtctool.as_deref()).unwrap_or_else(|e| fail(e)),
             ir::Target::Vita => unreachable!(),
         }
         std::fs::write(a.output.with_extension("log"), cook.log.join("\n") + "\n").unwrap();

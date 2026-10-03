@@ -65,7 +65,106 @@ fn fixture(root: &Path, width: u32, height: u32) {
     std::fs::write(root.join("scene.glb"), glb.to_vec().unwrap()).unwrap();
 }
 #[test]
-fn one_ir_builds_three_repeatable_packs_without_web_export_or_vita_intermediate() {
+fn one_image_preserves_distinct_wrap_modes_and_reuses_equivalent_samplers() {
+    use pocket3d_place as pc;
+    let temp = Temp(std::env::temp_dir().join(format!("atlas-samplers-{}", std::process::id())));
+    let export = temp.0.join("same-image");
+    let ir = temp.0.join("source.ir");
+    fixture(&export, 4, 4);
+    let source = std::fs::read(export.join("scene.glb")).unwrap();
+    let mut glb = gltf::binary::Glb::from_slice(&source).unwrap();
+    let mut document: serde_json::Value = serde_json::from_slice(&glb.json).unwrap();
+    document["samplers"] = json!([
+        {"wrapS":33071, "wrapT":10497},
+        {"wrapS":10497, "wrapT":33648},
+        {"wrapS":10497, "wrapT":10497}
+    ]);
+    document["textures"] = json!([
+        {"source":0}, // Default repeat on both axes.
+        {"source":0,"sampler":0},
+        {"source":0,"sampler":1},
+        {"source":0,"sampler":2} // Explicit repeat is equivalent to default.
+    ]);
+    document["materials"] = (0..4)
+        .map(|i| {
+            json!({
+                "name":format!("sampler-{i}"),
+                "pbrMetallicRoughness":{"baseColorTexture":{"index":i}},
+                "extensions":{"KHR_materials_unlit":{}}
+            })
+        })
+        .collect();
+    document["meshes"][0]["primitives"] = (0..4)
+        .map(|i| {
+            json!({
+                "attributes":{"POSITION":0},"material":i
+            })
+        })
+        .collect();
+    glb.json = Cow::Owned(serde_json::to_vec(&document).unwrap());
+    std::fs::write(export.join("scene.glb"), glb.to_vec().unwrap()).unwrap();
+    ok(&[
+        "import",
+        "--in",
+        export.to_str().unwrap(),
+        "--out",
+        ir.to_str().unwrap(),
+    ]);
+    std::fs::remove_dir_all(export).unwrap();
+    let manifest = std::fs::read(ir.join("manifest.json")).unwrap();
+    // The shared analysis must preserve the distinction before either target
+    // writes its own pixels/layouts; device-encoder behavior is irrelevant.
+    for target in ["ipod", "vita"] {
+        let output = temp.0.join(format!("{target}.place"));
+        ok(&[
+            "--in",
+            ir.to_str().unwrap(),
+            "--out",
+            output.to_str().unwrap(),
+            "--target",
+            target,
+        ]);
+        let bytes = std::fs::read(output).unwrap();
+        let pack = if target == "ipod" {
+            pc::ipod::parse(&bytes)
+        } else {
+            pc::Pack::parse(&bytes)
+        }
+        .unwrap();
+        let meta = pack.meta().unwrap();
+        let indices: Vec<_> = (0..4)
+            .map(|i| {
+                meta.materials
+                    .iter()
+                    .find(|m| m.name == format!("sampler-{i}"))
+                    .unwrap()
+                    .albedo
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(indices[0], indices[3]);
+        assert_ne!(indices[0], indices[1]);
+        assert_ne!(indices[0], indices[2]);
+        assert_ne!(indices[1], indices[2]);
+        let expected = [
+            (pc::Wrap::Repeat, pc::Wrap::Repeat),
+            (pc::Wrap::Clamp, pc::Wrap::Repeat),
+            (pc::Wrap::Repeat, pc::Wrap::Mirror),
+            (pc::Wrap::Repeat, pc::Wrap::Repeat),
+        ];
+        let pixels = pack.section(pc::TAG_TEXTURES).unwrap();
+        let original = pc::parts::slice(pixels, &meta.textures[indices[0] as usize].data).unwrap();
+        for (&index, wrap) in indices.iter().zip(expected) {
+            let texture = &meta.textures[index as usize];
+            assert_eq!((texture.wrap_s, texture.wrap_t), wrap);
+            assert_eq!(pc::parts::slice(pixels, &texture.data).unwrap(), original);
+        }
+    }
+    assert_eq!(manifest, std::fs::read(ir.join("manifest.json")).unwrap());
+}
+
+#[test]
+fn one_ir_builds_four_repeatable_packs_without_web_export_or_vita_intermediate() {
     let temp = Temp(std::env::temp_dir().join(format!("atlas-pipeline-{}", std::process::id())));
     let export = temp.0.join("triangle");
     let ir = temp.0.join("place.ir");
@@ -80,8 +179,17 @@ fn one_ir_builds_three_repeatable_packs_without_web_export_or_vita_intermediate(
     std::fs::remove_dir_all(export).unwrap();
     let manifest = std::fs::read(ir.join("manifest.json")).unwrap();
     // Deliberately compile Vita last; every target only sees the sealed source.
-    for target in ["psp", "3ds", "vita"] {
+    for target in ["ipod", "psp", "3ds", "vita"] {
         let output = temp.0.join("target.place");
+        if target == "ipod" {
+            // Rebuilding without an optional encoder must not publish an old
+            // compression receipt beside the newly uncompressed target pack.
+            std::fs::write(
+                output.with_extension("ipod-texture-receipt.json"),
+                b"obsolete encoder receipt",
+            )
+            .unwrap();
+        }
         let args = [
             "--in",
             ir.to_str().unwrap(),
@@ -108,6 +216,43 @@ fn one_ir_builds_three_repeatable_packs_without_web_export_or_vita_intermediate(
             assert!(vertices
                 .iter()
                 .any(|v| v.pos[0].to_bits() == 0.1234567f32.to_bits()));
+        } else if target == "ipod" {
+            assert!(!output.with_extension("ipod-texture-receipt.json").exists());
+            use pocket3d_place as pc;
+            let pack = pc::ipod::parse(&first).unwrap();
+            assert!(pc::Pack::parse(&first).is_err());
+            let m = pack.meta().unwrap();
+            assert_eq!(m.version, 1);
+            let g = pack.section(pc::TAG_GEOMETRY).unwrap();
+            assert!(m
+                .draws
+                .iter()
+                .any(|d| (0..d.vertex_count)
+                    .any(|i| pc::ipod::position(d, g, i as u16).unwrap()[0].to_bits()
+                        == 0.1234567f32.to_bits())));
+            assert_eq!((m.textures[0].width, m.textures[0].height), (8, 4));
+            let t = &m.textures[0];
+            let pixels = pack.section(pc::TAG_TEXTURES).unwrap();
+            assert_eq!(
+                &pixels[t.data.offset as usize..][..8 * 4 * 4],
+                [170, 120, 70, 255].repeat(32)
+            );
+            let suffixes = ["ipod-color.bin", "ipod-color.json", "ipod-clusters.bin"];
+            let sidecars: Vec<_> = suffixes
+                .iter()
+                .map(|s| std::fs::read(output.with_extension(s)).unwrap())
+                .collect();
+            ok(&args);
+            for (suffix, before) in suffixes.iter().zip(sidecars) {
+                assert_eq!(
+                    before,
+                    std::fs::read(output.with_extension(suffix)).unwrap(),
+                    "{suffix} not reproducible"
+                );
+            }
+            let mut corrupt = first.clone();
+            corrupt[4..8].copy_from_slice(&pc::VERSION.to_le_bytes());
+            assert!(pc::ipod::parse(&corrupt).is_err());
         } else if target == "3ds" {
             let cooker = Path::new(env!("CARGO_MANIFEST_DIR"));
             let reader = temp.0.join("pica-contract");

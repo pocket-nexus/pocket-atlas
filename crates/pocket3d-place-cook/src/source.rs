@@ -22,3 +22,27 @@ impl Scene {
         &self.blobs.anim
     }
 }
+
+/// Authored texture boundaries, retained before any device encoding.
+#[derive(Clone, Copy)]
+pub struct TexturePolicy {
+    pub cells: (u32, u32),
+    pub max_mips: u32,
+}
+impl Default for TexturePolicy {
+    fn default() -> Self {
+        Self {
+            cells: (1, 1),
+            max_mips: 32,
+        }
+    }
+}
+impl Scene {
+    pub fn texture_policy(&self, index: usize) -> TexturePolicy {
+        self.blobs
+            .texture_policy
+            .get(&(index as u32))
+            .copied()
+            .unwrap_or_default()
+    }
+}

@@ -9,7 +9,14 @@ use serde::Deserialize;
 struct DrawProgram {
     performance: [String; 2],
     #[serde(default)]
+    performance_reflection: Option<[String; 2]>,
+    #[serde(default)]
+    wet_response: Option<[String; 2]>,
+    #[serde(default)]
+    water_response: Option<[String; 2]>,
+    #[serde(default)]
     display_color: bool,
+    display_texture: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -31,17 +38,23 @@ struct Manifest {
 #[serde(deny_unknown_fields)]
 struct Binding {
     program: [String; 2],
+    #[serde(default)]
+    reflection_program: Option<[String; 2]>,
+    #[serde(default)]
+    response_program: Option<[String; 2]>,
+    #[serde(default)]
+    water_response_program: Option<[String; 2]>,
     samplers: Vec<String>,
 }
 
 pub struct Plan {
     needed: Vec<bool>,
+    original_shadow: bool,
 }
 
 #[derive(Clone, Copy)]
 enum Albedo {
     Original,
-    DisplayCandidates,
     DisplayExact(Option<u32>),
 }
 
@@ -66,6 +79,7 @@ impl Plan {
         }
         let mut plan = Self {
             needed: vec![false; meta.textures.len()],
+            original_shadow: false,
         };
         // Rain splash effects bind this independently of the mesh pipelines.
         // Retaining it also covers runtime rain toggles without coupling the
@@ -83,7 +97,7 @@ impl Plan {
             let (Some(pipeline), Some(binding)) = (pipeline, binding) else {
                 return Err("texture usage mesh pipeline is missing".into());
             };
-            if binding.program != pipeline.performance {
+            if binding.program != pipeline.performance || binding.reflection_program != pipeline.performance_reflection || binding.response_program != pipeline.wet_response || binding.water_response_program != pipeline.water_response {
                 return Err("texture usage selected program mismatch".into());
             }
             validate_samplers(&binding.samplers)?;
@@ -93,7 +107,7 @@ impl Plan {
                     draw,
                     name,
                     if pipeline.display_color {
-                        Albedo::DisplayCandidates
+                        Albedo::DisplayExact(pipeline.display_texture)
                     } else {
                         Albedo::Original
                     },
@@ -106,6 +120,13 @@ impl Plan {
         }
         Ok(Some(plan))
     }
+
+    pub fn include_recipes(&mut self, recipes: &pc::ipod::Recipes) -> Result<(), String> {
+        // Steam has its own generated effect programs, outside mesh bindings.
+        self.mark(recipes.steam_coverage)
+    }
+
+    pub fn needs_original_shadow(&self) -> bool { self.original_shadow }
 
     pub fn needs(&self, texture: usize) -> bool {
         self.needed.get(texture).copied().unwrap_or(false)
@@ -136,18 +157,13 @@ impl Plan {
             "uAlbedo" => match albedo {
                 Albedo::Original => self.mark(material.albedo),
                 Albedo::DisplayExact(texture) => self.mark(texture),
-                Albedo::DisplayCandidates => {
-                    // The baker can choose either source for a common display
-                    // texture. The compiled-program guard checks the actual
-                    // independently validated color sidecar before drawing.
-                    self.mark(material.albedo)?;
-                    self.mark(material.emission)
-                }
+
             },
             "uNormalMap" => self.mark(material.normal),
             "uOrm" => self.mark(material.orm),
             "uEmission" => self.mark(material.emission),
             "uShadow" => {
+                self.original_shadow = true;
                 for caster in meta.draws.iter().filter(|d| d.cast_shadow) {
                     let material = meta
                         .materials
@@ -177,7 +193,7 @@ impl Plan {
             // validated and hashed; its original HDR GL texture is unnecessary.
             "uDisplayEnv" | "uAtlasLut" | "uLut" | "uMask" | "uGrain" | "uReflSharp"
             | "uReflBlur" | "uDisplayReflSharp" | "uDisplayReflBlur" | "uSource" | "uSupport"
-            | "uScene" | "uBloom" | "uHazeTex" => Ok(()),
+            | "uScene" | "uBloom" | "uHazeTex" | "uWetResponse" | "uWaterResponse" => Ok(()),
             _ => Err(format!("texture usage unknown or misplaced sampler {name}")),
         }
     }
@@ -199,6 +215,7 @@ pub fn validate_resident(
     }
     let mut required = Plan {
         needed: vec![false; meta.textures.len()],
+        original_shadow: false,
     };
     required.mark(meta.effects.puddles)?;
     for (i, draw) in meta
@@ -319,19 +336,61 @@ pub(crate) mod tests {
         meta.atmosphere.environment = Some(7);
         let mut value = manifest(&meta, &["uAlbedo", "uNormalMap", "uRipples", "uDisplayEnv"]);
         value["draws"][0]["display_color"] = true.into();
+        value["draws"][0]["display_texture"] = 3.into();
         value["texture_usage"]["sky"]["samplers"] = json!(["uClouds"]);
         let plan = Plan::parse(&serde_json::to_vec(&value).unwrap(), &meta)
             .unwrap()
             .unwrap();
         assert_eq!(
             (0..8).filter(|&i| plan.needs(i)).collect::<Vec<_>>(),
-            [0, 1, 3, 4, 5, 6]
+            [1, 3, 4, 5, 6]
         );
+        value["draws"][0]["display_texture"] = 9.into();
+        assert!(Plan::parse(&serde_json::to_vec(&value).unwrap(), &meta).is_err());
+        value["draws"][0]["display_texture"] = 3.into();
         value["texture_usage"]["draws"][0]["samplers"] = json!(["uOrm", "uEmission", "uEnv"]);
         let plan = Plan::parse(&serde_json::to_vec(&value).unwrap(), &meta)
             .unwrap()
             .unwrap();
         assert!(plan.needs(2) && plan.needs(3) && plan.needs(7));
+    }
+
+    #[test]
+    fn response_binding_identity_and_sampler_union_are_required() {
+        let (mut meta, _, _) = crate::validation::tests::fixture();
+        meta.textures.resize(4, meta.textures[0].clone());
+        meta.effects.puddles = Some(1);
+        meta.effects.ripples = Some(2);
+        for (recipe_field, binding_field, response_sampler) in [
+            ("wet_response", "response_program", "uWetResponse"),
+            ("water_response", "water_response_program", "uWaterResponse"),
+            ("performance_reflection", "reflection_program", "uSource"),
+        ] {
+        let mut value = manifest(&meta, &["uAlbedo", response_sampler, "uPuddles", "uRipples", "uDisplayReflSharp"]);
+        value["draws"][0][recipe_field] = json!(["wv", "response"]);
+        value["texture_usage"]["draws"][0][binding_field] = json!(["wv", "response"]);
+        let parse = |v: &serde_json::Value| Plan::parse(&serde_json::to_vec(v).unwrap(), &meta);
+        let plan = parse(&value).unwrap().unwrap();
+        assert_eq!((0..4).filter(|&i| plan.needs(i)).collect::<Vec<_>>(), [0, 1, 2]);
+        for fault in 0..4 {
+            let mut bad = value.clone();
+            match fault {
+                0 => { bad["texture_usage"]["draws"][0].as_object_mut().unwrap().remove(binding_field); },
+                1 => bad["texture_usage"]["draws"][0][binding_field] = json!(["wv", "stale"]),
+                2 => bad["draws"][0][recipe_field] = serde_json::Value::Null,
+                _ => bad["texture_usage"]["draws"][0][binding_field] = json!(["wv"]),
+            }
+            assert!(parse(&bad).is_err(), "response binding fault {fault}");
+        }
+        // Manifest omissions cannot silently remove a response-only texture:
+        // the linked-program union used by Renderer rejects nonresidency.
+        value["texture_usage"]["draws"][0]["samplers"] = json!(["uAlbedo", response_sampler]);
+        let plan = parse(&value).unwrap().unwrap();
+        let textures: Vec<_> = (0..4).map(|i| if plan.needs(i) { i as u32 + 1 } else { 0 }).collect();
+        assert!(!plan.needs(2));
+        assert!(validate_resident(&meta, &textures, |_| None,
+            |_, name| name == "uAlbedo" || name == "uRipples", |_| false).is_err());
+        }
     }
 
     #[test]

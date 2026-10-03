@@ -18,6 +18,7 @@ pub enum Target {
     Vita,
     Pica,
     Psp,
+    Ipod,
 }
 impl Target {
     pub fn parse(s: &str) -> Result<Self, String> {
@@ -25,6 +26,7 @@ impl Target {
             "vita" => Ok(Self::Vita),
             "3ds" => Ok(Self::Pica),
             "psp" => Ok(Self::Psp),
+            "ipod" => Ok(Self::Ipod),
             _ => Err(format!("unknown target {s}")),
         }
     }
@@ -33,6 +35,7 @@ impl Target {
             Self::Vita => "vita",
             Self::Pica => "3ds",
             Self::Psp => "psp",
+            Self::Ipod => "ipod",
         }
     }
 }
@@ -134,7 +137,7 @@ fn required_files(document: &Value) -> Result<BTreeSet<String>, String> {
 impl Manifest {
     pub fn check_target(&self, target: Target) -> Result<(), String> {
         for feature in &self.features {
-            if target != Target::Vita
+            if matches!(target, Target::Pica | Target::Psp)
                 && matches!(feature.as_str(), "material:lights" | "vista-haze")
             {
                 return Err(format!(
@@ -360,7 +363,7 @@ mod tests {
         assert_eq!(document["extensions"]["VENDOR_future"]["value"], "preserve");
         assert_eq!(scene_meta(&document).unwrap()["futureField"]["keep"], 42);
         std::fs::remove_dir_all(source).unwrap();
-        for target in [Target::Vita, Target::Pica, Target::Psp] {
+        for target in [Target::Vita, Target::Pica, Target::Psp, Target::Ipod] {
             open(&ir).unwrap().check_target(target).unwrap();
         }
         std::fs::write(ir.join("scene.bin"), [0; 4]).unwrap();
@@ -403,6 +406,7 @@ mod tests {
             files: vec![],
         };
         assert!(m.check_target(Target::Vita).is_ok());
+        assert!(m.check_target(Target::Ipod).is_ok());
         assert!(m
             .check_target(Target::Pica)
             .unwrap_err()

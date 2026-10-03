@@ -1,27 +1,130 @@
 import { expect, test } from "bun:test";
-import { BLOOM_RADIANCE_LIMIT, BLOOM_RGBM_RANGE, bloomStorage, withoutBloomHaze, pointCoverage, displayHazeDepth, displayBloomSource, displayHazeBloomSource, displayFieldWeight } from "./atlas-ipod-effects";
+import { BLOOM_RADIANCE_LIMIT, BLOOM_RGBM_RANGE, bloomStorage, withoutBloomHaze, pointCoverage, displayHazeDepth, displayBloomSource, displayHazeBloomSource, fieldAppearanceFragment, steamCoverageFragment, displayParticleVertex } from "./atlas-ipod-effects";
+import { shader as compileShader, fieldAppearanceVertex, preparedHazeFragment } from "./atlas-ipod-shaders";
 import { hdrFragment } from "./atlas-ipod-hdr";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 
 const byte = (x: number) => Math.round(Math.max(0, Math.min(1, x)) * 255) / 255;
 
-test("field density scales final display energy after the original LUT and coverage", () => {
-  const original = `precision mediump float;
-uniform sampler2D uAtlasLut;
-void main() { gl_FragColor=vec4(texture2D(uAtlasLut,vec2(0.5)).rgb*0.25,0.25); }`;
-  const source = displayFieldWeight(original);
-  expect(source.replace("void atlasField()", "void main()").slice(0, original.length)).toBe(original);
-  expect(source).toContain("atlasField();\n gl_FragColor.rgb*=vDensity;");
-  expect(source).not.toContain("gl_FragColor.a*=");
-  expect(() => displayFieldWeight("void main() {}")).toThrow();
+test("display particle visibility lowering preserves shared seeds, coverage shaders and stage interfaces", () => {
+  const directory = resolve(import.meta.dir, "../.pocket-build/validation/ipod-effects-tests/particle-support");
+  mkdirSync(directory, { recursive: true });
+  for (const kind of ["STREAK", "DRIP", "SPLASH", "STEAM", "BEACON"]) {
+    const key = compileShader("fx_v", { [kind]: 1, DISPLAY_COLOR: 1 });
+    const original = readFileSync(resolve(import.meta.dir, `../.pocket-build/ipod/assets/shaders/${key}.glsl`), "utf8")
+      .replace(/\baSeed\b/g, "aPosition").replace(/\baCorner\b/g, "aUv").replace(/\boLife\b/g, "vLife");
+    const lowered = displayParticleVertex(original, kind);
+    expect(lowered.includes("all(equal(aColor.rgb, vec3(0.0)))")).toBe(kind !== "STEAM");
+    if (kind === "STEAM") expect(lowered).toBe(original);
+    expect(lowered.includes("atlasExtent")).toBe(kind === "SPLASH");
+    expect(lowered.match(/vLife = [^;]+;/)?.[0]).toBe(original.match(/vLife = [^;]+;/)?.[0]);
+    expect(lowered.match(/varying [^;]+;/g)).toEqual(original.match(/varying [^;]+;/g));
+    if (kind === "SPLASH") {
+      expect(lowered).toContain("vUv = atlasCorner");
+      expect(lowered).toContain("highp vec2 atlasCorner = aUv * atlasExtent");
+      expect(lowered.match(/fract\(/g)?.length).toBe((original.match(/fract\(/g)?.length ?? 0) + 1);
+    }
+    const fragmentKey = compileShader("fx_f", { [kind === "DRIP" ? "STREAK" : kind]: 1,
+      ATLAS_BLEND: kind === "STEAM" ? 3 : 2, ATLAS_LDR: 1, ATLAS_OUTPUT_LDR: 1 });
+    const fragment = readFileSync(resolve(import.meta.dir, `../.pocket-build/ipod/assets/shaders/${fragmentKey}.glsl`), "utf8");
+    const vert = join(directory, `${kind}.vert`), frag = join(directory, `${kind}.frag`);
+    writeFileSync(vert, lowered); writeFileSync(frag, fragment);
+    const result = Bun.spawnSync(["glslangValidator", "-l", vert, frag], { stdout: "pipe", stderr: "pipe" });
+    expect(result.exitCode, result.stdout.toString() + result.stderr.toString()).toBe(0);
+  }
+  expect(() => displayParticleVertex("void main(){}", "STREAK")).toThrow("contract changed");
+  expect(() => displayParticleVertex("", "UNKNOWN")).toThrow("Unsupported");
+});
+
+test("splash crop contains droplet and ring supports across every half-lifetime boundary", () => {
+  const half = new Float16Array(1), bits = new Uint16Array(half.buffer);
+  const value = (v: number) => { bits[0] = v; return half[0]; };
+  let worstX = -Infinity, worstY = -Infinity, area = 0;
+  const extent = (t: number) => [Math.min(1, .9*t+.082), Math.min(1, Math.max(.122, 3.6*t*(1-t)+.102))];
+  // The vertex may use f32 while the fragment receives half. Test both ends
+  // of every half rounding interval, including t rounded up to exactly 1.
+  // An additional half-UV step is reserved for interpolation precision.
+  for (let b = 0; b <= 0x3c00; b++) {
+    const t = value(b), lo = b ? (value(b-1)+t)*.5 : 0;
+    const hi = b < 0x3c00 ? (value(b+1)+t)*.5 : 1;
+    for (const raw of [lo, t, hi]) {
+      const [x, y] = extent(raw);
+      const neededX = Math.min(1, .9*t+.08+1/2048);
+      const neededY = Math.min(1, 3.6*t*(1-t)+.1+1/2048);
+      worstX = Math.max(worstX, neededX-x); worstY = Math.max(worstY, neededY-y);
+      // Ring: radius <= .9*t+.06, vertical support additionally clipped .12.
+      expect(x).toBeGreaterThanOrEqual(Math.min(1, .9*t+.06+1/2048));
+      expect(y).toBeGreaterThanOrEqual(Math.min(.12, (.9*t+.06)/5)+1/2048);
+    }
+  }
+  expect(worstX).toBeLessThanOrEqual(0); expect(worstY).toBeLessThanOrEqual(0);
+  for (let i=0; i<65536; i++) { const [x,y]=extent((i+.5)/65536); area += x*y; }
+  expect(area/65536).toBeGreaterThan(.373);
+  expect(area/65536).toBeLessThan(.374);
+});
+
+test("compiled steam coverage keeps shared motion and premultiplied opacity with one response sample", () => {
+  const fragment = steamCoverageFragment();
+  expect(fragment.match(/texture2D\s*\(/g)?.length).toBe(1);
+  expect(fragment).not.toMatch(/uPuddles|uAtlasLut|sqrt\s*\(|length\s*\(|smoothstep\s*\(|atlasEncode|gl_LastFragData/);
+  expect(fragment).toContain(".r*vLife.y*uOpacity.x");
+  expect(fragment).toContain("vec4(vColor*(a*0.28),a*0.16)");
+  const key = compileShader("fx_v", { STEAM: 1, DISPLAY_COLOR: 1 });
+  const vertex = readFileSync(resolve(import.meta.dir, `../.pocket-build/ipod/assets/shaders/${key}.glsl`), "utf8")
+    .replace(/\boLife\b/g, "vLife");
+  expect(vertex).toContain("aSeed");
+  expect(vertex).toContain("uTime");
+  expect(vertex).toContain("vLife");
+  expect(vertex).not.toMatch(/uFogPos|uFogCol|uAmbient/);
+  const directory = resolve(import.meta.dir, "../.pocket-build/validation/ipod-effects-tests/steam");
+  mkdirSync(directory, { recursive: true });
+  const vert = join(directory, "coverage.vert"), frag = join(directory, "coverage.frag");
+  writeFileSync(vert, vertex); writeFileSync(frag, fragment);
+  const result = Bun.spawnSync(["glslangValidator", "-l", "-q", vert, frag], { stdout: "pipe", stderr: "pipe" });
+  expect(result.exitCode, result.stdout.toString() + result.stderr.toString()).toBe(0);
+  expect(result.stdout.toString()).toContain("uSteamCoverage");
+});
+
+test("prepared haze removes ray-independent arithmetic without changing integral or display grade", () => {
+  const path = resolve(import.meta.dir, "../vita/shaders/haze_f.cg");
+  const shared = readFileSync(path, "utf8");
+  const prepared = preparedHazeFragment(shared);
+  expect(() => preparedHazeFragment("void main() {}")).toThrow("contract changed");
+  expect(prepared).not.toMatch(/dot\(L, L\)|uFogPos\[i\]\.xyz - ro|acc \* uHaze.x|P - uFogPos/);
+  for (const fragment of ["float I = cut ? arc", "I *= smoothstep", "curtainLayer(uv", "float amb = 1.0 - exp", "tex2D(uScene, vUv).a"])
+    expect(prepared).toContain(fragment);
+  expect(prepared).toContain("max(uFogMetric[i].x - tca * tca, 0.0) + radiusSquared");
+  const key = compileShader("haze_f", { HAZE_LIGHTS: 6, SGX_HAZE_PREPARED: 1, ATLAS_LDR: 1, ATLAS_BLEND: 2 });
+  const source = readFileSync(resolve(import.meta.dir, `../.pocket-build/ipod/assets/shaders/${key}.glsl`), "utf8");
+  expect(source).toContain("uFogMetric[6]");
+  expect(source).toContain("atlasDisplay(atlasColor.rgb)");
+  expect(source).toContain("for (int"); // No sixfold shader-code expansion.
+});
+
+test("field appearance uses one display sample and keeps shared vertex motion, energy and fog", () => {
+  const source = fieldAppearanceFragment();
+  expect(source.match(/texture2D\s*\(/g)?.length).toBe(1);
+  expect(source).not.toMatch(/uAtlasLut|sqrt\s*\(|pow\s*\(|atlasDecode|atlasEncode|gl_LastFragData/);
+  expect(source).toContain("f*f*vDensity");
+  expect(() => fieldAppearanceVertex("void main() {}")).toThrow("contract changed");
   const directory = resolve(import.meta.dir, "../.pocket-build/validation/ipod-effects-tests/density");
   mkdirSync(directory, { recursive: true });
-  const vert=join(directory,"density.vert"),frag=join(directory,"density.frag");
-  writeFileSync(vert,"attribute vec4 aPosition; attribute float aUv; varying mediump float vDensity; void main(){gl_Position=aPosition;vDensity=aUv;}");
-  writeFileSync(frag,source);
-  const result=Bun.spawnSync(["glslangValidator","-l",vert,frag],{stdout:"pipe",stderr:"pipe"});
-  expect(result.exitCode,result.stdout.toString()+result.stderr.toString()).toBe(0);
+  for (const vista of [false, true]) {
+    const key = compileShader("lights_v", { PHASE_CACHED: 1, DENSITY_LOD: 1, SGX_FIELD_APPEARANCE: 1, ...(vista ? { VISTA: 1 } : {}) });
+    const vertex = readFileSync(resolve(import.meta.dir, `../.pocket-build/ipod/assets/shaders/${key}.glsl`), "utf8")
+      .replace(/\boDensity\b/g,"vDensity");
+    expect(vertex).toContain("aCurve");
+    expect(vertex).toContain("aPath");
+    expect(vertex).toContain("aBlink");
+    expect(vertex).toContain("gl_PointSize");
+    expect(vertex).not.toMatch(/\bsin\s*\(/);
+    expect(/\bexp2\s*\(/.test(vertex)).toBe(vista);
+    const vert=join(directory,`appearance-${+vista}.vert`),frag=join(directory,`appearance-${+vista}.frag`);
+    writeFileSync(vert,vertex); writeFileSync(frag,source);
+    const result=Bun.spawnSync(["glslangValidator","-l",vert,frag],{stdout:"pipe",stderr:"pipe"});
+    expect(result.exitCode,result.stdout.toString()+result.stderr.toString()).toBe(0);
+  }
 });
 
 test("cached field phase removes only the vertex sine and leaves full/Vita defaults intact", () => {
@@ -237,61 +340,29 @@ test("CPU particle variants exclude lighting before compilation and link the ori
     const reflection = run(["glslangValidator", "-l", "-q", vert, frag]);
     expect(reflection).not.toMatch(/uFogPos|uFogCol|uAmbient/);
   }
-});
+}, 30_000); // Fifteen external shader compilations plus preprocessing and links.
 
-// Compile the real shared haze independently of the global asset generator.
-// Its translated integration body must survive fusion byte-for-byte apart
-// from the coordinate of the one nearest-depth sample.
-function translatedDisplayHaze(): string {
-  const directory = resolve(import.meta.dir, "../.pocket-build/validation/ipod-effects-tests/fused");
+test("separate display haze combines one low-resolution sample with the original four bloom taps", () => {
+  const combined = displayHazeBloomSource();
+  expect(combined).not.toMatch(/uFogPos|uFogDir|uAtlasLut|uSceneTexel|vRay|gl_LastFragData/);
+  expect(combined.match(/texture2D\(uScene,/g)?.length).toBe(4);
+  expect(combined.match(/texture2D\(uHazeTex,/g)?.length).toBe(1);
+  expect(combined).toContain("displayByte(displayBloom()+extractGlow(haze)*uThreshold.z)");
+  const directory = resolve(import.meta.dir, "../.pocket-build/validation/ipod-effects-tests/combine");
   mkdirSync(directory, { recursive: true });
-  const run = (args: string[]) => {
-    const result = Bun.spawnSync(args, { stdout: "pipe", stderr: "pipe" });
-    expect(result.exitCode, result.stdout.toString() + result.stderr.toString()).toBe(0);
-    return result.stdout.toString();
-  };
-  const hlsl = join(directory, "haze.hlsl"), spv = join(directory, "haze.spv");
-  writeFileSync(hlsl, readFileSync(resolve(import.meta.dir, "../vita/shaders/haze_f.cg"), "utf8")
-    .replace(/: COLOR\b/g, ": SV_Target"));
-  run(["glslangValidator", "-D", "--hlsl-dx9-compatible", "--auto-map-bindings", "--auto-map-locations",
-    "-V", "-S", "frag", "-e", "main", "-DHAZE_LIGHTS=6", hlsl, "-o", spv]);
-  let glsl = run(["spirv-cross", spv, "--es", "--version", "100"]);
-  for (const block of [...glsl.matchAll(/struct (\w+)\n\{\n([\s\S]*?)\n\};\n/g)]) {
-    const re = new RegExp(`uniform ${block[1]} (\\w+);`), instance = glsl.match(re);
-    if (instance) glsl = glsl.replace(block[0], block[2].split("\n").map(l => "uniform " + l.trim()).join("\n") + "\n")
-      .replace(re, "").replace(new RegExp(`\\b${instance[1]}\\.`, "g"), "");
-  }
-  return displayHazeDepth(hdrFragment(glsl, "haze_f", { ATLAS_LDR: 1, ATLAS_BLEND: 2 }));
-}
-
-test("fused display effects retain the shared six-light integral and use nearest depth with linear bloom", () => {
-  const original = translatedDisplayHaze();
-  const fused = displayHazeBloomSource(original);
-  const integral = (s: string) => s.slice(s.indexOf("void atlasMaterial()"), s.indexOf("uniform mediump sampler2D uAtlasLut;"));
-  expect(integral(fused).replace("(floor(vUv*uSceneTexel.zw)+0.5)*uSceneTexel.xy", "vUv")).toBe(integral(original));
-  expect(fused).not.toMatch(/uHazeTex|gl_LastFragData/);
-  expect(fused.match(/texture2D\(uScene,/g)?.length).toBe(5); // One depth plus the original four RGB taps.
-  expect(fused).toContain("uFogPos[6]");
-  expect(fused).toContain("uFogDir[6]");
-  expect(fused).toContain("uAmbient");
-  expect(fused).toContain("uCurtain");
-  expect(() => displayHazeBloomSource("void main() {} ")).toThrow("Missing display haze contract");
-  const directory = resolve(import.meta.dir, "../.pocket-build/validation/ipod-effects-tests/fused");
-  const vert = join(directory, "fused.vert"), frag = join(directory, "fused.frag");
+  const vert = join(directory, "combine.vert"), frag = join(directory, "combine.frag");
   writeFileSync(vert, `#version 100
 attribute vec2 aPosition;
 varying highp vec2 vUv;
-varying highp vec3 vRay;
-uniform highp vec4 uRayX,uRayY,uRayZ;
-void main(){gl_Position=vec4(aPosition,0.5,1.0);vUv=aPosition*0.5+0.5;vRay=uRayZ.xyz+uRayX.xyz*aPosition.x+uRayY.xyz*aPosition.y;}`);
-  writeFileSync(frag, fused);
+void main(){gl_Position=vec4(aPosition,0.5,1.0);vUv=aPosition*0.5+0.5;}`);
+  writeFileSync(frag, combined);
   const result = Bun.spawnSync(["glslangValidator", "-l", "-q", vert, frag], { stdout: "pipe", stderr: "pipe" });
   expect(result.exitCode, result.stdout.toString() + result.stderr.toString()).toBe(0);
-  expect(result.stdout.toString()).toContain("uSceneTexel");
+  expect(result.stdout.toString()).toContain("uHazeTex");
   expect(result.stdout.toString()).toContain("uEffectMix");
 });
 
-test("fused storage preserves threshold rounding and bounds the additional error after bilinear reconstruction", () => {
+test("combined storage preserves threshold rounding and bounds the additional error after bilinear reconstruction", () => {
   let seed = 0x96d52ef1;
   const random = () => ((seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296);
   const smooth = (a: number, b: number, x: number) => {
@@ -324,18 +395,6 @@ test("fused storage preserves threshold rounding and bounds the additional error
           expect(Math.abs(actual-expected)).toBeLessThanOrEqual(scale/510+1e-12);
         }
       }
-    }
-  }
-});
-
-test("snapped depth coordinates select the same source pixel including edge and silhouette boundaries", () => {
-  for (const width of [160,213,320,426,480,640,960]) {
-    for (let pixel=0;pixel<width;pixel++) for (const phase of [0,0.0001,0.4999,0.9999]) {
-      const uv=(pixel+phase)/width;
-      const nearest=Math.min(width-1,Math.floor(uv*width));
-      const snapped=(Math.floor(uv*width)+0.5)/width;
-      expect(Math.round(snapped*width-0.5)).toBe(nearest);
-      expect(Math.abs(snapped*width-0.5-nearest)).toBeLessThan(1e-10);
     }
   }
 });

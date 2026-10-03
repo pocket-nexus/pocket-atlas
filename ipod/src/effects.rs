@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use crate::{
     gl::*,
-    gpu::{Program, Target},
+    gpu::{Objects, Program, Target},
     read,
     scene::Scene,
 };
@@ -33,6 +33,8 @@ struct Pipelines {
     field_vista_ldr: [String; 2],
     particles: [[String; 2]; 5],
     particles_ldr: [[String; 2]; 5],
+    #[serde(default)]
+    steam_coverage_ldr: Option<[String; 2]>,
     haze: [String; 2],
     haze_ldr: [String; 2],
     haze_bloom_ldr: [String; 2],
@@ -226,6 +228,72 @@ impl ParticleGrade {
         };
         let b = |x: f32| (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
         [b(c.x), b(c.y), b(c.z), 255]
+    }
+}
+
+const FIELD_RESPONSE_WIDTH: usize = 256;
+const FIELD_RESPONSE_MAX: f32 = 65504.0;
+
+/// A source colour's scalar intensity response. This immutable preparation
+/// uses the same shared grade/LUT as the reference path, once per scene. No
+/// camera, light motion or animation frame causes a CPU colour-table update.
+fn field_response_pixels(palette: &[[u8; 3]], grade: &ParticleGrade) -> Result<(usize, Vec<u8>), String> {
+    if palette.is_empty() { return Err("field appearance has no source colours".into()); }
+    let height = palette.len().checked_next_power_of_two().ok_or("field appearance size overflow")?;
+    let mut pixels = Vec::new();
+    pixels.try_reserve_exact(height * FIELD_RESPONSE_WIDTH * 4)
+        .map_err(|_| "field appearance image allocation")?;
+    pixels.resize(height * FIELD_RESPONSE_WIDTH * 4, 0);
+    for (row, rgb) in palette.iter().enumerate() {
+        let c = Vec3::new(rgb[0] as f32, rgb[1] as f32, rgb[2] as f32) / 255.0;
+        // Exactly lights_v.cg's sRGB approximation, not a second colour decode.
+        let linear = c * (c * (c * 0.305306011 + Vec3::splat(0.682171111))
+            + Vec3::splat(0.012522878));
+        for x in 0..FIELD_RESPONSE_WIDTH {
+            let e = x as f32 / (FIELD_RESPONSE_WIDTH - 1) as f32;
+            let q = e * e;
+            let scalar = if x + 1 == FIELD_RESPONSE_WIDTH { FIELD_RESPONSE_MAX }
+                else { q / (1.0 - q) };
+            let color = (grade.sample(linear * scalar) - grade.black).max(Vec3::ZERO);
+            let at = (row * FIELD_RESPONSE_WIDTH + x) * 4;
+            for channel in 0..3 {
+                pixels[at + channel] = (color[channel].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            }
+            pixels[at + 3] = 255;
+        }
+    }
+    Ok((height, pixels))
+}
+
+pub(crate) struct FieldAppearance {
+    _objects: Objects,
+    texture: u32,
+    rows: u32,
+    params: [f32; 4],
+    pub(crate) gpu_bytes: usize,
+}
+impl FieldAppearance {
+    pub(crate) unsafe fn new(source: &crate::light_lod::Sources, post: &pc::Post) -> Result<Self, String> {
+        let mut limit = 0;
+        glGetIntegerv(0x0d33, &mut limit); // GL_MAX_TEXTURE_SIZE
+        let height = source.palette().len().checked_next_power_of_two().unwrap_or(usize::MAX);
+        if source.palette().is_empty() || height > limit.max(0) as usize || FIELD_RESPONSE_WIDTH > limit.max(0) as usize {
+            return Err(format!("field appearance {} colours exceeds texture limit {limit}", source.palette().len()));
+        }
+        let (_, pixels) = field_response_pixels(source.palette(), &ParticleGrade::new(post))?;
+        let mut objects = Objects::default();
+        let texture = objects.image(FIELD_RESPONSE_WIDTH as i32, height as i32, &pixels);
+        let error = glGetError();
+        if texture == 0 || error != 0 { return Err(format!("field appearance texture: GL {error:x}")); }
+        let rows = objects.buffer();
+        upload_effect_buffer(GL_ARRAY_BUFFER, rows, source.color_rows(), GL_STATIC_DRAW, "field appearance rows")?;
+        Ok(Self {
+            _objects: objects,
+            texture,
+            rows,
+            params: [FIELD_RESPONSE_WIDTH as f32, 1.0 / FIELD_RESPONSE_WIDTH as f32, 1.0 / height as f32, 0.0],
+            gpu_bytes: pixels.len() + source.color_rows().len() * 2,
+        })
     }
 }
 
@@ -878,6 +946,18 @@ struct FogLight {
     inner: f32,
 }
 
+fn haze_light_uniforms(light: FogLight, eye: Vec3, density: f32, prepared: bool)
+    -> ([f32; 4], [f32; 4], [f32; 4], [f32; 4])
+{
+    let relative = light.pos - eye;
+    (
+        if prepared { v4(relative, light.radius * light.radius) } else { v4(light.pos, light.radius) },
+        v4(light.color * light.gain * if prepared { density } else { 1.0 }, light.outer),
+        v4(light.dir, light.inner),
+        [relative.length_squared(), 0.0, 0.0, 0.0],
+    )
+}
+
 fn fog_lights(scene: &Scene, time: f32) -> Vec<FogLight> {
     scene
         .meta
@@ -1041,6 +1121,10 @@ impl BloomPlan {
         }
     }
 }
+fn haze_divisor(w: i32, h: i32, performance: bool) -> i32 {
+    if performance { 8.max((w.max(h) + 39) / 40) } else { 4 }
+}
+
 impl PostTargets {
     unsafe fn new(
         w: i32,
@@ -1065,11 +1149,7 @@ impl PostTargets {
         }
         Ok(Self {
             haze: if haze {
-                Some(target(if performance {
-                    8.max((w.max(h) + 39) / 40)
-                } else {
-                    4
-                })?)
+                Some(target(haze_divisor(w, h, performance))?)
             } else {
                 None
             },
@@ -1088,6 +1168,7 @@ pub struct Effects {
     /// blinking and sparse fields, splashes, drips, steam and beacons remain.
     pub performance: bool,
     fields: [Option<[Program; 2]>; 2],
+    field_appearance: Option<FieldAppearance>,
     light_lod: Option<crate::light_lod::LightLod>,
     particles: [Option<ParticlePass>; 5],
     particle_grade: Option<ParticleGrade>,
@@ -1156,9 +1237,12 @@ impl Effects {
         );
         let mut particles: [Option<ParticlePass>; 5] = core::array::from_fn(|_| None);
         let particle_programs = |i: usize| -> Result<[Program; 2], String> {
+            let display = if i == 3 && scene.performance && scene.ipod_recipes.steam_coverage.is_some() {
+                cfg.steam_coverage_ldr.as_ref().ok_or("steam coverage recipe requires its shader pipeline")?
+            } else { &cfg.particles_ldr[i] };
             Ok([
                 Program::new(root, &cfg.particles[i])?,
-                Program::new(root, &cfg.particles_ldr[i])?,
+                Program::new(root, display)?,
             ])
         };
         let mut rng = Rng(0x2545_f491);
@@ -1249,6 +1333,9 @@ impl Effects {
         let up = Program::new(root, &cfg.up)?;
         let up_final = Program::new(root, &cfg.up_final)?;
         let targets = PostTargets::new(width, height, has_haze, has_fields, false)?;
+        let field_appearance = if scene.performance && fields.iter().flatten().any(|p| p[1].has("uFieldAppearance")) {
+            Some(FieldAppearance::new(&scene.light_lod_source, &scene.meta.post)?)
+        } else { None };
         let mut triangle = 0;
         glGenBuffers(1, &mut triangle);
 
@@ -1257,6 +1344,7 @@ impl Effects {
         let result = Self {
             performance: false,
             fields,
+            field_appearance,
             light_lod: None,
             particle_grade: particles
                 .iter()
@@ -1314,6 +1402,9 @@ impl Effects {
     /// Separate from Scene's immutable payload accounting: GPU, CPU bytes.
     pub fn light_lod_bytes(&self) -> (usize, usize) {
         self.light_lod.as_ref().map_or((0, 0), |lod| lod.bytes())
+    }
+    pub fn field_appearance_bytes(&self) -> usize {
+        self.field_appearance.as_ref().map_or(0, |a| a.gpu_bytes)
     }
 
     /// Draw into the bound main HDR framebuffer after opaque/transparent
@@ -1408,6 +1499,8 @@ impl Effects {
                 if lod_draw.is_some_and(|d| d.count == 0) {
                     continue;
                 }
+                let geometry_offset = scene.gpu_vertex_offset(draw)
+                    .ok_or("missing resident light field geometry")? as usize;
                 let program_changed = current_field != Some(field_kind);
                 if program_changed {
                     program.bind();
@@ -1425,6 +1518,11 @@ impl Effects {
                     if self.performance {
                         program.tex("uAtlasLut", display_lut, 7);
                         program.v("uAtlasBlack", &black);
+                        if program.has("uFieldAppearance") {
+                            let appearance = self.field_appearance.as_ref().ok_or("missing field appearance")?;
+                            program.tex("uFieldAppearance", appearance.texture, 7);
+                            program.v("uAppearance", &appearance.params);
+                        }
                     }
                     program.v("uBlend", &[2.0, 0.0, 0.0, 0.0]);
                     program.mat("uViewProj", vp);
@@ -1493,7 +1591,7 @@ impl Effects {
                             kind,
                             normalized,
                             pc::LightPoint::STRIDE as i32,
-                            (d.vertices.offset as usize + offset) as *const _,
+                            (geometry_offset + offset) as *const _,
                         );
                     }
                 }
@@ -1510,6 +1608,14 @@ impl Effects {
                         glEnableVertexAttribArray(1);
                     }
                     glVertexAttribPointer(1, 2, GL_FLOAT, 0, 8, offset as usize as *const _);
+                }
+                if program.attrs[6] {
+                    let appearance = self.field_appearance.as_ref().ok_or("missing field appearance rows")?;
+                    let offset = scene.light_lod_source.color_offset(draw)
+                        .ok_or_else(|| format!("missing field appearance offset {draw}"))?;
+                    glBindBuffer(GL_ARRAY_BUFFER, appearance.rows);
+                    glEnableVertexAttribArray(6);
+                    glVertexAttribPointer(6, 1, GL_UNSIGNED_SHORT, 0, 2, offset as *const _);
                 }
                 if let Some(draw) = lod_draw {
                     let (indices, weights) = self.light_lod.as_ref().unwrap().buffers();
@@ -1622,6 +1728,12 @@ impl Effects {
                 if let Some(texture) = scene.meta.effects.puddles {
                     p.tex("uPuddles", scene.textures[texture as usize], 0);
                 }
+                if p.has("uSteamCoverage") {
+                    let texture = scene.ipod_recipes.steam_coverage
+                        .and_then(|i| scene.textures.get(i as usize)).copied().filter(|&id| id != 0)
+                        .ok_or("missing resident steam coverage")?;
+                    p.tex("uSteamCoverage", texture, 0);
+                }
                 pass.buffer.draw(p);
                 stats.draws += 1;
                 stats.particle_quads += (pass.buffer.count / 6) as u32;
@@ -1701,51 +1813,13 @@ impl Effects {
                 curtain,
             );
         let bloom = bloom_enabled && scene.meta.post.bloom_intensity > 0.0;
-        let fused = self.performance && visible_haze && bloom;
         if let (true, Some(programs), Some(haze)) = (visible_haze, &self.haze, &self.targets.haze) {
-            let (program, haze) = if fused {
-                (self.haze_bloom.as_ref().unwrap(), &self.targets.levels[0])
-            } else {
-                (&programs[self.performance as usize], haze)
-            };
+            let program = &programs[self.performance as usize];
             haze.bind();
             program.bind();
             if self.performance {
                 program.tex("uAtlasLut", display_lut, 7);
                 program.v("uAtlasBlack", &crate::gpu::tone_black(&scene.meta.post));
-            }
-            if fused {
-                program.v(
-                    "uTexel",
-                    &BloomPlan::new(self.width, self.height, self.has_fields, true).texel(
-                        self.width,
-                        self.height,
-                        haze.w,
-                        haze.h,
-                    ),
-                );
-                program.v(
-                    "uThreshold",
-                    &display_bloom_threshold(&scene.meta.post, 1.0),
-                );
-                program.v(
-                    "uEffectMix",
-                    &[
-                        scene.meta.post.bloom_intensity,
-                        1.0 / display_effect_scale(scene.meta.post.bloom_intensity),
-                        0.0,
-                        0.0,
-                    ],
-                );
-                program.v(
-                    "uSceneTexel",
-                    &[
-                        1.0 / self.width as f32,
-                        1.0 / self.height as f32,
-                        self.width as f32,
-                        self.height as f32,
-                    ],
-                );
             }
             let fwd = (target - eye).normalize_or(Vec3::NEG_Z);
             let right = fwd.cross(Vec3::Y).normalize_or(Vec3::X);
@@ -1766,63 +1840,54 @@ impl Effects {
                 ],
             );
             program.v("uAmbient", &v4(Vec3::from(a.haze_ambient), 0.0));
-            program.v("uBoxMin", &v4(Vec3::from(a.dry_min), 0.0));
-            program.v("uBoxMax", &v4(Vec3::from(a.dry_max), 0.0));
+            let prepared = program.has("uFogMetric");
+            let dry_origin = if prepared { eye } else { Vec3::ZERO };
+            program.v("uBoxMin", &v4(Vec3::from(a.dry_min) - dry_origin, 0.0));
+            program.v("uBoxMax", &v4(Vec3::from(a.dry_max) - dry_origin, 0.0));
             let mut positions = [0.0; FOG_LIGHTS * 4];
             let mut colors = positions;
             let mut dirs = positions;
+            let mut metrics = positions;
             for k in 0..FOG_LIGHTS {
-                let (p, c, d) = ranked
+                let (p, c, d, metric) = ranked
                     .get(k)
-                    .map(|(_, l)| {
-                        (
-                            v4(l.pos, l.radius),
-                            v4(l.color * l.gain, l.outer),
-                            v4(l.dir, l.inner),
-                        )
-                    })
-                    .unwrap_or((
-                        [0.0, -1000.0, 0.0, 1.0],
-                        [0.0, 0.0, 0.0, -2.0],
-                        [0.0, -1.0, 0.0, 1.0],
-                    ));
+                    .map(|(_, l)| *l)
+                    .map(|l| haze_light_uniforms(l, eye, a.haze_density, prepared))
+                    .unwrap_or_else(|| haze_light_uniforms(FogLight {
+                        pos: Vec3::new(0.0, -1000.0, 0.0), color: Vec3::ZERO,
+                        gain: 0.0, radius: 1.0, dir: Vec3::NEG_Y, outer: -2.0, inner: 1.0,
+                    }, eye, a.haze_density, prepared));
                 positions[k * 4..k * 4 + 4].copy_from_slice(&p);
                 colors[k * 4..k * 4 + 4].copy_from_slice(&c);
                 dirs[k * 4..k * 4 + 4].copy_from_slice(&d);
+                metrics[k * 4..k * 4 + 4].copy_from_slice(&metric);
             }
             program.v("uFogPos", &positions);
             program.v("uFogCol", &colors);
             program.v("uFogDir", &dirs);
+            program.v("uFogMetric", &metrics);
             program.v("uCurtain", &[0.55, 0.6, 0.72, curtain]);
             program.tex("uScene", scene_texture, 0);
-            // The fused shader snaps only its depth sample to a source texel
-            // centre, leaving the same texture's four bloom samples linear.
-            if !fused {
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-            }
+            // Preserve nearest scene-depth semantics at the haze target's
+            // own resolution, independently of the bloom filter footprint.
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
             self.fullscreen();
-            if !fused {
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            }
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            output.haze = haze.texture;
+            output.haze_weight = 1.0;
             if self.performance {
                 output.bloom = haze.texture;
-                output.bloom_weight = if fused {
-                    display_effect_scale(scene.meta.post.bloom_intensity)
-                } else {
-                    1.0
-                };
-            } else {
-                output.haze = haze.texture;
-                output.haze_weight = 1.0;
+                output.bloom_weight = 1.0;
             }
         }
-        if bloom && !fused {
+        if bloom {
             let levels = &self.targets.levels;
             levels[0].bind();
+            let combine = self.targets.performance && output.haze_weight > 0.0;
             let prefilter = if self.targets.performance {
-                &self.tiny
+                if combine { self.haze_bloom.as_ref().unwrap() } else { &self.tiny }
             } else {
                 &self.prefilter[(output.haze_weight > 0.0) as usize]
             };
@@ -1852,6 +1917,12 @@ impl Effects {
                     ]
                 },
             );
+            if combine {
+                prefilter.v("uEffectMix", &[
+                    scene.meta.post.bloom_intensity,
+                    1.0 / display_effect_scale(scene.meta.post.bloom_intensity), 0.0, 0.0,
+                ]);
+            }
             self.fullscreen();
             let spread = self.targets.spread;
             for i in 1..levels.len() {
@@ -1885,7 +1956,9 @@ impl Effects {
                 self.fullscreen();
             }
             output.bloom = self.targets.up.first().unwrap_or(&levels[0]).texture;
-            output.bloom_weight = scene.meta.post.bloom_intensity;
+            output.bloom_weight = if combine {
+                display_effect_scale(scene.meta.post.bloom_intensity)
+            } else { scene.meta.post.bloom_intensity };
         }
         glDepthMask(1);
         output
@@ -1903,6 +1976,137 @@ impl Drop for Effects {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_haze_keeps_its_own_low_frequency_target() {
+        for (w, h) in [(480, 320), (640, 426), (960, 640)] {
+            let d = haze_divisor(w, h, true);
+            let bloom = BloomPlan::new(w, h, false, true);
+            assert_eq!(w / d, 40);
+            assert_eq!(h / d, 26);
+            assert_eq!(w / bloom.divisor, if w == 480 { 60 } else { 80 });
+            assert!(2 * (w / d) * (h / d) <= (w / bloom.divisor) * (h / bloom.divisor));
+            assert_eq!(haze_divisor(w, h, false), 4);
+        }
+    }
+
+    #[test]
+    fn prepared_haze_uniforms_preserve_integral_geometry_and_linear_energy() {
+        for i in 0..128 {
+            let t = i as f32 * 0.137;
+            let eye = Vec3::new(t * 4.0, 1.7, -t);
+            let light = FogLight {
+                pos: Vec3::new(-3.4, 4.6, 7.3) + Vec3::new(t, t * 0.2, -t * 0.4),
+                color: Vec3::new(0.08, 0.71, 1.0), gain: t * 0.03,
+                radius: 0.2 + t * 0.11, dir: Vec3::new(0.0, -0.8, 0.6), outer: 0.4, inner: 0.8,
+            };
+            let density = 0.014;
+            let (p, color, direction, metric) = haze_light_uniforms(light, eye, density, true);
+            let (original, original_color, original_direction, _) = haze_light_uniforms(light, eye, density, false);
+            assert_eq!(Vec3::from_slice(&original), light.pos);
+            assert_eq!(direction, original_direction);
+            for j in 0..16 {
+                let ray = Vec3::new(j as f32 * 0.11 - 0.8, 0.2, -1.0).normalize();
+                let l = light.pos - eye;
+                let tca = l.dot(ray);
+                let reference_ih = 1.0 / libm::sqrtf((l.length_squared() - tca * tca).max(0.0) + light.radius * light.radius);
+                let prepared_l = Vec3::from_slice(&p);
+                let prepared_tca = prepared_l.dot(ray);
+                let ih = 1.0 / libm::sqrtf((metric[0] - prepared_tca * prepared_tca).max(0.0) + p[3]);
+                assert_eq!(tca, prepared_tca);
+                assert_eq!(reference_ih, ih); // Identical arc inputs, including softened grazing rays.
+                let dist = 0.25 + j as f32 * 4.0;
+                let reference_sample = eye + ray * tca.clamp(0.0, dist) - light.pos;
+                let prepared_sample = ray * prepared_tca.clamp(0.0, dist) - prepared_l;
+                assert!((reference_sample - prepared_sample).abs().max_element() < 0.00001);
+                let integral = (libm::atanf((dist - tca) * ih) - libm::atanf(-tca * ih)) * ih;
+                let expected = Vec3::from_slice(&original_color) * integral * density;
+                let actual = Vec3::from_slice(&color) * integral;
+                assert!((actual - expected).abs().max_element() < 0.0000001);
+            }
+        }
+    }
+
+    fn sample_field_response(pixels: &[u8], row: usize, scalar: f32) -> Vec3 {
+        let c = scalar.clamp(0.0, FIELD_RESPONSE_MAX);
+        let x = libm::sqrtf(c / (1.0 + c)) * (FIELD_RESPONSE_WIDTH - 1) as f32;
+        let lo = x as usize;
+        let sample = |i: usize| {
+            let at = (row * FIELD_RESPONSE_WIDTH + i.min(FIELD_RESPONSE_WIDTH - 1)) * 4;
+            Vec3::new(pixels[at] as f32, pixels[at + 1] as f32, pixels[at + 2] as f32) / 255.0
+        };
+        sample(lo).lerp(sample(lo + 1), x - lo as f32)
+    }
+
+    #[test]
+    fn field_appearance_bounds_scalar_response_error_and_keeps_zero_dark() {
+        let palette = [[255, 214, 149], [240, 246, 255], [255, 50, 38], [90, 255, 206],
+            [255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 255], [0, 0, 0]];
+        for tone in [pc::ToneCurve::Aces, pc::ToneCurve::Agx] {
+            let post = pc::Post { tone, contrast: 1.16, saturation: 1.18,
+                lift: [0.1, 0.35, 0.45], gain: [1.04, 0.99, 0.94], ..Default::default() };
+            let grade = ParticleGrade::new(&post);
+            let (height, pixels) = field_response_pixels(&palette, &grade).unwrap();
+            assert_eq!(height, 16);
+            let mut maximum = 0.0f32;
+            for (row, rgb) in palette.iter().enumerate() {
+                let c = Vec3::new(rgb[0] as f32, rgb[1] as f32, rgb[2] as f32) / 255.0;
+                let linear = c * (c * (c * 0.305306011 + Vec3::splat(0.682171111)) + Vec3::splat(0.012522878));
+                assert_eq!(sample_field_response(&pixels, row, 0.0), Vec3::ZERO);
+                for step in 0..4096 {
+                    let e = step as f32 / 4096.0;
+                    let scalar = e * e / (1.0 - e * e);
+                    let expected = (grade.sample(linear * scalar) - grade.black).max(Vec3::ZERO);
+                    let actual = sample_field_response(&pixels, row, scalar);
+                    maximum = maximum.max((actual - expected).abs().max_element());
+                    assert!(actual.is_finite() && actual.min_element() >= 0.0);
+                }
+            }
+            assert!(maximum <= 3.0 / 255.0, "scalar response error {} display bytes", maximum * 255.0);
+        }
+        assert!(field_response_pixels(&[], &ParticleGrade::new(&pc::Post::default())).is_err());
+    }
+
+    #[test]
+    #[ignore = "set POCKET_ATLAS_VALIDATION_PACKS to source PLIP packs; offline response validation"]
+    fn measured_real_field_appearance_error() {
+        let dir = std::env::var("POCKET_ATLAS_VALIDATION_PACKS").unwrap();
+        let mut checked = 0;
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|s| s.to_str()) != Some("place") { continue; }
+            let bytes = std::fs::read(&path).unwrap();
+            let pack = pc::ipod::parse(&bytes).unwrap();
+            let meta = pack.meta().unwrap();
+            let source = crate::light_lod::Sources::new(&meta, pack.section(pc::TAG_GEOMETRY).unwrap()).unwrap();
+            if source.palette().is_empty() { continue; }
+            let grade = ParticleGrade::new(&meta.post);
+            let (height, pixels) = field_response_pixels(source.palette(), &grade).unwrap();
+            let mut maximum = 0.0f32;
+            let mut squared = 0.0f64;
+            let mut samples = 0usize;
+            for (row, rgb) in source.palette().iter().enumerate() {
+                let c = Vec3::new(rgb[0] as f32, rgb[1] as f32, rgb[2] as f32) / 255.0;
+                let linear = c * (c * (c * 0.305306011 + Vec3::splat(0.682171111)) + Vec3::splat(0.012522878));
+                assert_eq!(sample_field_response(&pixels, row, 0.0), Vec3::ZERO);
+                for step in 0..4097 {
+                    let e = step as f32 / 4096.0;
+                    let scalar = if step == 4096 { FIELD_RESPONSE_MAX } else { e * e / (1.0 - e * e) };
+                    let expected = (grade.sample(linear * scalar) - grade.black).max(Vec3::ZERO);
+                    let error = sample_field_response(&pixels, row, scalar) - expected;
+                    maximum = maximum.max(error.abs().max_element());
+                    squared += error.length_squared() as f64;
+                    samples += 3;
+                }
+            }
+            std::println!("{}: {} source colours, {} source points, {}x{} appearance, GPU {} bytes; error max {:.4}/255 RMS {:.4}/255",
+                meta.name, source.palette().len(), source.color_rows().len(), FIELD_RESPONSE_WIDTH, height,
+                pixels.len() + source.color_rows().len() * 2, maximum * 255.0, (squared / samples as f64).sqrt() * 255.0);
+            assert!(maximum <= 3.0 / 255.0, "{} response error {} bytes", meta.name, maximum * 255.0);
+            checked += 1;
+        }
+        assert!(checked > 0, "no source light fields tested");
+    }
 
     fn view(eye: Vec3, forward: Vec3, height: i32, time: f32) -> ParticleView<'static> {
         let vp =

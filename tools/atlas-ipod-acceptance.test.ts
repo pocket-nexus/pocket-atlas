@@ -10,7 +10,7 @@ function timing(presentedFrames = 240, samples = 120, ms = 1000 / 30) {
 }
 
 describe("iPod physical acceptance evidence", () => {
-  test("adaptive defaults never pin render width", () => {
+  test("default acceptance uses the fixed profile without a diagnostic override", () => {
     expect(parseOptions([])).toMatchObject({ quality: 0, width: 0, warmup: 2, seconds: 90 });
     expect(parseOptions(["--quality", "2", "--width", "160"])).toMatchObject({ quality: 2, width: 160 });
     expect(() => parseOptions(["--width", "80"])).toThrow();
@@ -60,12 +60,13 @@ describe("iPod physical acceptance evidence", () => {
   });
 
   test("diagnostic filters and source or nonce changes fail validation", () => {
-    const expected = { buildId: "build", place: "test-place", shot: 0, camera: [1, 2, 3], quality: 0, profile: false, nonce: "command", memoryWarningBatches: 0 };
+    const expected = { renderWidth: 480, buildId: "build", place: "test-place", shot: 0, camera: [1, 2, 3], quality: 0, profile: false, nonce: "command", memoryWarningBatches: 0 };
     const state = {
       ...expected, lastCommand: "command", state: "running", glError: 0, fps: 30,
-      profileDrawClass: 0, frameTiming: timing(), width: 480, height: 320, renderWidth: 320, renderHeight: 213,
+      profileDrawClass: 0, frameTiming: timing(), width: 480, height: 320, renderWidth: 480, renderHeight: 320,
     };
     expect(() => validateState(state, expected)).not.toThrow();
+    expect(() => validateState({ ...state, renderWidth: 160, renderHeight: 106 }, expected)).toThrow("resolution");
     expect(() => validateState({ ...state, memoryWarningBatches: 1 }, expected)).toThrow("Memory pressure");
     expect(() => validateState({ ...state, memoryWarningBatches: NaN }, expected)).toThrow("Memory pressure");
     expect(() => validateState({ ...state, profileDrawClass: 7 }, expected)).toThrow("filter");

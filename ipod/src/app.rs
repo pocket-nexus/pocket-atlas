@@ -1,6 +1,6 @@
 use crate::{
     gl::*,
-    performance::{FrameTimings, PassKind, ResolutionController, WORK_TARGET_MS},
+    performance::{FrameTimings, PassKind, QualityProfile, WORK_TARGET_MS},
     read,
     renderer::Renderer,
     scene::Scene,
@@ -51,7 +51,6 @@ pub struct App {
     reload: bool,
     saved_door: f32,
     memory_warning_batches: u32,
-    memory_pressure_pending: bool,
     sound: bool,
     ids: Vec<CString>,
     globe: Option<crate::globe::Globe>,
@@ -83,7 +82,6 @@ pub struct App {
     target: Vec3,
     fov: f32,
     timings: FrameTimings,
-    governor: ResolutionController,
     sample_excluded: bool,
     drawable: [i32; 2],
     audio_playing: bool,
@@ -171,7 +169,6 @@ impl App {
             reload: false,
             saved_door: 0.0,
             memory_warning_batches: 0,
-            memory_pressure_pending: false,
             sound: false,
             ids,
             globe: None,
@@ -203,7 +200,6 @@ impl App {
             target: Vec3::ZERO,
             fov: 45.0,
             timings: FrameTimings::new(),
-            governor: ResolutionController::new(),
             sample_excluded: false,
             drawable: [0, 0],
             audio_playing: false,
@@ -393,7 +389,6 @@ impl App {
                 self.selected = None;
                 self.error.clear();
                 self.touches.clear();
-                self.governor = ResolutionController::new();
                 self.timings.reset_window();
             }
             100..=199 => {
@@ -425,7 +420,9 @@ impl App {
             4 => self.paused = !self.paused,
             5 => self.cinematic = !self.cinematic,
             8 => {
-                self.set_quality((self.quality + 1) % 3);
+                // Settings 0 and 2 are legacy aliases of the same device
+                // profile; offer only the two distinct choices in native UI.
+                self.set_quality(if self.quality == 1 { 0 } else { 1 });
             }
             9 => self.rain = !self.rain,
             10 => self.reflection = !self.reflection,
@@ -446,11 +443,13 @@ impl App {
         self.clear_resize_error();
         let rebuild = self.selected.is_some()
             && (self.scene.is_none()
-                || self.renderer.as_ref().is_none_or(|r| r.performance != (quality != 1)));
+                || self
+                    .renderer
+                    .as_ref()
+                    .is_none_or(|r| r.performance != (quality != 1)));
         if self.quality != quality || rebuild {
             self.quality = quality;
             self.renderer_dirty = rebuild;
-            self.governor = ResolutionController::new();
             self.timings.reset_window();
         }
     }
@@ -458,12 +457,11 @@ impl App {
     /// The worker coalesces UIKit notifications and calls this only while it
     /// owns a foreground context. The next frame releases incompatible HDR
     /// resources before loading the display profile; camera/clock survive.
+    /// Memory pressure never lowers the device profile below 480x320.
     pub fn memory_warning(&mut self) {
         self.memory_warning_batches = self.memory_warning_batches.saturating_add(1);
         self.render_override = None;
-        self.memory_pressure_pending = true;
         self.set_quality(0);
-        self.governor.memory_pressure();
         self.timings.reset_window();
         self.reset_dt = true;
         self.status_dirty = true;
@@ -474,7 +472,6 @@ impl App {
             self.error.clear();
             self.error_text = CString::new("").unwrap();
             self.timings.reset_window();
-            self.governor.reset_samples();
         }
     }
 
@@ -517,15 +514,13 @@ impl App {
             if let Some(p) = v["profile"].as_bool() {
                 if self.profile != p {
                     self.timings.reset_window();
-                    self.governor.reset_samples();
                 }
                 self.profile = p;
             }
             if let Some(class) = v["profileDrawClass"].as_i64() {
-                let class = class.clamp(0, 9) as u8;
+                let class = class.clamp(0, 13) as u8;
                 if class != self.profile_draw_class {
                     self.timings.reset_window();
-                    self.governor.reset_samples();
                 }
                 self.profile_draw_class = class;
             }
@@ -636,6 +631,7 @@ impl App {
         status["ldrColorBytes"] = 0.into();
         status["lightPoints"] = 0.into();
         status["lightLodGpuBytes"] = 0.into();
+        status["fieldAppearanceGpuBytes"] = 0.into();
         status["lightLodCpuBytes"] = 0.into();
         status["renderingProfile"] = serde_json::Value::Null;
         status["residentBytes"] = atlas_resident_bytes().into();
@@ -662,10 +658,11 @@ impl App {
         if let Some(i) = self.pending.take() {
             self.renderer_dirty = false;
             self.selected = Some(i);
-            if !resuming { self.saved_door = 0.0; }
+            if !resuming {
+                self.saved_door = 0.0;
+            }
             self.sample_excluded = true;
             self.timings.reset_window();
-            self.governor = ResolutionController::new();
             glFinish();
             glUseProgram(0);
             self.reset_dt = true;
@@ -703,11 +700,6 @@ impl App {
                 crate::atlas_log(self.error_text.as_ptr());
             }
         }
-        if core::mem::take(&mut self.memory_pressure_pending) {
-            // Pending scene loads and resume reset normal adaptation samples.
-            // A warning received in this same batch must still win.
-            self.governor.memory_pressure();
-        }
         if self.renderer_dirty {
             self.renderer_dirty = false;
             self.failed_render_width = None;
@@ -731,15 +723,18 @@ impl App {
                 }
                 self.renderer = None;
                 let result = (|| -> Result<Renderer, String> {
-                    if self.scene.as_ref().is_none_or(|s| s.performance != performance) {
+                    if self
+                        .scene
+                        .as_ref()
+                        .is_none_or(|s| s.performance != performance)
+                    {
                         if let Some(scene) = &self.scene {
                             self.saved_door = scene.door;
                         }
                         self.scene = None;
                         glFinish();
-                        let mut scene = Scene::load_for_profile(
-                            &format!("{assets}/{id}.place"), performance,
-                        )?;
+                        let mut scene =
+                            Scene::load_for_profile(&format!("{assets}/{id}.place"), performance)?;
                         scene.door = self.saved_door;
                         self.scene = Some(scene);
                     }
@@ -814,15 +809,12 @@ impl App {
                 self.target += next - self.eye;
                 self.eye = next;
             }
-            let width = self.render_override.unwrap_or(match self.quality {
-                1 => 960,
-                2 => 480,
-                _ => self.governor.width(),
-            });
+            let width = self
+                .render_override
+                .unwrap_or(QualityProfile::from_setting(self.quality).scene_width());
             if r.width != width && self.failed_render_width.is_none() {
                 self.sample_excluded = true;
                 self.timings.reset_window();
-                self.governor.reset_samples();
                 if let Err(e) = r.resize(width, width * 2 / 3) {
                     // Renderer::resize is transactional: keep presenting the
                     // old target, but do not churn allocations each frame.
@@ -856,12 +848,9 @@ impl App {
                 self.error_text = CString::new(self.error.as_str()).unwrap();
             }
         } else if self.selected.is_none() {
-            let width = self.render_override.unwrap_or(match self.quality {
-                // The complete globe was authored at 480x272, independently
-                // of the full-quality place renderer's 960x640 target.
-                1 | 2 => 480,
-                _ => self.governor.width(),
-            });
+            // The atlas keeps its authored 480x272 framing, independently of
+            // the place renderer's fixed 480x320 and reference 960x640 targets.
+            let width = self.render_override.unwrap_or(480);
             if !self.globe_tried {
                 self.sample_excluded = true;
                 self.timings.reset_window();
@@ -884,7 +873,6 @@ impl App {
                 {
                     self.sample_excluded = true;
                     self.timings.reset_window();
-                    self.governor.reset_samples();
                     if let Err(error) = g.resize(width, self.quality != 1) {
                         self.failed_render_width = Some(width);
                         self.error = error;
@@ -939,7 +927,6 @@ impl App {
 
     pub fn drawable_changed(&mut self) {
         self.timings.reset_window();
-        self.governor.reset_samples();
         self.reset_dt = true;
     }
 
@@ -951,10 +938,12 @@ impl App {
                 .record(render_ms, present_ms, interval_ms, self.sample_excluded);
         if valid_sample {
             if let Some(r) = &self.renderer {
-                let mut stages = [0.0; 9];
+                let mut stages = [0.0; 11];
                 stages[..5].copy_from_slice(&r.timings);
                 stages[5] = r.mesh_ms;
-                stages[6..].copy_from_slice(&r.post_steps_ms);
+                stages[6..9].copy_from_slice(&r.post_steps_ms);
+                stages[9] = r.wet_response_ms;
+                stages[10] = r.water_response_ms;
                 self.timings
                     .record_passes(PassKind::Scene, self.profile, &stages);
             } else if let Some(g) = &self.globe {
@@ -964,16 +953,6 @@ impl App {
                 self.timings
                     .record_passes(PassKind::Globe, self.profile, &stages);
             }
-        }
-        if valid_sample
-            && (self.renderer.is_some() || self.globe.is_some())
-            && self.failed_render_width.is_none()
-            && self.quality == 0
-            && !self.profile
-            && self.render_override.is_none()
-        {
-            self.governor
-                .observe(render_ms + present_ms, &self.timings.cadence());
         }
         if self.presented_command != self.last_command {
             self.presented_command.clone_from(&self.last_command);
@@ -1038,11 +1017,14 @@ impl App {
             "frameTiming": timing,
             "targetFps": 30,
             "targetWorkMs": WORK_TARGET_MS,
-            "adaptiveWidth": self.governor.width(),
+            // Deprecated receipt compatibility; no automatic resolution tiers.
+            "adaptiveWidth": QualityProfile::Optimized.scene_width(),
             "timingKind": if self.profile { "synchronized-pass" } else { "cpu-submission" },
             "skyMs": self.renderer.as_ref().map(|r| r.sky_ms),
             "meshMs": self.renderer.as_ref().map(|r| r.mesh_ms),
-            // Rows: mirror, main. Columns: cull, sort, index gathering,
+            "wetResponseMs": self.renderer.as_ref().map(|r| r.wet_response_ms),
+            "waterResponseMs": self.renderer.as_ref().map(|r| r.water_response_ms),
+            // Rows: mirror, main, wet response, water response. Columns: cull, sort, index gathering,
             // upload, draw submission. These are CPU wall times, not GPU time.
             "meshSubmitStepsMs": self.renderer.as_ref().map(|r| r.mesh_steps_ms),
             "submitMs": self.renderer.as_ref().map(|r| r.submit_ms),
@@ -1053,6 +1035,7 @@ impl App {
             "triangles": self.renderer.as_ref().map(|r| r.triangles)
                 .or_else(|| self.globe.as_ref().map(|g| g.triangles)).unwrap_or(0),
             "lightPoints": self.renderer.as_ref().map(|r| r.light_points).unwrap_or(0),
+            "fieldAppearanceGpuBytes": self.renderer.as_ref().map(|r| r.field_appearance_bytes()).unwrap_or(0),
             "lightLodGpuBytes": self.renderer.as_ref().map(|r| r.light_lod_bytes().0).unwrap_or(0),
             "lightLodCpuBytes": self.renderer.as_ref().map(|r| r.light_lod_bytes().1).unwrap_or(0)
                 + self.scene.as_ref().map(|s| s.light_lod_source.bytes()).unwrap_or(0),
@@ -1070,6 +1053,14 @@ impl App {
         if let serde_json::Value::Object(rendering) = rendering {
             status.as_object_mut().unwrap().extend(rendering);
         }
+        status["qualityProfile"] =
+            serde_json::to_value(QualityProfile::from_setting(self.quality)).unwrap();
+        status["defaultRenderWidth"] = if self.selected.is_some() {
+            QualityProfile::from_setting(self.quality).scene_width()
+        } else {
+            480
+        }
+        .into();
         // Background, Earth surface, place markers, grade/composite. A globe
         // keeps its own pass layout; the five-entry place array remains null.
         status["globePassesMs"] =

@@ -2,7 +2,9 @@
 extern crate alloc;
 mod app;
 mod effects;
+mod display_environment;
 mod gl;
+mod geometry_usage;
 mod globe;
 mod gpu;
 mod light_lod;
@@ -15,6 +17,7 @@ mod scene;
 mod shadow;
 mod state;
 mod texture_usage;
+mod texture_storage;
 mod validation;
 use alloc::{ffi::CString, format, string::String, vec, vec::Vec};
 use core::{

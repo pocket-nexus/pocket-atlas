@@ -1,402 +1,289 @@
-//! GLES texture adaptation and bounded-error static vertex sharing. Materials,
-//! draw identities and animation retain the common PLCE contract.
-//!
-//! The common cooker stops each mip dimension at four texels. GLES continues
-//! to one, so narrow mip tails must be resampled rather than cropped. Authored
-//! partial chains remain partial (in particular, flipbook frames must not bleed
-//! together). The runtime must support a texture maximum mip level.
+//! SGX535 lowering from shared source analysis. No device pack is an input.
+//! Positions/UVs retain source precision; textures are filtered from original
+//! RGBA pixels. PLIP and its vertex layouts have a version independent of Vita.
 use pocket3d_place as pc;
-use serde_json::value::RawValue;
-use std::{collections::BTreeMap, ops::Range, path::Path};
-
+use std::path::Path;
 #[path = "gles_clusters.rs"]
 mod gles_clusters;
 #[path = "gles_colors.rs"]
 mod gles_colors;
+#[path = "gles_effects.rs"]
+mod gles_effects;
+#[path = "gles_environment.rs"]
+mod gles_environment;
 #[path = "gles_geometry.rs"]
 mod gles_geometry;
-#[path = "gles_materials.rs"]
-mod gles_materials;
-pub use gles_geometry::Profile as GeometryProfile;
-
+#[path = "gles_products.rs"]
+mod gles_products;
+#[path = "gles_pvrtc.rs"]
+mod gles_pvrtc;
 type Result<T> = std::result::Result<T, String>;
 
-struct Adapted {
-    bytes: Vec<u8>,
-    texture_count: usize,
-    texture_bytes: usize,
-    geometry_bytes: usize,
-    animation_bytes: usize,
-    largest_texture: usize,
-    geometry_pages: usize,
-    shared_draws: usize,
-    position_error: f32,
-    uv_error_texels: f32,
-    tint_materials: usize,
-    tint_draws: usize,
-    tint_linear_error: f32,
-    tint_display_error: f32,
+/// SGX's fixed 320-pixel height needs centimetre-scale levels between the
+/// source mesh and the shared 6 cm tier. Keep the shared tiers byte-for-byte:
+/// these additions are independently simplified from the same float source,
+/// with the same attribute weights, chunk locks and structural-detail policy.
+/// This is a target policy; other backends continue to call `geometry::lods`.
+pub(crate) fn source_lods(
+    vertices: &[crate::geometry::Vertex],
+    triangles: &[[u32; 3]],
+    locked: &[bool],
+    drop_parts: bool,
+    shared_bounds: &[f32],
+) -> Vec<(Vec<[u32; 3]>, f32)> {
+    let shared = crate::geometry::lods(vertices, triangles, locked, drop_parts, shared_bounds);
+    let mut fine =
+        crate::geometry::lods(vertices, triangles, locked, drop_parts, &[0.01, 0.02, 0.04]);
+    // An inserted level must reduce the finer tier and remain finer than the
+    // next shared one. A shared tier with a smaller measured error dominates
+    // an otherwise promising fine candidate; never weaken that existing tier.
+    fine.retain(|(triangles, error)| {
+        shared.iter().all(|(original, original_error)| {
+            if original_error == error {
+                false
+            } else if original_error < error {
+                original.len() > triangles.len()
+            } else {
+                original.len() < triangles.len()
+            }
+        })
+    });
+    fine.extend(shared);
+    fine.sort_by(|a, b| a.1.total_cmp(&b.1));
+    fine
 }
 
-pub fn cook(input: &Path, output: &Path, cap: u32) {
-    cook_with_profile(input, output, cap, GeometryProfile::Balanced);
-}
-
-pub fn cook_with_profile(input: &Path, output: &Path, cap: u32, profile: GeometryProfile) {
-    let source = std::fs::read(input).expect("source place");
-    let out = adapt_with_profile(&source, cap, profile)
-        .unwrap_or_else(|e| panic!("GLES adaptation: {e}"));
-    if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent).expect("output directory");
+pub fn cook(
+    source: &crate::source::Scene,
+    output: &Path,
+    cap: u32,
+    pvrtctool: Option<&Path>,
+) -> Result<()> {
+    let encoder = pvrtctool
+        .map(|path| gles_pvrtc::Encoder::new(path, output.parent().unwrap_or(Path::new("."))))
+        .transpose()?;
+    let (bytes, recipe, receipt) = lower(source, cap, encoder.as_ref())?;
+    // Validate/bake every sidecar before publishing any file.
+    let colors = gles_colors::adapt_with_recipe(&bytes, &recipe)?;
+    let clusters = gles_clusters::adapt(&bytes)?;
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    std::fs::write(output, &out.bytes).expect("write GLES place");
-    gles_colors::write(&out.bytes, output).expect("write optional GLES colors");
-    gles_clusters::write(&out.bytes, output).expect("write optional GLES clusters");
-    let mib = |n: usize| n as f64 / 1048576.0;
-    println!(
-        "GLES place: {} bytes, {} textures, texture cap {cap}",
-        out.bytes.len(),
-        out.texture_count
-    );
-    println!("  geometry {}", profile.description());
-    println!(
-        "  {} static vertex pages shared by {} draws; max re-encoding error {:.6} m / {:.5} adapted texels",
-        out.geometry_pages, out.shared_draws, out.position_error, out.uv_error_texels
-    );
-    println!(
-        "  {} canonical tint materials / {} draws; max base-color error {:.6} linear / {:.4} sRGB byte levels",
-        out.tint_materials, out.tint_draws, out.tint_linear_error, out.tint_display_error * 255.0
-    );
-    println!(
-        "  texture payload {:.2} MiB + geometry {:.2} MiB; animation {:.2} MiB; largest texture upload {:.2} MiB",
-        mib(out.texture_bytes), mib(out.geometry_bytes), mib(out.animation_bytes), mib(out.largest_texture)
-    );
-    // This is payload accounting, not a device memory estimate: driver copies,
-    // render targets, decoded JSON and the OS also occupy the shared RAM.
+    std::fs::write(output, &bytes).map_err(|e| e.to_string())?;
+    std::fs::write(output.with_extension("ipod-color.bin"), &colors.bytes)
+        .map_err(|e| e.to_string())?;
+    std::fs::write(output.with_extension("ipod-color.json"), &colors.json)
+        .map_err(|e| e.to_string())?;
+    std::fs::write(output.with_extension("ipod-clusters.bin"), &clusters)
+        .map_err(|e| e.to_string())?;
+    if let Some(receipt) = receipt {
+        std::fs::write(
+            output.with_extension("ipod-texture-receipt.json"),
+            serde_json::to_vec_pretty(&receipt).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+    } else if let Err(error) =
+        std::fs::remove_file(output.with_extension("ipod-texture-receipt.json"))
+    {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!("remove obsolete PVRTC receipt: {error}"));
+        }
+    }
+    let p = pc::ipod::parse(&bytes).map_err(|e| e.to_string())?;
+    println!("iPod PLIP v1: {} bytes, GEOM {} bytes, TEXD {} bytes, {} display draws / {} color bytes, {} cluster bytes", bytes.len(),p.section(pc::TAG_GEOMETRY).unwrap().len(),p.section(pc::TAG_TEXTURES).unwrap().len(),colors.draws,colors.bytes.len(),clusters.len());
+    Ok(())
 }
-
-#[cfg(test)]
-fn adapt(source: &[u8], cap: u32) -> Result<Adapted> {
-    adapt_with_profile(source, cap, GeometryProfile::Balanced)
+fn append(out: &mut Vec<u8>, data: &[u8], align: usize) -> Result<pc::Range> {
+    let start = out.len().checked_add(align - 1).ok_or("payload overflow")? / align * align;
+    let end = start.checked_add(data.len()).ok_or("payload overflow")?;
+    if end > u32::MAX as usize {
+        return Err("iPod payload exceeds u32".into());
+    }
+    out.resize(start, 0);
+    out.extend_from_slice(data);
+    Ok(pc::Range {
+        offset: start as u32,
+        size: data.len() as u32,
+    })
 }
-
-fn adapt_with_profile(source: &[u8], cap: u32, profile: GeometryProfile) -> Result<Adapted> {
+fn lower(
+    source: &crate::source::Scene,
+    cap: u32,
+    encoder: Option<&gles_pvrtc::Encoder>,
+) -> Result<(Vec<u8>, gles_products::Recipe, Option<gles_pvrtc::Receipt>)> {
     if cap == 0 {
         return Err("texture cap must be positive".into());
     }
-    // Pack::parse allocates its section table. Bound the count before calling it
-    // and reject aliases/duplicates rather than silently picking the first one.
-    let count = source.get(8..12).ok_or("truncated pack header")?;
-    let count = u32::from_le_bytes(count.try_into().unwrap()) as usize;
-    if source.len() < 16 || count > (source.len() - 16) / 16 {
-        return Err("truncated section table".into());
+    let mut meta = source.meta.clone();
+    meta.version = pc::ipod::VERSION;
+    let geometry = gles_geometry::lower(source, &mut meta)?;
+    let mut pixels = Vec::new();
+    for (i, t) in meta.textures.iter_mut().enumerate() {
+        let (mut texture, bytes) =
+            lower_texture(t, source.textures(), cap, source.texture_policy(i))
+                .map_err(|e| format!("texture {i} ({}): {e}", t.name))?;
+        texture.data = append(&mut pixels, &bytes, 16)?;
+        *t = texture;
     }
-    let pack = pc::Pack::parse(source).map_err(|e| e.to_string())?;
-    let table_end = 16 + count * 16;
-    for (i, section) in pack.sections.iter().enumerate() {
-        let start = section.offset as usize;
-        let end = start + section.size as usize;
-        if start < table_end
-            || !section.align.is_power_of_two()
-            || start % section.align as usize != 0
-        {
-            return Err("invalid section alignment or offset".into());
-        }
-        if pack.sections[..i].iter().any(|s| {
-            s.tag == section.tag
-                || (start < s.offset as usize + s.size as usize && (s.offset as usize) < end)
-        }) {
-            return Err("duplicate or overlapping sections".into());
-        }
-    }
-    let meta = pack.meta().map_err(|e| e.to_string())?;
-    if meta.version != pc::VERSION {
-        return Err(format!("unsupported metadata version {}", meta.version));
-    }
-    // Keep unrecognised metadata and sections, too. Texture representation and
-    // eligible geometry ranges change. Throughput may append tint materials;
-    // original material entries and animation tracks remain byte-for-byte.
-    let mut json: BTreeMap<String, Box<RawValue>> =
-        serde_json::from_slice(pack.section(pc::TAG_META).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
-    let mut texture_json: Vec<Box<RawValue>> =
-        serde_json::from_str(json.get("textures").ok_or("missing texture table")?.get())
-            .map_err(|e| e.to_string())?;
-    let blob = pack.section(pc::TAG_TEXTURES).map_err(|e| e.to_string())?;
-    let geometry = pack.section(pc::TAG_GEOMETRY).map_err(|e| e.to_string())?;
-    let draw_json: Vec<Box<RawValue>> =
-        serde_json::from_str(json.get("draws").ok_or("missing draw table")?.get())
-            .map_err(|e| e.to_string())?;
-    let material_json: Vec<Box<RawValue>> =
-        serde_json::from_str(json.get("materials").ok_or("missing material table")?.get())
-            .map_err(|e| e.to_string())?;
-    let tinted = if profile == GeometryProfile::Throughput {
-        gles_materials::adapt(&meta, &material_json, &draw_json, geometry)?
+    let recipe = gles_products::bake(source, &mut meta, &mut pixels)?;
+    let mut ipod_recipes = gles_effects::bake(&mut meta, &mut pixels)?;
+    let (display_cubes, cube_recipes) = gles_environment::bake(&meta, &pixels)?;
+    ipod_recipes.display_cubes = cube_recipes;
+    let mut compressed = Vec::new();
+    let receipt = if let Some(encoder) = encoder {
+        let out = encoder.bake(&meta, &pixels)?;
+        compressed = out.bytes;
+        ipod_recipes.pvrtc = out.recipes;
+        Some(out.receipt)
     } else {
         None
     };
-    if let Some(tinted) = &tinted {
-        json.insert(
-            "materials".into(),
-            serde_json::value::to_raw_value(&tinted.materials).map_err(|e| e.to_string())?,
-        );
-        json.insert(
-            "draws".into(),
-            serde_json::value::to_raw_value(&tinted.draws).map_err(|e| e.to_string())?,
-        );
+    let json = serde_json::to_vec(&pc::ipod::Metadata {
+        scene: meta,
+        ipod_recipes,
+    })
+    .map_err(|e| e.to_string())?;
+    let mut sections = vec![
+        (pc::TAG_META, json.as_slice(), 16),
+        (pc::TAG_TEXTURES, pixels.as_slice(), 16),
+        (pc::TAG_GEOMETRY, geometry.as_slice(), 16),
+        (pc::TAG_ANIMATION, source.animation(), 16),
+    ];
+    if !compressed.is_empty() {
+        sections.push((pc::ipod::TAG_PVRTC, compressed.as_slice(), 16));
     }
-    let geometry = tinted
-        .as_ref()
-        .map(|t| t.geometry.as_slice())
-        .unwrap_or(geometry);
-    let batched = gles_geometry::adapt_with_profile(
-        tinted.as_ref().map(|t| &t.meta).unwrap_or(&meta),
-        tinted
-            .as_ref()
-            .map(|t| t.draws.as_slice())
-            .unwrap_or(&draw_json),
-        geometry,
-        cap,
-        profile,
-    )?;
-    if let Some(batched) = &batched {
-        json.insert(
-            "draws".into(),
-            serde_json::value::to_raw_value(&batched.draws).map_err(|e| e.to_string())?,
-        );
+    if !display_cubes.is_empty() {
+        sections.push((pc::ipod::TAG_DISPLAY_CUBES, display_cubes.as_slice(), 16));
     }
-    let geometry = batched
-        .as_ref()
-        .map(|b| b.bytes.as_slice())
-        .unwrap_or(geometry);
-    let geometry_bytes = geometry.len();
-    let animation_bytes = pack
-        .section(pc::TAG_ANIMATION)
-        .map_err(|e| e.to_string())?
-        .len();
-    let mut pixels = Vec::new();
-    let mut largest_texture = 0;
-    for (i, texture) in meta.textures.iter().enumerate() {
-        let (mut texture, data) = adapt_texture(texture, blob, cap)
-            .map_err(|e| format!("texture {} ({i}): {e}", texture.name))?;
-        texture.data.offset =
-            u32::try_from(pixels.len()).map_err(|_| "texture blob exceeds 4 GiB")?;
-        texture.data.size = u32::try_from(data.len()).map_err(|_| "texture exceeds 4 GiB")?;
-        largest_texture = largest_texture.max(data.len());
-        pixels.extend(data);
-        let encoded = serde_json::to_value(texture).map_err(|e| e.to_string())?;
-        let mut fields: BTreeMap<String, Box<RawValue>> =
-            serde_json::from_str(texture_json[i].get()).map_err(|e| e.to_string())?;
-        for field in ["width", "height", "mips", "format", "data"] {
-            fields.insert(
-                field.into(),
-                serde_json::value::to_raw_value(&encoded[field]).map_err(|e| e.to_string())?,
-            );
-        }
-        texture_json[i] = serde_json::value::to_raw_value(&fields).map_err(|e| e.to_string())?;
-    }
-    if pixels.len() > u32::MAX as usize {
-        return Err("texture blob exceeds 4 GiB".into());
-    }
-    json.insert(
-        "textures".into(),
-        serde_json::value::to_raw_value(&texture_json).map_err(|e| e.to_string())?,
-    );
-    let json = serde_json::to_vec(&json).map_err(|e| e.to_string())?;
-    let sections: Vec<_> = pack
-        .sections
-        .iter()
-        .map(|s| {
-            let data = match s.tag {
-                pc::TAG_META => json.as_slice(),
-                pc::TAG_TEXTURES => pixels.as_slice(),
-                pc::TAG_GEOMETRY => geometry,
-                _ => &source[s.offset as usize..s.offset as usize + s.size as usize],
-            };
-            (s.tag, data, s.align)
-        })
-        .collect();
-    // The container uses u32 offsets. Check before its serializer's casts.
-    let mut total = table_end;
+    let mut total = 16usize + sections.len() * 16;
     for (_, data, align) in &sections {
         total = total
             .checked_add(*align as usize - 1)
             .map(|n| n / *align as usize * *align as usize)
             .and_then(|n| n.checked_add(data.len()))
-            .ok_or("pack size overflow")?;
+            .ok_or("iPod pack overflow")?;
         if total > u32::MAX as usize {
-            return Err("GLES pack exceeds 4 GiB".into());
+            return Err("iPod pack exceeds u32".into());
         }
     }
-    Ok(Adapted {
-        bytes: pc::write(&sections),
-        texture_count: meta.textures.len(),
-        texture_bytes: pixels.len(),
-        geometry_bytes,
-        animation_bytes,
-        largest_texture,
-        geometry_pages: batched.as_ref().map_or(0, |b| b.pages),
-        shared_draws: batched.as_ref().map_or(0, |b| b.shared_draws),
-        position_error: batched.as_ref().map_or(0.0, |b| b.position_error),
-        uv_error_texels: batched.as_ref().map_or(0.0, |b| b.uv_error_texels),
-        tint_materials: tinted.as_ref().map_or(0, |t| t.canonical_materials),
-        tint_draws: tinted.as_ref().map_or(0, |t| t.folded_draws),
-        tint_linear_error: tinted.as_ref().map_or(0.0, |t| t.linear_error),
-        tint_display_error: tinted.as_ref().map_or(0.0, |t| t.display_error),
-    })
+    Ok((
+        pc::write_versioned(pc::ipod::MAGIC, pc::ipod::VERSION, &sections),
+        recipe,
+        receipt,
+    ))
 }
-
-struct Mip {
-    width: u32,
-    height: u32,
-    bytes: Range<usize>,
-}
-
-fn level_bytes(format: pc::TexFormat, width: u32, height: u32) -> Result<usize> {
-    let (w, h, stride) = match format {
-        pc::TexFormat::Bc1 => (width.div_ceil(4), height.div_ceil(4), 8),
-        pc::TexFormat::Bc3 | pc::TexFormat::Bc5 => (width.div_ceil(4), height.div_ceil(4), 16),
-        pc::TexFormat::Rgba8 => (width, height, 4),
-        pc::TexFormat::Rgba16f => (width, height, 8),
+fn level_bytes(format: pc::TexFormat, w: u32, h: u32) -> Result<usize> {
+    let stride = match format {
+        pc::TexFormat::Rgba8 => 4,
+        pc::TexFormat::Rgba16f => 8,
+        _ => {
+            return Err(
+                "iPod lowering requires original RGBA pixels, not BC device textures".into(),
+            )
+        }
     };
     (w as usize)
         .checked_mul(h as usize)
         .and_then(|n| n.checked_mul(stride))
-        .ok_or_else(|| "mip size overflow".into())
+        .ok_or("texture size overflow".into())
 }
-
-fn mip_layout(t: &pc::Texture, floor: u32) -> Result<Vec<Mip>> {
-    let (mut width, mut height, mut offset) = (t.width, t.height, 0usize);
-    let mut levels = Vec::new();
-    for _ in 0..t.mips {
-        let end = offset
-            .checked_add(level_bytes(t.format, width, height)?)
-            .ok_or("texture size overflow")?;
-        levels.push(Mip {
-            width,
-            height,
-            bytes: offset..end,
-        });
-        offset = end;
-        width = (width / 2).max(floor.min(t.width));
-        height = (height / 2).max(floor.min(t.height));
-    }
-    Ok(levels)
-}
-
-fn adapt_texture(t: &pc::Texture, blob: &[u8], cap: u32) -> Result<(pc::Texture, Vec<u8>)> {
+fn lower_texture(
+    t: &pc::Texture,
+    blob: &[u8],
+    cap: u32,
+    policy: crate::source::TexturePolicy,
+) -> Result<(pc::Texture, Vec<u8>)> {
     if cap == 0
         || t.width == 0
         || t.height == 0
         || t.mips == 0
-        || t.mips > 32 - t.width.max(t.height).leading_zeros()
+        || t.mips > 32
+        || policy.cells.0 == 0
+        || policy.cells.1 == 0
+        || policy.max_mips == 0
     {
-        return Err("invalid dimensions, mip count or cap".into());
+        return Err("invalid texture dimensions or policy".into());
     }
-    let start = t.data.offset as usize;
-    let end = start
-        .checked_add(t.data.size as usize)
-        .ok_or("texture range overflow")?;
-    let source = blob.get(start..end).ok_or("texture range outside TEXD")?;
+    let source = pc::parts::slice(blob, &t.data)?;
+    let mut expected = 0usize;
+    let (mut sw, mut sh) = (t.width, t.height);
+    for _ in 0..t.mips {
+        expected = expected
+            .checked_add(level_bytes(t.format, sw, sh)?)
+            .ok_or("mip overflow")?;
+        sw = (sw / 2).max(1);
+        sh = (sh / 2).max(1);
+    }
+    if source.len() != expected {
+        return Err("source mip payload size mismatch".into());
+    }
     if t.format == pc::TexFormat::Rgba16f
         && source
             .chunks_exact(2)
-            .any(|b| !half::f16::from_le_bytes([b[0], b[1]]).is_finite())
+            .any(|b| !half::f16::from_le_bytes(b.try_into().unwrap()).is_finite())
     {
-        return Err("non-finite half-float texel".into());
+        return Err("non-finite environment texel".into());
     }
-    let mut levels = mip_layout(t, 4)?;
-    if levels.last().unwrap().bytes.end != source.len() {
-        // Also accept standard uncompressed GLES chains on a repeat cook.
-        // BC blocks cannot distinguish the layouts by size; common BC sources
-        // always use the four-pixel floor and are decoded that way.
-        levels = mip_layout(t, 1)?;
-        if levels.last().unwrap().bytes.end != source.len() {
-            return Err(format!(
-                "mip payload size mismatch: declared {}, expected {}",
-                source.len(),
-                levels.last().unwrap().bytes.end
-            ));
-        }
-    }
-    let mut output = t.clone();
-    let mut data = Vec::new();
-    let (mut width, mut height) = (t.width, t.height);
-    let mut first = 0;
-    while width > cap || height > cap {
-        width = (width / 2).max(1);
-        height = (height / 2).max(1);
-        first += 1;
-    }
-    output.width = width;
-    output.height = height;
+    let pow2 = |n: u32| 1u32 << (31 - n.leading_zeros());
+    let limit = pow2(cap);
+    let scale = (limit as f64 / t.width.max(t.height) as f64).min(1.0);
+    let (width, height) = (
+        pow2(((t.width as f64 * scale).floor() as u32).max(1)),
+        pow2(((t.height as f64 * scale).floor() as u32).max(1)),
+    );
+    let mut out = t.clone();
+    out.width = width;
+    out.height = height;
+    let mut bytes = Vec::new();
     if t.role == pc::TexRole::Environment {
-        // Environment level n represents roughness n/(mips-1), not an ordinary
-        // minification mip. Keep every roughness level and resize each spatially.
-        // A cap unable to hold those distinct levels cannot preserve the map.
         if t.mips > 32 - width.max(height).leading_zeros() {
-            return Err("cap cannot preserve the environment roughness levels".into());
+            return Err("texture cap cannot preserve environment roughness levels".into());
         }
-        first = 0;
-    }
-    if first >= t.mips as usize {
-        // A one-level panorama / short flipbook has no authored mip this small.
-        // Box filtering its last level respects aligned cell boundaries; never
-        // generate a new tail beyond the author's original stopping point.
-        let last = levels.last().unwrap();
-        data = convert_level(t, last, &source[last.bytes.clone()], width, height)?;
-        output.mips = 1;
+        let (mut sw, mut sh, mut dw, mut dh, mut at) = (t.width, t.height, width, height, 0);
+        for _ in 0..t.mips {
+            let n = level_bytes(t.format, sw, sh)?;
+            bytes.extend(resample(t, &source[at..at + n], sw, sh, dw, dh)?);
+            at += n;
+            sw = (sw / 2).max(1);
+            sh = (sh / 2).max(1);
+            dw = (dw / 2).max(1);
+            dh = (dh / 2).max(1);
+        }
     } else {
-        output.mips = t.mips - first as u32;
-        for level in &levels[first..] {
-            data.extend(convert_level(
-                t,
-                level,
-                &source[level.bytes.clone()],
-                width,
-                height,
-            )?);
-            width = (width / 2).max(1);
-            height = (height / 2).max(1);
+        if t.format != pc::TexFormat::Rgba8 || t.mips != 1 {
+            return Err("material source must contain one original RGBA8 image".into());
+        }
+        if width % policy.cells.0 != 0 || height % policy.cells.1 != 0 {
+            return Err("texture cap cannot preserve flipbook cell boundaries".into());
+        }
+        let mut mip = resample(t, source, t.width, t.height, width, height)?;
+        let (mut w, mut h) = (width, height);
+        out.mips = 0;
+        loop {
+            bytes.extend(&mip);
+            out.mips += 1;
+            let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+            if (w == 1 && h == 1)
+                || out.mips >= policy.max_mips
+                || (policy.cells != (1, 1) && (nw / policy.cells.0 < 4 || nh / policy.cells.1 < 4))
+            {
+                break;
+            }
+            mip = resize(t, &mip, w, h, nw, nh)?;
+            w = nw;
+            h = nh;
         }
     }
-    if t.format != pc::TexFormat::Rgba16f {
-        output.format = pc::TexFormat::Rgba8;
-    }
-    Ok((output, data))
+    out.data.size = u32::try_from(bytes.len()).map_err(|_| "texture exceeds u32")?;
+    Ok((out, bytes))
 }
-
-fn convert_level(
-    t: &pc::Texture,
-    level: &Mip,
-    source: &[u8],
-    width: u32,
-    height: u32,
-) -> Result<Vec<u8>> {
-    let decoded = match t.format {
-        pc::TexFormat::Bc1 | pc::TexFormat::Bc3 | pc::TexFormat::Bc5 => {
-            let format = match t.format {
-                pc::TexFormat::Bc1 => texpresso::Format::Bc1,
-                pc::TexFormat::Bc3 => texpresso::Format::Bc3,
-                _ => texpresso::Format::Bc5,
-            };
-            let mut rgba = vec![0u8; level_bytes(pc::TexFormat::Rgba8, level.width, level.height)?];
-            format.decompress(
-                source,
-                level.width as usize,
-                level.height as usize,
-                &mut rgba,
-            );
-            rgba
-        }
-        _ => source.to_vec(),
-    };
-    if (width, height) == (level.width, level.height) {
-        return Ok(decoded);
+fn resample(t: &pc::Texture, source: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Result<Vec<u8>> {
+    if sw == dw && sh == dh {
+        Ok(source.to_vec())
+    } else {
+        resize(t, source, sw, sh, dw, dh)
     }
-    resize(t, &decoded, level.width, level.height, width, height)
 }
-
 /// Area filtering in the texture's semantic space: sRGB colours are linearised
 /// and premultiplied, data channels remain independent, and XY normals are
 /// reconstructed / averaged / normalised. Half-float maps retain HDR precision.
@@ -500,248 +387,117 @@ fn resize(t: &pc::Texture, source: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) ->
 mod tests {
     use super::*;
     use serde_json::json;
-
-    fn texture(
-        format: pc::TexFormat,
-        role: pc::TexRole,
-        width: u32,
-        height: u32,
-        mips: u32,
-        size: usize,
-    ) -> pc::Texture {
-        pc::Texture {
-            name: "fixture".into(),
-            role,
-            format,
-            width,
-            height,
-            mips,
-            data: pc::Range {
-                offset: 0,
-                size: size as u32,
-            },
-            wrap_s: pc::Wrap::Repeat,
-            wrap_t: pc::Wrap::Clamp,
-            has_alpha: false,
-            mean: [0.2, 0.3, 0.4, 1.0],
-            lod_bias: -0.5,
-        }
-    }
-
     #[test]
-    fn block_formats_keep_alpha_and_normal_channels() {
-        let red = [0, 248, 0, 0, 0, 0, 0, 0];
-        let alpha = [64, 64, 0, 0, 0, 0, 0, 0];
-        let green = [192, 192, 0, 0, 0, 0, 0, 0];
-        for (format, source, pixel) in [
-            (pc::TexFormat::Bc1, red.to_vec(), [255, 0, 0, 255]),
-            (pc::TexFormat::Bc3, [alpha, red].concat(), [255, 0, 0, 64]),
-            (
-                pc::TexFormat::Bc5,
-                [alpha, green].concat(),
-                [64, 192, 0, 255],
-            ),
-        ] {
-            let t = texture(format, pc::TexRole::Data, 4, 4, 1, source.len());
-            let (out, bytes) = adapt_texture(&t, &source, 4).unwrap();
-            assert_eq!(out.format, pc::TexFormat::Rgba8);
-            assert_eq!(bytes, pixel.repeat(16));
-        }
-    }
-
-    #[test]
-    fn partial_mips_select_exact_source_without_extending_flipbook_tail() {
-        let mut source = [17, 23, 31, 255].repeat(64 * 32);
-        let tail = [67, 71, 79, 255].repeat(32 * 16);
-        source.extend(&tail);
-        let t = texture(
-            pc::TexFormat::Rgba8,
-            pc::TexRole::Color,
-            64,
-            32,
-            2,
-            source.len(),
-        );
-        let (out, bytes) = adapt_texture(&t, &source, 32).unwrap();
-        assert_eq!((out.width, out.height, out.mips), (32, 16, 1));
-        assert_eq!(bytes, tail);
-        assert_eq!(out.mean, t.mean);
-        assert_eq!(out.lod_bias, t.lod_bias);
-        assert_eq!(out.wrap_s, t.wrap_s);
-    }
-
-    #[test]
-    fn common_narrow_mips_are_filtered_to_gles_dimensions_not_cropped() {
-        let mut source = Vec::new();
-        for width in [32, 16, 8, 4] {
-            for row in 0..4 {
-                source.extend([row * 40, 0, 0, 255].repeat(width));
+    fn fine_source_lods_preserve_shared_tiers_and_chunk_locks() {
+        use crate::geometry::{self, Vertex};
+        use glam::{Vec2, Vec3};
+        let mut vertices = Vec::new();
+        let mut triangles = Vec::new();
+        let n = 24u32;
+        for y in 0..=n {
+            for x in 0..=n {
+                let u = x as f32 / n as f32;
+                let v = y as f32 / n as f32;
+                vertices.push(Vertex {
+                    pos: Vec3::new(u * 4.0, v * 4.0, (u * 6.0).sin() * (v * 6.0).sin() * 0.4),
+                    normal: Vec3::Z,
+                    uv: Vec2::new(u, v),
+                    color: [255; 4],
+                    ..Default::default()
+                });
+                if x < n && y < n {
+                    let a = y * (n + 1) + x;
+                    triangles.extend([[a, a + 1, a + n + 2], [a, a + n + 2, a + n + 1]]);
+                }
             }
         }
-        let t = texture(
-            pc::TexFormat::Rgba8,
-            pc::TexRole::Data,
-            32,
-            4,
-            4,
-            source.len(),
-        );
-        let (out, bytes) = adapt_texture(&t, &source, 16).unwrap();
-        assert_eq!((out.width, out.height, out.mips), (16, 2, 3));
-        assert_eq!(bytes.len(), (16 * 2 + 8 + 4) * 4);
-        assert_eq!(&bytes[..16 * 4], [20, 0, 0, 255].repeat(16));
-        assert_eq!(&bytes[16 * 4..32 * 4], [100, 0, 0, 255].repeat(16));
-        assert_eq!(&bytes[32 * 4..], [60, 0, 0, 255].repeat(12));
-        // A second adaptation recognises the standard uncompressed layout.
-        let mut out = out;
-        out.data.size = bytes.len() as u32;
-        assert_eq!(adapt_texture(&out, &bytes, 16).unwrap().1, bytes);
-    }
-
-    #[test]
-    fn fallback_preserves_aspect_and_filters_colour_in_linear_space() {
-        let source: Vec<_> = (0..64 * 16)
-            .flat_map(|i| if i % 2 == 0 { [0, 0, 0, 255] } else { [255; 4] })
+        let locks: Vec<_> = vertices
+            .iter()
+            .map(|v| v.pos.x == 0.0 || v.pos.x == 4.0)
             .collect();
-        let t = texture(
-            pc::TexFormat::Rgba8,
-            pc::TexRole::Color,
-            64,
-            16,
-            1,
-            source.len(),
+        let shared = geometry::lods(&vertices, &triangles, &locks, false, &[0.06, 0.25]);
+        let result = source_lods(&vertices, &triangles, &locks, false, &[0.06, 0.25]);
+        assert!(
+            result.len() > shared.len(),
+            "fixture needs a useful fine tier"
         );
-        let (out, bytes) = adapt_texture(&t, &source, 16).unwrap();
-        assert_eq!((out.width, out.height, out.mips), (16, 4, 1));
-        assert_eq!(bytes, [188, 188, 188, 255].repeat(16 * 4));
-        let mut t = t;
-        t.role = pc::TexRole::Data;
-        assert_eq!(
-            adapt_texture(&t, &source, 16).unwrap().1,
-            [128, 128, 128, 255].repeat(16 * 4)
-        );
-    }
-
-    #[test]
-    fn colour_alpha_is_premultiplied_but_data_channels_are_independent() {
-        let source = [255, 0, 0, 255, 0, 0, 255, 0].repeat(8);
-        let mut t = texture(
-            pc::TexFormat::Rgba8,
-            pc::TexRole::Color,
-            4,
-            4,
-            1,
-            source.len(),
-        );
-        t.has_alpha = true;
-        assert_eq!(adapt_texture(&t, &source, 1).unwrap().1, [255, 0, 0, 128]);
-        t.role = pc::TexRole::Data;
-        assert_eq!(adapt_texture(&t, &source, 1).unwrap().1, [128, 0, 128, 128]);
-    }
-
-    #[test]
-    fn resampled_normals_reconstruct_z_before_averaging() {
-        let source = [204, 128, 0, 255, 51, 128, 0, 255].repeat(8);
-        let t = texture(
-            pc::TexFormat::Rgba8,
-            pc::TexRole::Normal,
-            4,
-            4,
-            1,
-            source.len(),
-        );
-        let bytes = adapt_texture(&t, &source, 1).unwrap().1;
-        assert_eq!(bytes, [128, 128, 0, 255]);
-    }
-
-    #[test]
-    fn environment_keeps_hdr_values_and_every_roughness_level() {
-        let pixel = |v| {
-            [v, v / 2.0, -0.5, 1.0]
-                .map(|v| half::f16::from_f32(v).to_le_bytes())
-                .concat()
-        };
-        let source = [pixel(4.0).repeat(8 * 8), pixel(2.0).repeat(4 * 4)].concat();
-        let t = texture(
-            pc::TexFormat::Rgba16f,
-            pc::TexRole::Environment,
-            8,
-            8,
-            2,
-            source.len(),
-        );
-        let (out, bytes) = adapt_texture(&t, &source, 4).unwrap();
-        assert_eq!((out.width, out.height, out.mips), (4, 4, 2));
-        assert_eq!(out.format, pc::TexFormat::Rgba16f);
-        assert_eq!(
-            bytes,
-            [pixel(4.0).repeat(4 * 4), pixel(2.0).repeat(2 * 2)].concat()
-        );
-        assert!(adapt_texture(&t, &source, 1)
-            .unwrap_err()
-            .contains("roughness"));
-    }
-
-    #[test]
-    fn malformed_ranges_and_mips_fail_even_when_the_bad_level_would_be_skipped() {
-        let source = vec![0; 8 * 8 * 4 + 4 * 4 * 4];
-        let t = texture(
-            pc::TexFormat::Rgba8,
-            pc::TexRole::Data,
-            8,
-            8,
-            2,
-            source.len(),
-        );
-        for invalid in [
-            pc::Texture {
-                mips: 0,
-                ..t.clone()
-            },
-            pc::Texture {
-                mips: 33,
-                ..t.clone()
-            },
-            pc::Texture {
-                width: 0,
-                ..t.clone()
-            },
-            pc::Texture {
-                data: pc::Range {
-                    offset: u32::MAX,
-                    size: 10,
-                },
-                ..t.clone()
-            },
-            pc::Texture {
-                data: pc::Range {
-                    offset: 0,
-                    size: t.data.size - 1,
-                },
-                ..t.clone()
-            },
-        ] {
-            assert!(adapt_texture(&invalid, &source, 4).is_err());
+        for tier in &shared {
+            assert!(result.contains(tier), "shared topology/error changed");
         }
-        assert!(adapt_texture(&t, &source, 0).is_err());
-        assert!(adapt_texture(&t, &source[..source.len() - 1], 4).is_err());
-        let nan = half::f16::NAN.to_le_bytes().repeat(4 * 4 * 4);
-        let t = texture(
-            pc::TexFormat::Rgba16f,
-            pc::TexRole::Data,
-            4,
-            4,
-            1,
-            nan.len(),
-        );
-        assert!(adapt_texture(&t, &nan, 4)
-            .unwrap_err()
-            .contains("non-finite"));
+        for pair in result.windows(2) {
+            assert!(pair[0].1 < pair[1].1);
+            assert!(pair[0].0.len() > pair[1].0.len());
+        }
+        for (triangles, error) in &result {
+            assert!(error.is_finite() && *error >= 0.0);
+            assert!(triangles
+                .iter()
+                .flatten()
+                .all(|&i| (i as usize) < vertices.len()));
+            for (i, locked) in locks.iter().enumerate() {
+                if *locked {
+                    assert!(triangles.iter().flatten().any(|&v| v as usize == i));
+                }
+            }
+        }
     }
-
+    pub(super) fn texture(role: pc::TexRole, w: u32, h: u32) -> pc::Texture {
+        serde_json::from_value(json!({"name":"test","role":role,"format":"rgba8","width":w,"height":h,"mips":1,"data":{"offset":0,"size":w*h*4},"wrap_s":"repeat","wrap_t":"clamp","has_alpha":false})).unwrap()
+    }
+    #[test]
+    fn original_texels_and_semantic_mips() {
+        let src = [0, 0, 0, 255, 255, 255, 255, 255].repeat(8);
+        let t = texture(pc::TexRole::Color, 4, 4);
+        let (out, bytes) = lower_texture(&t, &src, 4, Default::default()).unwrap();
+        assert_eq!(&bytes[..64], &src);
+        assert_eq!(out.mips, 3);
+        assert_eq!(&bytes[64..], [188, 188, 188, 255].repeat(5));
+        let t = texture(pc::TexRole::Data, 4, 4);
+        assert_eq!(
+            lower_texture(&t, &src, 1, Default::default()).unwrap().1,
+            [128, 128, 128, 255]
+        );
+    }
+    #[test]
+    fn alpha_normal_and_flipbook_boundaries() {
+        let mut t = texture(pc::TexRole::Color, 8, 4);
+        t.has_alpha = true;
+        let src = [255, 0, 0, 255, 0, 0, 255, 0].repeat(16);
+        assert_eq!(
+            lower_texture(&t, &src, 1, Default::default()).unwrap().1,
+            [255, 0, 0, 128]
+        );
+        let (t, b) = lower_texture(
+            &t,
+            &src,
+            8,
+            crate::source::TexturePolicy {
+                cells: (2, 1),
+                max_mips: 32,
+            },
+        )
+        .unwrap();
+        assert_eq!(t.mips, 1);
+        assert_eq!(b, src);
+        let t = texture(pc::TexRole::Normal, 4, 4);
+        let src = [204, 128, 0, 255, 51, 128, 0, 255].repeat(8);
+        assert_eq!(
+            lower_texture(&t, &src, 1, Default::default()).unwrap().1,
+            [128, 128, 0, 255]
+        );
+    }
+    #[test]
+    fn reject_compressed_and_truncated_source() {
+        let mut t = texture(pc::TexRole::Data, 4, 4);
+        assert!(lower_texture(&t, &[0; 63], 4, Default::default()).is_err());
+        t.format = pc::TexFormat::Bc1;
+        assert!(lower_texture(&t, &[0; 64], 4, Default::default())
+            .unwrap_err()
+            .contains("original RGBA"));
+    }
     pub(super) fn fixture(texture: &pc::Texture) -> serde_json::Value {
         json!({
-            "version": pc::VERSION, "name": "Full loop fixture", "kind": "night-street",
+            "version": pc::ipod::VERSION, "name": "Full loop fixture", "kind": "night-street",
             "min": [-1,-2,-3], "max": [4,5,6], "textures": [texture], "materials": [],
             "draws": [{"material":0,"layout":"static","vertices":{"offset":0,"size":72},
                 "vertex_count":3,"indices":{"offset":72,"size":6},"index_count":3,
@@ -759,89 +515,5 @@ mod tests {
             "camera":{"shots":[],"walkable":[],"intro":{"pos":[0,1,2],"target":[3,4,5],"fov":40}},
             "doors":null,"beacons":[],"stats":{"triangles":1},"unknown_future_metadata":{"keep":true}
         })
-    }
-
-    #[test]
-    fn untouched_metadata_numbers_keep_the_original_lexemes() {
-        let texels = [255, 0, 0, 255].repeat(8 * 8);
-        let t = texture(
-            pc::TexFormat::Rgba8,
-            pc::TexRole::Color,
-            8,
-            8,
-            1,
-            texels.len(),
-        );
-        let meta = serde_json::to_string(&fixture(&t))
-            .unwrap()
-            .replace(
-                "\"pos_offset\":[0,0,0]",
-                "\"pos_offset\":[0,-2.4492937e-16,0]",
-            )
-            .replace(
-                "\"name\":\"fixture\"",
-                "\"name\":\"fixture\",\"future\":-2.4492937e-16",
-            );
-        let source = pc::write(&[
-            (pc::TAG_META, meta.as_bytes(), 16),
-            (pc::TAG_TEXTURES, &texels, 16),
-            (pc::TAG_GEOMETRY, &[], 16),
-            (pc::TAG_ANIMATION, &[], 16),
-        ]);
-        let out = adapt(&source, 4).unwrap();
-        let pack = pc::Pack::parse(&out.bytes).unwrap();
-        let text = std::str::from_utf8(pack.section(pc::TAG_META).unwrap()).unwrap();
-        assert!(text.contains("\"pos_offset\":[0,-2.4492937e-16,0]"));
-        assert!(text.contains("\"future\":-2.4492937e-16"));
-    }
-
-    #[test]
-    fn pack_adaptation_preserves_geometry_full_loop_and_other_metadata() {
-        let texels = [255, 0, 0, 255].repeat(8 * 8);
-        let t = texture(
-            pc::TexFormat::Rgba8,
-            pc::TexRole::Color,
-            8,
-            8,
-            1,
-            texels.len(),
-        );
-        let mut json = fixture(&t);
-        json["textures"][0]["future_texture_field"] = json!("retain");
-        let meta = serde_json::to_vec(&json).unwrap();
-        let geometry: Vec<_> = (0..78).collect();
-        let animation: Vec<_> = (0..3600 * 7)
-            .flat_map(|i| (i as f32 / 7.0).to_le_bytes())
-            .collect();
-        let source = pc::write(&[
-            (pc::TAG_META, &meta, 16),
-            (pc::TAG_TEXTURES, &texels, 4096),
-            (pc::TAG_GEOMETRY, &geometry, 4096),
-            (pc::TAG_ANIMATION, &animation, 16),
-            (*b"XTRA", b"keep", 16),
-        ]);
-        let out = adapt(&source, 4).unwrap();
-        let result = pc::Pack::parse(&out.bytes).unwrap();
-        assert_eq!(result.section(pc::TAG_GEOMETRY).unwrap(), geometry);
-        assert_eq!(result.section(pc::TAG_ANIMATION).unwrap(), animation);
-        assert_eq!(result.section(*b"XTRA").unwrap(), b"keep");
-        let mut output_json: serde_json::Value =
-            serde_json::from_slice(result.section(pc::TAG_META).unwrap()).unwrap();
-        for field in ["width", "height", "mips", "format", "data"] {
-            output_json["textures"][0][field] = json["textures"][0][field].clone();
-        }
-        assert_eq!(output_json, json);
-        assert_eq!(result.meta().unwrap().frames, 3600);
-        assert_eq!(out.geometry_bytes, geometry.len());
-        assert_eq!(out.animation_bytes, animation.len());
-        assert_eq!(out.texture_bytes, 4 * 4 * 4);
-        assert_eq!(out.largest_texture, 4 * 4 * 4);
-        let meta = result.meta().unwrap();
-        let tex = &meta.textures[0];
-        assert_eq!(tex.data.size, 4 * 4 * 4);
-        assert_eq!(
-            result.section(pc::TAG_TEXTURES).unwrap().len(),
-            tex.data.size as usize
-        );
     }
 }

@@ -3,7 +3,9 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { shader } from "./atlas-ipod-shaders";
 import { PLACES } from "../web/src/places/registry";
+import { selectIPodPlaces } from "./atlas-ipod-catalog";
 import { createHash } from "node:crypto";
+import { readIPodMetadata } from "./atlas-ipod-pack";
 
 interface ShadowMeta {
   materials: {
@@ -88,17 +90,7 @@ export function writeShadowPipelines(id: string, meta: ShadowMeta): void {
 }
 
 function packMeta(id: string): ShadowMeta {
-  const bytes = readFileSync(
-    join(root, `.pocket-build/places/${id}/${id}.place`),
-  );
-  for (let i = 0; i < bytes.readUInt32LE(8); i++) {
-    const at = 16 + i * 16;
-    if (bytes.toString("ascii", at, at + 4) !== "META") continue;
-    const offset = bytes.readUInt32LE(at + 4),
-      length = bytes.readUInt32LE(at + 8);
-    return JSON.parse(bytes.toString("utf8", offset, offset + length));
-  }
-  throw new Error(`${id}: META section missing`);
+  return readIPodMetadata(join(assets, `${id}.place`));
 }
 
 export function checkShadowPipelines(id: string): void {
@@ -150,7 +142,7 @@ export function checkShadowPipelines(id: string): void {
 }
 
 if (import.meta.main) {
-  for (const place of PLACES.filter((p) => p.status === "live" && p.load)) {
+  for (const place of selectIPodPlaces(PLACES)) {
     writeShadowPipelines(place.id, packMeta(place.id));
     if (Bun.argv.includes("--check")) checkShadowPipelines(place.id);
   }

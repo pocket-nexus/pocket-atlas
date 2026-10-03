@@ -38,11 +38,27 @@ fn source_key(d: &pc::Draw, color: u32) -> String {
     .unwrap()
 }
 
+#[cfg(test)]
 pub(super) fn pack(
     meta: &pc::Meta,
     geometry: &[u8],
     colors: &[u8],
     draws: &mut [Draw],
+) -> Result<(Vec<u8>, Vec<Page>, Vec<pc::display::State>)> {
+    pack_with_recipe(
+        meta,
+        geometry,
+        colors,
+        draws,
+        &super::super::gles_products::Recipe::default(),
+    )
+}
+pub(super) fn pack_with_recipe(
+    meta: &pc::Meta,
+    geometry: &[u8],
+    colors: &[u8],
+    draws: &mut [Draw],
+    recipe: &super::super::gles_products::Recipe,
 ) -> Result<(Vec<u8>, Vec<Page>, Vec<pc::display::State>)> {
     let mut groups = BTreeMap::<String, (pc::display::State, BTreeMap<String, Source>)>::new();
     let mut raw = Vec::new();
@@ -115,7 +131,7 @@ pub(super) fn pack(
             for source in sources {
                 let c = &draws[source.entry];
                 let d = &meta.draws[c.draw as usize];
-                let stride = d.layout.stride() as usize;
+                let stride = pc::ipod::stride(d.layout) as usize;
                 let end = d
                     .vertices
                     .offset
@@ -136,22 +152,19 @@ pub(super) fn pack(
                 let color = colors
                     .get(c.offset as usize..color_end as usize)
                     .ok_or("display source colors range")?;
-                for (v, rgba) in vertices.chunks_exact(stride).zip(color.chunks_exact(4)) {
-                    let q =
-                        |at| (i16::from_le_bytes([v[at], v[at + 1]]) as f32 / 32767.0).max(-1.0);
-                    for k in 0..3 {
-                        let value = q(k * 2) * d.pos_scale[k] + d.pos_offset[k];
-                        if !value.is_finite() {
-                            return Err("non-finite display position".into());
-                        }
-                        bytes.extend(value.to_le_bytes());
-                    }
-                    for k in 0..2 {
-                        let value = q(16 + k * 2) * d.uv_scale[k] + d.uv_offset[k];
-                        if !value.is_finite() {
-                            return Err("non-finite display UV".into());
-                        }
-                        bytes.extend(value.to_le_bytes());
+                for (vi, (v, rgba)) in vertices
+                    .chunks_exact(stride)
+                    .zip(color.chunks_exact(4))
+                    .enumerate()
+                {
+                    let position = pc::ipod::floats::<3>(v, pc::ipod::POSITION)?;
+                    let uv = if let Some(product) = recipe.draws.get(&(c.draw as usize)) {
+                        *product.uv.get(vi).ok_or("appearance UV count")?
+                    } else {
+                        pc::ipod::floats::<2>(v, pc::ipod::UV)?
+                    };
+                    for f in position.into_iter().chain(uv) {
+                        bytes.extend(f.to_le_bytes());
                     }
                     bytes.extend(rgba);
                 }
@@ -249,15 +262,13 @@ mod tests {
                     let index = u16::from_le_bytes(i.try_into().unwrap()) as usize;
                     let remapped = index + c.base_vertex as usize;
                     assert!(remapped < pages[0].vertex_count as usize);
-                    let v = &g[d.vertices.offset as usize + index * d.layout.stride() as usize..];
-                    let q = |at| (i16::from_le_bytes([v[at], v[at + 1]]) as f32 / 32767.).max(-1.);
-                    let expected = [
-                        q(0) * d.pos_scale[0] + d.pos_offset[0],
-                        q(2) * d.pos_scale[1] + d.pos_offset[1],
-                        q(4) * d.pos_scale[2] + d.pos_offset[2],
-                        q(16) * d.uv_scale[0] + d.uv_offset[0],
-                        q(18) * d.uv_scale[1] + d.uv_offset[1],
-                    ];
+                    let v = &g[d.vertices.offset as usize
+                        + index * pc::ipod::stride(d.layout) as usize..];
+                    let expected: Vec<_> = pc::ipod::floats::<3>(v, 0)
+                        .unwrap()
+                        .into_iter()
+                        .chain(pc::ipod::floats::<2>(v, 40).unwrap())
+                        .collect();
                     let at = pages[0].offset as usize + remapped * 24;
                     for k in 0..5 {
                         assert_eq!(
@@ -275,7 +286,7 @@ mod tests {
     #[test]
     fn u16_page_limit_aliases_and_nonstatic_layout_are_explicit() {
         let (mut m, mut g, _) = super::super::tests::fixture();
-        let stride = m.draws[0].layout.stride();
+        let stride = pc::ipod::stride(m.draws[0].layout);
         for (i, d) in m.draws.iter_mut().enumerate() {
             d.vertex_count = if i == 0 { 60000 } else { 6000 };
             d.vertices.offset = if i == 0 { 0 } else { 60000 * stride };

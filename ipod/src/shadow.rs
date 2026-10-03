@@ -193,6 +193,12 @@ impl SunShadow {
             if !d.cast_shadow || d.layout == pc::VertexLayout::Lights {
                 return Err("invalid shadow caster pipeline".into());
             }
+            if scene.gpu_vertex_offset(i).is_none()
+                || scene.gpu_index_offset(d.indices.offset, d.index_count).is_none()
+                || d.lods.iter().any(|lod| scene.gpu_index_offset(lod.indices.offset, lod.index_count).is_none())
+            {
+                return Err(format!("shadow caster {i} lacks resident source geometry"));
+            }
             let key = format!("{}:{}", pair[0], pair[1]);
             let index = if let Some(&index) = cache.get(&key) {
                 index
@@ -414,10 +420,10 @@ impl SunShadow {
                 glDisableVertexAttribArray(i);
             }
             for (slot, n, kind, normalized, offset) in [
-                (0, 3, 0x1402, 1, 0),
-                (3, 2, 0x1402, 1, 16),
-                (6, 4, GL_UNSIGNED_BYTE, 0, 24),
-                (7, 4, GL_UNSIGNED_BYTE, 1, 28),
+                (0, 3, GL_FLOAT, 0, pc::ipod::POSITION),
+                (3, 2, GL_FLOAT, 0, pc::ipod::UV),
+                (6, 4, GL_UNSIGNED_BYTE, 0, pc::ipod::EXTRA),
+                (7, 4, GL_UNSIGNED_BYTE, 1, pc::ipod::EXTRA + 4),
             ] {
                 if p.attrs[slot as usize] {
                     glEnableVertexAttribArray(slot);
@@ -426,8 +432,8 @@ impl SunShadow {
                         n,
                         kind,
                         normalized,
-                        d.layout.stride() as i32,
-                        (d.vertices.offset as usize + offset) as *const _,
+                        pc::ipod::stride(d.layout) as i32,
+                        (scene.gpu_vertex_offset(index).expect("validated shadow vertices") as usize + offset) as *const _,
                     );
                 }
             }
@@ -439,7 +445,7 @@ impl SunShadow {
                 GL_TRIANGLES,
                 count as i32,
                 GL_UNSIGNED_SHORT,
-                offset as usize as *const _,
+                scene.gpu_index_offset(offset, count).expect("validated shadow indices") as usize as *const _,
             );
             stats.draws += 1;
             stats.triangles += count / 3;

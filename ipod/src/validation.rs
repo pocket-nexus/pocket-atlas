@@ -21,20 +21,20 @@ type Result<T = ()> = core::result::Result<T, String>;
 pub fn place_header_size(header: &[u8], file_len: usize) -> Result<usize> {
     require(
         header.len() >= 16 && file_len >= 16,
-        "PLCE",
+        "PLIP",
         "truncated header",
     )?;
-    require(header[..4] == pc::MAGIC, "PLCE", "bad magic")?;
+    require(header[..4] == pc::ipod::MAGIC, "PLIP", "bad magic")?;
     let word = |at| u32::from_le_bytes(header[at..at + 4].try_into().unwrap());
-    require(word(4) == pc::VERSION, "PLCE", "unsupported version")?;
-    require(word(12) == 0, "PLCE", "reserved header field is not zero")?;
+    require(word(4) == pc::ipod::VERSION, "PLIP", "unsupported version")?;
+    require(word(12) == 0, "PLIP", "reserved header field is not zero")?;
     let count = word(8) as usize;
-    require((4..=16).contains(&count), "PLCE", "invalid section count")?;
+    require((4..=16).contains(&count), "PLIP", "invalid section count")?;
     let size = count
         .checked_mul(16)
         .and_then(|n| n.checked_add(16))
-        .ok_or("PLCE header overflow")?;
-    require(size <= file_len, "PLCE", "truncated section table")?;
+        .ok_or("PLIP header overflow")?;
+    require(size <= file_len, "PLIP", "truncated section table")?;
     Ok(size)
 }
 
@@ -44,41 +44,10 @@ pub fn validate_container(table: &[u8], file_len: usize) -> Result<Vec<pc::Secti
     let table_size = place_header_size(table, file_len)?;
     require(
         table.len() == table_size,
-        "PLCE",
+        "PLIP",
         "section table length mismatch",
     )?;
-    let sections = pc::Pack::parse_header(table).map_err(|e| format!("PLCE: {e}"))?;
-    for (i, s) in sections.iter().enumerate() {
-        let label = format!("section {:?}", s.tag);
-        require(s.align.is_power_of_two(), &label, "invalid alignment")?;
-        require(
-            s.offset as usize >= table_size && s.offset % s.align == 0,
-            &label,
-            "invalid absolute offset",
-        )?;
-        let end = s
-            .offset
-            .checked_add(s.size)
-            .ok_or_else(|| format!("{label}: absolute range overflow"))?;
-        require(
-            end as usize <= file_len,
-            &label,
-            "range exceeds file length",
-        )?;
-        for previous in &sections[..i] {
-            require(previous.tag != s.tag, &label, "duplicate section tag")?;
-            // The previous end has already been checked for overflow.
-            let previous_end = previous.offset + previous.size;
-            require(
-                s.size == 0
-                    || previous.size == 0
-                    || end <= previous.offset
-                    || s.offset >= previous_end,
-                &label,
-                "overlapping sections",
-            )?;
-        }
-    }
+    let sections = pc::ipod::parse_header(table, file_len).map_err(|e| format!("PLIP: {e}"))?;
     for tag in [
         pc::TAG_META,
         pc::TAG_TEXTURES,
@@ -87,7 +56,7 @@ pub fn validate_container(table: &[u8], file_len: usize) -> Result<Vec<pc::Secti
     ] {
         require(
             sections.iter().any(|s| s.tag == tag),
-            "PLCE",
+            "PLIP",
             "missing required section",
         )?;
     }
@@ -211,7 +180,7 @@ fn camera(key: &pc::ShotKey, label: &str) -> Result {
 
 pub fn validate(meta: &pc::Meta, geom_bytes: usize, tex_bytes: usize, anim: &[f32]) -> Result {
     require(
-        meta.version == pc::VERSION,
+        meta.version == pc::ipod::VERSION,
         "metadata",
         "unsupported version",
     )?;
@@ -372,7 +341,7 @@ pub fn validate(meta: &pc::Meta, geom_bytes: usize, tex_bytes: usize, anim: &[f3
         exact_span(
             &d.vertices,
             d.vertex_count,
-            d.layout.stride(),
+            pc::ipod::stride(d.layout),
             geom_bytes,
             4,
             &label,
@@ -647,7 +616,7 @@ pub fn validate_geometry(meta: &pc::Meta, geometry: &[u8]) -> Result {
         let vertices = exact_span(
             &d.vertices,
             d.vertex_count,
-            d.layout.stride(),
+            pc::ipod::stride(d.layout),
             geometry.len(),
             4,
             &label,
@@ -669,21 +638,26 @@ pub fn validate_geometry(meta: &pc::Meta, geometry: &[u8]) -> Result {
                 )?;
             }
         }
+        if d.layout != pc::VertexLayout::Lights {
+            for vertex in geometry[vertices.clone()].chunks_exact(pc::ipod::stride(d.layout) as usize) {
+                pc::ipod::floats::<12>(vertex, 0).map_err(|e| format!("{label}: {e}"))?;
+            }
+        }
         if d.layout == pc::VertexLayout::Skinned {
             let skin = d
                 .skin
                 .and_then(|s| meta.skins.get(s as usize))
                 .ok_or_else(|| format!("{label}: missing skin"))?;
-            for vertex in geometry[vertices].chunks_exact(d.layout.stride() as usize) {
+            for vertex in geometry[vertices].chunks_exact(pc::ipod::stride(d.layout) as usize) {
                 require(
-                    vertex[24..28]
+                    vertex[pc::ipod::EXTRA..pc::ipod::EXTRA + 4]
                         .iter()
                         .all(|&j| (j as usize) < skin.joints.len()),
                     &label,
                     "joint index exceeds palette",
                 )?;
                 require(
-                    vertex[28..32].iter().any(|&w| w != 0),
+                    vertex[pc::ipod::EXTRA + 4..pc::ipod::EXTRA + 8].iter().any(|&w| w != 0),
                     &label,
                     "zero skin weights",
                 )?;
@@ -707,7 +681,7 @@ pub(crate) mod tests {
 
     pub(crate) fn fixture() -> (pc::Meta, Vec<u8>, Vec<f32>) {
         let json = br#"{
-            "version":6,"name":"validator fixture","kind":"night-street",
+            "version":1,"name":"validator fixture","kind":"night-street",
             "min":[0,0,0],"max":[1,1,1],
             "textures":[{"name":"rgba","role":"color","format":"rgba8","width":4,"height":4,"mips":1,
                 "data":{"offset":0,"size":64},"wrap_s":"repeat","wrap_t":"clamp","has_alpha":false,"mean":[1,1,1,1]}],
@@ -716,8 +690,8 @@ pub(crate) mod tests {
                 "roughness":0.5,"metalness":0,"normal_scale":1,"ao_strength":1,"env_strength":1,
                 "albedo":0,"normal":null,"orm":null,"emission":null,"vertex_color":false,"interior":false,
                 "fog":true,"wet":null,"damp":null,"drops":0,"clearcoat":0,"polygon_offset":null,"emissive_track":null}],
-            "draws":[{"material":0,"layout":"static","vertices":{"offset":0,"size":72},"vertex_count":3,
-                "indices":{"offset":72,"size":6},"index_count":3,"pos_offset":[0,0,0],"pos_scale":[1,1,1],
+            "draws":[{"material":0,"layout":"static","vertices":{"offset":0,"size":156},"vertex_count":3,
+                "indices":{"offset":156,"size":6},"index_count":3,"pos_offset":[0,0,0],"pos_scale":[1,1,1],
                 "uv_offset":[0,0],"uv_scale":[1,1],"min":[0,0,0],"max":[1,1,1],"node":0,"skin":null,
                 "no_reflect":false,"cast_shadow":true}],
             "nodes":[{"name":"rigid","parent":null,"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1],"track":{"offset":0,"size":56}}],
@@ -732,7 +706,7 @@ pub(crate) mod tests {
         }"#;
         let pack = pc::write(&[(pc::TAG_META, json, 16)]);
         let meta = pc::Pack::parse(&pack).unwrap().meta().unwrap();
-        let mut geom = vec![0; 72];
+        let mut geom = vec![0; 156];
         geom.extend([0, 0, 1, 0, 2, 0]);
         let anim = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0].repeat(2);
         (meta, geom, anim)
@@ -744,12 +718,14 @@ pub(crate) mod tests {
     }
     #[test]
     fn container_checks_actual_lengths_alignment_aliases_and_required_tags() {
-        let bytes = pc::write(&[
+        let mut bytes = pc::write(&[
             (pc::TAG_META, b"{}", 16),
             (pc::TAG_TEXTURES, &[], 16),
             (pc::TAG_GEOMETRY, &[1, 2, 3, 4], 16),
             (pc::TAG_ANIMATION, &[], 16),
         ]);
+        bytes[..4].copy_from_slice(&pc::ipod::MAGIC);
+        bytes[4..8].copy_from_slice(&pc::ipod::VERSION.to_le_bytes());
         let size = place_header_size(&bytes[..16], bytes.len()).unwrap();
         validate_container(&bytes[..size], bytes.len()).unwrap();
         assert!(validate_container(&bytes[..size], bytes.len() - 1).is_err());
@@ -845,13 +821,21 @@ pub(crate) mod tests {
         validate_geometry(&m, &g).unwrap();
     }
     #[test]
+    fn rejects_non_finite_source_vertex_components() {
+        for offset in [pc::ipod::POSITION, pc::ipod::NORMAL, pc::ipod::TANGENT, pc::ipod::UV] {
+            let (m, mut g, _) = fixture();
+            g[offset..offset + 4].copy_from_slice(&f32::NAN.to_le_bytes());
+            assert!(validate_geometry(&m, &g).is_err());
+        }
+    }
+    #[test]
     fn rejects_reference_cycles_ranges_and_truncated_tracks() {
         bad(|m| m.draws[0].material = 1);
         bad(|m| m.materials[0].normal = Some(1));
         bad(|m| m.draws[0].node = Some(1));
         bad(|m| m.nodes[0].parent = Some(0));
         bad(|m| m.draws[0].vertices.offset = 2);
-        bad(|m| m.draws[0].indices.offset = 74);
+        bad(|m| m.draws[0].indices.offset = 158);
         bad(|m| m.draws[0].indices.offset = u32::MAX - 1);
         bad(|m| m.draws[0].vertices.size = 71);
         bad(|m| m.nodes[0].track.as_mut().unwrap().size = 28);
@@ -918,14 +902,14 @@ pub(crate) mod tests {
     #[test]
     fn validates_index_and_joint_payload_before_gpu_upload() {
         let (mut m, mut g, mut a) = fixture();
-        g[76] = 3;
+        g[160] = 3;
         assert!(validate_geometry(&m, &g).is_err());
-        g[76] = 2;
+        g[160] = 2;
         m.draws[0].skin = Some(0);
         m.draws[0].node = None;
         m.draws[0].layout = pc::VertexLayout::Skinned;
-        m.draws[0].vertices.size = 96;
-        m.draws[0].indices.offset = 96;
+        m.draws[0].vertices.size = 180;
+        m.draws[0].indices.offset = 180;
         m.skins.push(pc::Skin {
             joints: vec![0],
             inverse_bind: pc::Range {
@@ -936,17 +920,17 @@ pub(crate) mod tests {
         a.extend([
             1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ]);
-        g = vec![0; 96];
+        g = vec![0; 180];
         g.extend([0, 0, 1, 0, 2, 0]);
         for i in 0..3 {
-            g[i * 32 + 28] = 255;
+            g[i * 60 + 56] = 255;
         }
         validate(&m, g.len(), 64, &a).unwrap();
         validate_geometry(&m, &g).unwrap();
-        g[24] = 1;
+        g[52] = 1;
         assert!(validate_geometry(&m, &g).is_err());
-        g[24] = 0;
-        g[28] = 0;
+        g[52] = 0;
+        g[56] = 0;
         assert!(validate_geometry(&m, &g).is_err());
         m.skins[0].joints.clear();
         assert!(validate(&m, g.len(), 64, &a).is_err());
@@ -999,7 +983,7 @@ pub(crate) mod tests {
                 continue;
             }
             let bytes = std::fs::read(&path).unwrap();
-            let pack = pc::Pack::parse(&bytes).unwrap();
+            let pack = pc::ipod::parse(&bytes).unwrap();
             let m = pack.meta().unwrap();
             let g = pack.section(pc::TAG_GEOMETRY).unwrap();
             let tex = pack.section(pc::TAG_TEXTURES).unwrap();

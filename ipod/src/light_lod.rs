@@ -3,7 +3,7 @@
 //! complete; dense static scintillation uses stable ranks and smooth weights.
 //! Expected display energy is preserved before framebuffer quantization and
 //! clipping, not per-pixel radiance or exact individual-light visibility.
-use alloc::{format, string::String, vec::Vec};
+use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
 use core::{mem::size_of, ptr};
 use glam::{Mat4, Vec3};
 use pocket3d_place as pc;
@@ -37,6 +37,10 @@ pub struct Sources {
     fields: Vec<Field>,
     points: Vec<Point>,
     count: usize,
+    // Immutable display appearance identity, including protected/moving points.
+    // Original LightPoint RGB/phase/geometry remains untouched.
+    palette: Vec<[u8; 3]>,
+    color_rows: Vec<u16>,
 }
 impl Sources {
     pub fn new(meta: &pc::Meta, geometry: &[u8]) -> Result<Self, String> {
@@ -46,11 +50,16 @@ impl Sources {
             .filter(|d| d.layout == pc::VertexLayout::Lights)
             .try_fold(0usize, |n, d| n.checked_add(d.vertex_count as usize))
             .ok_or("light LOD source count overflow")?;
-        // Optional optimization: oversized legal fields retain every point.
-        if count == 0 || count > MAX_POINTS {
+        if count == 0 {
             return Ok(Self::default());
         }
+        // The optional density cache stays bounded. Appearance rows are also
+        // needed by protected/oversized fields drawn without density sampling.
+        let density = count <= MAX_POINTS;
         let mut out = Self::default();
+        out.color_rows.try_reserve_exact(count)
+            .map_err(|_| "field appearance row allocation")?;
+        let mut colors = BTreeMap::new();
         out.fields
             .try_reserve_exact(
                 meta.draws
@@ -61,7 +70,7 @@ impl Sources {
             .map_err(|_| "light LOD field allocation")?;
         // A source candidate is 24 bytes, bounded by six MiB across a scene.
         out.points
-            .try_reserve_exact(count)
+            .try_reserve_exact(if density { count } else { 0 })
             .map_err(|_| "light LOD point allocation")?;
         for (draw, d) in meta.draws.iter().enumerate() {
             if d.layout != pc::VertexLayout::Lights {
@@ -83,12 +92,26 @@ impl Sources {
                 .chunks_exact(pc::LightPoint::STRIDE)
                 .enumerate()
             {
+                let rgb = [p[8], p[9], p[10]];
+                let row = if let Some(&row) = colors.get(&rgb) {
+                    row
+                } else {
+                    let row = u16::try_from(out.palette.len())
+                        .map_err(|_| "field appearance exceeds 65536 source colours")?;
+                    out.palette.try_reserve(1)
+                        .map_err(|_| "field appearance palette allocation")?;
+                    out.palette.push(rgb);
+                    colors.insert(rgb, row);
+                    row
+                };
+                out.color_rows.push(row);
                 let f = |o| f32::from_le_bytes(p[o..o + 4].try_into().unwrap());
                 let path = Vec3::new(f(20), f(24), f(28));
                 let cycles = f(32);
                 if !path.is_finite() || !cycles.is_finite() || !f(16).is_finite() {
                     return Err("light LOD non-finite source".into());
                 }
+                if !density { continue; }
                 // Keep all moving lights and periodic/duty blink unchanged.
                 // A zero-cycle path is a constant offset, not motion.
                 if p[11] == 0
@@ -138,16 +161,20 @@ impl Sources {
             });
             out.count += d.vertex_count as usize;
         }
-        if out.points.is_empty() {
-            return Ok(Self::default());
-        }
         Ok(out)
     }
     pub fn bytes(&self) -> usize {
         self.fields.capacity() * size_of::<Field>() + self.points.capacity() * size_of::<Point>()
+            + self.palette.capacity() * 3 + self.color_rows.capacity() * 2
     }
     pub fn is_empty(&self) -> bool {
         self.points.is_empty()
+    }
+    pub fn palette(&self) -> &[[u8; 3]] { &self.palette }
+    pub fn color_rows(&self) -> &[u16] { &self.color_rows }
+    pub fn color_offset(&self, draw: usize) -> Option<usize> {
+        self.fields.binary_search_by_key(&draw, |f| f.draw).ok()
+            .map(|i| self.fields[i].base * 2)
     }
 }
 
@@ -525,6 +552,8 @@ mod tests {
                 })
                 .collect(),
             count: n,
+            palette: Vec::new(),
+            color_rows: Vec::new(),
         }
     }
     #[test]
@@ -560,6 +589,9 @@ mod tests {
         geometry[200 + 6..200 + 8].copy_from_slice(&16384i16.to_le_bytes());
         geometry[200 + 20..200 + 24].copy_from_slice(&10.0f32.to_le_bytes()); // constant path
         let source = Sources::new(&meta, &geometry).unwrap();
+        assert_eq!(source.palette(), [[0, 0, 0]]);
+        assert_eq!(source.color_rows(), [0; 6]);
+        assert_eq!(source.color_offset(0), Some(0));
         assert_eq!(
             source.points.iter().map(|p| p.vertex).collect::<Vec<_>>(),
             [0, 5]
@@ -573,13 +605,25 @@ mod tests {
         assert_eq!(geometry, original);
         meta.draws.push(meta.draws[0].clone());
         let aliases = Sources::new(&meta, &geometry).unwrap();
+        assert_eq!(aliases.palette(), [[0, 0, 0]]);
+        assert_eq!(aliases.color_rows().len(), 12);
+        assert_eq!(aliases.color_offset(1), Some(12));
         assert_ne!(aliases.points[0].rank, aliases.points[2].rank);
         assert!(aliases.points.iter().all(|p| p.rank > 0.0 && p.rank < 1.0));
         meta.draws.pop();
         meta.draws[0].vertices.size = 239;
         assert!(Sources::new(&meta, &geometry).is_err());
         meta.draws[0].vertex_count = MAX_POINTS as u32 + 1;
-        assert!(Sources::new(&meta, &geometry).unwrap().is_empty()); // bounded optional optimization
+        assert!(Sources::new(&meta, &geometry).is_err()); // per-draw bounds still validated
+        meta.draws[0].vertex_count = pc::LightPoint::PER_DRAW as u32;
+        meta.draws[0].vertices.size = (pc::LightPoint::PER_DRAW * pc::LightPoint::STRIDE) as u32;
+        let geometry = geometry[..40].repeat(pc::LightPoint::PER_DRAW);
+        meta.draws = vec![meta.draws[0].clone(); MAX_POINTS / pc::LightPoint::PER_DRAW + 1];
+        let oversized = Sources::new(&meta, &geometry).unwrap();
+        assert!(oversized.is_empty()); // bounded optional density optimization
+        assert_eq!(oversized.points.capacity(), 0);
+        assert_eq!(oversized.color_rows().len(), meta.draws.len() * pc::LightPoint::PER_DRAW);
+        assert_eq!(oversized.palette(), [[0, 0, 0]]); // appearance and all lights remain usable
     }
     #[test]
     fn only_dense_subpixel_candidates_are_sampled_and_protected_vertices_survive() {
@@ -735,7 +779,7 @@ mod tests {
                 continue;
             }
             let bytes = std::fs::read(&path).unwrap();
-            let pack = pc::Pack::parse(&bytes).unwrap();
+            let pack = pc::ipod::parse(&bytes).unwrap();
             let meta = pack.meta().unwrap();
             let source = Sources::new(&meta, pack.section(pc::TAG_GEOMETRY).unwrap()).unwrap();
             if source.is_empty() {

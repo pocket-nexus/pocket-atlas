@@ -7,7 +7,7 @@ import type { PlaceDef } from "../core/types";
 export const PLACES: PlaceDef[] = [
   {
     id: "tokyo-konbini",
-    targets: ["vita", "3ds", "psp"],
+    targets: ["vita", "3ds", "psp", "ipod"],
     name: "Rainy Night Konbini",
     native: "雨夜のコンビニ",
     locality: "Tokyo",
@@ -30,7 +30,7 @@ export const PLACES: PlaceDef[] = [
   {
     // Stair head 35.68502, 139.72330 (29.4 m); looking down the flight faces a bearing of ~33°.
     id: "suga-shrine-stairs",
-    targets: ["vita", "3ds"],
+    targets: ["vita", "3ds", "ipod"],
     name: "Suga Shrine Stairs",
     native: "須賀神社の男坂",
     locality: "Yotsuya, Tokyo",
@@ -53,7 +53,7 @@ export const PLACES: PlaceDef[] = [
   {
     // Centre of the north facade 35.69810, 139.77195; origin at the NE corner (35.698101, 139.772086). −Z is north.
     id: "akihabara-radio-kaikan",
-    targets: ["vita", "3ds"],
+    targets: ["vita", "3ds", "ipod"],
     name: "Radio Kaikan at Blue Hour",
     native: "秋葉原ラジオ会館",
     locality: "Akihabara, Tokyo",
@@ -76,7 +76,7 @@ export const PLACES: PlaceDef[] = [
   {
     // OSM node 3937261506 (official_name 鎌倉高校前1号踏切) on the Enoden at the foot of the slope road; −Z is north.
     id: "kamakura-koko-mae-crossing",
-    targets: ["vita", "3ds"],
+    targets: ["vita", "3ds", "ipod"],
     name: "Kamakura-Kōkōmae Crossing",
     native: "鎌倉高校前1号踏切",
     locality: "Kamakura, Kanagawa",
@@ -99,7 +99,7 @@ export const PLACES: PlaceDef[] = [
   {
     // The centre of the planetarium dome (OSM); −Z is north, the basin lies south.
     id: "griffith-observatory",
-    targets: ["vita"],
+    targets: ["vita", "ipod"],
     name: "Griffith Observatory at Blue Hour",
     native: "Griffith Observatory",
     locality: "Los Angeles, California",

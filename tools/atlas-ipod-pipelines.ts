@@ -4,27 +4,15 @@ import { writeShadowPipelines } from "./atlas-ipod-shadow";
 import { writeEffects } from "./atlas-ipod-effects";
 import { ldrPostShader } from "./atlas-ipod-post";
 import { globeGradeShader } from "./atlas-ipod-globe";
+import { waterPrograms } from "./atlas-ipod-water";
 import { textureUsage } from "./atlas-ipod-textures";
 import { shader } from "./atlas-ipod-shaders";
+import { readIPodMetadata } from "./atlas-ipod-pack";
 import { PLACES } from "../web/src/places/registry";
+import { selectIPodPlaces } from "./atlas-ipod-catalog";
 const root = resolve(import.meta.dir, "..");
 function meta(place: string) {
-  const b = readFileSync(
-    join(root, `.pocket-build/ipod/assets/${place}.place`),
-  );
-  const n = b.readUInt32LE(8);
-  for (let i = 0; i < n; i++) {
-    const t = 16 + i * 16;
-    if (b.toString("ascii", t, t + 4) === "META")
-      return JSON.parse(
-        b.toString(
-          "utf8",
-          b.readUInt32LE(t + 4),
-          b.readUInt32LE(t + 4) + b.readUInt32LE(t + 8),
-        ),
-      );
-  }
-  throw new Error("META");
+  return readIPodMetadata(join(root, `.pocket-build/ipod/assets/${place}.place`));
 }
 const fragments: Record<string, string> = {
   standard: "standard_f",
@@ -37,12 +25,17 @@ const fragments: Record<string, string> = {
   water: "water_f",
   lights: "lights_f",
 };
-function pair(scene: any, d: any, mirror: boolean, tier: number) {
+function pair(scene: any, d: any, mirror: boolean, tier: number, output: "scene" | "coverage" = "scene") {
   const m = scene.materials[d.material];
   const f: Record<string, number> = {
     LIGHTS: ["standard", "glass"].includes(m.kind) ? 2 : 0,
   };
   const v: Record<string, number> = {};
+  if (output === "coverage") {
+    if (m.kind !== "water" || tier !== 3 || mirror || m.blend !== "opaque" || !m.depth_write)
+      throw new Error("Coverage response requires opaque display water");
+    f.ATLAS_COVERAGE_TARGET = 1;
+  }
   f.ATLAS_BLEND =
     m.kind === "glass"
       ? 3
@@ -160,7 +153,7 @@ function pair(scene: any, d: any, mirror: boolean, tier: number) {
     shader(fragments[m.kind], f),
   ];
 }
-function colorPair(scene: any, d: any, color: { texture: number | null; flags: number; page?: number | null }) {
+function colorPair(scene: any, d: any, color: { texture: number | null; flags: number; page?: number | null }, wetResponse = false) {
   const m = scene.materials[d.material];
   const v: Record<string, number> = { COLOR: 1, DISPLAY_COLOR: 1 };
   const f: Record<string, number> = {};
@@ -176,7 +169,11 @@ function colorPair(scene: any, d: any, color: { texture: number | null; flags: n
   }
   if (color.texture != null) f.ALBEDO_MAP = 1;
   if (color.flags & 8) f.EMISSION_MAP = 1;
-  if (color.flags & 16) { f.WET = 1; v.SCREEN = 1; }
+  if (color.flags & 16) {
+    f.WET = 1; v.SCREEN = 1;
+    if (wetResponse) { v.SGX_WET = 1; f.SGX_WET_RESPONSE = 1; }
+    else f.SGX_WET_RESOLVE = 1;
+  }
   if (color.flags & 32) {
     v.DISPLAY_NORMAL = 1;
     if (!scene.rain.active || Math.max(m.clearcoat, m.drops) <= 0) f.NO_DROPS = 1;
@@ -191,15 +188,32 @@ function colorPair(scene: any, d: any, color: { texture: number | null; flags: n
     if (scene.vista_haze) f.VISTA = 1;
     else { if (!(color.flags & 32)) v.VERTEX_FOG = 1; f.FOG = 1; }
   }
+  if (wetResponse) {
+    // The response is display RGB plus a diffuse multiplier, not eye depth.
+    // Fog and native texture detail are applied once, by the main resolve.
+    delete v.LDR_COLOR; delete v.VERTEX_FOG;
+    delete f.FOG; delete f.VISTA; delete f.EMISSION_MAP;
+    delete f.DEPTH_UNUSED;
+  }
   return [shader("surface_v", v), shader(color.flags & 32 ? "glass_f" : "color_f", f)];
 }
-for (const place of PLACES.filter((p) => p.status === "live" && p.load)) {
+
+/** Interior windows have an authored cheap mirror path. Compile it in the
+ * same display domain as the optimized mirror target; an HDR reflection pair
+ * cannot be substituted for this one. Other materials retain their alias. */
+export function performanceReflectionPair(scene: any, draw: any, compile = pair): string[] | null {
+  return scene.materials[draw.material].kind === "interior_window"
+    ? compile(scene, draw, true, 3) : null;
+}
+
+if (import.meta.main) {
+for (const place of selectIPodPlaces(PLACES)) {
   const m = meta(place.id);
   const colorPath = join(root, `.pocket-build/ipod/assets/${place.id}.ipod-color.json`);
   const colors = new Map<number, { texture: number | null; flags: number; page?: number | null }>();
   if (existsSync(colorPath)) {
     const color = JSON.parse(readFileSync(colorPath, "utf8"));
-    if (color.version !== 2) throw new Error(`Unsupported display color version: ${place.id}`);
+    if (color.version !== 2 && color.version !== 3) throw new Error(`Unsupported display color version: ${place.id}`);
     for (const draw of color.draws) colors.set(draw.draw, draw);
   }
   writeShadowPipelines(place.id, m);
@@ -209,12 +223,15 @@ for (const place of PLACES.filter((p) => p.status === "live" && p.load)) {
       : {
           display_color: colors.has(i),
           display_float: colors.get(i)?.page != null,
-          display_texture: colors.get(i)?.texture != null,
+          display_texture: colors.get(i)?.texture ?? null,
           display_flags: colors.get(i)?.flags ?? 0,
           detail: pair(m, d, false, 0),
           far: pair(m, d, false, m.materials[d.material].wet ? 1 : 2),
           reflection: pair(m, d, true, 2),
-          performance: colors.has(i) ? colorPair(m, d, colors.get(i)!) : pair(m, d, false, 3),
+          ...waterPrograms(m, d, colors.has(i) ? colorPair(m, d, colors.get(i)!) : pair(m, d, false, 3),
+            () => pair(m, d, false, 3, "coverage")),
+          performance_reflection: performanceReflectionPair(m, d),
+          wet_response: (colors.get(i)?.flags ?? 0) & 16 ? colorPair(m, d, colors.get(i)!, true) : null,
         },
   );
   const fixed = {
@@ -293,3 +310,4 @@ for (const entry of readdirSync(assetRoot))
 for (const entry of readdirSync(join(assetRoot, "shaders")))
   if (entry.endsWith(".glsl") && !live.has(entry))
     unlinkSync(join(assetRoot, "shaders", entry));
+}

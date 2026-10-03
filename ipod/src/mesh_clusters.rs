@@ -468,7 +468,7 @@ impl MeshClusters {
             if !eligible(meta, d) {
                 return Err("ineligible cluster draw".into());
             }
-            let roots = pc::parts::components(d, geometry)?;
+            let roots = pc::ipod::components(d, geometry)?;
             let mut owners = reserve::<u32>(roots.len())?;
             owners.resize(roots.len(), u32::MAX);
             let sources: Vec<_> = core::iter::once((&d.indices, d.index_count, 0.0))
@@ -536,7 +536,7 @@ impl MeshClusters {
                                 return Err("LOD component changes group".into());
                             }
                             for &i in tri {
-                                let p = pc::parts::position(d, geometry, i)?;
+                                let p = pc::ipod::position(d, geometry, i)?;
                                 if !contains(group.min, group.max, p)
                                     || !contains(cluster.min, cluster.max, p)
                                 {
@@ -1027,7 +1027,7 @@ mod tests {
                 continue;
             }
             let bytes = std::fs::read(&path).unwrap();
-            let pack = pc::Pack::parse(&bytes).unwrap();
+            let pack = pc::ipod::parse(&bytes).unwrap();
             let meta = pack.meta().unwrap();
             let clusters = std::fs::read(path.with_extension("ipod-clusters.bin")).unwrap();
             let mesh = MeshClusters::parse(
@@ -1109,6 +1109,212 @@ mod tests {
         }
         assert!(packs > 0 && shots > 0);
     }
+    #[test]
+    fn plip_clusters_preserve_float_bounds_components_original_lods_and_empty_levels() {
+        use pc::ipod::{parse, position, stride};
+        // This module is also compiled by the cooker. Keep its format fixture
+        // independent of the application's validator and GL test harness.
+        let mut meta: pc::Meta = serde_json::from_str(r#"{
+            "version":1,"name":"PLIP grouped float triangles","min":[0,0,0],"max":[1,1,1],
+            "textures":[],"materials":[{"name":"opaque","kind":"standard","blend":"opaque",
+                "double_sided":false,"depth_write":true,"alpha_test":0,"color":[1,1,1,1],"emissive":[0,0,0],
+                "roughness":0.5,"metalness":0,"normal_scale":1,"ao_strength":1,"env_strength":0,
+                "vertex_color":false,"interior":false,"fog":false,"drops":0,"clearcoat":0}],
+            "draws":[{"material":0,"layout":"baked","vertices":{"offset":0,"size":0},"vertex_count":0,
+                "indices":{"offset":0,"size":0},"index_count":0,"pos_offset":[0,0,0],"pos_scale":[1,1,1],
+                "uv_offset":[0,0],"uv_scale":[1,1],"min":[0,0,0],"max":[1,1,1],
+                "no_reflect":false,"cast_shadow":true}],
+            "nodes":[],"skins":[],"lights":[],"fog_lights":[],"fog_tracks":[],"material_tracks":[],
+            "fps":30,"frames":1,"beacons":[],"stats":{},
+            "atmosphere":{"fog_color":[0,0,0],"fog_density":0,"haze_density":0,"haze_ambient":[0,0,0],"haze_ambient_density":0,
+                "dry_min":[0,0,0],"dry_max":[0,0,0],"hemisphere_sky":[0,0,0],"hemisphere_ground":[0,0,0],
+                "sky_zenith":[0,0,0],"sky_horizon":[0,0,0],"sky_glow":[0,0,0],"environment_strength":0},
+            "rain":{"dry_boxes":[],"drip_edges":[],"steam_vents":[]},
+            "camera":{"shots":[],"walkable":[],"intro":{"pos":[0,1,2],"target":[0,1,0],"fov":40}}
+        }"#).unwrap();
+        let d = &mut meta.draws[0];
+        d.layout = pc::VertexLayout::Baked;
+        d.node = None;
+        d.vertex_count = 6;
+        d.vertices = pc::Range {
+            offset: 0,
+            size: 6 * stride(d.layout),
+        };
+        d.indices = pc::Range {
+            offset: d.vertices.size,
+            size: 12,
+        };
+        d.index_count = 6;
+        d.lods = vec![
+            pc::DrawLod {
+                indices: pc::Range {
+                    offset: d.vertices.size + 12,
+                    size: 6,
+                },
+                index_count: 3,
+                error: 0.25,
+            },
+            pc::DrawLod {
+                indices: pc::Range {
+                    offset: d.vertices.size + 18,
+                    size: 0,
+                },
+                index_count: 0,
+                error: 1.0,
+            },
+        ];
+        d.min = [10.125, 0.25, -0.5];
+        d.max = [701.125, 1.25, -0.5];
+        // Legacy normalization parameters deliberately cannot decode this
+        // source. Cluster bounds must use PLIP's exact f32 positions.
+        d.pos_offset = [-100.0; 3];
+        d.pos_scale = [2.0; 3];
+        let mut geometry = Vec::new();
+        let group_bounds = [
+            ([10.125, 0.25, -0.5], [11.125, 1.25, -0.5]),
+            ([700.125, 0.25, -0.5], [701.125, 1.25, -0.5]),
+        ];
+        for &(lo, hi) in &group_bounds {
+            for (pos, uv) in [
+                (lo, [0.0f32, 0.0]),
+                ([hi[0], lo[1], lo[2]], [1.0, 0.0]),
+                ([lo[0], hi[1], lo[2]], [0.0, 1.0]),
+            ] {
+                for value in pos
+                    .into_iter()
+                    .chain([0.0, 0.0, 1.0])
+                    .chain([1.0, 0.0, 0.0, 1.0])
+                    .chain(uv)
+                {
+                    geometry.extend(value.to_le_bytes());
+                }
+                geometry.extend([17, 89, 201, 255, 128, 128, 128, 255]);
+            }
+        }
+        assert_eq!(geometry.len(), d.vertices.size as usize);
+        geometry.extend(
+            [0u16, 1, 2, 3, 4, 5, 0, 1, 2]
+                .into_iter()
+                .flat_map(u16::to_le_bytes),
+        );
+        meta.min = meta.draws[0].min;
+        meta.max = meta.draws[0].max;
+        let meta_bytes = serde_json::to_vec(&meta).unwrap();
+        let pack_bytes = pc::write_versioned(
+            pc::ipod::MAGIC,
+            pc::ipod::VERSION,
+            &[
+                (pc::TAG_META, &meta_bytes, 16),
+                (pc::TAG_GEOMETRY, &geometry, 16),
+                (pc::TAG_TEXTURES, &[], 16),
+                (pc::TAG_ANIMATION, &[], 16),
+            ],
+        );
+        let pack = parse(&pack_bytes).unwrap();
+        let geometry = pack.section(pc::TAG_GEOMETRY).unwrap();
+        assert_eq!(
+            position(&meta.draws[0], geometry, 3).unwrap(),
+            [700.125, 0.25, -0.5]
+        );
+        let mut bytes = vec![0; HEADER];
+        bytes[..4].copy_from_slice(b"IPCL");
+        bytes[4..8].copy_from_slice(&2u32.to_le_bytes());
+        for (i, count) in [1u32, 2, 6, 3, 9].into_iter().enumerate() {
+            bytes[32 + i * 4..36 + i * 4].copy_from_slice(&count.to_le_bytes());
+        }
+        let words = |b: &mut Vec<u8>, values: &[u32]| {
+            for v in values {
+                b.extend(v.to_le_bytes());
+            }
+        };
+        words(&mut bytes, &[0, 2]);
+        for (i, &(lo, hi)) in group_bounds.iter().enumerate() {
+            words(&mut bytes, &[i as u32 * 3, 3]);
+            words(
+                &mut bytes,
+                &lo.into_iter()
+                    .chain(hi)
+                    .map(f32::to_bits)
+                    .collect::<Vec<_>>(),
+            );
+        }
+        for (error, first, count) in [
+            (0.0f32, 0, 1),
+            (0.25, 1, 1),
+            (1.0, 2, 0),
+            (0.0, 2, 1),
+            (0.25, 3, 0),
+            (1.0, 3, 0),
+        ] {
+            words(&mut bytes, &[error.to_bits(), first, count]);
+        }
+        for (i, group) in [0usize, 0, 1].into_iter().enumerate() {
+            words(&mut bytes, &[i as u32 * 3, 3]);
+            let (lo, hi) = group_bounds[group];
+            words(
+                &mut bytes,
+                &lo.into_iter()
+                    .chain(hi)
+                    .map(f32::to_bits)
+                    .collect::<Vec<_>>(),
+            );
+        }
+        let index_start = bytes.len();
+        bytes.extend(
+            [0u16, 1, 2, 0, 1, 2, 3, 4, 5]
+                .into_iter()
+                .flat_map(u16::to_le_bytes),
+        );
+        let identity = |b: &mut [u8], g: &[u8]| {
+            for (at, value) in [
+                (8, hash(&meta_bytes)),
+                (16, hash(g)),
+                (24, hash(&b[HEADER..])),
+            ] {
+                b[at..at + 8].copy_from_slice(&value.to_le_bytes());
+            }
+        };
+        identity(&mut bytes, geometry);
+        let mesh = MeshClusters::parse(&bytes, &meta, &meta_bytes, geometry).unwrap();
+        let groups = mesh.groups(0).unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(
+            mesh.indices(&mesh.clusters(&mesh.levels(&groups[1])[0])[0]),
+            [3, 4, 5]
+        );
+        assert!(mesh.clusters(&mesh.levels(&groups[1])[1]).is_empty());
+        for group in groups {
+            assert!(mesh.clusters(&mesh.levels(group)[2]).is_empty());
+        }
+        for (mode, expected) in [
+            (0, "bounds exclude geometry"),
+            (1, "triangles differ"),
+            (2, "cluster index exceeds"),
+            (3, "component changes group"),
+            (4, "non-finite"),
+        ] {
+            let mut invalid = bytes.clone();
+            let mut g = geometry.to_vec();
+            match mode {
+                0 => invalid[HEADER + 8 + 8..HEADER + 8 + 12]
+                    .copy_from_slice(&10.25f32.to_le_bytes()),
+                1 => invalid[index_start..index_start + 4].copy_from_slice(&[1, 0, 0, 0]),
+                2 => invalid[index_start..index_start + 2].copy_from_slice(&6u16.to_le_bytes()),
+                3 => {
+                    invalid[index_start + 6..index_start + 12].copy_from_slice(&[3, 0, 4, 0, 5, 0])
+                }
+                _ => g[..4].copy_from_slice(&f32::NAN.to_le_bytes()),
+            }
+            // Recompute identities so these cases test geometry and topology,
+            // not merely the checksum gate.
+            identity(&mut invalid, &g);
+            let error = MeshClusters::parse(&invalid, &meta, &meta_bytes, &g)
+                .err()
+                .unwrap();
+            assert!(error.contains(expected), "mode {mode}: {error}");
+        }
+    }
+
     #[test]
     fn identity_and_checked_ranges() {
         assert_eq!(hash(b""), 0xcbf29ce484222325);

@@ -11,11 +11,41 @@ use core::{
     cell::{Cell, RefCell},
     ptr,
 };
+/// Only valid while this caller owns all texture bindings. Mesh submission
+/// creates one per pass; sky/effects and later passes start with unknown state.
+/// ES2 guarantees eight fragment units. Higher units remain fully functional
+/// through the uncached path rather than indexing beyond this bounded table.
+#[derive(Default)]
+pub struct TextureBindings {
+    active: Option<u32>,
+    units: [[Option<u32>; 2]; 8],
+}
+impl TextureBindings {
+    unsafe fn bind(&mut self, target: GLenum, id: u32, unit: u32) {
+        let kind = match target {
+            GL_TEXTURE_2D => Some(0),
+            GL_TEXTURE_CUBE_MAP => Some(1),
+            _ => None,
+        };
+        let slot = kind.and_then(|kind| self.units.get_mut(unit as usize).map(|u| &mut u[kind]));
+        if slot.as_deref() == Some(&Some(id)) {
+            return;
+        }
+        if self.active != Some(unit) {
+            glActiveTexture(GL_TEXTURE0 + unit);
+            self.active = Some(unit);
+        }
+        glBindTexture(target, id);
+        if let Some(slot) = slot { *slot = Some(id); }
+    }
+}
+
 struct Uniform {
     location: i32,
     size: usize,
     data: RefCell<Vec<f32>>,
     sampler: Cell<i32>,
+    texture_target: GLenum,
 }
 use glam::Mat4;
 pub struct Program {
@@ -124,6 +154,7 @@ impl Program {
                     size: size as usize,
                     data: RefCell::new(Vec::new()),
                     sampler: Cell::new(-1),
+                    texture_target: if kind == GL_SAMPLER_CUBE { GL_TEXTURE_CUBE_MAP } else { GL_TEXTURE_2D },
                 },
             );
         }
@@ -167,7 +198,7 @@ impl Program {
     pub unsafe fn tex(&self, name: &str, id: u32, unit: u32) -> u32 {
         if let Some(u) = self.uniforms.get(name) {
             glActiveTexture(GL_TEXTURE0 + unit);
-            glBindTexture(GL_TEXTURE_2D, id);
+            glBindTexture(u.texture_target, id);
             if u.sampler.get() != unit as i32 {
                 glUniform1i(u.location, unit as i32);
                 u.sampler.set(unit as i32);
@@ -177,6 +208,28 @@ impl Program {
             unit
         }
     }
+    /// Sampler uniforms belong to each Program, while texture bindings belong
+    /// to the context. Keep those caches separate across program switches.
+    pub unsafe fn tex_cached(&self, name: &str, id: u32, unit: u32, bindings: &mut TextureBindings) -> u32 {
+        if let Some(u) = self.uniforms.get(name) {
+            bindings.bind(u.texture_target, id, unit);
+            if u.sampler.get() != unit as i32 {
+                glUniform1i(u.location, unit as i32);
+                u.sampler.set(unit as i32);
+            }
+            unit + 1
+        } else {
+            unit
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn test_samplers(id: u32, samplers: &[(&str, i32, GLenum)]) -> Self {
+        Self { id, attrs: [false; 8], uniforms: samplers.iter().map(|&(name, location, target)| {
+            (name.into(), Uniform { location, size: 1, data: RefCell::new(Vec::new()),
+                sampler: Cell::new(-1), texture_target: target })
+        }).collect() }
+    }
+
 }
 impl Drop for Program {
     fn drop(&mut self) {
@@ -250,17 +303,20 @@ impl Drop for Target {
     }
 }
 pub unsafe fn rgba(w: i32, h: i32, pixels: &[u8]) -> u32 {
+    image(w, h, pixels, GL_RGBA)
+}
+unsafe fn image(w: i32, h: i32, pixels: &[u8], format: GLenum) -> u32 {
     let mut id = 0;
     glGenTextures(1, &mut id);
     glBindTexture(GL_TEXTURE_2D, id);
     glTexImage2D(
         GL_TEXTURE_2D,
         0,
-        GL_RGBA as _,
+        format as _,
         w,
         h,
         0,
-        GL_RGBA,
+        format,
         GL_UNSIGNED_BYTE,
         pixels.as_ptr() as _,
     );
@@ -330,8 +386,30 @@ pub struct Objects {
     pub buffers: Vec<u32>,
 }
 impl Objects {
+    pub unsafe fn solid_cube(&mut self, rgba: [u8; 4]) -> u32 {
+        let mut id = 0;
+        glGenTextures(1, &mut id);
+        self.textures.push(id);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, id);
+        for face in 0..6 {
+            glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_RGBA as _,
+                1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.as_ptr() as _);
+        }
+        for parameter in [GL_TEXTURE_MIN_FILTER, GL_TEXTURE_MAG_FILTER] {
+            glTexParameteri(GL_TEXTURE_CUBE_MAP, parameter, GL_LINEAR);
+        }
+        for parameter in [GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T] {
+            glTexParameteri(GL_TEXTURE_CUBE_MAP, parameter, GL_CLAMP_TO_EDGE);
+        }
+        id
+    }
     pub unsafe fn image(&mut self, w: i32, h: i32, pixels: &[u8]) -> u32 {
         let id = rgba(w, h, pixels);
+        self.textures.push(id);
+        id
+    }
+    pub unsafe fn luminance(&mut self, w: i32, h: i32, pixels: &[u8]) -> u32 {
+        let id = image(w, h, pixels, GL_LUMINANCE);
         self.textures.push(id);
         id
     }
@@ -352,7 +430,7 @@ impl Drop for Objects {
 }
 /// Same smooth radial mask and deterministic grain used by the shared grade.
 pub unsafe fn grade_textures(objects: &mut Objects, vignette: f32) -> (u32, u32) {
-    let mut mask = vec![255u8; 128 * 128 * 4];
+    let mut mask = vec![255u8; 128 * 128];
     for y in 0..128 {
         for x in 0..128 {
             let u = (x as f32 + 0.5) / 128.0 - 0.5;
@@ -360,21 +438,19 @@ pub unsafe fn grade_textures(objects: &mut Objects, vignette: f32) -> (u32, u32)
             let r = libm::sqrtf(u * u * 2.25 + v * v);
             let t = ((r - 1.05) / (0.25 - 1.05)).clamp(0.0, 1.0);
             let m = ((1.0 - vignette + vignette * t * t * (3.0 - 2.0 * t)) * 255.0) as u8;
-            mask[(y * 128 + x) * 4..(y * 128 + x) * 4 + 4].copy_from_slice(&[m, m, m, 255]);
+            mask[y * 128 + x] = m;
         }
     }
-    let mask = objects.image(128, 128, &mask);
-    let mut noise = vec![255u8; 64 * 64 * 4];
+    let mask = objects.luminance(128, 128, &mask);
+    let mut noise = vec![255u8; 64 * 64];
     let mut seed = 0x9e3779b9u32;
-    for px in noise.chunks_exact_mut(4) {
+    for px in &mut noise {
         seed ^= seed << 13;
         seed ^= seed >> 17;
         seed ^= seed << 5;
-        px[0] = seed as u8;
-        px[1] = px[0];
-        px[2] = px[0];
+        *px = seed as u8;
     }
-    let grain = objects.image(64, 64, &noise);
+    let grain = objects.luminance(64, 64, &noise);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
     (mask, grain)

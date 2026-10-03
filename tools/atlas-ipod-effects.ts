@@ -60,18 +60,77 @@ export function pointCoverage(source: string): string {
   return source.replace(color, (_, f: string) => `atlasColor = vec4(vColor * (${f} * ${f}), ${f} * ${f});`);
 }
 
-/** Density compensation belongs after display tone and coverage. Scaling
- * radiance before the nonlinear LUT would dim retained distant city lights. */
-export function displayFieldWeight(source: string): string {
-  if (!source.includes("uAtlasLut") || source.match(/void main\(\)/g)?.length !== 1)
-    throw new Error("Missing display field entry point");
-  return source.replace("void main()", "void atlasField()") + `
+/** One material appearance sample. The vertex stage already applies the
+ * shared physical energy, motion, blink, scintillation and Vista attenuation.
+ * The row texture includes the place grade and exact additive black removal. */
+export function fieldAppearanceFragment(): string {
+  return `#version 100
+precision mediump float;
+uniform sampler2D uFieldAppearance;
+varying highp vec2 vAppearance;
 varying mediump float vDensity;
 void main() {
- atlasField();
- gl_FragColor.rgb*=vDensity;
+ vec2 q=gl_PointCoord*2.0-1.0;
+ float f=max(1.0-dot(q,q),0.0);
+ gl_FragColor=vec4(texture2D(uFieldAppearance,vAppearance).rgb*(f*f*vDensity),0.0);
 }
 `;
+}
+
+/** The compiler evaluates the static steam shape from its PUDDLES source.
+ * Motion, rotation, lifetime, lighting and premultiplied blend stay shared. */
+export function steamCoverageFragment(): string {
+  return `#version 100
+precision mediump float;
+uniform sampler2D uSteamCoverage;
+uniform vec4 uOpacity;
+varying mediump vec3 vColor;
+varying mediump vec2 vUv, vLife;
+void main() {
+ float a=texture2D(uSteamCoverage,vUv*0.5+0.5).r*vLife.y*uOpacity.x;
+ gl_FragColor=vec4(vColor*(a*0.28),a*0.16);
+}
+
+`;
+}
+
+/** SGX display particles keep their original seeds and pixel kernels. Additive
+ * black is unobservable while destination alpha/depth writes are disabled.
+ * Splash quads can also omit the analytically empty area around their five
+ * droplets and ring; the interpolated UV/world mapping remains the same. */
+export function displayParticleVertex(source: string, kind: string): string {
+  if (kind === "STEAM") return source; // Black premultiplied steam still occludes.
+  if (!["STREAK", "DRIP", "SPLASH", "BEACON"].includes(kind))
+    throw new Error(`Unsupported display particle ${kind}`);
+  const main = /void main\(\)\s*\{/;
+  const start = source.match(main);
+  if (!start || !source.includes("aColor") || !source.includes("vLife"))
+    throw new Error("Display particle vertex contract changed");
+  if (kind === "SPLASH") {
+    // Derive the phase from the shared vertex result instead of reproducing
+    // its hash, cycle rate, seed arithmetic or driver-dependent precision.
+    const phase = source.match(/vLife\s*=\s*vec2\(fract\((\w+)\),/);
+    if (!phase) throw new Error("Splash phase contract changed");
+    const declaration = new RegExp(`(float ${phase[1]} = [^;]+;)`);
+    if (!declaration.test(source)) throw new Error("Splash cycle contract changed");
+    const at = start.index! + start[0].length;
+    // Only body references change: the original attribute remains aUv.
+    source = source.slice(0, at) + source.slice(at).replace(/\baUv\b/g, "atlasCorner");
+    source = source.replace(declaration, `$1
+    mediump float atlasT = fract(${phase[1]});
+    highp float atlasPhase = atlasT;
+    // Droplet support: |x| <= .9*t+.08 and y <= .9*4*t*(1-t)+.1.
+    // Ring support also reaches y=.12. .002 covers half-phase/UV rounding;
+    // do not move kind/frac between stages, where wrap thresholds can jump.
+    highp vec2 atlasExtent = min(vec2(1.0), vec2(0.9*atlasPhase+0.082, max(0.122, 3.6*atlasPhase*(1.0-atlasPhase)+0.102)));
+    highp vec2 atlasCorner = aUv * atlasExtent;`);
+  }
+  return source.replace(main, `void main() {
+    if (all(equal(aColor.rgb, vec3(0.0)))) {
+        gl_Position=vec4(2.0,2.0,2.0,1.0);
+        vColor=vec3(0.0); vUv=vec2(0.0); vLife=vec2(0.0);
+        return;
+    }`);
 }
 
 export function displayHazeDepth(source: string): string {
@@ -109,29 +168,23 @@ void main() {
 `;
 }
 
-/** Reuse the translated six-light haze and its display grade verbatim. The
- * scene remains linearly filtered for bloom; sampling a source texel centre
- * gives exactly the old nearest depth, without a second scene texture. */
-export function displayHazeBloomSource(haze: string): string {
-  const depth = /texture2D\(uScene,\s*vUv\)/g;
-  if (haze.match(depth)?.length !== 1 || !haze.includes("void atlasMaterial()") ||
-      !haze.includes("void main()")) throw new Error("Missing display haze contract");
-  haze = haze.replace(depth,
-    "texture2D(uScene, (floor(vUv*uSceneTexel.zw)+0.5)*uSceneTexel.xy)")
-    .replace("void atlasMaterial()", "uniform highp vec4 uSceneTexel;\nvoid atlasMaterial()")
-    .replace("void main()", "highp vec4 atlasHazeColor;\nvoid atlasHaze()")
-    .replace(/\bgl_FragColor\b/g, "atlasHazeColor");
-  return haze + `
+/** Keep the six-light integral at its independent low-frequency resolution.
+ * Bloom still uses four scene taps, then folds in bilinearly reconstructed
+ * haze; the final native-size composite needs only this one effects texture. */
+export function displayHazeBloomSource(): string {
+  return `#version 100
+precision mediump float;
+varying highp vec2 vUv;
+uniform sampler2D uScene, uHazeTex;
 ${displayBloomKernel}
 uniform highp vec4 uEffectMix; // bloom intensity, reciprocal storage scale
 highp vec3 displayByte(highp vec3 c) {
  return floor(clamp(c,0.0,1.0)*255.0+0.5)*(1.0/255.0);
 }
 void main() {
- atlasHaze();
- // Preserve the old intermediate RGBA8 rounding before applying its
- // nonlinear threshold. Only the final combined storage adds quantization.
- highp vec3 haze=displayByte(atlasHazeColor.rgb);
+ // Haze was already graded and rounded in its own RGBA8 target. Preserve
+ // its smooth bilinear reconstruction before applying the glow threshold.
+ highp vec3 haze=texture2D(uHazeTex,vUv).rgb;
  highp vec3 bloom=displayByte(displayBloom()+extractGlow(haze)*uThreshold.z);
  gl_FragColor=vec4((haze*uThreshold.z+bloom*uEffectMix.x)*uEffectMix.y,1.0);
 }
@@ -164,10 +217,15 @@ function effectShader(
           oLife: "vLife",
         }
       : name === "lights_v"
-        ? { aPath: "aTangent", aBlink: "aWeights", aPhase: "aNormal", aDensity: "aUv", oDensity: "vDensity" }
+        ? { aPath: "aTangent", aBlink: "aWeights", aPhase: "aNormal", aDensity: "aUv", aCurve: "aJoints", oDensity: "vDensity" }
         : {};
   for (const [from, to] of Object.entries(aliases))
     source = source.replace(new RegExp(`\\b${from}\\b`, "g"), to);
+  if (name === "fx_v" && defines.DISPLAY_COLOR) {
+    const kind = ["STREAK", "DRIP", "SPLASH", "STEAM", "BEACON"].find(k => defines[k]);
+    if (!kind) throw new Error("Missing display particle kind");
+    source = displayParticleVertex(source, kind);
+  }
   if (name === "lights_f") {
     source = source.replace(
       /^varying (?:lowp |mediump |highp )?vec2 vCoord;\s*$/m,
@@ -175,7 +233,6 @@ function effectShader(
     );
     source = source.replace(/\bvCoord\b/g, "gl_PointCoord");
     if (defines.ATLAS_COVERAGE) source = pointCoverage(source);
-    if (defines.DENSITY_LOD) source = displayFieldWeight(source);
   }
   if (variant.bloom) source = bloomStorage(source, variant.bloom);
   if (variant.noHaze) source = withoutBloomHaze(source);
@@ -201,7 +258,7 @@ export function writeEffects(): void {
       }),
     ],
   );
-  const hazeLdr = post("haze_f", { HAZE_LIGHTS: 6, ATLAS_LDR: 1, ATLAS_BLEND: 2 }, { displayDepth: true });
+  const hazeLdr = post("haze_f", { HAZE_LIGHTS: 6, SGX_HAZE_PREPARED: 1, ATLAS_LDR: 1, ATLAS_BLEND: 2 }, { displayDepth: true });
   const config = {
     field: [
       effectShader("lights_v"),
@@ -211,14 +268,14 @@ export function writeEffects(): void {
       effectShader("lights_v", { VISTA: 1 }),
       effectShader("lights_f", { ATLAS_BLEND: 2 }),
     ],
-    field_ldr: [effectShader("lights_v", { PHASE_CACHED: 1, DENSITY_LOD: 1 }), effectShader("lights_f", { ATLAS_BLEND: 2, ATLAS_LDR: 1, ATLAS_COVERAGE: 1, DENSITY_LOD: 1 })],
-    field_vista_ldr: [effectShader("lights_v", { VISTA: 1, PHASE_CACHED: 1, DENSITY_LOD: 1 }), effectShader("lights_f", { ATLAS_BLEND: 2, ATLAS_LDR: 1, ATLAS_COVERAGE: 1, DENSITY_LOD: 1 })],
+    field_ldr: [effectShader("lights_v", { PHASE_CACHED: 1, DENSITY_LOD: 1, SGX_FIELD_APPEARANCE: 1 }), writeEffectSource("field_appearance_f", fieldAppearanceFragment())],
+    field_vista_ldr: [effectShader("lights_v", { VISTA: 1, PHASE_CACHED: 1, DENSITY_LOD: 1, SGX_FIELD_APPEARANCE: 1 }), writeEffectSource("field_appearance_f", fieldAppearanceFragment())],
     particles: particles(false),
     particles_ldr: particles(true),
+    steam_coverage_ldr: [effectShader("fx_v", { STEAM: 1, DISPLAY_COLOR: 1 }), writeEffectSource("steam_coverage_f", steamCoverageFragment())],
     haze: post("haze_f", { HAZE_LIGHTS: 6 }),
     haze_ldr: hazeLdr,
-    haze_bloom_ldr: [hazeLdr[0], writeEffectSource("haze_bloom_ldr_f",
-      displayHazeBloomSource(readFileSync(join(output, `${hazeLdr[1]}.glsl`), "utf8")))],
+    haze_bloom_ldr: [effectShader("post_v"), writeEffectSource("haze_bloom_ldr_f", displayHazeBloomSource())],
     prefilter: post("prefilter_f", {}, { bloom: "write" }),
     prefilter_no_haze: post("prefilter_f", {}, { bloom: "write", noHaze: true }),
     prefilter_points: post("prefilter_f", { PER_PIXEL: 1 }, { bloom: "write" }),
@@ -270,7 +327,7 @@ export function checkEffects(): void {
                /\bu(?:FogPos|FogCol|Ambient)\b/.test(source)))
             throw new Error(`${name}: CPU display colors must exclude vertex lighting`);
           if (name.startsWith("field") && name.endsWith("_ldr") &&
-              (!/attribute (?:\w+ )?vec2 aNormal;/.test(source) || !/attribute (?:\w+ )?float aUv;/.test(source) || /\bsin\s*\(/.test(source)))
+              (!/attribute (?:\w+ )?vec2 aNormal;/.test(source) || !/attribute (?:\w+ )?float aUv;/.test(source) || !/attribute (?:\w+ )?float aJoints;/.test(source) || /\bsin\s*\(/.test(source)))
             throw new Error(`${name}: cached phase must replace the per-point sine`);
         } else if (
           name.startsWith("field") &&
@@ -278,6 +335,10 @@ export function checkEffects(): void {
         ) {
           throw new Error(`${name}: point sprite coordinate not mapped`);
         }
+        if (stage === 1 && name.startsWith("field") && name.endsWith("_ldr") &&
+            (/uAtlasLut|atlasEncode|atlasDecode|sqrt\s*\(|gl_LastFragData/.test(source) ||
+             source.match(/texture2D\s*\(/g)?.length !== 1))
+          throw new Error(`${name}: field appearance must use one display sample`);
         source = source
           .replace(
             "#extension GL_EXT_shader_framebuffer_fetch : require",

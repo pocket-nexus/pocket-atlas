@@ -1,11 +1,13 @@
 //! Optional display-referred colors for the GLES throughput renderer.
-//! Original geometry, materials and animation remain in PLCE for full quality.
+//! Original geometry, materials and animation remain in PLIP for full quality.
 //! Like PICA, grading precedes texture modulation and light interpolation;
 //! this is an explicit LDR/Gouraud approximation, not an HDR-equivalent bake.
 use super::{pc, Result};
 use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 use serde_json::json;
-use std::{collections::BTreeMap, path::Path};
+use std::collections::BTreeMap;
+#[path = "gles_display_indices.rs"]
+mod display_indices;
 #[path = "gles_display_pages.rs"]
 mod display_pages;
 
@@ -33,9 +35,9 @@ fn decode(c: f32) -> f32 {
 fn color(v: &[u8], enabled: bool) -> Vec3 {
     if enabled {
         Vec3::new(
-            decode(v[20] as f32 / 255.0),
-            decode(v[21] as f32 / 255.0),
-            decode(v[22] as f32 / 255.0),
+            decode(v[48] as f32 / 255.0),
+            decode(v[49] as f32 / 255.0),
+            decode(v[50] as f32 / 255.0),
         )
     } else {
         Vec3::ONE
@@ -277,8 +279,15 @@ pub(super) struct Colors {
     pub bytes: Vec<u8>,
     pub draws: usize,
 }
+#[cfg(test)]
 pub(super) fn adapt(source: &[u8]) -> Result<Colors> {
-    let pack = pc::Pack::parse(source).map_err(|e| e.to_string())?;
+    adapt_with_recipe(source, &super::gles_products::Recipe::default())
+}
+pub(super) fn adapt_with_recipe(
+    source: &[u8],
+    recipe: &super::gles_products::Recipe,
+) -> Result<Colors> {
+    let pack = pc::ipod::parse(source).map_err(|e| e.to_string())?;
     let meta_bytes = pack.section(pc::TAG_META).map_err(|e| e.to_string())?;
     let meta = pack.meta().map_err(|e| e.to_string())?;
     let geom = pack.section(pc::TAG_GEOMETRY).map_err(|e| e.to_string())?;
@@ -319,12 +328,28 @@ pub(super) fn adapt(source: &[u8]) -> Result<Colors> {
     let mut fallback = BTreeMap::<String, usize>::new();
     let mut approximation = Vec::new();
     for (i, d) in meta.draws.iter().enumerate() {
+        if let Some(product) = recipe.draws.get(&i) {
+            let offset = u32::try_from(bytes.len()).map_err(|_| "appearance colors exceed u32")?;
+            bytes.extend(core::iter::repeat_n(255, d.vertex_count as usize * 4));
+            draws.push(display_pages::Draw {
+                draw: i as u32,
+                offset,
+                vertex_count: d.vertex_count,
+                texture: Some(product.texture),
+                flags: pc::display::PRODUCTS_APPEARANCE,
+                page: None,
+                base_vertex: 0,
+            });
+            continue;
+        }
         let m = meta
             .materials
             .get(d.material as usize)
             .ok_or("color material reference")?;
         let planar_wet = m.kind == pc::Kind::Standard
-            && m.wet.as_ref().is_some_and(|w| w.planar)
+            && m.wet
+                .as_ref()
+                .is_some_and(|w| w.planar && (0.0..=1.0).contains(&w.darken))
             && d.layout == pc::VertexLayout::Baked
             && d.node.is_none()
             && d.skin.is_none();
@@ -379,7 +404,7 @@ pub(super) fn adapt(source: &[u8]) -> Result<Colors> {
         } else {
             let offset = u32::try_from(bytes.len()).map_err(|_| "color stream exceeds 4GiB")?;
             let input = slice(geom, &d.vertices)?;
-            let stride = d.layout.stride() as usize;
+            let stride = pc::ipod::stride(d.layout) as usize;
             if d.vertex_count.checked_mul(stride as u32) != Some(d.vertices.size) || stride < 24 {
                 return Err("color vertex stride mismatch".into());
             }
@@ -389,11 +414,9 @@ pub(super) fn adapt(source: &[u8]) -> Result<Colors> {
                 Mat4::IDENTITY
             };
             for v in input.chunks_exact(stride) {
-                let q = |at| i16::from_le_bytes([v[at], v[at + 1]]) as f32 / 32767.0;
-                let mut p = Vec3::from(d.pos_offset)
-                    + Vec3::new(q(0), q(2), q(4)) * Vec3::from(d.pos_scale);
-                let mut n = Vec3::new(v[8] as i8 as f32, v[9] as i8 as f32, v[10] as i8 as f32)
-                    .normalize_or(Vec3::Y);
+                let mut p = Vec3::from(pc::ipod::floats::<3>(v, pc::ipod::POSITION)?);
+                let mut n =
+                    Vec3::from(pc::ipod::floats::<3>(v, pc::ipod::NORMAL)?).normalize_or(Vec3::Y);
                 if let Some(si) = d.skin {
                     if d.layout != pc::VertexLayout::Skinned {
                         return Err("color skin layout mismatch".into());
@@ -403,9 +426,9 @@ pub(super) fn adapt(source: &[u8]) -> Result<Colors> {
                     let mut sn = Vec3::ZERO;
                     for k in 0..4 {
                         let bone = bones
-                            .get(v[24 + k] as usize)
+                            .get(v[52 + k] as usize)
                             .ok_or("color skin vertex joint")?;
-                        let weight = v[28 + k] as f32 / 255.0;
+                        let weight = v[56 + k] as f32 / 255.0;
                         sp += bone.transform_point3(p) * weight;
                         sn += bone.transform_vector3(n) * weight;
                     }
@@ -420,8 +443,8 @@ pub(super) fn adapt(source: &[u8]) -> Result<Colors> {
                     base
                 } else {
                     let mut light = if d.layout == pc::VertexLayout::Baked {
-                        let s = Vec3::new(v[24] as f32, v[25] as f32, v[26] as f32)
-                            * (v[27] as f32 / (255.0 * 255.0));
+                        let s = Vec3::new(v[52] as f32, v[53] as f32, v[54] as f32)
+                            * (v[55] as f32 / (255.0 * 255.0));
                         s * s * 64.0
                     } else if m.kind == pc::Kind::Glass {
                         baker.irradiance(p, n, 0.0, true, 1.0)
@@ -480,7 +503,7 @@ pub(super) fn adapt(source: &[u8]) -> Result<Colors> {
                     bytes.push((c.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
                 }
                 bytes.push(if m.vertex_color && m.kind != pc::Kind::Glass {
-                    v[23]
+                    v[51]
                 } else {
                     255
                 });
@@ -501,26 +524,17 @@ pub(super) fn adapt(source: &[u8]) -> Result<Colors> {
             approximation.push(json!({"draw":i,"material":d.material,"visibleMipTexels":map.samples,"maxVisibleEmissionError":map.visible_error,"maxAllTexelEmissionError":map.all_error}));
         }
     }
-    let (bytes, pages, states) = display_pages::pack(&meta, geom, &bytes, &mut draws)?;
-    let json = json!({"version":2,"identity":"fnv1a64-v1","metaHash":hash(meta_bytes),"geometryHash":hash(geom),"animationHash":hash(anim),"textureHash":texture_hash,"colorsHash":hash(&bytes),"colorsBytes":bytes.len(),"states":states,"pages":pages.iter().map(|p|p.json()).collect::<Vec<_>>(),"draws":draws.iter().map(|d|d.json()).collect::<Vec<_>>(),"approximation":{"gradeBeforeSrgbTextureModulation":true,"flags":{"1":"frame-zero dynamic lighting","2":"weak emission shares albedo sample","4":"Gouraud sun without runtime shadows","8":"diffuse-only color; independent emission sample remains in shader","16":"static planar wet diffuse; wet effects remain in shader","32":"glass diffuse only; coverage Fresnel beads remain in shader"},"weakEmissionLimit":MAX_WEAK_EMISSION,"visibleEmissionErrorLimit":MAX_VISIBLE_EMISSION_ERROR,"emissionSamples":approximation,"fallbackDraws":fallback}});
+    let (mut bytes, pages, mut states) =
+        display_pages::pack_with_recipe(&meta, geom, &bytes, &mut draws, recipe)?;
+    let vertex_bytes = bytes.len();
+    let index_overrides =
+        display_indices::append(&meta, geom, &mut bytes, &draws, &pages, &mut states)?;
+    let json = json!({"version":3,"vertexBytes":vertex_bytes,"indexOverrides":index_overrides,"recipes":recipe.receipts,"identity":"fnv1a64-v1","metaHash":hash(meta_bytes),"geometryHash":hash(geom),"animationHash":hash(anim),"textureHash":texture_hash,"colorsHash":hash(&bytes),"colorsBytes":bytes.len(),"states":states,"pages":pages.iter().map(|p|p.json()).collect::<Vec<_>>(),"draws":draws.iter().map(|d|d.json()).collect::<Vec<_>>(),"approximation":{"gradeBeforeSrgbTextureModulation":true,"flags":{"1":"frame-zero dynamic lighting","2":"weak emission shares albedo sample","4":"Gouraud sun without runtime shadows","8":"diffuse-only color; independent emission sample remains in shader","16":"static planar wet diffuse; wet effects remain in shader","32":"glass diffuse only; coverage Fresnel beads remain in shader","64":"Products material appearance baked into a remapped display texture"},"weakEmissionLimit":MAX_WEAK_EMISSION,"visibleEmissionErrorLimit":MAX_VISIBLE_EMISSION_ERROR,"emissionSamples":approximation,"fallbackDraws":fallback}});
     Ok(Colors {
         json: serde_json::to_vec_pretty(&json).map_err(|e| e.to_string())?,
         bytes,
         draws: draws.len(),
     })
-}
-pub(super) fn write(source: &[u8], path: &Path) -> Result<()> {
-    let colors = adapt(source)?;
-    std::fs::write(path.with_extension("ipod-color.bin"), &colors.bytes)
-        .map_err(|e| e.to_string())?;
-    std::fs::write(path.with_extension("ipod-color.json"), &colors.json)
-        .map_err(|e| e.to_string())?;
-    println!(
-        "  optional LDR colors: {} draws, {:.2} MiB (original GEOM retained)",
-        colors.draws,
-        colors.bytes.len() as f64 / 1048576.0
-    );
-    Ok(())
 }
 
 #[cfg(test)]
@@ -549,54 +563,6 @@ mod tests {
         m.textures[1].data.offset = u32::MAX;
         assert!(pc::content_hash::textures(&m.textures, &tex).is_err());
     }
-    #[test]
-    #[ignore = "set POCKET_ATLAS_VALIDATION_PACKS; optional POCKET_ATLAS_COLOR_OUTPUT writes candidate sidecars"]
-    fn existing_packs_regenerate_identical_color_payload_and_texture_binding() {
-        let root = std::env::var("POCKET_ATLAS_VALIDATION_PACKS").expect("pack directory");
-        let output = std::env::var_os("POCKET_ATLAS_COLOR_OUTPUT").map(std::path::PathBuf::from);
-        if let Some(output) = &output {
-            std::fs::create_dir_all(output).unwrap();
-        }
-        let mut count = 0;
-        for entry in std::fs::read_dir(root).unwrap() {
-            let path = entry.unwrap().path();
-            if path.extension().and_then(|e| e.to_str()) != Some("place") {
-                continue;
-            }
-            let source = std::fs::read(&path).unwrap();
-            let result = adapt(&source).unwrap();
-            assert_eq!(
-                result.bytes,
-                std::fs::read(path.with_extension("ipod-color.bin")).unwrap(),
-                "{}: color payload changed",
-                path.display()
-            );
-            let mut old: serde_json::Value = serde_json::from_slice(
-                &std::fs::read(path.with_extension("ipod-color.json")).unwrap(),
-            )
-            .unwrap();
-            let mut new: serde_json::Value = serde_json::from_slice(&result.json).unwrap();
-            let binding = new.as_object_mut().unwrap().remove("textureHash").unwrap();
-            old.as_object_mut().unwrap().remove("textureHash");
-            assert_eq!(
-                new,
-                old,
-                "{}: unrelated color metadata changed",
-                path.display()
-            );
-            if let Some(output) = &output {
-                let stem = output.join(path.file_name().unwrap());
-                std::fs::write(stem.with_extension("ipod-color.json"), &result.json).unwrap();
-                std::fs::write(stem.with_extension("ipod-color.bin"), &result.bytes).unwrap();
-            }
-            println!(
-                "{}: identical color payload; textureHash={binding}",
-                path.display()
-            );
-            count += 1;
-        }
-        assert!(count > 0);
-    }
     pub(super) fn fixture() -> (pc::Meta, Vec<u8>, Vec<u8>) {
         let (mut m, _, mut g) = super::super::gles_geometry::tests::fixture();
         m.nodes.clear();
@@ -606,20 +572,24 @@ mod tests {
         m.textures[0].data.size = 64;
         for d in &m.draws {
             for v in
-                g[d.vertices.offset as usize..][..d.vertices.size as usize].chunks_exact_mut(28)
+                g[d.vertices.offset as usize..][..d.vertices.size as usize].chunks_exact_mut(56)
             {
-                v[24..28].copy_from_slice(&[255, 255, 255, 32]);
+                v[52..56].copy_from_slice(&[255, 255, 255, 32]);
             }
         }
         (m, g, [255; 4].repeat(16))
     }
     fn source(m: &pc::Meta, g: &[u8], t: &[u8]) -> Vec<u8> {
-        pc::write(&[
-            (pc::TAG_META, &serde_json::to_vec(m).unwrap(), 16),
-            (pc::TAG_GEOMETRY, g, 16),
-            (pc::TAG_TEXTURES, t, 16),
-            (pc::TAG_ANIMATION, &[], 16),
-        ])
+        pc::write_versioned(
+            pc::ipod::MAGIC,
+            pc::ipod::VERSION,
+            &[
+                (pc::TAG_META, &serde_json::to_vec(m).unwrap(), 16),
+                (pc::TAG_GEOMETRY, g, 16),
+                (pc::TAG_TEXTURES, t, 16),
+                (pc::TAG_ANIMATION, &[], 16),
+            ],
+        )
     }
     #[test]
     fn grades_once_into_a_deduplicated_stream_without_changing_original_pack() {
@@ -640,7 +610,7 @@ mod tests {
         );
         assert_eq!(&out.bytes[20..23], &rgb.map(|v| (v * 255.0 + 0.5) as u8));
         assert_eq!(out.bytes[23], 255);
-        let pack = pc::Pack::parse(&input).unwrap();
+        let pack = pc::ipod::parse(&input).unwrap();
         assert_eq!(json["metaHash"], hash(pack.section(pc::TAG_META).unwrap()));
         assert_eq!(json["colorsHash"], hash(&out.bytes));
         assert_eq!(hash(b""), "cbf29ce484222325");
@@ -739,7 +709,7 @@ mod tests {
         let out = adapt(&source(&m, &g, &t)).unwrap();
         let json: Value = serde_json::from_slice(&out.json).unwrap();
         assert_eq!(json["draws"][0]["flags"], GOURAUD_SUN);
-        assert_eq!(out.bytes[23], g[m.draws[0].vertices.offset as usize + 23]);
+        assert_eq!(out.bytes[23], g[m.draws[0].vertices.offset as usize + 51]);
         // A rigid object keeps its runtime transform; the sidecar labels its
         // fixed lighting instead of removing its node or animation contract.
         let texture = m.textures[0].clone();

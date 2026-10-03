@@ -15,7 +15,8 @@ pub const GOURAUD_SUN: u32 = 4;
 pub const INDEPENDENT_EMISSION: u32 = 8;
 pub const PLANAR_WET: u32 = 16;
 pub const GLASS_DIFFUSE: u32 = 32;
-pub const ALL_FLAGS: u32 = 63;
+pub const PRODUCTS_APPEARANCE: u32 = 64;
+pub const ALL_FLAGS: u32 = 127;
 pub const RUNTIME_FLAGS: u32 = INDEPENDENT_EMISSION | PLANAR_WET | GLASS_DIFFUSE;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -85,7 +86,8 @@ impl State {
         if draw.node.is_some()
             || draw.skin.is_some()
             || !matches!(draw.layout, VertexLayout::Static | VertexLayout::Baked)
-            || !matches!(m.kind, Kind::Standard | Kind::Unlit)
+            || !(matches!(m.kind, Kind::Standard | Kind::Unlit)
+                || (m.kind == Kind::Products && flags == PRODUCTS_APPEARANCE))
             || m.blend != Blend::Opaque
             || !m.depth_write
             || flags & !ALL_FLAGS != 0
@@ -93,6 +95,18 @@ impl State {
             || m.emissive_track.is_some()
         {
             return Err("display state requires static opaque color geometry");
+        }
+        if flags & PRODUCTS_APPEARANCE != 0
+            && (m.kind != Kind::Products
+                || flags != PRODUCTS_APPEARANCE
+                || texture.is_none()
+                || m.uv_anim.is_some()
+                || m.alpha_test > 0.0
+                || m.wet.is_some()
+                || m.emission.is_some()
+                || m.emission_shade.is_some())
+        {
+            return Err("display Products appearance contract");
         }
         let color_texture = |index: u32| {
             meta.textures

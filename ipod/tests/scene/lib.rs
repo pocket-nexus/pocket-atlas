@@ -4,8 +4,12 @@
 
 extern crate alloc;
 
+#[path = "../../src/display_environment.rs"]
+mod display_environment;
 #[path = "../../src/gl.rs"]
 mod gl;
+#[path = "../../src/geometry_usage.rs"]
+mod geometry_usage;
 #[path = "../../src/light_lod.rs"]
 mod light_lod;
 #[path = "../../src/mesh_batch.rs"]
@@ -16,6 +20,8 @@ mod mesh_clusters;
 mod scene;
 #[path = "../../src/texture_usage.rs"]
 mod texture_usage;
+#[path = "../../src/texture_storage.rs"]
+mod texture_storage;
 #[path = "../../src/validation.rs"]
 mod validation;
 #[path = "../../src/gpu.rs"]

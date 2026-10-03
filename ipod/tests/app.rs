@@ -47,7 +47,11 @@ mod scene {
         pub camera: pocket3d_place::CameraSet,
     }
     pub struct LightSource;
-    impl LightSource { pub fn bytes(&self) -> usize { 0 } }
+    impl LightSource {
+        pub fn bytes(&self) -> usize {
+            0
+        }
+    }
     pub struct Scene {
         pub light_lod_source: LightSource,
         pub performance: bool,
@@ -59,7 +63,11 @@ mod scene {
     }
     impl Scene {
         pub unsafe fn load_for_profile(_: &str, performance: bool) -> Result<Self, String> {
-            assert_eq!(LIVE.load(SeqCst), 0, "release renderer before loading a scene profile");
+            assert_eq!(
+                LIVE.load(SeqCst),
+                0,
+                "release renderer before loading a scene profile"
+            );
             LOADS.fetch_add(1, SeqCst);
             if FAIL_SCENE.load(SeqCst) {
                 return Err("injected scene profile upload failure".into());
@@ -115,7 +123,9 @@ mod renderer {
         pub gl_error: u32,
         pub sky_ms: f32,
         pub mesh_ms: f32,
-        pub mesh_steps_ms: [[f32; 5]; 2],
+        pub wet_response_ms: f32,
+        pub water_response_ms: f32,
+        pub mesh_steps_ms: [[f32; 5]; 4],
         pub submit_ms: f32,
         pub timings: [f32; 5],
         pub post_steps_ms: [f32; 3],
@@ -138,7 +148,7 @@ mod renderer {
             BUILDS.fetch_add(1, SeqCst);
             assert_eq!(scene.performance, performance);
             CONSTRUCTED_DOOR.store(scene.door.to_bits(), SeqCst);
-            let width = if performance { 320 } else { 960 };
+            let width = if performance { 480 } else { 960 };
             Ok(Self {
                 width,
                 height: width * 2 / 3,
@@ -148,7 +158,9 @@ mod renderer {
                 gl_error: 0,
                 sky_ms: 0.0,
                 mesh_ms: 0.0,
-                mesh_steps_ms: [[0.0; 5]; 2],
+                wet_response_ms: 0.0,
+                water_response_ms: 0.0,
+                mesh_steps_ms: [[0.0; 5]; 4],
                 submit_ms: 0.0,
                 timings: [0.0; 5],
                 post_steps_ms: [0.0; 3],
@@ -188,7 +200,10 @@ mod renderer {
             glUseProgram(7);
             Ok(())
         }
-        pub fn light_lod_bytes(&self) -> (usize, usize) { (0, 0) }
+        pub fn field_appearance_bytes(&self) -> usize { 0 }
+        pub fn light_lod_bytes(&self) -> (usize, usize) {
+            (0, 0)
+        }
         pub fn cpu_index_bytes(&self) -> usize {
             0
         }
@@ -321,10 +336,10 @@ unsafe fn presented(app: &mut app::App) -> serde_json::Value {
 fn failed_resize_waits_for_retry_and_profile_reloads_preserve_camera_clock_and_door() {
     let mut app = app::App::new("/host-test".into());
     FAIL_RESIZE.store(true, SeqCst);
-    app.command(br#"{"place":"test-place","quality":2,"pause":true}"#);
+    app.command(br#"{"place":"test-place","quality":2,"renderWidth":640,"pause":true}"#);
     let initial = unsafe { presented(&mut app) };
     assert_eq!(initial["state"], "error");
-    assert_eq!(initial["renderWidth"], 320);
+    assert_eq!(initial["renderWidth"], 480);
     assert_eq!(RESIZES.load(SeqCst), 1);
     for _ in 0..100 {
         unsafe {
@@ -343,10 +358,10 @@ fn failed_resize_waits_for_retry_and_profile_reloads_preserve_camera_clock_and_d
     }
     assert_eq!(RESIZES.load(SeqCst), 2);
     FAIL_RESIZE.store(false, SeqCst);
-    app.command(br#"{"renderWidth":480}"#);
+    app.command(br#"{"renderWidth":640}"#);
     let recovered = unsafe { presented(&mut app) };
     assert_eq!(recovered["state"], "running");
-    assert_eq!(recovered["renderWidth"], 480);
+    assert_eq!(recovered["renderWidth"], 640);
     assert_eq!(RESIZES.load(SeqCst), 3);
     assert_eq!(BUILDS.load(SeqCst), 1);
     assert_eq!(INDEX_DETACHES.load(SeqCst), 0);
@@ -355,6 +370,8 @@ fn failed_resize_waits_for_retry_and_profile_reloads_preserve_camera_clock_and_d
     let full = unsafe { presented(&mut app) };
     assert_eq!(full["renderingProfile"], "full-hdr");
     assert_eq!(full["renderWidth"], 960);
+    assert_eq!(full["qualityProfile"], "reference");
+    assert_eq!(full["defaultRenderWidth"], 960);
     assert_eq!(full["camera"], initial["camera"]);
     assert_eq!(full["time"], initial["time"]);
     assert_eq!(LOADS.load(SeqCst), 2);
@@ -374,14 +391,11 @@ fn failed_resize_waits_for_retry_and_profile_reloads_preserve_camera_clock_and_d
     assert_eq!(BUILDS.load(SeqCst), 3);
     assert_eq!(INDEX_DETACHES.load(SeqCst), 2);
     FAIL_RESIZE.store(true, SeqCst);
-    // Force the adaptive controller to request its next width, then fail that allocation.
-    for _ in 0..125 {
-        unsafe {
-            presented(&mut app);
-        }
-    }
-    let attempts = RESIZES.load(SeqCst);
+    // A diagnostic target change still fails transactionally and requires an
+    // explicit retry; normal frame timing can no longer change the target.
+    app.command(br#"{"renderWidth":640}"#);
     let failure = unsafe { presented(&mut app) };
+    let attempts = RESIZES.load(SeqCst);
     assert_eq!(failure["state"], "error");
     for _ in 0..200 {
         unsafe {
@@ -391,8 +405,8 @@ fn failed_resize_waits_for_retry_and_profile_reloads_preserve_camera_clock_and_d
     let still_failed = unsafe { presented(&mut app) };
     assert_eq!(RESIZES.load(SeqCst), attempts);
     assert_eq!(
-        still_failed["adaptiveWidth"], failure["adaptiveWidth"],
-        "governor must pause after failure"
+        still_failed["renderWidth"], failure["renderWidth"],
+        "the previous target must remain stable after failure"
     );
     assert_eq!(
         LOADS.load(SeqCst),
@@ -422,7 +436,11 @@ fn failed_resize_waits_for_retry_and_profile_reloads_preserve_camera_clock_and_d
     // failure must release the old GPU owner without retrying every frame.
     FAIL_RESIZE.store(false, SeqCst);
     app.command(br#"{"pause":false,"renderWidth":480}"#);
-    for _ in 0..60 { unsafe { presented(&mut app); } }
+    for _ in 0..60 {
+        unsafe {
+            presented(&mut app);
+        }
+    }
     let before = unsafe { presented(&mut app) };
     assert!(before["time"].as_f64().unwrap() > 1.0);
     app.command(br#"{"quality":1,"renderWidth":0}"#);
@@ -437,12 +455,23 @@ fn failed_resize_waits_for_retry_and_profile_reloads_preserve_camera_clock_and_d
     app.command(br#"{"quality":0}"#);
     let failed_profile = unsafe { presented(&mut app) };
     assert_eq!(failed_profile["state"], "error");
-    assert_eq!(failed_profile["error"], "injected scene profile upload failure");
+    assert_eq!(
+        failed_profile["error"],
+        "injected scene profile upload failure"
+    );
     assert_eq!(LIVE.load(SeqCst), 0);
     let attempts = LOADS.load(SeqCst);
-    for _ in 0..10 { unsafe { presented(&mut app); } }
+    for _ in 0..10 {
+        unsafe {
+            presented(&mut app);
+        }
+    }
     assert_eq!(LOADS.load(SeqCst), attempts);
-    assert_eq!(GLOBE_BUILDS.load(SeqCst), globe_builds, "failed scene must not allocate a globe");
+    assert_eq!(
+        GLOBE_BUILDS.load(SeqCst),
+        globe_builds,
+        "failed scene must not allocate a globe"
+    );
     FAIL_SCENE.store(false, SeqCst);
     app.command(br#"{"quality":0}"#); // Explicit same-quality retry.
     let restored = unsafe { presented(&mut app) };
@@ -456,12 +485,12 @@ fn failed_resize_waits_for_retry_and_profile_reloads_preserve_camera_clock_and_d
     assert_eq!(BOUND_PROGRAM.load(SeqCst), 0);
     assert_eq!(LIVE.load(SeqCst), 0);
 
-    // The atlas shares the measured controller and reports its real target.
+    // The atlas has fixed authored dimensions and reports its real target.
     FAIL_RESIZE.store(false, SeqCst);
     app.command(br#"{"place":"atlas","quality":0,"renderWidth":0}"#);
     let globe = unsafe { presented(&mut app) };
-    assert_eq!(globe["renderWidth"], 320);
-    assert_eq!(globe["renderHeight"], 181);
+    assert_eq!(globe["renderWidth"], 480);
+    assert_eq!(globe["renderHeight"], 272);
     assert_eq!(globe["renderingProfile"], "globe-hdr");
     assert_eq!(globe["draws"], 5);
     assert_eq!(globe["triangles"], 16390);
@@ -472,7 +501,7 @@ fn failed_resize_waits_for_retry_and_profile_reloads_preserve_camera_clock_and_d
             presented(&mut app);
         }
     }
-    assert_eq!(unsafe { presented(&mut app) }["renderWidth"], 400);
+    assert_eq!(unsafe { presented(&mut app) }["renderWidth"], 480);
     app.command(br#"{"quality":1,"profile":true}"#);
     let full_globe = unsafe { presented(&mut app) };
     assert_eq!(full_globe["renderWidth"], 480);
@@ -523,15 +552,15 @@ fn failed_resize_waits_for_retry_and_profile_reloads_preserve_camera_clock_and_d
     }
     assert_eq!(
         unsafe { presented(&mut app) }["renderWidth"],
-        320,
-        "profiling locks adaptive resolution"
+        480,
+        "profiling does not change the fixed device profile"
     );
     FAIL_RESIZE.store(true, SeqCst);
-    app.command(br#"{"quality":2,"profile":false}"#);
+    app.command(br#"{"quality":2,"profile":false,"renderWidth":640}"#);
     let failure = unsafe { presented(&mut app) };
     let attempts = RESIZES.load(SeqCst);
     assert_eq!(failure["state"], "error");
-    assert_eq!(failure["renderWidth"], 320);
+    assert_eq!(failure["renderWidth"], 480);
     for _ in 0..150 {
         unsafe {
             presented(&mut app);
@@ -539,32 +568,52 @@ fn failed_resize_waits_for_retry_and_profile_reloads_preserve_camera_clock_and_d
     }
     assert_eq!(RESIZES.load(SeqCst), attempts);
     FAIL_RESIZE.store(false, SeqCst);
-    app.command(br#"{"quality":2}"#);
+    app.command(br#"{"quality":2,"renderWidth":0}"#);
     assert_eq!(unsafe { presented(&mut app) }["renderWidth"], 480);
 
     // A real OS warning overrides even a diagnostic width, without resetting
     // the view, timeline or authored effect toggles. Subsequent warnings remain
     // observable and do not reload a compatible Scene.
-    app.command(br#"{"place":"test-place","quality":1,"renderWidth":960,"pause":true}"#);
+    app.command(br#"{"place":"test-place","quality":1,"renderWidth":960,"pause":false,"time":-1}"#);
+    for _ in 0..60 {
+        unsafe {
+            presented(&mut app);
+        }
+    }
+    app.command(br#"{"pause":true}"#);
     let before_warning = unsafe { presented(&mut app) };
+    assert!(before_warning["time"].as_f64().unwrap() > 1.0);
     app.memory_warning();
     let after_warning = unsafe { presented(&mut app) };
     assert_eq!(after_warning["quality"], 0);
-    assert_eq!(after_warning["renderWidth"], 160);
+    assert_eq!(after_warning["renderWidth"], 480);
+    assert_eq!(after_warning["renderHeight"], 320);
+    assert_eq!(after_warning["defaultRenderWidth"], 480);
+    assert_eq!(after_warning["qualityProfile"], "optimized");
     assert_eq!(after_warning["memoryWarningBatches"], 1);
     assert_eq!(after_warning["camera"], before_warning["camera"]);
+    assert_eq!(after_warning["target"], before_warning["target"]);
     assert_eq!(after_warning["time"], before_warning["time"]);
     assert_eq!(after_warning["rain"], before_warning["rain"]);
+    assert_eq!(CONSTRUCTED_DOOR.load(SeqCst), 0.73f32.to_bits());
     let loads = LOADS.load(SeqCst);
+    // Small targets are diagnostic only; a warning clears even that override
+    // and restores the full fixed device dimensions, never a hidden low tier.
+    app.command(br#"{"renderWidth":160}"#);
+    let diagnostic = unsafe { presented(&mut app) };
+    assert_eq!(diagnostic["renderWidth"], 160);
+    assert_eq!(diagnostic["defaultRenderWidth"], 480);
     app.memory_warning();
-    assert_eq!(unsafe { presented(&mut app) }["memoryWarningBatches"], 2);
+    let warned_again = unsafe { presented(&mut app) };
+    assert_eq!(warned_again["memoryWarningBatches"], 2);
+    assert_eq!(warned_again["renderWidth"], 480);
     assert_eq!(LOADS.load(SeqCst), loads);
 
     // A warning after a same-batch navigation still forces the floor, and a
     // failed load neither retries the old selection nor hides the failure.
     app.command(br#"{"place":"test-place","quality":1}"#);
     app.memory_warning();
-    assert_eq!(unsafe { presented(&mut app) }["renderWidth"], 160);
+    assert_eq!(unsafe { presented(&mut app) }["renderWidth"], 480);
     FAIL_SCENE.store(true, SeqCst);
     let loads = LOADS.load(SeqCst);
     let globes = GLOBE_BUILDS.load(SeqCst);
@@ -577,6 +626,41 @@ fn failed_resize_waits_for_retry_and_profile_reloads_preserve_camera_clock_and_d
     FAIL_SCENE.store(false, SeqCst);
     app.command(br#"{"quality":0}"#);
     assert_eq!(unsafe { presented(&mut app) }["state"], "running");
+
+    // Old quality 2 checkpoints map to the same working set and resolution as
+    // quality 0. The button skips that duplicate and offers only real profiles.
+    let loads = LOADS.load(SeqCst);
+    let builds = BUILDS.load(SeqCst);
+    app.command(br#"{"quality":2,"renderWidth":0}"#);
+    let legacy = unsafe { presented(&mut app) };
+    assert_eq!(legacy["renderWidth"], 480);
+    assert_eq!(legacy["qualityProfile"], "optimized");
+    assert_eq!(LOADS.load(SeqCst), loads);
+    assert_eq!(BUILDS.load(SeqCst), builds);
+    for (quality, width) in [(1, 960), (0, 480)] {
+        app.action(8);
+        let selected = unsafe { presented(&mut app) };
+        assert_eq!(selected["quality"], quality);
+        assert_eq!(selected["renderWidth"], width);
+    }
+
+    // Present/backpressure and CPU cost are not permission to shrink quality.
+    // Preserve the bad cadence in the report instead of hiding it at 160 px.
+    for _ in 0..140 {
+        unsafe {
+            app.frame(1.0 / 30.0, 480, 320, 1);
+            app.frame_completed(22.0, 90.0, 112.0);
+        }
+    }
+    unsafe {
+        app.refresh_status();
+    }
+    let overloaded: serde_json::Value = serde_json::from_slice(app.status.as_bytes()).unwrap();
+    assert_eq!(overloaded["renderWidth"], 480);
+    assert_eq!(overloaded["renderHeight"], 320);
+    assert_eq!(overloaded["frameTiming"]["workMs"]["overBudget"], 120);
+    assert_eq!(overloaded["frameTiming"]["intervalMs"]["p95"], 112.0);
+    assert!(overloaded["fps"].as_f64().unwrap() < 9.0);
 
     // JSON construction is deferred until publication; timings and UI values
     // still advance, and a command is acknowledged only after presentation.

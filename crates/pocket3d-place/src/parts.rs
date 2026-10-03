@@ -32,8 +32,18 @@ pub fn position(d: &Draw, geometry: &[u8], index: u16) -> Result<[f32; 3], Strin
 
 /// Unreferenced vertices are `u32::MAX`. Returned roots are vertex indices.
 pub fn components(d: &Draw, geometry: &[u8]) -> Result<Vec<u32>, String> {
+    components_with(d, geometry, d.layout.stride(), |i| position(d, geometry, i))
+}
+
+/// Shared topology analysis over a target-owned vertex decoder.
+pub fn components_with(
+    d: &Draw,
+    geometry: &[u8],
+    stride: u32,
+    mut position: impl FnMut(u16) -> Result<[f32; 3], String>,
+) -> Result<Vec<u32>, String> {
     if d.vertex_count > 65536
-        || d.vertex_count.checked_mul(d.layout.stride()) != Some(d.vertices.size)
+        || d.vertex_count.checked_mul(stride) != Some(d.vertices.size)
         || d.index_count.checked_mul(2) != Some(d.indices.size)
         || d.index_count % 3 != 0
     {
@@ -76,7 +86,7 @@ pub fn components(d: &Draw, geometry: &[u8]) -> Result<Vec<u32>, String> {
         if parent[i] == u32::MAX {
             continue;
         }
-        let key = position(d, geometry, i as u16)?.map(|v| if v == 0.0 { 0 } else { v.to_bits() });
+        let key = position(i as u16)?.map(|v| if v == 0.0 { 0 } else { v.to_bits() });
         if let Some(&j) = seams.get(&key) {
             join(&mut parent, i as u32, j);
         } else {

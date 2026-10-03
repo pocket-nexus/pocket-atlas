@@ -332,9 +332,8 @@ static float wrapped_label(id parent, float x, float y, float w,
 
 static const char *quality_name(int quality) {
     switch (quality) {
-        case 1: return "Retina · Full";
-        case 2: return "Performance · 480";
-        default: return "Adaptive · 30 fps";
+        case 1: return "Retina · Reference";
+        default: return "SGX · 480×320";
     }
 }
 
@@ -493,7 +492,7 @@ static void draw_settings(float w, float h) {
     float y = 0;
     y = setting_row(settings_scroll, y, row_width, "Image quality",
                     quality_name(ui_value(VALUE_QUALITY)),
-                    "Adaptive targets 30 fps; low memory restores Adaptive.", ACTION_QUALITY);
+                    "SGX uses fixed 480×320; Reference uses Retina detail.", ACTION_QUALITY);
     y = setting_row(settings_scroll, y, row_width, "Rain",
                     ui_value(VALUE_RAIN) ? "On" : "Off",
                     "Rainfall in wet-weather places.", ACTION_RAIN);

@@ -7,6 +7,8 @@ export function hdrFragment(
   name: string,
   defines: Record<string, number> = {},
 ): string {
+  if (defines.ATLAS_COVERAGE_TARGET && (!defines.ATLAS_LDR || !defines.ATLAS_OUTPUT_LDR))
+    throw new Error("Coverage targets require opaque display output");
   if (name === "blit_f") return source;
   const targets = new Set([
     "uInscatter",
@@ -70,11 +72,13 @@ highp vec4 atlasEncode(highp vec4 c) {
           ? 2
           : 0);
     if (defines.ATLAS_LDR) {
+      if (defines.ATLAS_COVERAGE_TARGET && (!defines.ATLAS_OUTPUT_LDR || mode !== 0))
+        throw new Error("Coverage targets require opaque display output");
       source = source.replace("void main(", "void atlasMaterial(")
         .replace(/gl_FragData\[0\]/g, "atlasColor")
         .replace("void atlasMaterial(", "highp vec4 atlasColor;\nvoid atlasMaterial(");
       if (defines.ATLAS_OUTPUT_LDR)
-        return source + `\nvoid main() { atlasMaterial(); gl_FragColor=vec4(atlasColor.rgb,${mode === 0 ? "1.0/(1.0+max(atlasColor.a,0.0)/32.0)" : "clamp(atlasColor.a,0.0,1.0)"}); }\n`;
+        return source + `\nvoid main() { atlasMaterial(); gl_FragColor=vec4(atlasColor.rgb,${defines.ATLAS_COVERAGE_TARGET ? "1.0" : mode === 0 ? "1.0/(1.0+max(atlasColor.a,0.0)/32.0)" : "clamp(atlasColor.a,0.0,1.0)"}); }\n`;
       return source + `
 uniform mediump sampler2D uAtlasLut;
 uniform mediump vec4 uAtlasBlack;

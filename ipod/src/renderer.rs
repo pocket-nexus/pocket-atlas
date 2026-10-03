@@ -11,6 +11,10 @@ use alloc::{format, string::String, vec::Vec};
 use core::ptr;
 use glam::{Mat4, Vec3, Vec4};
 use pocket3d_place as pc;
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+enum MeshPass { Mirror = 0, Main = 1, WetResponse = 2, WaterResponse = 3 }
+const MESH_PASSES: usize = 4;
 pub struct Renderer {
     _objects: Objects,
     mask: u32,
@@ -25,21 +29,27 @@ pub struct Renderer {
     pub performance: bool,
     pub sky_ms: f32,
     pub mesh_ms: f32,
-    pub mesh_steps_ms: [[f32; 5]; 2],
+    pub wet_response_ms: f32,
+    pub water_response_ms: f32,
+    pub mesh_steps_ms: [[f32; 5]; MESH_PASSES],
     pub post_steps_ms: [f32; 3],
     effects: Effects,
     vista: Option<VistaUniforms>,
     // Atmosphere and grade are immutable for this renderer. Static centres
     // depend only on the eye, not camera rotation or scene animation time.
-    haze_eye: [Option<[u32; 3]>; 2],
-    haze_values: [Vec<Option<[f32; 4]>>; 2],
-    haze_keys: [Vec<Option<[u8; 4]>>; 2],
+    haze_eye: [Option<[u32; 3]>; MESH_PASSES],
+    haze_values: [Vec<Option<[f32; 4]>>; MESH_PASSES],
+    haze_keys: [Vec<Option<[u8; 4]>>; MESH_PASSES],
     programs: Vec<Program>,
     draws: Vec<[usize; 4]>,
+    wet_programs: Vec<Option<usize>>,
+    wet_response: Option<Target>,
+    water_programs: Vec<Option<usize>>,
+    water_response: Option<Target>,
     sky: usize,
     post: usize,
     main: Target,
-    present: Target,
+    present: Option<Target>,
     sky_low: Target,
     blit: usize,
     copy: usize,
@@ -47,18 +57,19 @@ pub struct Renderer {
     mirror_blur: Target,
     down: usize,
     white: u32,
+    white_cube: u32,
     black: u32,
     lut: u32,
     grain: u32,
     tri: u32,
-    stream_indices: [[u32; 3]; 2],
-    stream_slot: [usize; 2],
-    stream_valid: [bool; 2],
-    selection_keys: [Vec<u32>; 2],
+    stream_indices: [[u32; 3]; MESH_PASSES],
+    stream_slot: [usize; MESH_PASSES],
+    stream_valid: [bool; MESH_PASSES],
+    selection_keys: [Vec<u32>; MESH_PASSES],
     selection_scratch: Vec<u32>,
-    stream_ranges: [Vec<StreamRange>; 2],
+    stream_ranges: [Vec<StreamRange>; MESH_PASSES],
     cluster_scratch: Vec<crate::mesh_clusters::Cluster>,
-    query_cache: [crate::mesh_clusters::QueryCache; 2],
+    query_cache: [crate::mesh_clusters::QueryCache; MESH_PASSES],
     index_scratch: Vec<u16>,
     pub count: u32,
     pub triangles: u32,
@@ -83,6 +94,7 @@ struct DrawRun {
     haze: Option<[u8; 4]>,
     display_haze: Option<[f32; 4]>,
     cluster_span: Option<(usize, usize)>,
+    index_override: Option<pc::Range>,
 }
 #[derive(Clone, Copy, Default)]
 struct StreamRange {
@@ -93,7 +105,7 @@ struct StreamRange {
 impl DrawRun {
     fn stream_key(&self, key: &mut Vec<u32>, clustered: bool) {
         if self.streaming {
-            key.extend_from_slice(&[self.index as u32, clustered as u32]);
+            key.extend_from_slice(&[self.index as u32, clustered as u32, self.index_override.is_some() as u32]);
             // Cluster selections append their own complete LOD/index identity.
             // The original whole-draw LOD range is unused in that path.
             if !clustered {
@@ -143,6 +155,8 @@ fn visible(p: &[Vec4; 6], lo: Vec3, hi: Vec3) -> bool {
     })
 }
 impl Renderer {
+    pub fn field_appearance_bytes(&self) -> usize { self.effects.field_appearance_bytes() }
+
     pub fn light_lod_bytes(&self) -> (usize, usize) { self.effects.light_lod_bytes() }
 
     pub fn cpu_index_bytes(&self) -> usize {
@@ -170,12 +184,18 @@ impl Renderer {
         })?;
         if performance {
             cfg.validate_colors(s.meta.draws.len(), |i| {
-                s.ldr_colors[i].map(|c| (c.flags, c.page.is_some(), c.texture.is_some()))
+                s.ldr_colors[i].map(|c| (c.flags, c.page.is_some(), c.texture))
             })?;
         }
+        cfg.validate_water(s.meta.draws.len(), |i| {
+            let m = &s.meta.materials[s.meta.draws[i].material as usize];
+            m.kind == pc::Kind::Water && m.blend == pc::Blend::Opaque && m.depth_write
+        })?;
         let Compiled {
             programs,
             draws,
+            wet_response: wet_programs,
+            water_response: water_programs,
             sky,
             post,
             blit,
@@ -188,7 +208,7 @@ impl Renderer {
             crate::texture_usage::validate_resident(
                 &s.meta, &s.textures,
                 |i| s.ldr_colors[i].map(|c| c.texture),
-                |i, name| programs[draws[i][0]].has(name),
+                |i, name| programs[draws[i][0]].has(name) || programs[draws[i][2]].has(name) || wet_programs[i].is_some_and(|p| programs[p].has(name)) || water_programs[i].is_some_and(|p| programs[p].has(name)),
                 |name| programs[sky].has(name),
             )?;
         }
@@ -197,7 +217,7 @@ impl Renderer {
         } else {
             None
         };
-        let width = if performance { 320 } else { 960 };
+        let width = if performance { 480 } else { 960 };
         let height = width * 2 / 3;
         let mirror_width = if performance {
             (width / 3).max(64)
@@ -212,6 +232,7 @@ impl Renderer {
         let sky_width = (width / 4).clamp(64, 128);
         let mut objects = Objects::default();
         let white = objects.image(1, 1, &[255; 4]);
+        let white_cube = if performance { objects.solid_cube([255; 4]) } else { 0 };
         let black = objects.image(1, 1, &[0, 0, 0, 255]);
         let lut = if performance {
             crate::gpu::tone_lut_sized(&s.meta.post, 16, true)
@@ -242,7 +263,9 @@ impl Renderer {
             performance,
             sky_ms: 0.0,
             mesh_ms: 0.0,
-            mesh_steps_ms: [[0.0; 5]; 2],
+            wet_response_ms: 0.0,
+            water_response_ms: 0.0,
+            mesh_steps_ms: [[0.0; 5]; MESH_PASSES],
             post_steps_ms: [0.0; 3],
             effects: {
                 let mut effects = Effects::new(root, s, width, height)?;
@@ -251,15 +274,23 @@ impl Renderer {
                 effects
             },
             vista: VistaUniforms::new(s),
-            haze_eye: [None; 2],
+            haze_eye: [None; MESH_PASSES],
             haze_values: core::array::from_fn(|_| alloc::vec![None; s.meta.draws.len()]),
             haze_keys: core::array::from_fn(|_| alloc::vec![None; s.meta.draws.len()]),
             programs,
+            wet_response: if wet_programs.iter().any(Option::is_some) {
+                Some(Target::new((width / 3).max(1), (height / 3).max(1), true)?)
+            } else { None },
+            wet_programs,
+            water_response: if water_programs.iter().any(Option::is_some) {
+                Some(Target::new((width / 2).max(1), (height / 2).max(1), true)?)
+            } else { None },
+            water_programs,
             draws,
             sky,
             post,
             main: Target::new(width, height, true)?,
-            present: Target::new(width, height, false)?,
+            present: if performance { None } else { Some(Target::new(width, height, false)?) },
             sky_low: Target::new(sky_width, sky_width * 2 / 3, false)?,
             blit,
             copy,
@@ -267,13 +298,14 @@ impl Renderer {
             mirror_blur: Target::new(mirror_width / 2, mirror_height / 2, false)?,
             down,
             white,
+            white_cube,
             black,
             lut,
             grain,
             tri,
             stream_indices,
-            stream_slot: [0; 2],
-            stream_valid: [false; 2],
+            stream_slot: [0; MESH_PASSES],
+            stream_valid: [false; MESH_PASSES],
             selection_keys: core::array::from_fn(|_| Vec::new()),
             selection_scratch: Vec::new(),
             stream_ranges: core::array::from_fn(
@@ -294,7 +326,13 @@ impl Renderer {
     }
     pub unsafe fn resize(&mut self, w: i32, h: i32) -> Result<(), String> {
         let main = Target::new(w, h, true)?;
-        let present = Target::new(w, h, false)?;
+        let wet_response = if self.wet_response.is_some() {
+            Some(Target::new((w / 3).max(1), (h / 3).max(1), true)?)
+        } else { None };
+        let water_response = if self.water_response.is_some() {
+            Some(Target::new((w / 2).max(1), (h / 2).max(1), true)?)
+        } else { None };
+        let present = if self.performance { None } else { Some(Target::new(w, h, false)?) };
         let divisor = if self.performance { 3 } else { 2 };
         let min_width = if self.performance { 64 } else { 160 };
         let mirror = Target::new(
@@ -316,6 +354,8 @@ impl Renderer {
         self.mirror_blur = mirror_blur;
         self.present = present;
         self.main = main;
+        self.wet_response = wet_response;
+        self.water_response = water_response;
         self.width = w;
         self.height = h;
         Ok(())
@@ -447,19 +487,27 @@ impl Renderer {
         glEnable(GL_DEPTH_TEST);
         glDepthMask(1);
     }
+    fn mesh_program(&self, draw: usize, tier: usize, pass: MeshPass) -> usize {
+        if pass == MeshPass::WetResponse {
+            self.wet_programs[draw].expect("wet pass selected only validated response draws")
+        } else if pass == MeshPass::WaterResponse {
+            self.water_programs[draw].expect("water pass selected only validated response draws")
+        } else { self.draws[draw][tier] }
+    }
     unsafe fn meshes(
         &mut self,
         s: &Scene,
         vp: Mat4,
         eye: Vec3,
         time: f32,
-        mirror: bool,
+        mode: MeshPass,
         reflection: bool,
     ) {
+        let mirror = mode == MeshPass::Mirror;
         let cpu_start = crate::atlas_seconds();
         let reflection_matrix = Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0));
         let clip = planes(if mirror { vp * reflection_matrix } else { vp });
-        let pass = usize::from(!mirror);
+        let pass = mode as usize;
         let haze_eye = eye.to_array().map(f32::to_bits);
         if self.haze_eye[pass] != Some(haze_eye) {
             self.haze_eye[pass] = Some(haze_eye);
@@ -469,6 +517,8 @@ impl Renderer {
         let mut order = Vec::new();
         for (i, d) in s.meta.draws.iter().enumerate() {
             let m = &s.meta.materials[d.material as usize];
+            if mode == MeshPass::WetResponse && self.wet_programs[i].is_none() { continue; }
+            if mode == MeshPass::WaterResponse && self.water_programs[i].is_none() { continue; }
             if d.layout == pc::VertexLayout::Lights {
                 continue;
             }
@@ -488,6 +538,10 @@ impl Renderer {
                     7 => true,
                     8 => m.kind != pc::Kind::Products,
                     9 => m.kind != pc::Kind::InteriorWindow,
+                    10 => m.wet.is_none(),
+                    11 => m.wet.is_some() || m.kind == pc::Kind::Glass || d.node.is_some() || d.skin.is_some(),
+                    12 => m.kind == pc::Kind::InteriorWindow,
+                    13 => m.kind == pc::Kind::Products,
                     _ => false,
                 }
             {
@@ -538,7 +592,9 @@ impl Renderer {
             {
                 continue;
             }
-            let program = self.draws[i][tier];
+            let source_range = pc::Range { offset, size: count * 2 };
+            let index_override = if self.performance { s.index_override(i, &source_range) } else { None };
+            let program = self.mesh_program(i, tier, mode);
             let display_haze = if self.programs[program].has("uDisplayHaze") {
                 self.vista.as_ref().map(|vista| {
                     let static_center = d.node.is_none() && d.skin.is_none();
@@ -604,8 +660,7 @@ impl Renderer {
                     }
                 },
                 material_key: if self.performance {
-                    s.ldr_colors[i]
-                        .and_then(|c| c.state)
+                    index_override.map(|r| r.state).or_else(|| s.ldr_colors[i].and_then(|c| c.state))
                         .map_or((false, d.material), |state| (true, state))
                 } else {
                     (false, d.material)
@@ -613,6 +668,7 @@ impl Renderer {
                 haze,
                 display_haze,
                 cluster_span: None,
+                index_override: index_override.map(|_| source_range),
                 tier,
                 center: (lo + hi) * 0.5,
                 count,
@@ -724,13 +780,14 @@ impl Renderer {
                     run.offset = (first * 2) as u32;
                     run.count = (self.index_scratch.len() - first) as u32;
                 } else {
-                    let indices = if run.streaming {
-                        s.indices(run.offset, run.count)
+                    let indices = if let Some(source) = &run.index_override {
+                        s.index_override(run.index, source).map(|r| r.indices)
                     } else {
-                        None
+                        s.indices(run.offset, run.count)
                     };
                     run.streaming = indices.is_some();
                     if let Some(indices) = indices {
+                        run.count = indices.len() as u32;
                         run.offset = (self.index_scratch.len() * 2) as u32;
                         let base = if self.performance {
                             s.ldr_colors[run.index]
@@ -772,7 +829,7 @@ impl Renderer {
                     && last.mergeable
                     && run.mergeable
                     && last.tier == run.tier
-                    && self.draws[last.index][last.tier] == self.draws[run.index][run.tier]
+                    && self.mesh_program(last.index, last.tier, mode) == self.mesh_program(run.index, run.tier, mode)
                     && same_color_page
                     && last.haze == run.haze
                     && if self.performance
@@ -837,6 +894,9 @@ impl Renderer {
         let mut current_program = usize::MAX;
         let mut current_material = (usize::MAX, (false, u32::MAX));
         let mut globals_set = alloc::vec![false; self.programs.len()];
+        // globals()/shadow.bind() only set uniforms here. Any future direct
+        // texture binding inside this pass must invalidate this local cache.
+        let mut texture_bindings = crate::gpu::TextureBindings::default();
         for DrawRun {
             index: i,
             tier,
@@ -855,7 +915,7 @@ impl Renderer {
             }
             let d = &s.meta.draws[i];
             let m = &s.meta.materials[d.material as usize];
-            let program = self.draws[i][tier];
+            let program = self.mesh_program(i, tier, mode);
             let p = &self.programs[program];
             let display_color = if self.performance {
                 s.ldr_colors[i]
@@ -991,11 +1051,20 @@ impl Renderer {
                             "uReflOn",
                             &[if reflection && !mirror { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
                         );
+                        let rain = if s.meta.rain.active { 1.0 } else { 0.0 };
+                        p.v("uWetCurve", &[
+                            roughness * (1.0 + (wet.roughness - 1.0) * rain),
+                            1.0 + (libm::sqrtf(wet.darken.max(0.0)) - 1.0) * rain,
+                            0.71 - wet.puddles * 0.25,
+                            if wet.puddles >= 0.001 { rain } else { 0.0 },
+                        ]);
                         let frame = (time * 1.15 - libm::floorf(time * 1.15)) * 16.0;
+                        let cell = libm::floorf(frame);
+                        p.v("uRippleCell", &[cell % 4.0, libm::floorf(cell * 0.25), 0.0, 0.0]);
                         p.v(
                             "uRipple",
                             &[
-                                libm::floorf(frame),
+                                cell,
                                 0.0,
                                 0.0,
                                 1.0 / s.meta.effects.ripple_tile.max(0.1),
@@ -1180,13 +1249,15 @@ impl Renderer {
                     (
                         "uDisplayEnv",
                         match s.display_environments[d.material as usize] {
-                            0 => self.white,
+                            0 => self.white_cube,
                             id => id,
                         },
                     ),
                     ("uPuddles", tex(s.meta.effects.puddles)),
                     ("uRipples", tex(s.meta.effects.ripples)),
                     ("uBeads", tex(s.meta.effects.beads)),
+                    ("uWetResponse", self.wet_response.as_ref().map_or(self.white, |t| t.texture)),
+                    ("uWaterResponse", self.water_response.as_ref().map_or(self.white, |t| t.texture)),
                     ("uDisplayReflSharp", self.mirror.texture),
                     ("uDisplayReflBlur", self.mirror_blur.texture),
                     ("uReflSharp", self.mirror.texture),
@@ -1200,13 +1271,12 @@ impl Renderer {
                             .unwrap_or(self.white),
                     ),
                 ] {
-                    unit = p.tex(name, id, unit);
+                    unit = p.tex_cached(name, id, unit, &mut texture_bindings);
                 }
-                if m.double_sided {
-                    glDisable(GL_CULL_FACE);
-                } else {
-                    glEnable(GL_CULL_FACE);
-                }
+                let cull = if material_key.0 {
+                    s.display_states[material_key.1 as usize].cull
+                } else { !m.double_sided };
+                if cull { glEnable(GL_CULL_FACE); } else { glDisable(GL_CULL_FACE); }
                 if self.performance && blend != pc::Blend::Opaque {
                     glEnable(GL_BLEND);
                     glBlendFunc(
@@ -1253,11 +1323,19 @@ impl Renderer {
                 GL_ELEMENT_ARRAY_BUFFER,
                 if streaming { stream } else { s.geometry },
             );
+            let gpu_offset = if streaming {
+                offset
+            } else if let Some(offset) = s.gpu_index_offset(offset, count) {
+                offset
+            } else {
+                self.gl_error = 0x0502; // Missing validated GPU range, not texture zero.
+                break;
+            };
             glDrawElements(
                 GL_TRIANGLES,
                 count as _,
                 GL_UNSIGNED_SHORT,
-                offset as usize as _,
+                gpu_offset as usize as _,
             );
             self.count += 1;
             self.triangles += count / 3;
@@ -1276,7 +1354,7 @@ impl Renderer {
             upload_done,
             submit_done,
         ];
-        self.mesh_steps_ms[usize::from(!mirror)] =
+        self.mesh_steps_ms[pass] =
             core::array::from_fn(|i| ((stamps[i + 1] - stamps[i]) * 1000.0) as f32);
     }
     // The HDR framebuffer-fetch path retains its device-proven completion
@@ -1310,7 +1388,7 @@ impl Renderer {
         self.count = 0;
         self.triangles = 0;
         self.gl_error = 0;
-        self.mesh_steps_ms = [[0.0; 5]; 2];
+        self.mesh_steps_ms = [[0.0; 5]; MESH_PASSES];
         let mut stamp = crate::atlas_seconds();
         if let Some(shadow) = &mut self.shadow {
             let stats = shadow.render(s, time);
@@ -1336,7 +1414,7 @@ impl Renderer {
             glClearColor(0.0, 0.0, 0.0, 1.0);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             self.sky(s, eye, target, fov, time, true);
-            self.meshes(s, vp, eye, time, true, false);
+            self.meshes(s, vp, eye, time, MeshPass::Mirror, false);
             if self.performance {
                 glDiscardFramebufferEXT(0x8d40, 1, &0x8d00);
             }
@@ -1361,6 +1439,36 @@ impl Renderer {
             self.fullscreen(p);
         }
         stamp = self.end_pass(1, stamp, false);
+        self.wet_response_ms = 0.0;
+        if let Some(response) = &self.wet_response {
+            response.bind();
+            glEnable(GL_DEPTH_TEST);
+            glDepthMask(1);
+            glColorMask(1, 1, 1, 1);
+            glClearColor(0.0, 0.0, 0.0, 1.0);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            self.meshes(s, vp, eye, time, MeshPass::WetResponse, reflection);
+            glDiscardFramebufferEXT(0x8d40, 1, &0x8d00);
+            if self.profile { glFinish(); }
+            let done = crate::atlas_seconds();
+            self.wet_response_ms = ((done - stamp) * 1000.0) as f32;
+            stamp = done;
+        }
+        self.water_response_ms = 0.0;
+        if let Some(response) = &self.water_response {
+            response.bind();
+            glEnable(GL_DEPTH_TEST);
+            glDepthMask(1);
+            glColorMask(1, 1, 1, 1);
+            glClearColor(0.0, 0.0, 0.0, 0.0);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            self.meshes(s, vp, eye, time, MeshPass::WaterResponse, reflection);
+            glDiscardFramebufferEXT(0x8d40, 1, &0x8d00);
+            if self.profile { glFinish(); }
+            let done = crate::atlas_seconds();
+            self.water_response_ms = ((done - stamp) * 1000.0) as f32;
+            stamp = done;
+        }
         if self.performance {
             self.sky_low.bind();
             self.sky(s, eye, target, fov, time, false);
@@ -1386,7 +1494,7 @@ impl Renderer {
         }
         let sky_finished = crate::atlas_seconds();
         self.sky_ms = ((sky_finished - stamp) * 1000.0) as f32;
-        self.meshes(s, vp, eye, time, false, reflection);
+        self.meshes(s, vp, eye, time, MeshPass::Main, reflection);
         self.submit_ms = ((crate::atlas_seconds() - stamp) * 1000.0) as f32;
         stamp = self.end_pass(2, stamp, !self.performance);
         self.mesh_ms = ((stamp - sky_finished) * 1000.0) as f32;
@@ -1423,7 +1531,15 @@ impl Renderer {
         glDepthMask(0);
         glDisable(GL_CULL_FACE);
         glDisable(GL_BLEND);
-        self.present.bind();
+        // The optimized shaders already produce display colors. Composite
+        // directly into the EAGL drawable to avoid a full tile store, texture
+        // read and second full-screen draw. Reference HDR keeps its target.
+        if let Some(present) = &self.present {
+            present.bind();
+        } else {
+            glBindFramebuffer(0x8d40, fbo);
+            glViewport(0, 0, w, h);
+        }
         let p = &self.programs[self.post];
         p.bind();
         p.tex("uScene", self.main.texture, 0);
@@ -1452,16 +1568,18 @@ impl Renderer {
         }
         let grade_done = crate::atlas_seconds();
         self.post_steps_ms[1] = ((grade_done - post_fx_done) * 1000.0) as f32;
-        glBindFramebuffer(0x8d40, fbo);
-        glViewport(0, 0, w, h);
-        let p = &self.programs[self.blit];
-        p.bind();
-        p.tex("uSource", self.present.texture, 0);
-        self.fullscreen(p);
-        glDepthMask(1);
-        if self.performance {
-            glDiscardFramebufferEXT(0x8d40, 1, &0x8d00);
+        if let Some(present) = &self.present {
+            glBindFramebuffer(0x8d40, fbo);
+            glViewport(0, 0, w, h);
+            let p = &self.programs[self.blit];
+            p.bind();
+            p.tex("uSource", present.texture, 0);
+            self.fullscreen(p);
         }
+        glDepthMask(1);
+        // The drawable only receives a fullscreen color composite. Its depth
+        // attachment is never used, so a discard here is redundant. Let EAGL
+        // presentation provide backpressure for the submitted frame.
         let finish = self.end_pass(4, stamp, !self.performance);
         self.post_steps_ms[2] = ((finish - grade_done) * 1000.0) as f32;
         Ok(())
@@ -1487,6 +1605,7 @@ mod stream_tests {
             haze: None,
             display_haze: None,
             cluster_span: None,
+            index_override: None,
         }
     }
     fn key(runs: &[DrawRun]) -> Vec<u32> {
@@ -1548,6 +1667,18 @@ mod stream_tests {
             key(&[run(2, true, 42, 9), run(0, true, 18, 6)])
         );
     }
+    #[test]
+    fn display_index_recipe_has_a_distinct_stream_key_and_restores_its_smaller_count() {
+        let original = run(0, true, 18, 12);
+        let mut display = run(0, true, 18, 12);
+        display.index_override = Some(pc::Range { offset: 18, size: 24 });
+        assert_ne!(key(&[original]), key(core::slice::from_ref(&display)));
+        let cached = StreamRange { offset: 64, count: 6, streaming: true };
+        cached.restore(&mut display);
+        assert_eq!((display.offset, display.count), (64, 6));
+        assert_eq!(display.index_override.unwrap().offset, 18);
+    }
+
     #[test]
     fn clustered_ranges_key_selected_parts_instead_of_unused_whole_draw_lod() {
         let mut a = Vec::new();

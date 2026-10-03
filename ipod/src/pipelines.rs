@@ -10,13 +10,19 @@ struct DrawPrograms {
     #[serde(default)]
     display_float: bool,
     #[serde(default)]
-    display_texture: bool,
+    display_texture: Option<u32>,
     #[serde(default)]
     display_flags: u32,
     detail: [String; 2],
     far: [String; 2],
     reflection: [String; 2],
     performance: [String; 2],
+    #[serde(default)]
+    performance_reflection: Option<[String; 2]>,
+    #[serde(default)]
+    wet_response: Option<[String; 2]>,
+    #[serde(default)]
+    water_response: Option<[String; 2]>,
 }
 
 #[derive(Deserialize)]
@@ -34,6 +40,8 @@ pub struct Pipelines {
 pub struct Compiled<P> {
     pub programs: Vec<P>,
     pub draws: Vec<[usize; 4]>,
+    pub wet_response: Vec<Option<usize>>,
+    pub water_response: Vec<Option<usize>>,
     pub sky: usize,
     pub post: usize,
     pub blit: usize,
@@ -65,7 +73,7 @@ impl Pipelines {
     pub fn validate_colors(
         &self,
         count: usize,
-        color: impl Fn(usize) -> Option<(u32, bool, bool)>,
+        color: impl Fn(usize) -> Option<(u32, bool, Option<u32>)>,
     ) -> Result<(), String> {
         if self.draws.len() != count {
             return Err("pipeline draw count does not match place".into());
@@ -75,9 +83,19 @@ impl Pipelines {
                 .as_ref()
                 .filter(|d| d.display_color)
                 .map(|d| (d.display_flags, d.display_float, d.display_texture));
+            if draw.as_ref().is_some_and(|d| d.wet_response.is_some() != (d.display_color && d.display_flags & 16 != 0)) {
+                return Err("pipeline wet response does not match display material".into());
+            }
             if expected != color(i) {
                 return Err("pipeline display colors do not match place sidecar".into());
             }
+        }
+        Ok(())
+    }
+    pub fn validate_water(&self, count: usize, eligible: impl Fn(usize) -> bool) -> Result<(), String> {
+        if self.draws.len() != count || self.draws.iter().enumerate().any(|(i, d)|
+            d.as_ref().is_some_and(|d| d.water_response.is_some()) != eligible(i)) {
+            return Err("pipeline water response does not match opaque water material".into());
         }
         Ok(())
     }
@@ -98,9 +116,21 @@ impl Pipelines {
             Ok(index)
         };
         let mut draws = Vec::with_capacity(self.draws.len());
+        let mut wet_response = Vec::with_capacity(self.draws.len());
+        let mut water_response = Vec::with_capacity(self.draws.len());
         for draw in self.draws {
+            water_response.push(if performance {
+                draw.as_ref().and_then(|d| d.water_response.as_ref()).map(&mut add).transpose()?
+            } else { None });
+            wet_response.push(if performance {
+                draw.as_ref().and_then(|d| d.wet_response.as_ref()).map(&mut add).transpose()?
+            } else { None });
             draws.push(match draw {
-                Some(draw) if performance => [add(&draw.performance)?; 4],
+                Some(draw) if performance => {
+                    let main = add(&draw.performance)?;
+                    let mirror = draw.performance_reflection.as_ref().map(&mut add).transpose()?.unwrap_or(main);
+                    [main, main, mirror, main]
+                },
                 Some(draw) => {
                     let detail = add(&draw.detail)?;
                     [detail, add(&draw.far)?, add(&draw.reflection)?, detail]
@@ -124,6 +154,8 @@ impl Pipelines {
         Ok(Compiled {
             programs,
             draws,
+            wet_response,
+            water_response,
             sky,
             post,
             blit,
@@ -205,23 +237,119 @@ mod tests {
         assert!(cfg.validate_colors(3, |_| None).is_ok());
         assert!(cfg.validate_colors(2, |_| None).is_err());
         assert!(cfg
-            .validate_colors(3, |i| (i == 0).then_some((0, false, false)))
+            .validate_colors(3, |i| (i == 0).then_some((0, false, None)))
             .is_err());
         let mut cfg = config();
         cfg.draws[0].as_mut().unwrap().display_color = true;
         assert!(cfg.validate_colors(3, |_| None).is_err());
         assert!(cfg
-            .validate_colors(3, |i| (i == 0).then_some((0, false, false)))
+            .validate_colors(3, |i| (i == 0).then_some((0, false, None)))
             .is_ok());
         assert!(cfg
-            .validate_colors(3, |i| (i == 0).then_some((16, false, false)))
+            .validate_colors(3, |i| (i == 0).then_some((16, false, None)))
             .is_err());
         assert!(cfg
-            .validate_colors(3, |i| (i == 0).then_some((0, true, false)))
+            .validate_colors(3, |i| (i == 0).then_some((0, true, None)))
             .is_err());
         assert!(cfg
-            .validate_colors(3, |i| (i == 0).then_some((0, false, true)))
+            .validate_colors(3, |i| (i == 0).then_some((0, false, Some(0))))
             .is_err());
+    }
+
+    #[test]
+    fn wet_response_presence_is_exactly_the_validated_wet_display_contract() {
+        for display in [false, true] {
+            for flags in [0, 8, 16, 24] {
+                for response in [false, true] {
+                    let mut cfg = config();
+                    let draw = cfg.draws[0].as_mut().unwrap();
+                    draw.display_color = display;
+                    draw.display_flags = flags;
+                    draw.wet_response = response.then(|| ["v".into(), "wet".into()]);
+                    let valid = cfg.validate_colors(3, |i| {
+                        (i == 0 && display).then_some((flags, false, None))
+                    });
+                    assert_eq!(valid.is_ok(), response == (display && flags & 16 != 0),
+                        "display {display}, flags {flags}, response {response}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn optimized_response_programs_are_shared_and_reference_never_compiles_them() {
+        for performance in [true, false] {
+            let mut cfg = config();
+            for draw in cfg.draws.iter_mut().flatten() {
+                draw.display_color = true;
+                draw.display_flags = 16;
+                draw.wet_response = Some(["wv".into(), "response".into()]);
+            }
+            cfg.validate_colors(3, |i| (i < 2).then_some((16, false, None))).unwrap();
+            let compiled = cfg.compile(performance, |pair| Ok(pair[1].clone())).unwrap();
+            assert_eq!(compiled.wet_response.len(), 3);
+            assert_eq!(compiled.wet_response[2], None);
+            if performance {
+                let index = compiled.wet_response[0].unwrap();
+                assert_eq!(compiled.wet_response[1], Some(index));
+                assert_eq!(compiled.programs[index], "response");
+                assert_ne!(index, compiled.draws[0][0]);
+                assert_eq!(compiled.programs.iter().filter(|p| *p == "response").count(), 1);
+                assert!(!compiled.programs.iter().any(|p| ["detail", "far", "reflection"].contains(&p.as_str())));
+            } else {
+                assert!(compiled.wet_response.iter().all(Option::is_none));
+                assert!(!compiled.programs.iter().any(|p| ["response", "performance"].contains(&p.as_str())));
+            }
+        }
+    }
+
+    #[test]
+    fn optimized_reflection_has_its_own_program_and_reference_keeps_its_variants() {
+        for performance in [true, false] {
+            let mut cfg = config();
+            cfg.draws[0].as_mut().unwrap().performance_reflection = Some(["v".into(), "display-mirror".into()]);
+            let c = cfg.compile(performance, |p| Ok(p[1].clone())).unwrap();
+            assert_eq!(c.programs[c.draws[0][0]], if performance { "performance" } else { "detail" });
+            assert_eq!(c.programs[c.draws[0][2]], if performance { "display-mirror" } else { "reflection" });
+            if performance {
+                assert_eq!(c.draws[1], [c.draws[1][0]; 4]);
+            } else {
+                assert!(!c.programs.iter().any(|p| p == "display-mirror"));
+            }
+        }
+    }
+
+    #[test]
+    fn water_response_is_required_only_for_eligible_materials_and_never_compiled_by_reference() {
+        let mut cfg = config();
+        assert!(cfg.validate_water(3, |_| false).is_ok());
+        assert!(cfg.validate_water(3, |i| i == 0).is_err());
+        cfg.draws[0].as_mut().unwrap().water_response = Some(["v".into(), "water".into()]);
+        assert!(cfg.validate_water(3, |i| i == 0).is_ok());
+        assert!(cfg.validate_water(2, |i| i == 0).is_err());
+        assert!(cfg.validate_water(3, |_| false).is_err());
+        assert!(cfg.validate_water(3, |i| i == 2).is_err());
+        let compiled = cfg.compile(true, |p| Ok(p[1].clone())).unwrap();
+        assert_eq!(compiled.programs[compiled.water_response[0].unwrap()], "water");
+        assert!(compiled.water_response[1..].iter().all(Option::is_none));
+        let mut cfg = config();
+        cfg.draws[0].as_mut().unwrap().water_response = Some(["v".into(), "water".into()]);
+        let reference = cfg.compile(false, |p| Ok(p[1].clone())).unwrap();
+        assert!(reference.water_response.iter().all(Option::is_none));
+        assert!(!reference.programs.iter().any(|p| p == "water"));
+    }
+
+    #[test]
+    fn failed_response_compile_releases_already_compiled_main_programs() {
+        let live = Rc::new(Cell::new(0));
+        let mut cfg = config();
+        cfg.draws[1].as_mut().unwrap().wet_response = Some(["v".into(), "response".into()]);
+        let result = cfg.compile(true, |pair| {
+            if pair[1] == "response" { return Err("injected response compile failure".into()); }
+            Ok(owned(&live))
+        });
+        assert!(result.is_err());
+        assert_eq!(live.get(), 0);
     }
 
     struct Owned(Rc<Cell<usize>>);
@@ -247,5 +375,4 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(live.get(), 0);
     }
-
 }

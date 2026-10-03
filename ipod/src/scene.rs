@@ -1,4 +1,4 @@
-//! Streaming PLCE loader. Only one place is resident; texture staging is
+//! Streaming PLIP loader. Only one place is resident; texture staging is
 //! released after each upload, and geometry lives in GL buffers. Only the
 //! eligible static index ranges remain on the CPU for visible-range batching.
 use crate::{gl::*, validation};
@@ -35,6 +35,19 @@ pub struct LdrColor {
     /// All colors are graded before sRGB texture modulation.
     pub flags: u32,
 }
+/// An optional, proven two-sided display LOD. Indices stay source-local;
+/// streaming adds LdrColor::base_vertex exactly as for original indices.
+#[derive(Clone, Copy)]
+pub struct IndexOverrideRef<'a> {
+    pub indices: &'a [u16],
+    pub state: u32,
+}
+struct DisplayIndices {
+    draw: u32,
+    source: pc::Range,
+    state: u32,
+    indices: Vec<u16>,
+}
 pub struct Scene {
     /// Performance assets are loaded together and never required by Retina.
     pub performance: bool,
@@ -43,8 +56,12 @@ pub struct Scene {
     /// Material-indexed display environments for water/glass; zero for others.
     /// Atmosphere and material environment strength are included before grading.
     pub display_environments: Vec<u32>,
+    index_overrides: Vec<DisplayIndices>,
+    pub ipod_recipes: pc::ipod::Recipes,
     display_environment_textures: Vec<u32>,
     pub geometry: u32,
+    geometry_source_bytes: usize,
+    geometry_usage: Option<crate::geometry_usage::GeometryUsage>,
     /// Per-point sin/cos of the decoded phase; display fields use slot 1.
     /// The original packed LightPoint stream remains authoritative.
     pub light_phase_buffer: u32,
@@ -165,7 +182,7 @@ impl PackageParameters {
                 offsets.push(None);
                 continue;
             }
-            if d.vertex_count.checked_mul(24) != Some(d.vertices.size) {
+            if d.vertex_count.checked_mul(pc::ipod::stride(d.layout)) != Some(d.vertices.size) {
                 return Err("invalid package vertex range".into());
             }
             let range = pc::parts::slice(geometry, &d.vertices)?;
@@ -191,8 +208,8 @@ impl PackageParameters {
             .map_err(|_| "package data allocation failed")?;
         let mut seeds = BTreeMap::new();
         for page in pages {
-            for vertex in page.chunks_exact(24) {
-                let rgb: [u8; 3] = vertex[20..23].try_into().unwrap();
+            for vertex in page.chunks_exact(pc::ipod::stride(pc::VertexLayout::Static) as usize) {
+                let rgb: [u8; 3] = vertex[pc::ipod::COLOR..pc::ipod::COLOR + 3].try_into().unwrap();
                 let params = seeds
                     .entry(rgb)
                     .or_insert_with(|| pc::products::package_params(rgb));
@@ -401,7 +418,7 @@ impl Drop for PlaceFile {
     }
 }
 
-// Kept local to the optional iPod sidecar, rather than changing shared PLCE.
+// Kept local to the optional iPod sidecar, independent from other target ABIs.
 fn color_hash(bytes: &[u8]) -> String {
     format!("{:016x}", pc::content_hash::hash(bytes))
 }
@@ -436,6 +453,18 @@ struct ColorPage {
 }
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct AppearanceRecipe {
+    kind: String,
+    version: u32,
+    draws: Vec<u32>,
+    textures: Vec<u32>,
+    tile_size: u32,
+    border: u32,
+    parameterization: String,
+    max_vertex_height_parameter_error: f32,
+}
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ColorMetadata {
     version: u32,
     identity: String,
@@ -445,12 +474,20 @@ struct ColorMetadata {
     texture_hash: String,
     colors_hash: String,
     colors_bytes: u32,
+    #[serde(default)]
+    vertex_bytes: Option<u32>,
+    #[serde(default)]
+    index_overrides: Vec<pc::ipod::DisplayIndexOverride>,
     draws: Vec<ColorEntry>,
     pages: Vec<ColorPage>,
     states: Vec<pc::display::State>,
+    #[serde(default)]
+    recipes: Vec<AppearanceRecipe>,
 }
 struct ColorFile {
     bytes: Vec<u8>,
+    vertex_bytes: u32,
+    index_overrides: Vec<pc::ipod::DisplayIndexOverride>,
     draws: Vec<ColorEntry>,
     pages: Vec<ColorPage>,
     states: Vec<pc::display::State>,
@@ -473,12 +510,13 @@ impl ColorFile {
                 entry.base_vertex,
                 d.vertices.offset,
                 d.vertices.size,
-                d.layout.stride(),
+                pc::ipod::stride(d.layout),
+                entry.flags & 64,
                 decode,
             )) {
                 continue;
             }
-            let stride = d.layout.stride() as usize;
+            let stride = pc::ipod::stride(d.layout) as usize;
             let start = entry.offset as usize + entry.base_vertex as usize * 24;
             let source_end = d
                 .vertices
@@ -489,24 +527,46 @@ impl ColorFile {
                 .get(d.vertices.offset as usize..source_end as usize)
                 .ok_or("LDR source vertex range")?;
             for (i, v) in source.chunks_exact(stride).enumerate() {
-                let q = |at| (i16::from_le_bytes([v[at], v[at + 1]]) as f32 / 32767.0).max(-1.0);
-                let expected = [
-                    q(0) * d.pos_scale[0] + d.pos_offset[0],
-                    q(2) * d.pos_scale[1] + d.pos_offset[1],
-                    q(4) * d.pos_scale[2] + d.pos_offset[2],
-                    q(16) * d.uv_scale[0] + d.uv_offset[0],
-                    q(18) * d.uv_scale[1] + d.uv_offset[1],
-                ];
+                let position = pc::ipod::floats::<3>(v, pc::ipod::POSITION)?;
+                let uv = pc::ipod::floats::<2>(v, pc::ipod::UV)?;
+                let expected = [position[0], position[1], position[2], uv[0], uv[1]];
                 for (k, value) in expected.iter().enumerate() {
                     let at = start + i * 24 + k * 4;
                     let actual = f32::from_le_bytes(self.bytes[at..at + 4].try_into().unwrap());
-                    if actual != *value {
+                    if entry.flags & 64 != 0 && k >= 3 {
+                        if !actual.is_finite() || !(0.0..=1.0).contains(&actual) {
+                            return Err("LDR appearance UV outside texture".into());
+                        }
+                    } else if actual != *value {
                         return Err("LDR float position/UV differs from source geometry".into());
                     }
                 }
             }
         }
         Ok(())
+    }
+    fn validate_index_overrides(&self, meta: &pc::Meta, geometry: &[u8]) -> Result<Vec<DisplayIndices>, String> {
+        let mut result = Vec::new();
+        for entry in &self.index_overrides {
+            let draw = meta.draws.get(entry.draw as usize).ok_or("LDR override draw reference")?;
+            let color = self.draws.iter().find(|c| c.draw == entry.draw).ok_or("LDR override color reference")?;
+            let start = color.base_vertex.checked_mul(24).and_then(|n| color.offset.checked_add(n))
+                .ok_or("LDR override vertex offset overflow")?;
+            let size = draw.vertex_count.checked_mul(24).ok_or("LDR override vertex size overflow")?;
+            let vertex_range = pc::Range { offset: start, size };
+            let vertices = pc::parts::slice(&self.bytes[..self.vertex_bytes as usize], &vertex_range).map_err(String::from)?;
+            let source = pc::parts::slice(geometry, &entry.source).map_err(String::from)?;
+            let indices: Vec<_> = source.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+            let expected = pc::ipod::display_indices::two_sided_indices(vertices, &indices)?
+                .ok_or("LDR override source triangles are not exact reverse pairs")?;
+            let actual = pc::parts::slice(&self.bytes, &entry.indices).map_err(String::from)?;
+            if actual.len() != expected.len() * 2 || actual.chunks_exact(2)
+                .zip(&expected).any(|(b, &i)| u16::from_le_bytes([b[0], b[1]]) != i)
+            { return Err("LDR override indices differ from exact reverse-pair selection".into()); }
+            result.push(DisplayIndices { draw: entry.draw, source: entry.source.clone(), state: entry.state, indices: expected });
+        }
+        result.sort_unstable_by_key(|entry| (entry.draw, entry.source.offset, entry.source.size));
+        Ok(result)
     }
     fn load(
         path: &str,
@@ -534,7 +594,12 @@ impl ColorFile {
         }
         let data: ColorMetadata = serde_json::from_slice(&json.read(0, json.len)?)
             .map_err(|e| format!("LDR color metadata: {e}"))?;
-        if data.version != 2
+        let vertex_bytes = match data.version {
+            2 if data.vertex_bytes.is_none() && data.index_overrides.is_empty() => data.colors_bytes,
+            3 => data.vertex_bytes.ok_or("LDR v3 vertex boundary missing")?,
+            _ => return Err("LDR color version/override contract".into()),
+        };
+        if !matches!(data.version, 2 | 3)
             || data.identity != "fnv1a64-v1"
             || data.meta_hash != meta_hash
             || data.geometry_hash != geometry_hash
@@ -550,14 +615,49 @@ impl ColorFile {
                 n.checked_add((d.vertex_count as usize).checked_mul(24)?)
             })
             .ok_or("LDR color byte budget overflow")?;
+        let index_budget = meta.draws.iter().try_fold(0usize, |sum, draw| {
+            draw.lods.iter().try_fold(sum, |sum, lod| {
+                sum.checked_add(lod.indices.size as usize / 2)?.checked_add(16)
+            })
+        }).ok_or("LDR index override budget overflow")?;
+        let total_budget = budget.checked_add(index_budget).ok_or("LDR payload budget overflow")?;
         if bin.len != data.colors_bytes as usize
-            || bin.len > budget
-            || bin.len % 4 != 0
+            || vertex_bytes as usize > budget || vertex_bytes as usize > bin.len
+            || vertex_bytes % 4 != 0 || bin.len > total_budget
+            || bin.len % 2 != 0
+            || (data.version == 2 && bin.len % 4 != 0)
             || data.draws.len() > meta.draws.len()
             || data.pages.len() > data.draws.len()
-            || data.states.len() > data.pages.len()
+            || data.states.len() > data.pages.len().saturating_add(data.index_overrides.len())
+            || data.index_overrides.len() > meta.draws.iter().map(|d| d.lods.len()).sum::<usize>()
         {
             return Err("LDR color payload size mismatch".into());
+        }
+        let mut appearance = vec![None; meta.draws.len()];
+        for recipe in &data.recipes {
+            if recipe.kind != "products-appearance" || recipe.version != 1
+                || recipe.parameterization != "uv-height-v1" || recipe.tile_size != 32
+                || recipe.border != 2 || recipe.draws.is_empty() || recipe.textures.is_empty()
+                || !recipe.max_vertex_height_parameter_error.is_finite()
+                || !(0.0..=1.0 / 255.0).contains(&recipe.max_vertex_height_parameter_error)
+            {
+                return Err("LDR appearance recipe contract mismatch".into());
+            }
+            let mut used_textures = alloc::collections::BTreeSet::new();
+            for &draw in &recipe.draws {
+                let slot = appearance.get_mut(draw as usize).ok_or("LDR recipe draw reference")?;
+                let entry = data.draws.iter().find(|e| e.draw == draw)
+                    .ok_or("LDR recipe color draw missing")?;
+                let texture = entry.texture.ok_or("LDR recipe texture missing")?;
+                if slot.is_some() || entry.flags != 64 || !recipe.textures.contains(&texture) {
+                    return Err("LDR appearance recipe draw mismatch".into());
+                }
+                *slot = Some(texture);
+                used_textures.insert(texture);
+            }
+            if used_textures.len() != recipe.textures.len() {
+                return Err("LDR appearance recipe unused or duplicate texture".into());
+            }
         }
         let mut seen = vec![false; meta.draws.len()];
         let mut page_end = 0u32;
@@ -581,7 +681,7 @@ impl ColorFile {
                 .checked_mul(24)
                 .and_then(|n| page.offset.checked_add(n))
                 .ok_or("LDR float page overflow")?;
-            if page_end as usize > bin.len {
+            if page_end > vertex_bytes {
                 return Err("LDR float page outside payload".into());
             }
         }
@@ -594,23 +694,26 @@ impl ColorFile {
             if seen[entry.draw as usize]
                 || d.layout == pc::VertexLayout::Lights
                 || entry.vertex_count != d.vertex_count
-                || entry.flags & !63 != 0
+                || entry.flags & !127 != 0
+                || ((entry.flags & 64 != 0) != appearance[entry.draw as usize].is_some())
                 || (entry.flags & 8 != 0
                     && (m.kind != pc::Kind::Standard
                         || m.emission.is_none()
                         || m.emission_shade.is_some()
                         || entry.texture != m.albedo))
-                || !matches!(
-                    m.kind,
-                    pc::Kind::Standard | pc::Kind::Unlit | pc::Kind::Glass
-                )
+                || (!matches!(m.kind, pc::Kind::Standard | pc::Kind::Unlit | pc::Kind::Glass)
+                    && !(m.kind == pc::Kind::Products && entry.flags & 64 != 0))
+                || (entry.flags & 64 != 0
+                    && (m.kind != pc::Kind::Products || entry.flags != 64
+                        || entry.page.is_none() || entry.texture.is_none()
+                        || m.uv_anim.is_some() || m.emission.is_some()))
                 || ((entry.flags & 32 != 0) != (m.kind == pc::Kind::Glass))
                 || (entry.flags & 32 != 0
                     && (entry.flags & (2 | 4 | 8 | 16) != 0 || entry.texture.is_some()))
                 || ((entry.flags & 16 != 0) != m.wet.is_some())
                 || (m.wet.is_some()
                     && !(m.kind == pc::Kind::Standard
-                        && m.wet.as_ref().is_some_and(|w| w.planar)
+                        && m.wet.as_ref().is_some_and(|w| w.planar && (0.0..=1.0).contains(&w.darken))
                         && d.layout == pc::VertexLayout::Baked
                         && d.node.is_none()
                         && d.skin.is_none()))
@@ -654,7 +757,7 @@ impl ColorFile {
                     .ok_or("LDR color range overflow")?;
                 if entry.offset % 4 != 0
                     || entry.offset < page_end
-                    || end as usize > bin.len
+                    || end > vertex_bytes
                     || entry.base_vertex != 0
                 {
                     return Err("LDR color range outside payload".into());
@@ -667,6 +770,32 @@ impl ColorFile {
                     return Err("LDR color texture reference".into());
                 }
             }
+        }
+        let mut seen_overrides = alloc::collections::BTreeSet::new();
+        let mut index_ranges = Vec::new();
+        for entry in &data.index_overrides {
+            let draw = meta.draws.get(entry.draw as usize).ok_or("LDR override draw reference")?;
+            let color = data.draws.iter().find(|c| c.draw == entry.draw).ok_or("LDR override color draw missing")?;
+            let page = color.page.and_then(|i| data.pages.get(i as usize)).ok_or("LDR override requires float page")?;
+            let original = data.states.get(page.state as usize).ok_or("LDR override source state")?;
+            let actual = data.states.get(entry.state as usize).ok_or("LDR override state reference")?;
+            let mut expected = original.clone();
+            expected.cull = false;
+            let end = entry.indices.offset.checked_add(entry.indices.size).ok_or("LDR override range overflow")?;
+            if color.flags != 64 || *actual != expected
+                || !draw.lods.iter().any(|lod| lod.indices.offset == entry.source.offset && lod.indices.size == entry.source.size)
+                || (draw.indices.offset == entry.source.offset && draw.indices.size == entry.source.size)
+                || entry.source.size == 0 || entry.source.size % 12 != 0
+                || entry.indices.size != entry.source.size / 2
+                || entry.indices.offset < vertex_bytes || entry.indices.offset % 2 != 0 || end as usize > bin.len
+                || !seen_overrides.insert((entry.draw, entry.source.offset, entry.source.size))
+            { return Err("LDR index override contract mismatch".into()); }
+            index_ranges.push((entry.indices.offset, end));
+            state_used[entry.state as usize] = true;
+        }
+        index_ranges.sort_unstable();
+        if index_ranges.windows(2).any(|ranges| ranges[0].1 > ranges[1].0) {
+            return Err("LDR index override ranges overlap".into());
         }
         let bytes = bin.read(0, bin.len)?;
         if color_hash(&bytes) != data.colors_hash {
@@ -695,6 +824,8 @@ impl ColorFile {
         }
         Ok(Some(Self {
             bytes,
+            vertex_bytes,
+            index_overrides: data.index_overrides,
             draws: data.draws,
             pages: data.pages,
             states: data.states,
@@ -736,8 +867,19 @@ impl Scene {
         };
         let meta_bytes = file.section(section(pc::TAG_META)?)?;
         let meta_hash = color_hash(&meta_bytes);
-        let meta: pc::Meta =
+        let metadata: pc::ipod::Metadata =
             serde_json::from_slice(&meta_bytes).map_err(|e| format!("place metadata: {e}"))?;
+        let meta = metadata.scene;
+        let ipod_recipes = metadata.ipod_recipes;
+        crate::texture_storage::validate_recipes(&meta, &ipod_recipes)?;
+        let compressed_section = sections.iter().find(|s| s.tag == pc::ipod::TAG_PVRTC);
+        crate::texture_storage::validate_pvrtc_ranges(&ipod_recipes, compressed_section.map(|s| s.size))?;
+        crate::texture_storage::validate_display_cubes(&meta, &ipod_recipes)?;
+        let cube_section = sections.iter().find(|s| s.tag == pc::ipod::TAG_DISPLAY_CUBES);
+        if cube_section.is_some_and(|s| s.align < 16 || s.offset % 16 != 0) {
+            return Err("display cube section alignment".into());
+        }
+        crate::texture_storage::validate_display_cube_ranges(&ipod_recipes, cube_section.map(|s| s.size))?;
         let tex = section(pc::TAG_TEXTURES)?;
         let geom = section(pc::TAG_GEOMETRY)?;
         let animation = section(pc::TAG_ANIMATION)?;
@@ -752,7 +894,7 @@ impl Scene {
             .collect();
         drop(anim_bytes);
         validation::validate(&meta, geom.size as usize, tex.size as usize, &anim)?;
-        let texture_plan = if performance {
+        let mut texture_plan = if performance {
             if let Some(mut pipelines) = PlaceFile::optional(&sidecar_path(path, "pipelines.json"))?
             {
                 let budget = meta
@@ -771,6 +913,7 @@ impl Scene {
         } else {
             None
         };
+        if let Some(plan) = &mut texture_plan { plan.include_recipes(&ipod_recipes)?; }
         let needs_texture = |index| texture_plan.as_ref().is_none_or(|p| p.needs(index));
         check_gl("before scene upload")?;
         let mut limit = 0;
@@ -796,8 +939,12 @@ impl Scene {
             ldr_vaos: Vec::new(),
             textures: vec![0; meta.textures.len()],
             display_environments: vec![0; meta.materials.len()],
+            index_overrides: Vec::new(),
             display_environment_textures: Vec::new(),
+            ipod_recipes,
             geometry: 0,
+            geometry_source_bytes: geom.size as usize,
+            geometry_usage: None,
             light_phase_buffer: 0,
             light_phase_offsets: Vec::new(),
             light_lod_source: crate::light_lod::Sources::default(),
@@ -845,21 +992,39 @@ impl Scene {
         }
         let mut texture_hash = pc::content_hash::Fnv1a64::default();
         for (index, (t, &id)) in scene.meta.textures.iter().zip(&scene.textures).enumerate() {
-            let data = file.payload(tex, &t.data)?;
+            let mut data = file.payload(tex, &t.data)?;
             validation::validate_texture(t, &data)?;
             texture_hash.update(&data);
+            // Bind compiler cubes to the source pixel interpretation and every
+            // original ENV mip, before conversion. Reference validates too.
+            let environment_hash = if scene.meta.atmosphere.environment == Some(index as u32) {
+                Some(pc::ipod::display_environment::source_hash(t, &data)?)
+            } else { None };
+            // Validate the optional compressed payload even when Reference or
+            // sampler demand skips its upload. Original RGBA stays the source
+            // identity and is checked before any lossy GPU storage conversion.
+            let compressed = if let Some(recipe) = scene.ipod_recipes.pvrtc.iter().find(|r| r.texture as usize == index) {
+                let bytes = file.payload(compressed_section.ok_or("PVRTC payload section missing")?, &recipe.range)?;
+                crate::texture_storage::validate_pvrtc_payload(recipe, &data, &bytes)?;
+                performance.then_some(bytes)
+            } else { None };
             if id != 0 {
                 glBindTexture(GL_TEXTURE_2D, id);
                 glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
                 let half = t.format == pc::TexFormat::Rgba16f;
+                let rgb565 = performance && compressed.is_none() && crate::texture_storage::pack_opaque_color(t, &mut data);
+                let format = if rgb565 { GL_RGB } else { GL_RGBA };
+                let pixel_type = if rgb565 { GL_UNSIGNED_SHORT_5_6_5 } else { GL_UNSIGNED_BYTE };
                 let (mut w, mut h, mut at) = (t.width, t.height, 0usize);
                 for mip in 0..t.mips {
-                    let n = (w as usize)
+                    let n = if compressed.is_some() {
+                        pc::ipod::pvrtc_level_bytes(w, h).ok_or("PVRTC mip overflow")?
+                    } else { (w as usize)
                         .checked_mul(h as usize)
-                        .and_then(|n| n.checked_mul(if half { 8 } else { 4 }))
-                        .ok_or("texture mip overflow")?;
+                        .and_then(|n| n.checked_mul(if half { 8 } else if rgb565 { 2 } else { 4 }))
+                        .ok_or("texture mip overflow")? };
                     let end = at.checked_add(n).ok_or("texture mip offset overflow")?;
-                    let level = data.get(at..end).ok_or("texture mip range")?;
+                    let level = compressed.as_ref().unwrap_or(&data).get(at..end).ok_or("texture mip range")?;
                     let encoded: Vec<u8> = if half {
                         level
                             .chunks_exact(8)
@@ -882,17 +1047,20 @@ impl Scene {
                     } else {
                         level.as_ptr()
                     };
-                    glTexImage2D(
+                    if compressed.is_some() {
+                        glCompressedTexImage2D(GL_TEXTURE_2D, mip as _, GL_COMPRESSED_RGB_PVRTC_4BPPV1_IMG,
+                            w as _, h as _, 0, n as _, pixels as _);
+                    } else { glTexImage2D(
                         GL_TEXTURE_2D,
                         mip as _,
-                        GL_RGBA as _,
+                        format as _,
                         w as _,
                         h as _,
                         0,
-                        GL_RGBA,
-                        GL_UNSIGNED_BYTE,
+                        format,
+                        pixel_type,
                         pixels as _,
-                    );
+                    ); }
                     at = end;
                     w = (w / 2).max(1);
                     h = (h / 2).max(1);
@@ -912,56 +1080,45 @@ impl Scene {
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap(t.wrap_s));
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap(t.wrap_t));
                 check_gl(&format!("upload texture {}", t.name))?;
-                scene.gpu_bytes += if half { data.len() / 2 } else { data.len() };
+                scene.gpu_bytes += compressed.as_ref().map_or_else(|| if half { data.len() / 2 } else { data.len() }, Vec::len);
             }
-            if performance && scene.meta.atmosphere.environment == Some(index as u32) {
-                let mut cache = Vec::<(u32, u32)>::new();
-                for (material, m) in scene.meta.materials.iter().enumerate() {
-                    if !matches!(m.kind, pc::Kind::Water | pc::Kind::Glass) {
-                        continue;
+            if let Some(source_hash) = environment_hash {
+                if !scene.ipod_recipes.display_cubes.is_empty() {
+                    for recipe in &scene.ipod_recipes.display_cubes {
+                        let pixels = file.payload(cube_section.ok_or("display cube section missing")?, &recipe.range)?;
+                        crate::texture_storage::validate_display_cube_payload(recipe, &source_hash, &pixels)?;
+                        if performance {
+                            let id = upload_display_environment(&mut scene.display_environment_textures, &pixels)?;
+                            scene.gpu_bytes += crate::display_environment::CUBE_BYTES;
+                            for &material in &recipe.materials {
+                                scene.display_environments[material as usize] = id;
+                            }
+                        }
                     }
-                    let strength = m.env_strength * scene.meta.atmosphere.environment_strength;
-                    if let Some(&(_, id)) =
-                        cache.iter().find(|&&(bits, _)| bits == strength.to_bits())
-                    {
+                } else if performance {
+                    // Legacy PLIP v1 packs use the compiler's same bake math.
+                    // New packs upload their IPEN bytes without runtime grading.
+                    let mut cache = Vec::<(u32, u32)>::new();
+                    for (material, m) in scene.meta.materials.iter().enumerate() {
+                        if !matches!(m.kind, pc::Kind::Water | pc::Kind::Glass) {
+                            continue;
+                        }
+                        let strength = m.env_strength * scene.meta.atmosphere.environment_strength;
+                        let id = if let Some(&(_, id)) = cache.iter().find(|&&(bits, _)| bits == strength.to_bits()) {
+                            id
+                        } else {
+                            let pixels = crate::display_environment::bake(t, &data, strength, &scene.meta.post)?;
+                            let id = upload_display_environment(&mut scene.display_environment_textures, &pixels)?;
+                            scene.gpu_bytes += crate::display_environment::CUBE_BYTES;
+                            cache.push((strength.to_bits(), id));
+                            id
+                        };
                         scene.display_environments[material] = id;
-                        continue;
                     }
-                    let (w, h, display) =
-                        display_environment_pixels(t, &data, strength, &scene.meta.post)?;
-                    // Store the owner before allocation so failures always release it.
-                    scene.display_environment_textures.push(0);
-                    let owned = scene.display_environment_textures.last_mut().unwrap();
-                    glGenTextures(1, owned);
-                    check_gl("create display environment")?;
-                    let id = *owned;
-                    if id == 0 {
-                        return Err("GLES did not allocate display environment".into());
-                    }
-                    glBindTexture(GL_TEXTURE_2D, id);
-                    glTexImage2D(
-                        GL_TEXTURE_2D,
-                        0,
-                        GL_RGBA as _,
-                        w as _,
-                        h as _,
-                        0,
-                        GL_RGBA,
-                        GL_UNSIGNED_BYTE,
-                        display.as_ptr() as _,
-                    );
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-                    check_gl("upload display environment")?;
-                    scene.gpu_bytes += display.len();
-                    scene.display_environments[material] = id;
-                    cache.push((strength.to_bits(), id));
                 }
             }
         }
-        let data = file.section(geom)?;
+        let mut data = file.section(geom)?;
         validation::validate_geometry(&scene.meta, &data)?;
         let colors = if performance {
             scene.light_lod_source = crate::light_lod::Sources::new(&scene.meta, &data)?;
@@ -978,6 +1135,7 @@ impl Scene {
         };
         if let Some(colors) = &colors {
             colors.validate_float_geometry(&scene.meta, &data)?;
+            scene.index_overrides = colors.validate_index_overrides(&scene.meta, &data)?;
         }
         if performance {
             scene.index_cache = IndexCache::new(
@@ -1009,7 +1167,9 @@ impl Scene {
                 }
             }
         }
-        scene.cpu_index_bytes = scene.index_cache.bytes();
+        scene.cpu_index_bytes = scene.index_cache.bytes()
+            + scene.index_overrides.capacity() * core::mem::size_of::<DisplayIndices>()
+            + scene.index_overrides.iter().map(|o| o.indices.capacity() * 2).sum::<usize>();
         if let Some(mut clusters) = if performance {
             PlaceFile::optional(&sidecar_path(path, "ipod-clusters.bin"))?
         } else {
@@ -1025,20 +1185,6 @@ impl Scene {
             scene.mesh_clusters = Some(parsed);
         }
         drop(meta_bytes);
-        glGenBuffers(1, &mut scene.geometry);
-        check_gl("create scene geometry")?;
-        if scene.geometry == 0 {
-            return Err("GLES did not allocate scene geometry".into());
-        }
-        glBindBuffer(GL_ARRAY_BUFFER, scene.geometry);
-        glBufferData(
-            GL_ARRAY_BUFFER,
-            data.len() as _,
-            data.as_ptr() as _,
-            GL_STATIC_DRAW,
-        );
-        check_gl("upload scene geometry")?;
-        scene.gpu_bytes += data.len();
         let phases = if performance {
             LightPhases::new(&scene.meta, &data)?
         } else {
@@ -1047,6 +1193,41 @@ impl Scene {
                 offsets: Vec::new(),
             }
         };
+        let packages = if performance {
+            PackageParameters::new(&scene.meta, &data)?
+        } else {
+            PackageParameters {
+                data: Vec::new(),
+                offsets: Vec::new(),
+            }
+        };
+        if performance {
+            let mut display_pages = vec![false; scene.meta.draws.len()];
+            if let Some(colors) = &colors {
+                for entry in colors.draws.iter().filter(|e| e.page.is_some()) {
+                    display_pages[entry.draw as usize] = true;
+                }
+            }
+            let usage = crate::geometry_usage::GeometryUsage::new(
+                &scene.meta, data.len(), &display_pages,
+                texture_plan.as_ref().is_none_or(|p| p.needs_original_shadow()),
+            )?;
+            usage.compact(&mut data)?;
+            scene.geometry_usage = Some(usage);
+        }
+        // All source hashes, vertices, LODs, clusters and auxiliary CPU data
+        // were validated above. Only now may the upload discard unused bytes.
+        if !data.is_empty() {
+            glGenBuffers(1, &mut scene.geometry);
+            check_gl("create scene geometry")?;
+            if scene.geometry == 0 {
+                return Err("GLES did not allocate scene geometry".into());
+            }
+            glBindBuffer(GL_ARRAY_BUFFER, scene.geometry);
+            glBufferData(GL_ARRAY_BUFFER, data.len() as _, data.as_ptr() as _, GL_STATIC_DRAW);
+            check_gl("upload scene geometry")?;
+            scene.gpu_bytes += data.len();
+        }
         if !phases.data.is_empty() {
             glGenBuffers(1, &mut scene.light_phase_buffer);
             check_gl("create light phase buffer")?;
@@ -1065,14 +1246,6 @@ impl Scene {
         }
         scene.light_phase_offsets = phases.offsets;
         drop(phases.data);
-        let packages = if performance {
-            PackageParameters::new(&scene.meta, &data)?
-        } else {
-            PackageParameters {
-                data: Vec::new(),
-                offsets: Vec::new(),
-            }
-        };
         if !packages.data.is_empty() {
             glGenBuffers(1, &mut scene.package_buffer);
             check_gl("create package parameter buffer")?;
@@ -1092,26 +1265,38 @@ impl Scene {
         let package_offsets = packages.offsets;
         drop(packages.data);
         drop(data);
-        if !scene.vaos.is_empty() {
-            glGenVertexArraysOES(scene.vaos.len() as _, scene.vaos.as_mut_ptr());
+        let source_vao_count = (0..scene.vaos.len()).filter(|&i| scene.gpu_vertex_offset(i).is_some()).count();
+        if source_vao_count > 0 {
+            glGenVertexArraysOES(source_vao_count as _, scene.vaos.as_mut_ptr());
             check_gl("create scene vertex arrays")?;
-            if scene.vaos.contains(&0) {
+            if scene.vaos[..source_vao_count].contains(&0) {
                 return Err("GLES did not allocate scene vertex arrays".into());
+            }
+            let mut dense = source_vao_count;
+            for i in (0..scene.vaos.len()).rev() {
+                if scene.gpu_vertex_offset(i).is_some() {
+                    dense -= 1;
+                    scene.vaos[i] = scene.vaos[dense];
+                    if i != dense { scene.vaos[dense] = 0; }
+                } else {
+                    scene.vaos[i] = 0;
+                }
             }
         }
         for (i, d) in scene.meta.draws.iter().enumerate() {
-            if d.layout == pc::VertexLayout::Lights {
+            if d.layout == pc::VertexLayout::Lights || scene.vaos[i] == 0 {
                 continue;
             }
+            let vertex_offset = scene.gpu_vertex_offset(i).ok_or("missing resident source vertices")?;
             glBindVertexArrayOES(scene.vaos[i]);
             glBindBuffer(GL_ARRAY_BUFFER, scene.geometry);
             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, scene.geometry);
             let attrs = [
-                (0, 3, 0x1402, 1, 0),
-                (1, 3, 0x1400, 1, 8),
-                (2, 4, 0x1400, 1, 12),
-                (3, 2, 0x1402, 1, 16),
-                (4, 4, GL_UNSIGNED_BYTE, 1, 20),
+                (0, 3, GL_FLOAT, 0, pc::ipod::POSITION),
+                (1, 3, GL_FLOAT, 0, pc::ipod::NORMAL),
+                (2, 4, GL_FLOAT, 0, pc::ipod::TANGENT),
+                (3, 2, GL_FLOAT, 0, pc::ipod::UV),
+                (4, 4, GL_UNSIGNED_BYTE, 1, pc::ipod::COLOR),
             ];
             for (k, n, t, normalize, offset) in attrs {
                 glEnableVertexAttribArray(k);
@@ -1120,8 +1305,8 @@ impl Scene {
                     n,
                     t,
                     normalize,
-                    d.layout.stride() as _,
-                    (d.vertices.offset as usize + offset) as _,
+                    pc::ipod::stride(d.layout) as _,
+                    (vertex_offset as usize + offset) as _,
                 );
             }
             if d.layout == pc::VertexLayout::Baked {
@@ -1131,20 +1316,20 @@ impl Scene {
                     4,
                     GL_UNSIGNED_BYTE,
                     1,
-                    28,
-                    (d.vertices.offset as usize + 24) as _,
+                    pc::ipod::stride(d.layout) as _,
+                    (vertex_offset as usize + pc::ipod::EXTRA) as _,
                 );
             }
             if d.layout == pc::VertexLayout::Skinned {
-                for (k, normalize, offset) in [(6, 0, 24), (7, 1, 28)] {
+                for (k, normalize, offset) in [(6, 0, pc::ipod::EXTRA), (7, 1, pc::ipod::EXTRA + 4)] {
                     glEnableVertexAttribArray(k);
                     glVertexAttribPointer(
                         k,
                         4,
                         GL_UNSIGNED_BYTE,
                         normalize,
-                        32,
-                        (d.vertices.offset as usize + offset) as _,
+                        pc::ipod::stride(d.layout) as _,
+                        (vertex_offset as usize + offset) as _,
                     );
                 }
             }
@@ -1165,13 +1350,13 @@ impl Scene {
             glBindBuffer(GL_ARRAY_BUFFER, scene.ldr_color_buffer);
             glBufferData(
                 GL_ARRAY_BUFFER,
-                colors.bytes.len() as _,
+                colors.vertex_bytes as _,
                 colors.bytes.as_ptr() as _,
                 GL_STATIC_DRAW,
             );
             check_gl("upload LDR colors")?;
-            scene.ldr_color_bytes = colors.bytes.len();
-            scene.gpu_bytes += colors.bytes.len();
+            scene.ldr_color_bytes = colors.vertex_bytes as usize;
+            scene.gpu_bytes += colors.vertex_bytes as usize;
             scene.ldr_vaos = vec![
                 0;
                 colors.pages.len()
@@ -1221,20 +1406,21 @@ impl Scene {
                 let vao = scene.ldr_vaos[raw_vao];
                 raw_vao += 1;
                 let d = &scene.meta.draws[entry.draw as usize];
+                let vertex_offset = scene.gpu_vertex_offset(entry.draw as usize).ok_or("missing resident LDR source vertices")?;
                 glBindVertexArrayOES(vao);
                 glBindBuffer(GL_ARRAY_BUFFER, scene.geometry);
                 glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, scene.geometry);
                 // Reflection surfaces retain the authored normal; ordinary
                 // diffuse shaders need only position, UV, color and skin.
-                for (k, n, t, normalized, at) in [(0, 3, 0x1402, 1, 0), (3, 2, 0x1402, 1, 16)] {
+                for (k, n, t, normalized, at) in [(0, 3, GL_FLOAT, 0, pc::ipod::POSITION), (3, 2, GL_FLOAT, 0, pc::ipod::UV)] {
                     glEnableVertexAttribArray(k);
                     glVertexAttribPointer(
                         k,
                         n,
                         t,
                         normalized,
-                        d.layout.stride() as _,
-                        (d.vertices.offset as usize + at) as _,
+                        pc::ipod::stride(d.layout) as _,
+                        (vertex_offset as usize + at) as _,
                     );
                 }
                 if entry.flags & (16 | 32) != 0 {
@@ -1242,22 +1428,22 @@ impl Scene {
                     glVertexAttribPointer(
                         1,
                         3,
-                        0x1400,
-                        1,
-                        d.layout.stride() as _,
-                        (d.vertices.offset as usize + 8) as _,
+                        GL_FLOAT,
+                        0,
+                        pc::ipod::stride(d.layout) as _,
+                        (vertex_offset as usize + pc::ipod::NORMAL) as _,
                     );
                 }
                 if d.layout == pc::VertexLayout::Skinned {
-                    for (k, normalized, at) in [(6, 0, 24), (7, 1, 28)] {
+                    for (k, normalized, at) in [(6, 0, pc::ipod::EXTRA), (7, 1, pc::ipod::EXTRA + 4)] {
                         glEnableVertexAttribArray(k);
                         glVertexAttribPointer(
                             k,
                             4,
                             GL_UNSIGNED_BYTE,
                             normalized,
-                            32,
-                            (d.vertices.offset as usize + at) as _,
+                            pc::ipod::stride(d.layout) as _,
+                            (vertex_offset as usize + at) as _,
                         );
                     }
                 }
@@ -1390,11 +1576,36 @@ impl Scene {
     pub fn indices(&self, offset: u32, count: u32) -> Option<&[u16]> {
         self.index_cache.get(offset, count)
     }
+    /// GPU byte offsets are separate from the immutable source META ranges.
+    pub fn index_override(&self, draw: usize, source: &pc::Range) -> Option<IndexOverrideRef<'_>> {
+        self.meta.draws.get(draw)?;
+        let at = self.index_overrides.binary_search_by_key(&(draw as u32, source.offset, source.size),
+            |entry| (entry.draw, entry.source.offset, entry.source.size)).ok()?;
+        let entry = self.index_overrides.get(at)?;
+        Some(IndexOverrideRef { indices: &entry.indices, state: entry.state })
+    }
+    /// A display float page may intentionally have no original vertex/IBO.
+    pub fn gpu_vertex_offset(&self, draw: usize) -> Option<u32> {
+        let d = self.meta.draws.get(draw)?;
+        match &self.geometry_usage {
+            Some(usage) => usage.vertex_offset(draw),
+            None => Some(d.vertices.offset),
+        }
+    }
+    pub fn gpu_index_offset(&self, source: u32, count: u32) -> Option<u32> {
+        if source % 2 != 0 || source.checked_add(count.checked_mul(2)?)? as usize > self.geometry_source_bytes {
+            return None;
+        }
+        match &self.geometry_usage {
+            Some(usage) => usage.index_offset(source, count),
+            None => Some(source),
+        }
+    }
     /// Replacing a Renderer can retain this Scene. VAOs
     /// retain element-buffer bindings, including renderer-owned stream IBOs:
     /// detach those references before deleting the old renderer's buffers.
     pub unsafe fn reset_index_bindings(&self) {
-        for &vao in self.vaos.iter().chain(&self.ldr_vaos) {
+        for &vao in self.vaos.iter().chain(&self.ldr_vaos).filter(|&&vao| vao != 0) {
             glBindVertexArrayOES(vao);
             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.geometry);
         }
@@ -1476,66 +1687,43 @@ fn half_float(h: u16) -> f32 {
     }
 }
 
-/// Average source radiance before grading. Reusing the encoded HDR texture
-/// would grade sqrt-compressed values; averaging display bytes would also bias
-/// bright texels. The independent clamped level needs at most 16 KiB on GPU.
-fn display_environment_pixels(
-    texture: &pc::Texture,
-    data: &[u8],
-    strength: f32,
-    post: &pc::Post,
-) -> Result<(u32, u32, Vec<u8>), String> {
-    let stride = match texture.format {
-        pc::TexFormat::Rgba16f => 8,
-        pc::TexFormat::Rgba8 => 4,
-        _ => return Err("unsupported display environment format".into()),
-    };
-    let (sw, sh) = (texture.width as usize, texture.height as usize);
-    let size = sw.checked_mul(sh).and_then(|n| n.checked_mul(stride));
-    if sw == 0 || sh == 0 || size.is_none_or(|n| n > data.len()) {
-        return Err("display environment source range".into());
+unsafe fn upload_display_environment(owner: &mut Vec<u32>, pixels: &[u8]) -> Result<u32, String> {
+    if pixels.len() != crate::display_environment::CUBE_BYTES {
+        return Err("display cube upload size".into());
     }
-    let divisor = sw.max(sh).div_ceil(64).max(1);
-    let (w, h) = (sw.div_ceil(divisor), sh.div_ceil(divisor));
-    let mut pixels = Vec::with_capacity(w * h * 4);
-    for y in 0..h {
-        let (y0, y1) = (
-            y as f32 * sh as f32 / h as f32,
-            (y + 1) as f32 * sh as f32 / h as f32,
-        );
-        for x in 0..w {
-            let (x0, x1) = (
-                x as f32 * sw as f32 / w as f32,
-                (x + 1) as f32 * sw as f32 / w as f32,
-            );
-            let mut rgb = [0.0; 3];
-            for sy in y0 as usize..(libm::ceilf(y1) as usize).min(sh) {
-                let wy = (y1.min((sy + 1) as f32) - y0.max(sy as f32)).max(0.0);
-                for sx in x0 as usize..(libm::ceilf(x1) as usize).min(sw) {
-                    let weight = wy * (x1.min((sx + 1) as f32) - x0.max(sx as f32)).max(0.0);
-                    let at = (sy * sw + sx) * stride;
-                    for c in 0..3 {
-                        let value = if stride == 8 {
-                            half_float(u16::from_le_bytes([data[at + c * 2], data[at + c * 2 + 1]]))
-                        } else {
-                            data[at + c] as f32 / 255.0
-                        };
-                        rgb[c] += value.max(0.0) * weight;
-                    }
-                }
-            }
-            let area = (x1 - x0) * (y1 - y0);
-            let display = pc::color::tone(rgb.map(|v| v / area * strength), post);
-            pixels.extend(display.map(|v| (v * 255.0 + 0.5) as u8));
-            pixels.push(255);
-        }
+    // Record ownership before allocation: partial face uploads and GL errors
+    // release this name along with every earlier scene resource.
+    owner.push(0);
+    let owned = owner.last_mut().unwrap();
+    glGenTextures(1, owned);
+    check_gl("create display environment")?;
+    let id = *owned;
+    if id == 0 {
+        return Err("GLES did not allocate display environment".into());
     }
-    Ok((w as u32, h as u32, pixels))
+    glBindTexture(GL_TEXTURE_CUBE_MAP, id);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    for (face, pixels) in pixels.chunks_exact(crate::display_environment::CUBE_BYTES / 6).enumerate() {
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face as u32, 0, GL_RGBA as _,
+            crate::display_environment::FACE_SIZE as _, crate::display_environment::FACE_SIZE as _,
+            0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.as_ptr() as _);
+        check_gl("upload display environment face")?;
+    }
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    check_gl("upload display environment")?;
+    Ok(id)
 }
+
+#[cfg(test)]
+use crate::display_environment::oct_pixels as display_environment_pixels;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pc::ipod::{parse, position, stride};
     extern crate std;
     use std::{
         collections::{BTreeMap, BTreeSet},
@@ -1546,6 +1734,30 @@ mod tests {
     // These symbols satisfy the loader's GLES imports in the standalone host
     // harness. They record ownership and inject real GL error return paths;
     // they do not claim to emulate rendering or the physical GPU.
+    #[derive(Clone, Debug)]
+    struct TextureUpload {
+        texture: u32,
+        target: u32,
+        level: i32,
+        internal_format: i32,
+        width: i32,
+        height: i32,
+        format: u32,
+        pixel_type: u32,
+        unpack_alignment: i32,
+        byte_len: usize,
+        data: Vec<u8>,
+    }
+    #[derive(Clone, Debug)]
+    struct CompressedUpload {
+        texture: u32,
+        target: u32,
+        level: i32,
+        format: u32,
+        width: i32,
+        height: i32,
+        data: Vec<u8>,
+    }
     #[derive(Default)]
     struct GlState {
         next: u32,
@@ -1557,12 +1769,28 @@ mod tests {
         vao: u32,
         element_buffers: BTreeMap<u32, u32>,
         uploads: Vec<[u8; 4]>,
+        texture_uploads: Vec<TextureUpload>,
+        compressed_uploads: Vec<CompressedUpload>,
+        fail_compressed_mip: Option<i32>,
+        capture_textures: bool,
+        fail_cube_face: Option<usize>,
+        texture_parameters: Vec<(u32, u32, i32)>,
+        unpack_alignment: i32,
         array_buffer: u32,
         color_buffer: u32,
         texture: u32,
+        texture_targets: BTreeMap<u32, u32>,
+        active_texture: u32,
+        active_texture_calls: Vec<u32>,
+        texture_bind_calls: Vec<(u32, u32, u32)>,
+        sampler_uniforms: Vec<(u32, i32, i32)>,
+        program: u32,
         display_texture: u32,
         color_vaos: BTreeSet<u32>,
         attributes: Vec<(u32, u32, u32, i32, i32, usize)>,
+        attribute_formats: Vec<(u32, u32, u32, u8)>,
+        capture_buffers: bool,
+        buffer_data: BTreeMap<u32, Vec<u8>>,
     }
     static SERIAL: Mutex<()> = Mutex::new(());
     static GL: LazyLock<Mutex<GlState>> = LazyLock::new(|| Mutex::new(GlState::default()));
@@ -1576,7 +1804,11 @@ mod tests {
         let mut state = GL.lock().unwrap();
         let color = (kind == b'B' || kind == b'V') && state.live.iter().any(|&(k, _)| k == kind);
         let display = kind == b'T' && state.live.iter().any(|&(k, _)| k == kind);
-        if color && kind == b'B' && state.fail == Some("zero color buffer") {
+        if (color && kind == b'B' && state.fail == Some("zero color buffer"))
+            || (display && state.fail == Some("zero display texture"))
+            || (kind == b'T' && state.fail == Some("zero texture"))
+            || (kind == b'B' && state.fail == Some("zero buffer"))
+        {
             state.fail = None;
             for i in 0..count as usize {
                 names.add(i).write(0);
@@ -1673,20 +1905,63 @@ mod tests {
         }
     }
     #[no_mangle]
-    unsafe extern "C" fn glBindTexture(_: u32, id: u32) {
-        GL.lock().unwrap().texture = id;
+    unsafe extern "C" fn glBindTexture(target: u32, id: u32) {
+        let mut state = GL.lock().unwrap();
+        if id != 0 {
+            if let Some(previous) = state.texture_targets.insert(id, target) {
+                assert_eq!(previous, target, "texture names cannot change target type");
+            }
+        }
+        let unit = state.active_texture;
+        state.texture_bind_calls.push((unit, target, id));
+        state.texture = id;
     }
     #[no_mangle]
-    unsafe extern "C" fn glPixelStorei(_: u32, _: i32) {}
+    unsafe extern "C" fn glActiveTexture(unit: u32) {
+        let mut state = GL.lock().unwrap();
+        state.active_texture = unit - GL_TEXTURE0;
+        state.active_texture_calls.push(unit - GL_TEXTURE0);
+    }
     #[no_mangle]
-    unsafe extern "C" fn glTexParameteri(_: u32, _: u32, _: i32) {}
+    unsafe extern "C" fn glUseProgram(program: u32) { GL.lock().unwrap().program = program; }
+    #[no_mangle]
+    unsafe extern "C" fn glUniform1i(location: i32, unit: i32) {
+        let mut state = GL.lock().unwrap();
+        let program = state.program;
+        state.sampler_uniforms.push((program, location, unit));
+    }
+    #[no_mangle]
+    unsafe extern "C" fn glDeleteProgram(_: u32) {}
+    #[no_mangle]
+    unsafe extern "C" fn glPixelStorei(parameter: u32, value: i32) {
+        if parameter == GL_UNPACK_ALIGNMENT {
+            GL.lock().unwrap().unpack_alignment = value;
+        }
+    }
+    #[no_mangle]
+    unsafe extern "C" fn glTexParameteri(target: u32, parameter: u32, value: i32) {
+        GL.lock().unwrap().texture_parameters.push((target, parameter, value));
+    }
     #[no_mangle]
     unsafe extern "C" fn glEnableVertexAttribArray(_: u32) {}
     #[no_mangle]
     unsafe extern "C" fn glFinish() {}
     #[no_mangle]
-    unsafe extern "C" fn glBufferData(_: u32, _: isize, _: *const c_void, _: u32) {
+    unsafe extern "C" fn glBufferData(target: u32, size: isize, data: *const c_void, _: u32) {
         let mut state = GL.lock().unwrap();
+        if state.capture_buffers && size >= 0 {
+            let buffer = if target == GL_ARRAY_BUFFER {
+                state.array_buffer
+            } else {
+                *state.element_buffers.get(&state.vao).unwrap_or(&0)
+            };
+            if buffer != 0 && !data.is_null() {
+                state.buffer_data.insert(
+                    buffer,
+                    core::slice::from_raw_parts(data as *const u8, size as usize).to_vec(),
+                );
+            }
+        }
         let name = if state.array_buffer == state.color_buffer && state.color_buffer != 0 {
             "color upload"
         } else {
@@ -1698,14 +1973,17 @@ mod tests {
     unsafe extern "C" fn glVertexAttribPointer(
         attribute: u32,
         size: i32,
-        _: u32,
-        _: u8,
+        kind: u32,
+        normalized: u8,
         stride: i32,
         offset: *const c_void,
     ) {
         let mut state = GL.lock().unwrap();
         let vao = state.vao;
         let buffer = state.array_buffer;
+        state
+            .attribute_formats
+            .push((vao, attribute, kind, normalized));
         state
             .attributes
             .push((vao, attribute, buffer, size, stride, offset as usize));
@@ -1720,25 +1998,89 @@ mod tests {
     }
     #[no_mangle]
     unsafe extern "C" fn glTexImage2D(
-        _: u32,
-        _: i32,
-        _: i32,
-        _: i32,
-        _: i32,
-        _: i32,
-        _: u32,
-        _: u32,
+        target: u32,
+        level: i32,
+        internal_format: i32,
+        width: i32,
+        height: i32,
+        border: i32,
+        format: u32,
+        pixel_type: u32,
         p: *const c_void,
     ) {
+        assert!(target == GL_TEXTURE_2D
+            || (GL_TEXTURE_CUBE_MAP_POSITIVE_X..GL_TEXTURE_CUBE_MAP_POSITIVE_X + 6).contains(&target));
+        assert_eq!(border, 0);
+        let bytes_per_pixel = match (format, pixel_type) {
+            (GL_LUMINANCE, GL_UNSIGNED_BYTE) => 1,
+            (GL_RGB, GL_UNSIGNED_SHORT_5_6_5) => 2,
+            (GL_RGBA, GL_UNSIGNED_BYTE) => 4,
+            _ => panic!("unexpected upload format/type: {format:x}/{pixel_type:x}"),
+        };
+        assert!(width > 0 && height > 0);
+        let byte_len = width as usize * height as usize * bytes_per_pixel;
         let mut state = GL.lock().unwrap();
-        let bytes = core::slice::from_raw_parts(p as *const u8, 4);
-        state.uploads.push(bytes.try_into().unwrap());
+        // A final 1x1 RGB565 mip contains only two bytes. Never inspect the
+        // old four-byte RGBA sample beyond that valid input allocation.
+        let bytes = if p.is_null() {
+            &[][..]
+        } else {
+            core::slice::from_raw_parts(p as *const u8, byte_len)
+        };
+        if format == GL_RGBA && bytes.len() >= 4 {
+            state.uploads.push(bytes[..4].try_into().unwrap());
+        }
+        let texture = state.texture;
+        let unpack_alignment = state.unpack_alignment;
+        let data = if state.capture_textures {
+            bytes.to_vec()
+        } else {
+            Vec::new()
+        };
+        state.texture_uploads.push(TextureUpload {
+            texture,
+            target,
+            level,
+            internal_format,
+            width,
+            height,
+            format,
+            pixel_type,
+            unpack_alignment,
+            byte_len,
+            data,
+        });
+        if state.fail_cube_face.is_some_and(|face| target == GL_TEXTURE_CUBE_MAP_POSITIVE_X + face as u32) {
+            state.error = 0x0505;
+            state.fail_cube_face = None;
+        }
         let name = if state.texture == state.display_texture && state.texture != 0 {
             "display upload"
         } else {
             "texture upload"
         };
         stage(&mut state, name);
+    }
+    #[no_mangle]
+    unsafe extern "C" fn glCompressedTexImage2D(
+        target: u32, level: i32, format: u32, width: i32, height: i32,
+        border: i32, size: i32, pixels: *const c_void,
+    ) {
+        assert_eq!(target, GL_TEXTURE_2D);
+        assert_eq!(format, GL_COMPRESSED_RGB_PVRTC_4BPPV1_IMG);
+        assert_eq!(border, 0);
+        assert!(width > 0 && height > 0 && level >= 0 && !pixels.is_null());
+        assert_eq!(size as usize, pc::ipod::pvrtc_level_bytes(width as u32, height as u32).unwrap());
+        let mut state = GL.lock().unwrap();
+        let texture = state.texture;
+        state.compressed_uploads.push(CompressedUpload {
+            texture, target, level, format, width, height,
+            data: core::slice::from_raw_parts(pixels as *const u8, size as usize).to_vec(),
+        });
+        if state.fail_compressed_mip == Some(level) {
+            state.error = 0x0505;
+            state.fail_compressed_mip = None;
+        }
     }
 
     struct PackFile(PathBuf);
@@ -1767,13 +2109,82 @@ mod tests {
     fn pack(m: &pc::Meta, geom: &[u8], anim: &[f32], textures: &[u8]) -> Vec<u8> {
         let meta = serde_json::to_vec(m).unwrap();
         let anim: Vec<u8> = anim.iter().flat_map(|v| v.to_le_bytes()).collect();
-        pc::write(&[
-            (pc::TAG_META, &meta, 16),
-            (pc::TAG_TEXTURES, textures, 16),
-            (pc::TAG_GEOMETRY, geom, 16),
-            (pc::TAG_ANIMATION, &anim, 16),
-        ])
+        pc::write_versioned(
+            pc::ipod::MAGIC,
+            pc::ipod::VERSION,
+            &[
+                (pc::TAG_META, &meta, 16),
+                (pc::TAG_TEXTURES, textures, 16),
+                (pc::TAG_GEOMETRY, geom, 16),
+                (pc::TAG_ANIMATION, &anim, 16),
+            ],
+        )
     }
+    const BAKED_VERTEX_BYTES: u32 = 3 * stride(pc::VertexLayout::Baked);
+
+    fn float_vertex(
+        layout: pc::VertexLayout,
+        pos: [f32; 3],
+        uv: [f32; 2],
+        color: [u8; 4],
+    ) -> Vec<u8> {
+        assert_ne!(layout, pc::VertexLayout::Lights);
+        let mut vertex = vec![0; stride(layout) as usize];
+        for (at, values) in [
+            (pc::ipod::POSITION, pos.as_slice()),
+            (pc::ipod::NORMAL, [0.0, 0.0, 1.0].as_slice()),
+            (pc::ipod::TANGENT, [1.0, 0.0, 0.0, 1.0].as_slice()),
+            (pc::ipod::UV, uv.as_slice()),
+        ] {
+            for (i, value) in values.iter().enumerate() {
+                vertex[at + i * 4..at + (i + 1) * 4].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+        vertex[pc::ipod::COLOR..pc::ipod::COLOR + 4].copy_from_slice(&color);
+        match layout {
+            pc::VertexLayout::Baked => {
+                vertex[pc::ipod::EXTRA..].copy_from_slice(&[128, 128, 128, 255])
+            }
+            pc::VertexLayout::Skinned => vertex[pc::ipod::EXTRA + 4] = 255,
+            _ => {}
+        }
+        vertex
+    }
+
+    fn float_fixture() -> (pc::Meta, Vec<u8>, Vec<f32>) {
+        let (mut meta, _, animation) = crate::validation::tests::fixture();
+        let draw = &mut meta.draws[0];
+        // Nonzero source floats and nonidentity legacy decode values ensure
+        // this fixture cannot accidentally pass through the old snorm ABI.
+        draw.pos_offset = [13.0, -7.0, 3.0];
+        draw.pos_scale = [2.0, 3.0, 5.0];
+        draw.uv_offset = [9.0, -2.0];
+        draw.uv_scale = [4.0, 8.0];
+        let mut geometry = Vec::new();
+        for (pos, uv) in [
+            ([0.125, 0.25, 0.375], [-0.25, 0.5]),
+            ([0.875, 0.25, 0.375], [1.25, 0.5]),
+            ([0.125, 0.875, 0.625], [-0.25, 1.5]),
+        ] {
+            geometry.extend(float_vertex(
+                pc::VertexLayout::Static,
+                pos,
+                uv,
+                [17, 89, 201, 255],
+            ));
+        }
+        draw.vertices = pc::Range {
+            offset: 0,
+            size: geometry.len() as u32,
+        };
+        draw.indices = pc::Range {
+            offset: geometry.len() as u32,
+            size: 6,
+        };
+        geometry.extend([0, 0, 1, 0, 2, 0]);
+        (meta, geometry, animation)
+    }
+
     fn reset(fail: Option<&'static str>) {
         *GL.lock().unwrap() = GlState {
             fail,
@@ -1792,9 +2203,101 @@ mod tests {
     }
 
     #[test]
+    fn plip_float_layouts_bind_exact_source_attributes_and_keep_joint_bytes() {
+        let _lock = SERIAL.lock().unwrap();
+        for layout in [
+            pc::VertexLayout::Static,
+            pc::VertexLayout::Baked,
+            pc::VertexLayout::Skinned,
+        ] {
+            let (mut meta, source, mut animation) = float_fixture();
+            let draw = &mut meta.draws[0];
+            let source_draw = draw.clone();
+            let mut geometry = Vec::new();
+            for i in 0..draw.vertex_count {
+                let pos = position(&source_draw, &source, i as u16).unwrap();
+                let at = i as usize * stride(source_draw.layout) as usize;
+                let uv = pc::ipod::floats::<2>(&source, at + pc::ipod::UV).unwrap();
+                geometry.extend(float_vertex(layout, pos, uv, [17, 89, 201, 255]));
+            }
+            draw.layout = layout;
+            draw.vertices.size = geometry.len() as u32;
+            draw.indices.offset = geometry.len() as u32;
+            geometry.extend(pc::parts::slice(&source, &source_draw.indices).unwrap());
+            if layout == pc::VertexLayout::Skinned {
+                draw.node = None;
+                draw.skin = Some(0);
+                meta.skins.push(pc::Skin {
+                    joints: vec![0],
+                    inverse_bind: pc::Range {
+                        offset: animation.len() as u32 * 4,
+                        size: 64,
+                    },
+                });
+                animation.extend(Mat4::IDENTITY.to_cols_array());
+            }
+            let bytes = pack(&meta, &geometry, &animation, &[255; 64]);
+            assert!(
+                pc::Pack::parse(&bytes).is_err(),
+                "PLIP must not masquerade as PLCE"
+            );
+            let parsed = parse(&bytes).unwrap();
+            assert_eq!(parsed.section(pc::TAG_GEOMETRY).unwrap(), geometry);
+            let d = &meta.draws[0];
+            assert_eq!(position(d, &geometry, 1).unwrap(), [0.875, 0.25, 0.375]);
+            assert_eq!(
+                pc::ipod::floats::<2>(&geometry, pc::ipod::UV).unwrap(),
+                [-0.25, 0.5]
+            );
+            for performance in [false, true] {
+                reset(None);
+                let file = PackFile::write(&bytes);
+                let scene = unsafe { Scene::load_for_profile(file.path(), performance) }.unwrap();
+                let mut expected = vec![
+                    (0, 3, GL_FLOAT, 0, pc::ipod::POSITION),
+                    (1, 3, GL_FLOAT, 0, pc::ipod::NORMAL),
+                    (2, 4, GL_FLOAT, 0, pc::ipod::TANGENT),
+                    (3, 2, GL_FLOAT, 0, pc::ipod::UV),
+                    (4, 4, GL_UNSIGNED_BYTE, 1, pc::ipod::COLOR),
+                ];
+                match layout {
+                    pc::VertexLayout::Baked => {
+                        expected.push((5, 4, GL_UNSIGNED_BYTE, 1, pc::ipod::EXTRA))
+                    }
+                    pc::VertexLayout::Skinned => expected.extend([
+                        (6, 4, GL_UNSIGNED_BYTE, 0, pc::ipod::EXTRA),
+                        (7, 4, GL_UNSIGNED_BYTE, 1, pc::ipod::EXTRA + 4),
+                    ]),
+                    _ => {}
+                }
+                {
+                    let gl = GL.lock().unwrap();
+                    let vao = scene.vaos[0];
+                    assert_eq!(gl.attributes.len(), expected.len());
+                    for (attribute, count, kind, normalized, offset) in expected {
+                        assert!(gl.attributes.contains(&(
+                            vao,
+                            attribute,
+                            scene.geometry,
+                            count,
+                            stride(layout) as i32,
+                            offset
+                        )));
+                        assert!(gl
+                            .attribute_formats
+                            .contains(&(vao, attribute, kind, normalized)));
+                    }
+                }
+                drop(scene);
+                released();
+            }
+        }
+    }
+
+    #[test]
     fn loader_rejects_malformed_container_before_allocating_gpu_names() {
         let _lock = SERIAL.lock().unwrap();
-        let (m, g, a) = crate::validation::tests::fixture();
+        let (m, g, a) = float_fixture();
         let source = pack(&m, &g, &a, &[255; 64]);
         for mode in 0..3 {
             reset(None);
@@ -1906,7 +2409,8 @@ mod tests {
         reset(None);
         assert!(unsafe { Scene::load(file.path()) }.is_err());
         released();
-        geometry[84..86].copy_from_slice(&u16::MAX.to_le_bytes());
+        geometry[BAKED_VERTEX_BYTES as usize..BAKED_VERTEX_BYTES as usize + 2]
+            .copy_from_slice(&u16::MAX.to_le_bytes());
         let bad = PackFile::write(&pack(&meta, &geometry, &animation, &[255; 64]));
         reset(None);
         assert!(unsafe { Scene::load_for_profile(bad.path(), false) }
@@ -1956,7 +2460,7 @@ mod tests {
                 let clusters = scene.mesh_clusters.as_ref().unwrap();
                 assert_eq!(scene.cpu_index_bytes, prior_cpu_bytes + clusters.bytes());
                 assert!(clusters.groups(0).is_none());
-                assert_eq!(scene.indices(84, 3), Some(&[0, 1, 2][..]));
+                assert_eq!(scene.indices(BAKED_VERTEX_BYTES, 3), Some(&[0, 1, 2][..]));
                 drop(scene);
             } else {
                 assert!(result.is_err());
@@ -1966,19 +2470,24 @@ mod tests {
     }
 
     fn baked_fixture() -> (pc::Meta, Vec<u8>, Vec<f32>) {
-        let (mut m, source, animation) = crate::validation::tests::fixture();
+        let (mut m, source, animation) = float_fixture();
+        let d = &mut m.draws[0];
         let mut geometry = Vec::new();
-        for vertex in source[..72].chunks_exact(24) {
+        for vertex in pc::parts::slice(&source, &d.vertices)
+            .unwrap()
+            .chunks_exact(stride(d.layout) as usize)
+        {
             geometry.extend_from_slice(vertex);
             geometry.extend_from_slice(&[128, 128, 128, 255]);
         }
-        geometry.extend_from_slice(&source[72..78]);
+        assert_eq!(geometry.len(), BAKED_VERTEX_BYTES as usize);
+        let index_offset = geometry.len() as u32;
+        geometry.extend_from_slice(pc::parts::slice(&source, &d.indices).unwrap());
         geometry.extend_from_slice(&[2, 0, 1, 0, 0, 0]);
-        let d = &mut m.draws[0];
         d.layout = pc::VertexLayout::Baked;
         d.node = None;
-        d.vertices.size = 84;
-        d.indices.offset = 84;
+        d.vertices.size = index_offset;
+        d.indices.offset = index_offset;
         d.lods = vec![
             pc::DrawLod {
                 indices: d.indices.clone(),
@@ -1987,7 +2496,7 @@ mod tests {
             },
             pc::DrawLod {
                 indices: pc::Range {
-                    offset: 90,
+                    offset: index_offset + 6,
                     size: 6,
                 },
                 index_count: 3,
@@ -1999,7 +2508,7 @@ mod tests {
     }
 
     fn color_sidecar(source: &[u8]) -> (serde_json::Value, Vec<u8>) {
-        let pack = pc::Pack::parse(source).unwrap();
+        let pack = parse(source).unwrap();
         let m = pack.meta().unwrap();
         let bytes = [42, 84, 126, 255].repeat(m.draws[0].vertex_count as usize);
         let draws:Vec<_>=m.draws.iter().enumerate().map(|(i,d)|serde_json::json!({"draw":i,"offset":0,"vertexCount":d.vertex_count,"texture":0,"flags":0,"page":null,"baseVertex":0})).collect();
@@ -2117,13 +2626,12 @@ mod tests {
         let (mut json, _) = color_sidecar(&source);
         let d = &m.draws[0];
         let mut bytes = Vec::new();
-        for v in g[d.vertices.offset as usize..][..d.vertices.size as usize].chunks_exact(28) {
-            let q = |at| (i16::from_le_bytes([v[at], v[at + 1]]) as f32 / 32767.0).max(-1.0);
-            for k in 0..3 {
-                bytes.extend((q(k * 2) * d.pos_scale[k] + d.pos_offset[k]).to_le_bytes());
-            }
-            for k in 0..2 {
-                bytes.extend((q(16 + k * 2) * d.uv_scale[k] + d.uv_offset[k]).to_le_bytes());
+        for i in 0..d.vertex_count {
+            let pos = position(d, &g, i as u16).unwrap();
+            let at = d.vertices.offset as usize + i as usize * stride(d.layout) as usize;
+            let uv = pc::ipod::floats::<2>(&g, at + pc::ipod::UV).unwrap();
+            for value in pos.into_iter().chain(uv) {
+                bytes.extend(value.to_le_bytes());
             }
             bytes.extend([42, 84, 126, 255]);
         }
@@ -2173,8 +2681,11 @@ mod tests {
                     assert_eq!(c.state, Some(0));
                     assert_eq!(c.base_vertex, 0);
                 }
-                assert_eq!(scene.indices(84, 3), Some(&[0, 1, 2][..]));
-                assert_eq!(scene.indices(90, 3), Some(&[2, 1, 0][..]));
+                assert_eq!(scene.indices(BAKED_VERTEX_BYTES, 3), Some(&[0, 1, 2][..]));
+                assert_eq!(
+                    scene.indices(BAKED_VERTEX_BYTES + 6, 3),
+                    Some(&[2, 1, 0][..])
+                );
                 {
                     let state = GL.lock().unwrap();
                     let attrs: Vec<_> = state
@@ -2207,6 +2718,561 @@ mod tests {
             released();
         }
     }
+    #[test]
+    fn product_appearance_pages_require_recipe_identity_and_preserve_source_positions() {
+        let _lock = SERIAL.lock().unwrap();
+        let (mut meta, geometry, animation) = baked_fixture();
+        meta.materials[0].kind = pc::Kind::Products;
+        let source = pack(&meta, &geometry, &animation, &[255; 64]);
+        let file = PackFile::write(&source);
+        let (mut json, _) = color_sidecar(&source);
+        let draw = &meta.draws[0];
+        let mut bytes = Vec::new();
+        for (i, uv) in [[0.0f32, 0.0], [1.0, 0.0], [0.0, 1.0]]
+            .into_iter()
+            .enumerate()
+        {
+            for value in position(draw, &geometry, i as u16)
+                .unwrap()
+                .into_iter()
+                .chain(uv)
+            {
+                bytes.extend(value.to_le_bytes());
+            }
+            bytes.extend([42, 84, 126, 255]);
+        }
+        for entry in json["draws"].as_array_mut().unwrap() {
+            entry["flags"] = 64.into();
+            entry["page"] = 0.into();
+        }
+        json["pages"] = serde_json::json!([{"offset":0,"vertexCount":draw.vertex_count,"state":0}]);
+        json["states"] =
+            serde_json::json!([pc::display::State::for_draw(&meta, draw, Some(0), 64).unwrap()]);
+        json["recipes"] = serde_json::json!([{
+            "kind":"products-appearance", "version":1, "draws":[0,1], "textures":[0],
+            "tileSize":32, "border":2, "parameterization":"uv-height-v1",
+            "maxVertexHeightParameterError":1.0 / 255.0,
+        }]);
+        json["colorsBytes"] = bytes.len().into();
+        for mode in 0..15 {
+            let mut input = json.clone();
+            let mut colors = bytes.clone();
+            match mode {
+                1 => {
+                    input.as_object_mut().unwrap().remove("recipes");
+                }
+                2 => input["recipes"][0]["kind"] = "unrecognized".into(),
+                3 => input["recipes"][0]["version"] = 2.into(),
+                4 => input["recipes"][0]["parameterization"] = "unknown".into(),
+                5 => input["recipes"][0]["tileSize"] = 64.into(),
+                6 => input["recipes"][0]["border"] = 0.into(),
+                7 => input["recipes"][0]["maxVertexHeightParameterError"] = (2.0 / 255.0).into(),
+                8 => input["recipes"][0]["draws"] = serde_json::json!([0]),
+                9 => input["recipes"][0]["textures"] = serde_json::json!([9]),
+                10 => input["recipes"][0]["textures"] = serde_json::json!([0, 0]),
+                11 => input["recipes"][0]["draws"] = serde_json::json!([0, 1, 1]),
+                12 => colors[12..16].copy_from_slice(&(1.0 + f32::EPSILON).to_le_bytes()),
+                13 => colors[..4]
+                    .copy_from_slice(&f32::from_bits(0.125f32.to_bits() + 1).to_le_bytes()),
+                14 => input["draws"][0]["flags"] = 65.into(),
+                _ => {}
+            }
+            input["colorsHash"] = color_hash(&colors).into();
+            write_colors(&file, &input, &colors);
+            reset(None);
+            let result = unsafe { Scene::load(file.path()) };
+            if mode == 0 {
+                let scene = result.unwrap();
+                assert_eq!(scene.ldr_vaos.len(), 1);
+                assert!(scene
+                    .ldr_colors
+                    .iter()
+                    .all(|entry| entry.unwrap().flags == 64));
+                assert_eq!(
+                    scene.indices(draw.indices.offset, draw.index_count),
+                    Some(&[0, 1, 2][..])
+                );
+                drop(scene);
+            } else {
+                let error = result.err().expect("invalid appearance sidecar");
+                assert!(error.contains("LDR"), "mode {mode}: {error}");
+            }
+            released();
+        }
+    }
+
+    fn product_indices_fixture() -> (pc::Meta, Vec<u8>, Vec<f32>, Vec<u8>, serde_json::Value, Vec<u8>) {
+        let (mut meta, original, animation) = float_fixture();
+        meta.materials[0].kind = pc::Kind::Products;
+        let draw = &mut meta.draws[0];
+        draw.node = None; draw.skin = None;
+        let vertices = pc::parts::slice(&original, &draw.vertices).unwrap();
+        let mut geometry = vertices.repeat(2);
+        draw.vertex_count = 6; draw.vertices.size = geometry.len() as u32;
+        draw.index_count = 6;
+        draw.indices = pc::Range { offset: geometry.len() as u32, size: 12 };
+        let original_indices = [0u16, 1, 2, 3, 5, 4];
+        for index in original_indices { geometry.extend(index.to_le_bytes()); }
+        draw.lods.clear();
+        for error in [0.1, 0.2] {
+            draw.lods.push(pc::DrawLod { indices: pc::Range { offset: geometry.len() as u32, size: 12 }, index_count: 6, error });
+            for index in original_indices { geometry.extend(index.to_le_bytes()); }
+        }
+        // A second original draw contributes three vertices before this
+        // display draw's page base; no page padding exceeds the source budget.
+        let mut prefix_draw = meta.draws[0].clone();
+        prefix_draw.vertex_count = 3; prefix_draw.vertices.size = 3 * stride(prefix_draw.layout);
+        prefix_draw.index_count = 3; prefix_draw.indices.size = 6; prefix_draw.lods.clear();
+        meta.draws.push(prefix_draw);
+        let source = pack(&meta, &geometry, &animation, &[255; 64]);
+        let (mut json, _) = color_sidecar(&source);
+        let draw = &meta.draws[0];
+        // Nonzero page base proves override u16 values stay source-local.
+        let mut colors = Vec::new();
+        for index in [0, 1, 2].into_iter().chain(0..6) {
+            for value in position(draw, &geometry, index as u16).unwrap().into_iter()
+                .chain([[0.0f32,0.0], [1.0,0.0], [0.0,1.0]][index % 3])
+            { colors.extend(value.to_le_bytes()); }
+            colors.extend([255; 4]);
+        }
+        let vertex_bytes = colors.len();
+        for index in [0u16, 1, 2] { colors.extend(index.to_le_bytes()); }
+        let original_state = pc::display::State::for_draw(&meta, draw, Some(0), 64).unwrap();
+        let mut override_state = original_state.clone(); override_state.cull = false;
+        json["version"] = 3.into(); json["vertexBytes"] = vertex_bytes.into();
+        for entry in json["draws"].as_array_mut().unwrap() {
+            entry["flags"] = 64.into(); entry["page"] = 0.into();
+        }
+        json["draws"][0]["baseVertex"] = 3.into();
+        json["pages"] = serde_json::json!([{"offset":0,"vertexCount":9,"state":0}]);
+        json["states"] = serde_json::json!([original_state, override_state]);
+        json["indexOverrides"] = serde_json::json!([{ "draw":0, "source":draw.lods[0].indices,
+            "indices":{"offset":vertex_bytes,"size":6}, "state":1 }]);
+        json["recipes"] = serde_json::json!([{"kind":"products-appearance","version":1,"draws":[0,1],
+            "textures":[0],"tileSize":32,"border":2,"parameterization":"uv-height-v1",
+            "maxVertexHeightParameterError":1.0 / 255.0}]);
+        json["colorsBytes"] = colors.len().into(); json["colorsHash"] = color_hash(&colors).into();
+        (meta, geometry, animation, source, json, colors)
+    }
+
+    #[test]
+    fn products_reverse_lod_uses_source_local_indices_and_cull_only_state_without_gpu_tail() {
+        let _lock = SERIAL.lock().unwrap();
+        let (meta, geometry, _, source, json, colors) = product_indices_fixture();
+        let file = PackFile::write(&source); write_colors(&file, &json, &colors);
+        let range = &meta.draws[0].lods[0].indices;
+        for performance in [true, false] {
+            reset(None); GL.lock().unwrap().capture_buffers = true;
+            let scene = unsafe { Scene::load_for_profile(file.path(), performance) }.unwrap();
+            assert_eq!(serde_json::to_vec(&scene.meta).unwrap(), serde_json::to_vec(&meta).unwrap());
+            if performance {
+                let replaced = scene.index_override(0, range).unwrap();
+                assert_eq!(replaced.indices, [0, 1, 2]);
+                assert_eq!(replaced.state, 1);
+                assert_eq!(scene.ldr_colors[0].unwrap().base_vertex, 3);
+                assert!(scene.display_states[0].cull);
+                assert!(!scene.display_states[replaced.state as usize].cull);
+                assert_eq!(scene.indices(range.offset, 6), Some(&[0, 1, 2, 3, 5, 4][..]));
+                assert_eq!(scene.ldr_color_bytes, 216);
+                assert_eq!(GL.lock().unwrap().buffer_data[&scene.ldr_color_buffer], colors[..216]);
+                assert!(scene.cpu_index_bytes >= replaced.indices.len() * 2);
+            } else {
+                assert!(scene.index_override(0, range).is_none());
+                assert_original_resources_only(&scene);
+                assert_eq!(GL.lock().unwrap().buffer_data[&scene.geometry], geometry);
+            }
+            assert!(scene.index_override(1, range).is_none());
+            assert!(scene.index_override(usize::MAX, range).is_none());
+            assert!(scene.index_override(0, &meta.draws[0].indices).is_none());
+            assert!(scene.index_override(0, &meta.draws[0].lods[1].indices).is_none());
+            assert!(scene.index_override(0, &pc::Range { offset:range.offset, size:6 }).is_none());
+            drop(scene); released();
+        }
+        // V2 retains every source triangle and has no derived state override.
+        let mut legacy = json.clone();
+        legacy["version"] = 2.into(); legacy.as_object_mut().unwrap().remove("vertexBytes");
+        legacy.as_object_mut().unwrap().remove("indexOverrides");
+        legacy["states"].as_array_mut().unwrap().truncate(1);
+        legacy["colorsBytes"] = 216.into(); legacy["colorsHash"] = color_hash(&colors[..216]).into();
+        write_colors(&file, &legacy, &colors[..216]);
+        reset(None);
+        let scene = unsafe { Scene::load(file.path()) }.unwrap();
+        assert!(scene.index_override(0, range).is_none());
+        assert_eq!(scene.indices(range.offset, 6), Some(&[0, 1, 2, 3, 5, 4][..]));
+        drop(scene); released();
+    }
+
+    #[test]
+    fn products_reverse_lod_reuses_existing_two_sided_state() {
+        let _lock = SERIAL.lock().unwrap();
+        let (mut meta, geometry, animation, _, mut json, colors) = product_indices_fixture();
+        meta.materials[0].double_sided = true;
+        let source = pack(&meta, &geometry, &animation, &[255; 64]);
+        let parsed = pc::ipod::parse(&source).unwrap();
+        json["metaHash"] = color_hash(parsed.section(pc::TAG_META).unwrap()).into();
+        let state = pc::display::State::for_draw(&meta, &meta.draws[0], Some(0), 64).unwrap();
+        assert!(!state.cull);
+        json["states"] = serde_json::json!([state]);
+        json["indexOverrides"][0]["state"] = 0.into();
+        let file = PackFile::write(&source);
+        write_colors(&file, &json, &colors);
+        let range = &meta.draws[0].lods[0].indices;
+        for performance in [true, false] {
+            reset(None);
+            GL.lock().unwrap().capture_buffers = true;
+            let scene = unsafe { Scene::load_for_profile(file.path(), performance) }.unwrap();
+            assert_eq!(serde_json::to_vec(&scene.meta).unwrap(), serde_json::to_vec(&meta).unwrap());
+            if performance {
+                assert_eq!(scene.indices(range.offset, 6), Some(&[0, 1, 2, 3, 5, 4][..]));
+                let replaced = scene.index_override(0, range).unwrap();
+                assert_eq!(replaced.indices, [0, 1, 2]);
+                assert_eq!(replaced.state, 0);
+                assert_eq!(scene.display_states.len(), 1);
+                assert!(!scene.display_states[0].cull);
+            } else {
+                assert!(scene.index_override(0, range).is_none());
+                assert_original_resources_only(&scene);
+                assert_eq!(GL.lock().unwrap().buffer_data[&scene.geometry], geometry);
+            }
+            drop(scene);
+            released();
+        }
+    }
+
+    #[test]
+    fn products_reverse_lod_rejects_partial_topology_wrong_state_ranges_and_tail_corruption() {
+        let _lock = SERIAL.lock().unwrap();
+        let (meta, geometry, animation, source, json, colors) = product_indices_fixture();
+        let file = PackFile::write(&source);
+        for fault in 0..20 {
+            let mut input = json.clone(); let mut bytes = colors.clone();
+            let mut original = geometry.clone();
+            match fault {
+                0 => { input.as_object_mut().unwrap().remove("vertexBytes"); },
+                1 => input["vertexBytes"] = 212.into(),
+                2 => input["indexOverrides"][0]["draw"] = 99.into(),
+                3 => input["indexOverrides"][0]["state"] = 99.into(),
+                4 => input["indexOverrides"][0]["source"] = serde_json::json!(meta.draws[0].indices),
+                5 => input["indexOverrides"][0]["source"]["offset"] = (meta.draws[0].lods[0].indices.offset + 2).into(),
+                6 => input["indexOverrides"][0]["indices"]["offset"] = 214.into(),
+                7 => input["indexOverrides"][0]["indices"]["offset"] = 217.into(),
+                8 => input["indexOverrides"][0]["indices"]["size"] = 4.into(),
+                9 => input["states"][1]["cull"] = true.into(),
+                10 => input["states"][1]["polygonOffset"] = serde_json::json!([1.0,1.0]),
+                11 => { let entry = input["indexOverrides"][0].clone(); input["indexOverrides"].as_array_mut().unwrap().push(entry); },
+                12 => { let mut entry = input["indexOverrides"][0].clone(); entry["source"] = serde_json::json!(meta.draws[0].lods[1].indices);
+                    input["indexOverrides"].as_array_mut().unwrap().push(entry); },
+                13 => bytes[216..218].copy_from_slice(&6u16.to_le_bytes()),
+                14 => bytes[218..220].copy_from_slice(&2u16.to_le_bytes()),
+                15 => bytes[(3 + 3) * 24 + 12..(3 + 3) * 24 + 16].copy_from_slice(&0.5f32.to_le_bytes()),
+                16 => bytes[(3 + 3) * 24 + 20] = 254,
+                17 => { let at = meta.draws[0].lods[0].indices.offset as usize;
+                    original[at + 8..at + 10].copy_from_slice(&4u16.to_le_bytes()); },
+                18 => input["version"] = 2.into(),
+                _ => bytes[220] ^= 1, // Keep the stale whole-bin hash.
+            }
+            if fault != 19 { input["colorsHash"] = color_hash(&bytes).into(); }
+            input["geometryHash"] = color_hash(&original).into();
+            std::fs::write(file.path(), pack(&meta, &original, &animation, &[255; 64])).unwrap();
+            write_colors(&file, &input, &bytes);
+            reset(None);
+            let error = unsafe { Scene::load(file.path()) }.err().unwrap_or_else(|| panic!("accepted fault {fault}"));
+            assert!(error.contains("LDR"), "fault {fault}: {error}");
+            released();
+            // Optional optimized recipes never replace or mutate Reference.
+            reset(None); GL.lock().unwrap().capture_buffers = true;
+            let scene = unsafe { Scene::load_for_profile(file.path(), false) }.unwrap();
+            assert!(scene.index_overrides.is_empty());
+            assert_eq!(GL.lock().unwrap().buffer_data[&scene.geometry], original);
+            drop(scene); released();
+        }
+        std::fs::write(file.path(), source).unwrap(); write_colors(&file, &json, &colors);
+        for stage in ["color buffer", "color upload", "color vaos", "color attributes"] {
+            reset(Some(stage));
+            assert!(unsafe { Scene::load(file.path()) }.is_err(), "{stage}");
+            released();
+        }
+    }
+
+    #[test]
+    fn compact_residency_keeps_raw_bytes_lods_and_shadow_demand_without_source_aliasing() {
+        let _lock = SERIAL.lock().unwrap();
+        let (mut meta, mut geometry, animation) = baked_fixture();
+        let source_copy = geometry.clone();
+        let second = geometry.len() as u32;
+        geometry.extend(&source_copy);
+        meta.draws[1].vertices.offset += second;
+        meta.draws[1].indices.offset += second;
+        for lod in &mut meta.draws[1].lods {
+            lod.indices.offset += second;
+        }
+        let source_meta = serde_json::to_vec(&meta).unwrap();
+        let source = pack(&meta, &geometry, &animation, &[255; 64]);
+        let file = PackFile::write(&source);
+        let (mut json, _) = color_sidecar(&source);
+        let mut colors = Vec::new();
+        let draw = &meta.draws[0];
+        for i in 0..draw.vertex_count {
+            let uv = pc::ipod::floats::<2>(
+                &geometry,
+                i as usize * stride(draw.layout) as usize + pc::ipod::UV,
+            )
+            .unwrap();
+            for value in position(draw, &geometry, i as u16)
+                .unwrap()
+                .into_iter()
+                .chain(uv)
+            {
+                colors.extend(value.to_le_bytes());
+            }
+            colors.extend([42, 84, 126, 255]);
+        }
+        for entry in json["draws"].as_array_mut().unwrap() {
+            entry["page"] = 0.into();
+        }
+        json["pages"] = serde_json::json!([{"offset":0,"vertexCount":3,"state":0}]);
+        json["states"] =
+            serde_json::json!([pc::display::State::for_draw(&meta, draw, Some(0), 0).unwrap()]);
+        json["colorsBytes"] = colors.len().into();
+        json["colorsHash"] = color_hash(&colors).into();
+        for (both_pages, shadow, performance) in [
+            (false, false, true),
+            (true, false, true),
+            (true, true, true),
+            (true, false, false),
+        ] {
+            let mut entries = json.clone();
+            if !both_pages {
+                entries["draws"].as_array_mut().unwrap().truncate(1);
+            }
+            write_colors(&file, &entries, &colors);
+            let mut manifest = crate::texture_usage::tests::manifest(
+                &meta,
+                if shadow {
+                    &["uAlbedo", "uShadow"]
+                } else {
+                    &["uAlbedo"]
+                },
+            );
+            for (i, d) in manifest["draws"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .enumerate()
+            {
+                d["display_color"] = (i == 0 || both_pages).into();
+                d["display_float"] = (i == 0 || both_pages).into();
+                d["display_texture"] = 0.into();
+            }
+            std::fs::write(
+                sidecar_path(file.path(), "pipelines.json"),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            reset(None);
+            GL.lock().unwrap().capture_buffers = true;
+            let scene = unsafe { Scene::load_for_profile(file.path(), performance) }.unwrap();
+            assert_eq!(serde_json::to_vec(&scene.meta).unwrap(), source_meta);
+            let all_resident = !performance || shadow;
+            let uploaded = if all_resident {
+                &geometry[..]
+            } else if both_pages {
+                &[][..]
+            } else {
+                &geometry[second as usize..]
+            };
+            assert_eq!(
+                scene.gpu_bytes,
+                uploaded.len() + if performance { 32 + colors.len() } else { 64 }
+            );
+            {
+                let gl = GL.lock().unwrap();
+                if uploaded.is_empty() {
+                    assert_eq!(scene.geometry, 0);
+                    assert!(scene.vaos.iter().all(|&v| v == 0));
+                } else {
+                    assert_eq!(gl.buffer_data[&scene.geometry], uploaded);
+                }
+                for (i, d) in meta.draws.iter().enumerate() {
+                    let retained = all_resident || (i == 1 && !both_pages);
+                    let base = if all_resident { d.vertices.offset } else { 0 };
+                    assert_eq!(scene.gpu_vertex_offset(i), retained.then_some(base));
+                    assert_eq!(scene.vaos[i] != 0, retained);
+                    if retained {
+                        assert!(gl.attributes.contains(&(
+                            scene.vaos[i],
+                            0,
+                            scene.geometry,
+                            3,
+                            stride(d.layout) as i32,
+                            base as usize
+                        )));
+                    }
+                    for (r, count) in core::iter::once((&d.indices, d.index_count))
+                        .chain(d.lods.iter().map(|l| (&l.indices, l.index_count)))
+                    {
+                        let expected = if all_resident {
+                            r.offset
+                        } else {
+                            r.offset - if i == 1 { second } else { 0 }
+                        };
+                        assert_eq!(
+                            scene.gpu_index_offset(r.offset, count),
+                            retained.then_some(expected)
+                        );
+                        if performance {
+                            let expected: Vec<_> = pc::parts::slice(&geometry, r)
+                                .unwrap()
+                                .chunks_exact(2)
+                                .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                                .collect();
+                            assert_eq!(scene.indices(r.offset, count), Some(expected.as_slice()));
+                        }
+                    }
+                }
+            }
+            assert!(scene.gpu_index_offset(geometry.len() as u32, 0).is_some());
+            unsafe {
+                scene.reset_index_bindings();
+            }
+            drop(scene);
+            released();
+        }
+        // The last manifest has no shadow demand. Cover every partially
+        // created mixed-residency object and the all-display/no-source case.
+        for both_pages in [false, true] {
+            let mut entries = json.clone();
+            if !both_pages {
+                entries["draws"].as_array_mut().unwrap().truncate(1);
+            }
+            write_colors(&file, &entries, &colors);
+            let stages: &[&str] = if both_pages {
+                &[
+                    "buffer",
+                    "zero buffer",
+                    "geometry upload",
+                    "vaos",
+                    "attributes",
+                ]
+            } else {
+                &[
+                    "buffer",
+                    "zero buffer",
+                    "geometry upload",
+                    "vaos",
+                    "attributes",
+                    "color buffer",
+                    "color upload",
+                    "color vaos",
+                    "color attributes",
+                ]
+            };
+            for &failure in stages {
+                reset(Some(failure));
+                assert!(
+                    unsafe { Scene::load(file.path()) }.is_err(),
+                    "{both_pages}: {failure}"
+                );
+                released();
+            }
+        }
+        for indices in [false, true] {
+            let mut corrupt = geometry.clone();
+            if indices {
+                let at = meta.draws[0].indices.offset as usize;
+                corrupt[at..at + 2].copy_from_slice(&u16::MAX.to_le_bytes());
+            } else {
+                corrupt[..4].copy_from_slice(&f32::NAN.to_le_bytes());
+            }
+            std::fs::write(file.path(), pack(&meta, &corrupt, &animation, &[255; 64])).unwrap();
+            reset(None);
+            let error = unsafe { Scene::load(file.path()) }.err().unwrap();
+            assert!(
+                error.contains(if indices {
+                    "index exceeds"
+                } else {
+                    "non-finite"
+                }),
+                "{error}"
+            );
+            released();
+        }
+    }
+
+    #[test]
+    fn appearance_pages_remap_only_uv_and_do_not_skip_ordinary_alias_validation() {
+        let (meta, geometry, _) = baked_fixture();
+        let d = &meta.draws[0];
+        let make = |flags: &[u32]| {
+            let mut bytes = Vec::new();
+            for (i, uv) in [[0.0f32, 0.0], [1.0, 0.0], [0.0, 1.0]]
+                .into_iter()
+                .enumerate()
+            {
+                for value in position(d, &geometry, i as u16)
+                    .unwrap()
+                    .into_iter()
+                    .chain(uv)
+                {
+                    bytes.extend(value.to_le_bytes());
+                }
+                bytes.extend([42, 84, 126, 255]);
+            }
+            ColorFile {
+                vertex_bytes: bytes.len() as u32,
+                index_overrides: Vec::new(),
+                bytes,
+                draws: flags
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &flags)| ColorEntry {
+                        draw: i as u32,
+                        offset: 0,
+                        vertex_count: d.vertex_count,
+                        texture: Some(0),
+                        flags,
+                        page: Some(0),
+                        base_vertex: 0,
+                    })
+                    .collect(),
+                pages: vec![ColorPage {
+                    offset: 0,
+                    vertex_count: d.vertex_count,
+                    state: 0,
+                }],
+                states: Vec::new(),
+            }
+        };
+        make(&[64, 64])
+            .validate_float_geometry(&meta, &geometry)
+            .unwrap();
+        // Positions stay bit-exact source values: even one representable step
+        // fails. The appearance recipe changes only finite normalized UVs.
+        for (offset, value) in [
+            (0, f32::from_bits(0.125f32.to_bits() + 1)),
+            (0, f32::NAN),
+            (12, -f32::EPSILON),
+            (16, 1.0 + f32::EPSILON),
+            (12, f32::INFINITY),
+            (16, f32::NAN),
+        ] {
+            let mut colors = make(&[64]);
+            colors.bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            assert!(
+                colors.validate_float_geometry(&meta, &geometry).is_err(),
+                "offset {offset}, value {value}"
+            );
+        }
+        for flags in [&[0][..], &[64, 0][..], &[0, 64][..]] {
+            assert!(
+                make(flags)
+                    .validate_float_geometry(&meta, &geometry)
+                    .is_err(),
+                "ordinary alias flags {flags:?}"
+            );
+        }
+    }
+
     #[test]
     fn wet_and_glass_colors_retain_normals_and_require_their_material_contract() {
         let _lock = SERIAL.lock().unwrap();
@@ -2253,8 +3319,8 @@ mod tests {
                             (
                                 scene.geometry,
                                 3,
-                                28,
-                                scene.meta.draws[i].vertices.offset as usize + 8
+                                stride(scene.meta.draws[i].layout) as i32,
+                                scene.meta.draws[i].vertices.offset as usize + pc::ipod::NORMAL
                             )
                         );
                     }
@@ -2263,6 +3329,111 @@ mod tests {
                 released();
             }
         }
+    }
+
+    #[test]
+    fn wet_response_requires_a_bounded_multiplier_without_changing_source_fallback() {
+        let _lock = SERIAL.lock().unwrap();
+        for darken in [0.0, 1.0, -0.01, 1.01] {
+            let (mut m, g, a) = baked_fixture();
+            m.materials[0].wet = Some(pc::Wet { planar: true, darken, ..Default::default() });
+            let source = pack(&m, &g, &a, &[255; 64]);
+            let file = PackFile::write(&source);
+            // Source and Reference remain valid. Only the RGBA8 response
+            // approximation rejects a multiplier outside its encoded range.
+            for performance in [true, false] {
+                reset(None);
+                let scene = unsafe { Scene::load_for_profile(file.path(), performance) }.unwrap();
+                assert_eq!(scene.meta.materials[0].wet.as_ref().unwrap().darken, darken);
+                assert!(scene.ldr_colors.iter().all(Option::is_none));
+                drop(scene);
+                released();
+            }
+            let (mut json, bytes) = color_sidecar(&source);
+            for d in json["draws"].as_array_mut().unwrap() { d["flags"] = 16.into(); }
+            write_colors(&file, &json, &bytes);
+            reset(None);
+            let result = unsafe { Scene::load(file.path()) };
+            assert_eq!(result.is_ok(), (0.0..=1.0).contains(&darken));
+            drop(result);
+            released();
+        }
+    }
+
+    #[test]
+    fn mesh_texture_cache_tracks_units_targets_and_program_samplers_with_unknown_pass_state() {
+        let _lock = SERIAL.lock().unwrap();
+        reset(None);
+        let a = crate::gpu::Program::test_samplers(101, &[("color", 2, GL_TEXTURE_2D), ("env", 3, GL_TEXTURE_CUBE_MAP)]);
+        let b = crate::gpu::Program::test_samplers(102, &[("color", 7, GL_TEXTURE_2D), ("env", 9, GL_TEXTURE_CUBE_MAP)]);
+        let mut cache = crate::gpu::TextureBindings::default();
+        unsafe {
+            a.bind();
+            assert_eq!(a.tex_cached("absent", 99, 0, &mut cache), 0);
+            a.tex_cached("color", 10, 0, &mut cache);
+            a.tex_cached("color", 10, 0, &mut cache);
+            a.tex_cached("env", 11, 0, &mut cache);
+            a.tex_cached("color", 10, 0, &mut cache);
+            a.tex_cached("env", 11, 0, &mut cache);
+            // Binding state is shared, but b's two sampler uniforms are new.
+            b.bind();
+            b.tex_cached("color", 10, 0, &mut cache);
+            b.tex_cached("env", 11, 0, &mut cache);
+            b.tex_cached("color", 12, 1, &mut cache);
+            b.tex_cached("env", 11, 0, &mut cache); // A hit does not activate unit 0.
+            b.tex_cached("color", 13, 1, &mut cache); // Still active: no redundant activation.
+            b.tex_cached("color", 10, 0, &mut cache); // Binding hit, sampler changes unit.
+        }
+        {
+            let state = GL.lock().unwrap();
+            assert_eq!(state.active_texture_calls, [0, 1]);
+            assert_eq!(state.texture_bind_calls, [(0, GL_TEXTURE_2D, 10),
+                (0, GL_TEXTURE_CUBE_MAP, 11), (1, GL_TEXTURE_2D, 12), (1, GL_TEXTURE_2D, 13)]);
+            assert_eq!(state.sampler_uniforms, [(101, 2, 0), (101, 3, 0),
+                (102, 7, 0), (102, 9, 0), (102, 7, 1), (102, 7, 0)]);
+        }
+        unsafe {
+            // Effects can overwrite context state between passes. A new cache
+            // must bind even when the program's sampler value is unchanged.
+            b.tex("color", 14, 0);
+            let mut next_pass = crate::gpu::TextureBindings::default();
+            b.tex_cached("color", 10, 0, &mut next_pass);
+            b.tex_cached("color", 10, 0, &mut next_pass);
+            // Beyond the bounded table, retain ordinary bind semantics.
+            b.tex_cached("color", 15, 8, &mut next_pass);
+            b.tex_cached("color", 15, 8, &mut next_pass);
+            b.tex_cached("env", 11, 0, &mut next_pass);
+        }
+        let state = GL.lock().unwrap();
+        assert_eq!(&state.texture_bind_calls[4..], [(0, GL_TEXTURE_2D, 14), (0, GL_TEXTURE_2D, 10),
+            (8, GL_TEXTURE_2D, 15), (8, GL_TEXTURE_2D, 15), (0, GL_TEXTURE_CUBE_MAP, 11)]);
+        assert_eq!(&state.active_texture_calls[2..], [0, 0, 8, 0]);
+        assert_eq!(&state.sampler_uniforms[6..], [(102, 7, 8)]);
+    }
+
+    #[test]
+    fn solid_cube_fallback_owns_six_faces_and_never_reuses_a_2d_texture_name() {
+        let _lock = SERIAL.lock().unwrap();
+        reset(None);
+        GL.lock().unwrap().capture_textures = true;
+        let mut objects = crate::gpu::Objects::default();
+        let image = unsafe { objects.image(1, 1, &[255; 4]) };
+        let cube = unsafe { objects.solid_cube([255; 4]) };
+        assert_ne!(image, cube);
+        {
+            let state = GL.lock().unwrap();
+            assert_eq!(state.texture_targets[&image], GL_TEXTURE_2D);
+            assert_eq!(state.texture_targets[&cube], GL_TEXTURE_CUBE_MAP);
+            let faces: Vec<_> = state.texture_uploads.iter().filter(|u| u.texture == cube).collect();
+            assert_eq!(faces.len(), 6);
+            for (face, upload) in faces.iter().enumerate() {
+                assert_eq!(upload.target, GL_TEXTURE_CUBE_MAP_POSITIVE_X + face as u32);
+                assert_eq!((upload.width, upload.height, upload.level), (1, 1, 0));
+                assert_eq!(upload.data, [255; 4]);
+            }
+        }
+        drop(objects);
+        released();
     }
     #[test]
     fn malformed_and_stale_color_sidecars_fail_without_gpu_leaks() {
@@ -2279,7 +3450,7 @@ mod tests {
                 3 => json["draws"][0]["offset"] = serde_json::json!(4294967292u32),
                 4 => json["draws"][0]["vertexCount"] = serde_json::json!(4),
                 5 => json["draws"][1]["draw"] = serde_json::json!(0),
-                6 => json["draws"][0]["flags"] = serde_json::json!(64),
+                6 => json["draws"][0]["flags"] = serde_json::json!(128),
                 7 => json["draws"][0]["texture"] = serde_json::json!(999),
                 8 => bytes[0] ^= 1,
                 9 => {
@@ -2312,8 +3483,8 @@ mod tests {
         let mut texture = [255; 64];
         texture[0] = 17;
         let changed = pack(&m, &g, &a, &texture);
-        let original = pc::Pack::parse(&source).unwrap();
-        let replacement = pc::Pack::parse(&changed).unwrap();
+        let original = parse(&source).unwrap();
+        let replacement = parse(&changed).unwrap();
         for tag in [pc::TAG_META, pc::TAG_GEOMETRY, pc::TAG_ANIMATION] {
             assert_eq!(
                 original.section(tag).unwrap(),
@@ -2370,7 +3541,7 @@ mod tests {
             [false, true, false, true]
         );
         assert_ne!(scene.textures[1], scene.textures[3]);
-        assert_eq!(scene.gpu_bytes, geometry.len() + 128);
+        assert_eq!(scene.gpu_bytes, geometry.len() + 64);
         drop(scene);
         released();
         // Every source upload failure still belongs to Scene, even with holes
@@ -2475,10 +3646,19 @@ mod tests {
         let cache = IndexCache::new(&m, &geometry, &[]).unwrap();
         assert_eq!(cache.data, [0, 1, 2, 2, 1, 0]);
         assert_eq!(cache.ranges.len(), 1);
-        assert_eq!(cache.get(84, 3), Some(&[0, 1, 2][..]));
-        assert_eq!(cache.get(90, 3), Some(&[2, 1, 0][..]));
-        assert_eq!(cache.get(86, 4), Some(&[1, 2, 2, 1][..]));
-        for (offset, count) in [(0, 3), (85, 3), (94, 2), (u32::MAX - 1, 3), (84, u32::MAX)] {
+        assert_eq!(cache.get(BAKED_VERTEX_BYTES, 3), Some(&[0, 1, 2][..]));
+        assert_eq!(cache.get(BAKED_VERTEX_BYTES + 6, 3), Some(&[2, 1, 0][..]));
+        assert_eq!(
+            cache.get(BAKED_VERTEX_BYTES + 2, 4),
+            Some(&[1, 2, 2, 1][..])
+        );
+        for (offset, count) in [
+            (0, 3),
+            (BAKED_VERTEX_BYTES + 1, 3),
+            (BAKED_VERTEX_BYTES + 10, 2),
+            (u32::MAX - 1, 3),
+            (BAKED_VERTEX_BYTES, u32::MAX),
+        ] {
             assert!(cache.get(offset, count).is_none());
         }
         assert_eq!(cache.bytes(), 12 + core::mem::size_of::<IndexRange>());
@@ -2507,7 +3687,7 @@ mod tests {
         for mode in 0..3 {
             let mut bad = m.clone();
             match mode {
-                0 => bad.draws[0].indices.offset = 85,
+                0 => bad.draws[0].indices.offset = BAKED_VERTEX_BYTES + 1,
                 1 => bad.draws[0].indices.size = 4,
                 _ => bad.draws[0].indices.offset = u32::MAX - 1,
             }
@@ -2516,8 +3696,11 @@ mod tests {
         reset(None);
         let file = PackFile::write(&pack(&m, &geometry, &animation, &[255; 64]));
         let scene = unsafe { Scene::load(file.path()) }.unwrap();
-        assert_eq!(scene.indices(84, 3), Some(&[0, 1, 2][..]));
-        assert_eq!(scene.indices(90, 3), Some(&[2, 1, 0][..]));
+        assert_eq!(scene.indices(BAKED_VERTEX_BYTES, 3), Some(&[0, 1, 2][..]));
+        assert_eq!(
+            scene.indices(BAKED_VERTEX_BYTES + 6, 3),
+            Some(&[2, 1, 0][..])
+        );
         assert!(scene.indices(0, 3).is_none());
         assert_eq!(
             scene.cpu_index_bytes,
@@ -2529,9 +3712,10 @@ mod tests {
     #[test]
     fn late_payload_errors_also_release_previously_uploaded_textures() {
         let _lock = SERIAL.lock().unwrap();
-        let (mut m, mut g, a) = crate::validation::tests::fixture();
+        let (mut m, mut g, a) = float_fixture();
         reset(None);
-        g[76] = 3;
+        let last_index = m.draws[0].indices.offset as usize + 4;
+        g[last_index] = 3;
         let file = PackFile::write(&pack(&m, &g, &a, &[255; 64]));
         assert!(unsafe { Scene::load(file.path()) }
             .err()
@@ -2539,7 +3723,7 @@ mod tests {
             .contains("index exceeds"));
         released();
         assert_eq!(GL.lock().unwrap().next, 1);
-        g[76] = 2;
+        g[last_index] = 2;
         let mut hdr = m.textures[0].clone();
         hdr.role = pc::TexRole::Environment;
         hdr.format = pc::TexFormat::Rgba16f;
@@ -2706,7 +3890,7 @@ mod tests {
     #[test]
     fn light_phases_use_final_snorm_share_ranges_and_release_failed_uploads() {
         let _lock = SERIAL.lock().unwrap();
-        let (mut m, mut geometry, animation) = crate::validation::tests::fixture();
+        let (mut m, mut geometry, animation) = float_fixture();
         let mut material = m.materials[0].clone();
         material.kind = pc::Kind::Lights;
         material.lights = Some(pc::LightField {
@@ -2771,7 +3955,7 @@ mod tests {
         let scene = unsafe { Scene::load(file.path()) }.unwrap();
         assert_ne!(scene.light_phase_buffer, 0);
         assert_eq!(scene.light_phase_offsets, cache.offsets);
-        assert_eq!(scene.gpu_bytes, 64 + geometry.len() + 8 * 8);
+        assert_eq!(scene.gpu_bytes, 32 + geometry.len() + 8 * 8);
         drop(scene);
         released();
         reset(None);
@@ -2832,6 +4016,94 @@ mod tests {
     }
 
     #[test]
+    fn field_appearance_releases_texture_and_row_buffer_on_every_partial_failure() {
+        let _lock = SERIAL.lock().unwrap();
+        let (mut meta, mut geometry, _) = float_fixture();
+        let mut material = meta.materials[0].clone();
+        material.kind = pc::Kind::Lights;
+        material.lights = Some(pc::LightField {
+            min_pixels: 2.0,
+            max_pixels: 8.0,
+            period: 120.0,
+            gain: 1.0,
+            ..Default::default()
+        });
+        meta.materials.push(material);
+        while geometry.len() % 4 != 0 {
+            geometry.push(0);
+        }
+        let mut draw = meta.draws[0].clone();
+        draw.layout = pc::VertexLayout::Lights;
+        draw.material = 1;
+        draw.node = None;
+        draw.vertices = pc::Range {
+            offset: geometry.len() as u32,
+            size: 4 * pc::LightPoint::STRIDE as u32,
+        };
+        draw.vertex_count = 4;
+        draw.indices = pc::Range::default();
+        draw.index_count = 4;
+        for rgb in [
+            [255, 128, 32],
+            [16, 128, 255],
+            [255, 128, 32],
+            [89, 17, 201],
+        ] {
+            let mut vertex = [0u8; pc::LightPoint::STRIDE];
+            vertex[8..11].copy_from_slice(&rgb);
+            vertex[11] = 123;
+            vertex[16..20].copy_from_slice(&0.5f32.to_le_bytes());
+            vertex[37] = 255;
+            geometry.extend(vertex);
+        }
+        meta.draws.push(draw);
+        let source = crate::light_lod::Sources::new(&meta, &geometry).unwrap();
+        assert_eq!(source.palette().len(), 3);
+        assert_eq!(source.color_rows(), [0, 1, 0, 2]);
+        reset(None);
+        let appearance =
+            unsafe { crate::effects::FieldAppearance::new(&source, &meta.post) }.unwrap();
+        assert_eq!(appearance.gpu_bytes, 4 * 256 * 4 + 4 * 2);
+        assert_eq!(GL.lock().unwrap().live.len(), 2);
+        drop(appearance);
+        released();
+        for (failure, context, textures, buffers) in [
+            ("textures", "field appearance texture", 1, 0),
+            ("texture upload", "field appearance texture", 1, 0),
+            ("zero texture", "field appearance texture", 0, 0),
+            ("buffer", "field appearance rows", 1, 1),
+            ("geometry upload", "field appearance rows", 1, 1),
+            ("zero buffer", "field appearance rows", 1, 0),
+        ] {
+            reset(Some(failure));
+            let error = unsafe { crate::effects::FieldAppearance::new(&source, &meta.post) }
+                .err()
+                .unwrap();
+            assert!(error.contains(context), "{failure}: {error}");
+            released();
+            let state = GL.lock().unwrap();
+            assert_eq!(
+                state
+                    .deleted
+                    .iter()
+                    .filter(|(kind, _)| *kind == b'T')
+                    .count(),
+                textures,
+                "{failure}"
+            );
+            assert_eq!(
+                state
+                    .deleted
+                    .iter()
+                    .filter(|(kind, _)| *kind == b'B')
+                    .count(),
+                buffers,
+                "{failure}"
+            );
+        }
+    }
+
+    #[test]
     fn light_phase_angle_addition_bounds_all_packed_phases_and_time_quadrants() {
         let mut max_error = 0.0f32;
         // Include exact quadrants and both sides of the periodic boundary.
@@ -2863,22 +4135,28 @@ mod tests {
     #[test]
     fn product_parameters_cover_lod_only_vertices_aliases_and_gpu_cleanup() {
         let _lock = SERIAL.lock().unwrap();
-        let (mut m, _, a) = crate::validation::tests::fixture();
+        let (mut m, _, a) = float_fixture();
         m.materials.push(m.materials[0].clone());
         m.materials[0].kind = pc::Kind::Products;
         let seeds = [[0, 0, 0], [255, 0, 0], [17, 89, 201], [255, 255, 255]];
-        let mut geometry = vec![0; 96];
-        for (vertex, seed) in geometry.chunks_exact_mut(24).zip(seeds) {
-            vertex[20..23].copy_from_slice(&seed);
+        let mut geometry = Vec::new();
+        for (i, seed) in seeds.into_iter().enumerate() {
+            geometry.extend(float_vertex(
+                pc::VertexLayout::Static,
+                [i as f32 / 4.0, 0.25, 0.5],
+                [i as f32 / 4.0, 0.5],
+                [seed[0], seed[1], seed[2], 0],
+            ));
         }
+        let vertex_bytes = geometry.len();
         geometry.extend([0, 0, 1, 0, 2, 0, 1, 0, 2, 0, 3, 0]);
         let d = &mut m.draws[0];
         d.vertex_count = 4;
-        d.vertices.size = 96;
-        d.indices.offset = 96;
+        d.vertices.size = vertex_bytes as u32;
+        d.indices.offset = vertex_bytes as u32;
         d.lods.push(pc::DrawLod {
             indices: pc::Range {
-                offset: 102,
+                offset: vertex_bytes as u32 + 6,
                 size: 6,
             },
             index_count: 3,
@@ -2889,10 +4167,10 @@ mod tests {
         m.draws[1].node = None;
         let mut other = m.draws[0].clone();
         other.vertices.offset = geometry.len() as u32;
-        let mut second = geometry[..96].to_vec();
-        for vertex in second.chunks_exact_mut(24) {
-            vertex[20..23].copy_from_slice(&seeds[2]);
-            vertex[23] = 255; // instance height must not affect the package
+        let mut second = geometry[..vertex_bytes].to_vec();
+        for vertex in second.chunks_exact_mut(stride(pc::VertexLayout::Static) as usize) {
+            vertex[pc::ipod::COLOR..pc::ipod::COLOR + 3].copy_from_slice(&seeds[2]);
+            vertex[pc::ipod::COLOR + 3] = 255; // instance height must not affect the package
         }
         geometry.extend(second);
         m.draws.push(other);
@@ -2920,7 +4198,7 @@ mod tests {
         reset(None);
         let scene = unsafe { Scene::load(file.path()) }.unwrap();
         assert_ne!(scene.package_buffer, 0);
-        assert_eq!(scene.gpu_bytes, 64 + geometry.len() + 8 * 8);
+        assert_eq!(scene.gpu_bytes, 32 + geometry.len() + 8 * 8);
         {
             let state = GL.lock().unwrap();
             for (i, offset) in parameters.offsets.iter().enumerate() {
@@ -2975,7 +4253,7 @@ mod tests {
     #[test]
     fn bone_palettes_keep_exact_rows_across_skins_updates_and_repeated_passes() {
         let _lock = SERIAL.lock().unwrap();
-        let (mut m, g, mut a) = crate::validation::tests::fixture();
+        let (mut m, g, mut a) = float_fixture();
         a[7..10].copy_from_slice(&[4.0, -2.0, 3.0]);
         a[10..14].copy_from_slice(&Quat::from_rotation_z(1.25).to_array());
         for (parent, translation, rotation, scale) in [
@@ -3063,10 +4341,369 @@ mod tests {
         drop(scene);
         released();
     }
+    fn pvrtc_pack(meta: &pc::Meta, geometry: &[u8], animation: &[f32], source: &[u8],
+        recipes: &pc::ipod::Recipes, payload: Option<&[u8]>) -> Vec<u8> {
+        let metadata = serde_json::to_vec(&pc::ipod::Metadata {
+            scene: meta.clone(), ipod_recipes: recipes.clone(),
+        }).unwrap();
+        let anim: Vec<_> = animation.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let mut sections = vec![(pc::TAG_META, metadata.as_slice(), 16),
+            (pc::TAG_TEXTURES, source, 16), (pc::TAG_GEOMETRY, geometry, 16),
+            (pc::TAG_ANIMATION, anim.as_slice(), 16)];
+        if let Some(payload) = payload { sections.push((pc::ipod::TAG_PVRTC, payload, 16)); }
+        pc::write_versioned(pc::ipod::MAGIC, pc::ipod::VERSION, &sections)
+    }
+
+    #[test]
+    fn pvrtc_mini_mips_upload_exact_blocks_at_logical_dimensions_and_release_failures() {
+        let _lock = SERIAL.lock().unwrap();
+        let (texture_meta, recipes, source, payload) = crate::texture_storage::tests::pvrtc_fixture();
+        let (mut meta, geometry, animation) = float_fixture();
+        meta.textures[0] = texture_meta.textures[0].clone();
+        let file = PackFile::write(&pvrtc_pack(&meta, &geometry, &animation, &source, &recipes, Some(&payload)));
+        for performance in [true, false] {
+            reset(None);
+            GL.lock().unwrap().capture_textures = true;
+            let scene = unsafe { Scene::load_for_profile(file.path(), performance) }.unwrap();
+            assert_eq!(scene.meta.textures[0].format, pc::TexFormat::Rgba8);
+            assert_eq!(scene.gpu_bytes, geometry.len() + if performance { 128 } else { 340 });
+            {
+                let state = GL.lock().unwrap();
+                if performance {
+                    assert!(state.texture_uploads.is_empty());
+                    assert_eq!(state.compressed_uploads.len(), 4);
+                    for (i, upload) in state.compressed_uploads.iter().enumerate() {
+                        assert_eq!(upload.texture, scene.textures[0]);
+                        assert_eq!((upload.target, upload.format), (GL_TEXTURE_2D, GL_COMPRESSED_RGB_PVRTC_4BPPV1_IMG));
+                        assert_eq!((upload.level, upload.width, upload.height), (i as i32, 8 >> i, 8 >> i));
+                        assert_eq!(upload.data, payload[i * 32..(i + 1) * 32]);
+                    }
+                } else {
+                    assert!(state.compressed_uploads.is_empty());
+                    assert_eq!(state.texture_uploads.len(), 4);
+                    let mut at = 0;
+                    for (i, upload) in state.texture_uploads.iter().enumerate() {
+                        let dimension = 8 >> i;
+                        let size = dimension * dimension * 4;
+                        assert_eq!((upload.level, upload.width, upload.height), (i as i32, dimension as i32, dimension as i32));
+                        assert_eq!((upload.internal_format, upload.format, upload.pixel_type), (GL_RGBA as i32, GL_RGBA, GL_UNSIGNED_BYTE));
+                        assert_eq!(upload.data, source[at..at + size]);
+                        at += size;
+                    }
+                    assert_eq!(at, 340);
+                }
+                assert!(state.texture_parameters.contains(&(GL_TEXTURE_2D, 0x813d, 3)));
+                assert!(state.texture_parameters.contains(&(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, 0x2703)));
+            }
+            drop(scene);
+            released();
+        }
+        for mip in 0..4 {
+            reset(None);
+            GL.lock().unwrap().fail_compressed_mip = Some(mip);
+            let error = unsafe { Scene::load(file.path()) }.err().unwrap();
+            assert!(error.contains("upload texture"), "mip {mip}: {error}");
+            released();
+            assert_eq!(GL.lock().unwrap().deleted.iter().filter(|(kind, _)| *kind == b'T').count(), 1);
+        }
+        reset(Some("zero texture"));
+        assert!(unsafe { Scene::load(file.path()) }.err().unwrap().contains("allocate scene textures"));
+        released();
+    }
+
+    #[test]
+    fn pvrtc_validation_is_required_in_reference_and_without_color_sidecars() {
+        let _lock = SERIAL.lock().unwrap();
+        let (texture_meta, recipes, source, payload) = crate::texture_storage::tests::pvrtc_fixture();
+        let (mut meta, geometry, animation) = float_fixture();
+        meta.textures[0] = texture_meta.textures[0].clone();
+        for performance in [true, false] {
+            for fault in 0..11 {
+                let mut r = recipes.clone(); let mut src = source.clone(); let mut bytes = payload.clone();
+                match fault {
+                    0 => bytes[127] ^= 1,
+                    1 => src[336] = 1, // Opaque source RGB changes, no color sidecar to catch it.
+                    2 => { // Even a freshly rehashed source must not bypass RGB-only alpha.
+                        src[339] = 254;
+                        r.pvrtc[0].source_hash = color_hash(&src);
+                    },
+                    3 => r.pvrtc[0].codec_version = 2,
+                    4 => r.pvrtc[0].gate_version = 2,
+                    5 => r.pvrtc[0].quality_metrics.max_block_rmse = 8.01,
+                    6 => r.pvrtc.push(r.pvrtc[0].clone()),
+                    7 => r.pvrtc[0].range.offset = 16,
+                    8 => { bytes.truncate(127); },
+                    9 => r.pvrtc[0].payload_hash = "0000000000000000".into(),
+                    _ => {}, // Missing IPTX section with an otherwise valid recipe.
+                }
+                let file = PackFile::write(&pvrtc_pack(&meta, &geometry, &animation, &src, &r,
+                    if fault == 10 { None } else { Some(&bytes) }));
+                assert!(!std::path::Path::new(&color_path(file.path(), "json")).exists());
+                reset(None);
+                let error = unsafe { Scene::load_for_profile(file.path(), performance) }.err().unwrap();
+                assert!(error.contains("PVRTC"), "profile {performance}, fault {fault}: {error}");
+                assert!(GL.lock().unwrap().compressed_uploads.is_empty());
+                assert!(GL.lock().unwrap().texture_uploads.is_empty());
+                released();
+                if (3..=8).contains(&fault) || fault == 10 {
+                    assert_eq!(GL.lock().unwrap().next, 0, "structural fault must fail before GL allocations");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn opaque_display_textures_upload_two_exact_rgb565_mips_without_changing_other_storage() {
+        let _lock = SERIAL.lock().unwrap();
+        let original = [
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255, 128, 64, 32, 255,
+        ];
+        // Independent expected packed words for red, green, blue, white,
+        // followed by the single 1x1 texel (R=16/31,G=16/63,B=4/31).
+        let packed = [0x00, 0xf8, 0xe0, 0x07, 0x1f, 0x00, 0xff, 0xff, 0x04, 0x82];
+        for mode in 0..7 {
+            let (mut meta, geometry, animation) = float_fixture();
+            let texture = &mut meta.textures[0];
+            texture.width = 2;
+            texture.height = 2;
+            texture.mips = 2;
+            texture.data.size = original.len() as u32;
+            let mut pixels = original;
+            match mode {
+                2 => texture.role = pc::TexRole::Data,
+                3 => texture.role = pc::TexRole::Normal,
+                4 => pixels[19] = 254, // Only the final mip has alpha.
+                5 => pixels[3] = 0,
+                6 => texture.has_alpha = true, // Actual payload remains opaque.
+                _ => {}
+            }
+            let performance = mode != 1;
+            let is_565 = mode == 0 || mode == 6;
+            let source_meta = serde_json::to_vec(&meta).unwrap();
+            let file = PackFile::write(&pack(&meta, &geometry, &animation, &pixels));
+            reset(None);
+            GL.lock().unwrap().capture_textures = true;
+            let scene = unsafe { Scene::load_for_profile(file.path(), performance) }.unwrap();
+            assert_eq!(serde_json::to_vec(&scene.meta).unwrap(), source_meta);
+            assert_eq!(
+                scene.gpu_bytes,
+                geometry.len() + if is_565 { 10 } else { 20 }
+            );
+            {
+                let uploads = GL.lock().unwrap().texture_uploads.clone();
+                assert_eq!(uploads.len(), 2);
+                for (i, upload) in uploads.iter().enumerate() {
+                    assert_eq!(upload.texture, scene.textures[0]);
+                    assert_eq!(upload.level, i as i32);
+                    assert_eq!(
+                        (upload.width, upload.height),
+                        if i == 0 { (2, 2) } else { (1, 1) }
+                    );
+                    assert_eq!(upload.unpack_alignment, 1);
+                    assert_eq!(
+                        upload.internal_format,
+                        if is_565 { GL_RGB } else { GL_RGBA } as i32
+                    );
+                    assert_eq!(upload.format, if is_565 { GL_RGB } else { GL_RGBA });
+                    assert_eq!(
+                        upload.pixel_type,
+                        if is_565 {
+                            GL_UNSIGNED_SHORT_5_6_5
+                        } else {
+                            GL_UNSIGNED_BYTE
+                        }
+                    );
+                    let expected = if is_565 {
+                        if i == 0 {
+                            &packed[..8]
+                        } else {
+                            &packed[8..]
+                        }
+                    } else if i == 0 {
+                        &pixels[..16]
+                    } else {
+                        &pixels[16..]
+                    };
+                    assert_eq!(upload.byte_len, expected.len());
+                    assert_eq!(upload.data, expected, "mode {mode}, mip {i}");
+                }
+            }
+            drop(scene);
+            released();
+        }
+    }
+
+    #[test]
+    fn rgb565_quantization_does_not_replace_original_texture_hash_identity() {
+        let _lock = SERIAL.lock().unwrap();
+        let (mut meta, geometry, animation) = baked_fixture();
+        meta.textures[0].width = 2;
+        meta.textures[0].height = 2;
+        meta.textures[0].mips = 2;
+        meta.textures[0].data.size = 20;
+        let mut pixels = [255u8; 20];
+        pixels[16..20].copy_from_slice(&[128, 64, 32, 255]);
+        let source = pack(&meta, &geometry, &animation, &pixels);
+        let file = PackFile::write(&source);
+        let (json, colors) = color_sidecar(&source);
+        write_colors(&file, &json, &colors);
+        reset(None);
+        GL.lock().unwrap().capture_textures = true;
+        let scene = unsafe { Scene::load(file.path()) }.unwrap();
+        let last_mip = GL.lock().unwrap().texture_uploads[1].data.clone();
+        assert_eq!(last_mip, [0x04, 0x82]);
+        drop(scene);
+        released();
+        // 128 and 129 quantize to the same five-bit channel. A stale sidecar
+        // must still reject the different original source bytes.
+        pixels[16] = 129;
+        std::fs::write(file.path(), pack(&meta, &geometry, &animation, &pixels)).unwrap();
+        reset(None);
+        GL.lock().unwrap().capture_textures = true;
+        let error = unsafe { Scene::load(file.path()) }.err().unwrap();
+        assert!(error.contains("LDR colors do not match"), "{error}");
+        let last_mip = GL.lock().unwrap().texture_uploads[1].data.clone();
+        assert_eq!(last_mip, [0x04, 0x82]);
+        released();
+    }
+
+    fn cube_pack(meta: &pc::Meta, geometry: &[u8], animation: &[f32], source: &[u8],
+        recipes: &pc::ipod::Recipes, payload: Option<&[u8]>) -> Vec<u8> {
+        let metadata = serde_json::to_vec(&pc::ipod::Metadata {
+            scene: meta.clone(), ipod_recipes: recipes.clone(),
+        }).unwrap();
+        let anim: Vec<_> = animation.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let mut sections = vec![(pc::TAG_META, metadata.as_slice(), 16),
+            (pc::TAG_TEXTURES, source, 16), (pc::TAG_GEOMETRY, geometry, 16),
+            (pc::TAG_ANIMATION, anim.as_slice(), 16)];
+        if let Some(payload) = payload { sections.push((pc::ipod::TAG_DISPLAY_CUBES, payload, 16)); }
+        pc::write_versioned(pc::ipod::MAGIC, pc::ipod::VERSION, &sections)
+    }
+
+    #[test]
+    fn compiled_cubes_upload_exact_faces_share_materials_and_leave_reference_original() {
+        let _lock = SERIAL.lock().unwrap();
+        let (template, mut recipes, source, mut payload) = crate::texture_storage::tests::cube_fixture();
+        let (mut meta, geometry, animation) = float_fixture();
+        meta.textures = template.textures; meta.materials = template.materials;
+        meta.atmosphere = template.atmosphere;
+        // A valid payload identity is authoritative. This deliberate changed
+        // texel proves the loader uploads IPEN rather than silently rebaking.
+        let face_bytes = crate::display_environment::CUBE_BYTES / 6;
+        payload[face_bytes - 4] ^= 1;
+        recipes.display_cubes[0].payload_hash = color_hash(&payload[..crate::display_environment::CUBE_BYTES]);
+        let file = PackFile::write(&cube_pack(&meta, &geometry, &animation, &source, &recipes, Some(&payload)));
+        for performance in [true, false] {
+            reset(None); GL.lock().unwrap().capture_textures = true;
+            let scene = unsafe { Scene::load_for_profile(file.path(), performance) }.unwrap();
+            if performance {
+                assert_eq!(scene.display_environment_textures.len(), 2);
+                assert_eq!(scene.display_environments[0], scene.display_environments[1]);
+                assert_ne!(scene.display_environments[0], scene.display_environments[2]);
+                assert_eq!(scene.display_environments[3], 0);
+                assert_eq!(scene.gpu_bytes, geometry.len() + 32 + 84 + 2 * crate::display_environment::CUBE_BYTES);
+                let state = GL.lock().unwrap();
+                let faces: Vec<_> = state.texture_uploads.iter().filter(|u| u.target != GL_TEXTURE_2D).collect();
+                assert_eq!(faces.len(), 12);
+                for (i, face) in faces.iter().enumerate() {
+                    assert_eq!((face.target, face.level, face.width, face.height),
+                        (GL_TEXTURE_CUBE_MAP_POSITIVE_X + (i % 6) as u32, 0, 64, 64));
+                    assert_eq!(face.texture, scene.display_environment_textures[i / 6]);
+                    assert_eq!(face.data, payload[i * face_bytes..(i + 1) * face_bytes]);
+                }
+            } else {
+                assert_original_resources_only(&scene);
+                assert_eq!(scene.gpu_bytes, geometry.len() + 64 + 84);
+                assert!(GL.lock().unwrap().texture_uploads.iter().all(|u| u.target == GL_TEXTURE_2D));
+            }
+            drop(scene); released();
+        }
+        // ENV need not be resident as a 2D texture to validate and upload IPEN.
+        let manifest = crate::texture_usage::tests::manifest(&meta, &["uDisplayEnv"]);
+        std::fs::write(sidecar_path(file.path(), "pipelines.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        reset(None);
+        let scene = unsafe { Scene::load(file.path()) }.unwrap();
+        assert!(scene.textures.iter().all(|&id| id == 0));
+        assert_eq!(scene.gpu_bytes, geometry.len() + 2 * crate::display_environment::CUBE_BYTES);
+        drop(scene); released();
+    }
+
+    #[test]
+    fn compiled_cube_corruption_is_rejected_in_both_profiles_and_releases_partial_uploads() {
+        let _lock = SERIAL.lock().unwrap();
+        let (template, recipes, source, payload) = crate::texture_storage::tests::cube_fixture();
+        let (mut meta, geometry, animation) = float_fixture();
+        meta.textures = template.textures; meta.materials = template.materials;
+        meta.atmosphere = template.atmosphere;
+        for performance in [true, false] {
+            for fault in 0..11 {
+                let mut m = meta.clone(); let mut r = recipes.clone();
+                let mut src = source.clone(); let mut bytes = payload.clone();
+                let expected = match fault {
+                    0 => { src[224] ^= 1; "source identity" }, // Last ENV mip, not used by bake.
+                    1 => { bytes[crate::display_environment::CUBE_BYTES + 4] ^= 1; "payload identity" },
+                    2 => { m.post.exposure += 0.1; "recipe contract" },
+                    3 => { m.materials[0].env_strength += 0.01; "ownership or strength" },
+                    4 => { r.display_cubes[0].materials.pop(); "coverage" },
+                    5 => { r.display_cubes[1].range.offset = 16; "range or overlap" },
+                    6 => "range or overlap", // No IPEN section.
+                    7 => { r.display_cubes[0].version = 2; "recipe contract" },
+                    8 => { r.display_cubes[0].source_texture = 0; "recipe contract" },
+                    9 => { bytes.pop(); "range or overlap" },
+                    _ => {
+                        // Both layouts are valid and consume exactly 168 bytes:
+                        // HDR 4x4+2x2+1x1 and RGBA8 8x4+4x2+2x1.
+                        // A byte-only source hash would incorrectly accept it.
+                        m.textures[1].format = pc::TexFormat::Rgba8;
+                        m.textures[1].width = 8;
+                        "source identity"
+                    },
+                };
+                let file = PackFile::write(&cube_pack(&m, &geometry, &animation, &src, &r,
+                    (fault != 6).then_some(bytes.as_slice())));
+                reset(None);
+                let error = unsafe { Scene::load_for_profile(file.path(), performance) }.err().unwrap();
+                assert!(error.contains(expected), "profile {performance}, fault {fault}: {error}");
+                if performance && fault == 1 {
+                    assert_eq!(GL.lock().unwrap().texture_uploads.iter().filter(|u| u.target != GL_TEXTURE_2D).count(), 6);
+                }
+                released();
+            }
+        }
+        let file = PackFile::write(&cube_pack(&meta, &geometry, &animation, &source, &recipes, Some(&payload)));
+        // Even a valid container with weaker declared alignment cannot bypass
+        // the IPEN ABI. The payload itself remains unchanged and in bounds.
+        let mut misaligned = std::fs::read(file.path()).unwrap();
+        let table_index = (0..u32::from_le_bytes(misaligned[8..12].try_into().unwrap()) as usize)
+            .find(|&i| misaligned[16 + i * 16..20 + i * 16] == pc::ipod::TAG_DISPLAY_CUBES).unwrap();
+        misaligned[28 + table_index * 16..32 + table_index * 16].copy_from_slice(&4u32.to_le_bytes());
+        std::fs::write(file.path(), &misaligned).unwrap();
+        for performance in [true, false] {
+            reset(None);
+            let error = unsafe { Scene::load_for_profile(file.path(), performance) }.err().unwrap();
+            assert!(error.contains("display cube section alignment"), "{error}");
+            assert_eq!(GL.lock().unwrap().next, 0);
+            released();
+        }
+        std::fs::write(file.path(), cube_pack(&meta, &geometry, &animation, &source, &recipes, Some(&payload))).unwrap();
+        for face in 0..6 {
+            reset(None); GL.lock().unwrap().fail_cube_face = Some(face);
+            let error = unsafe { Scene::load(file.path()) }.err().unwrap();
+            assert!(error.contains("upload display environment face"), "{error}");
+            assert_eq!(GL.lock().unwrap().texture_uploads.iter().filter(|u| u.target != GL_TEXTURE_2D).count(), face + 1);
+            released();
+        }
+        for failure in ["display texture", "zero display texture", "display upload"] {
+            reset(Some(failure));
+            assert!(unsafe { Scene::load(file.path()) }.is_err(), "{failure}");
+            released();
+        }
+    }
+
     #[test]
     fn successful_scene_keeps_vao_animation_and_hdr_encoding_until_drop() {
         let _lock = SERIAL.lock().unwrap();
-        let (mut m, g, a) = crate::validation::tests::fixture();
+        let (mut m, g, a) = float_fixture();
         let mut hdr = m.textures[0].clone();
         hdr.role = pc::TexRole::Environment;
         hdr.format = pc::TexFormat::Rgba16f;
@@ -3091,7 +4728,7 @@ mod tests {
         assert_eq!(scene.vaos.len(), 1);
         assert_eq!(scene.anim, a);
         assert_eq!(scene.world[0], Mat4::IDENTITY);
-        assert_eq!(scene.gpu_bytes, 64 + 64 + 64 + g.len());
+        assert_eq!(scene.gpu_bytes, 32 + 64 + crate::display_environment::CUBE_BYTES + g.len());
         assert_eq!(scene.cpu_index_bytes, 0);
         assert_ne!(scene.display_environments[0], 0);
         assert_eq!(scene.display_environments[0], scene.display_environments[1]);
@@ -3107,6 +4744,21 @@ mod tests {
                 .uploads
                 .contains(&[graded[0], graded[1], graded[2], 255]));
             assert_eq!(state.vao, 0);
+            let faces: Vec<_> = state.texture_uploads.iter()
+                .filter(|upload| upload.texture == scene.display_environments[0]).collect();
+            assert_eq!(faces.len(), 6);
+            for (face, upload) in faces.iter().enumerate() {
+                assert_eq!(upload.target, GL_TEXTURE_CUBE_MAP_POSITIVE_X + face as u32);
+                assert_eq!((upload.level, upload.width, upload.height), (0, 64, 64));
+                assert_eq!((upload.internal_format, upload.format, upload.pixel_type),
+                    (GL_RGBA as i32, GL_RGBA, GL_UNSIGNED_BYTE));
+                assert_eq!(upload.byte_len, 64 * 64 * 4);
+            }
+            for (parameter, value) in [(GL_TEXTURE_MIN_FILTER, GL_LINEAR),
+                (GL_TEXTURE_MAG_FILTER, GL_LINEAR), (GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE),
+                (GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)] {
+                assert!(state.texture_parameters.contains(&(GL_TEXTURE_CUBE_MAP, parameter, value)));
+            }
         }
         drop(scene);
         released();
@@ -3127,10 +4779,25 @@ mod tests {
                 .contains("GLES error"));
             released();
         }
+        for face in 0..6 {
+            reset(None);
+            GL.lock().unwrap().fail_cube_face = Some(face);
+            assert!(unsafe { Scene::load(file.path()) }.err().unwrap()
+                .contains("upload display environment face"));
+            let uploads = GL.lock().unwrap().texture_uploads.iter()
+                .filter(|upload| upload.target != GL_TEXTURE_2D).count();
+            assert_eq!(uploads, face + 1, "stop at failing face {face}");
+            released();
+        }
+        reset(Some("zero display texture"));
+        assert!(unsafe { Scene::load(file.path()) }.err().unwrap()
+            .contains("did not allocate display environment"));
+        released();
         reset(None);
         let scene = unsafe { Scene::load_for_profile(file.path(), false) }.unwrap();
         assert_original_resources_only(&scene);
         assert_eq!(scene.gpu_bytes, 64 + 64 + g.len());
+        assert!(GL.lock().unwrap().texture_uploads.iter().all(|u| u.target == GL_TEXTURE_2D));
         assert!(GL.lock().unwrap().uploads.contains(&[180, 180, 180, 255]));
         drop(scene);
         released();
@@ -3145,7 +4812,7 @@ mod tests {
         assert!(scene.textures.iter().all(|&id| id == 0));
         assert_ne!(scene.display_environments[0], 0);
         assert_eq!(scene.display_environments[0], scene.display_environments[1]);
-        assert_eq!(scene.gpu_bytes, 64 + g.len());
+        assert_eq!(scene.gpu_bytes, crate::display_environment::CUBE_BYTES + g.len());
         drop(scene);
         released();
         pixels[64..66].copy_from_slice(&0x7e00u16.to_le_bytes());
@@ -3160,7 +4827,7 @@ mod tests {
 
     #[test]
     fn display_environment_averages_linear_radiance_before_grade_at_bounded_size() {
-        let (m, _, _) = crate::validation::tests::fixture();
+        let (m, _, _) = float_fixture();
         let mut texture = m.textures[0].clone();
         texture.width = 128;
         texture.height = 64;
@@ -3189,5 +4856,36 @@ mod tests {
         let (w, h, pixels) = display_environment_pixels(&texture, &[255; 4], 0.5, &m.post).unwrap();
         assert_eq!((w, h), (1, 1));
         assert_eq!(pixels, [expected[0], expected[1], expected[2], 255]);
+    }
+
+    #[test]
+    #[ignore = "set POCKET_ATLAS_VALIDATION_PACKS; compares CPU sampling, not GPU precision"]
+    fn display_cube_real_pack_reprojection_error() {
+        let dir = std::env::var("POCKET_ATLAS_VALIDATION_PACKS").expect("pack directory");
+        let mut count = 0;
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|s| s.to_str()) != Some("place") { continue; }
+            let bytes = std::fs::read(&path).unwrap();
+            let pack = parse(&bytes).unwrap();
+            let meta: pc::Meta = serde_json::from_slice(pack.section(pc::TAG_META).unwrap()).unwrap();
+            let Some(index) = meta.atmosphere.environment else { continue; };
+            let texture = &meta.textures[index as usize];
+            let data = pc::parts::slice(pack.section(pc::TAG_TEXTURES).unwrap(), &texture.data).unwrap();
+            let mut strengths = BTreeSet::new();
+            for material in &meta.materials {
+                if !matches!(material.kind, pc::Kind::Water | pc::Kind::Glass) { continue; }
+                let strength = material.env_strength * meta.atmosphere.environment_strength;
+                if !strengths.insert(strength.to_bits()) { continue; }
+                let (w, h, pixels) = display_environment_pixels(texture, data, strength, &meta.post).unwrap();
+                for size in [32, 64, 128] {
+                    let (rmse, max, samples) = crate::display_environment::tests::error_at_size(w, h, &pixels, size);
+                    std::println!("cube {} strength={strength} oct={w}x{h} cube=6x{size}x{size} samples={samples} RGB byte RMSE={rmse:.6} max={max:.6}", path.display());
+                    assert!(rmse.is_finite() && max.is_finite());
+                }
+                count += 1;
+            }
+        }
+        assert!(count > 0, "no eligible scene environment");
     }
 }

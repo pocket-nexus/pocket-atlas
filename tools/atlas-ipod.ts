@@ -26,6 +26,7 @@ import {
   userDeploymentScript,
 } from "../vendor/pocketjs/tools/ipodtouch4-installation";
 import { PLACES } from "../web/src/places/registry";
+import { isIPodAsset, selectIPodPlaces } from "./atlas-ipod-catalog";
 import { validateDrawableCapture } from "./atlas-ipod-capture";
 const root = resolve(import.meta.dir, "..");
 const args = Bun.argv.slice(2),
@@ -223,15 +224,16 @@ async function build() {
       join(bundle, name),
     ]);
   }
+  const places = selectIPodPlaces(PLACES);
   writeFileSync(
     join(bundle, "catalog.json"),
     JSON.stringify(
-      PLACES.filter((p) => p.status === "live" && p.load).map(
+      places.map(
         ({ load, ...p }) => p,
       ),
     ),
   );
-  for (const place of PLACES.filter((p) => p.status === "live" && p.load)) {
+  for (const place of places) {
     for (const suffix of [
       "place",
       "pipelines.json",
@@ -245,8 +247,19 @@ async function build() {
         );
     }
   }
-  if (existsSync(join(out, "assets")))
-    cpSync(join(out, "assets"), join(bundle, "assets"), { recursive: true });
+  const sourceAssets = join(out, "assets"), bundledAssets = join(bundle, "assets");
+  // Rebuild the asset tree even for an incremental native build: an old
+  // catalog entry must not survive in the next package after losing opt-in.
+  rmSync(bundledAssets, { recursive: true, force: true });
+  if (existsSync(sourceAssets)) {
+    for (const source of files(sourceAssets)) {
+      const name = source.slice(sourceAssets.length + 1);
+      if (!isIPodAsset(name, places)) continue;
+      const destination = join(bundledAssets, name);
+      mkdirSync(dirname(destination), { recursive: true });
+      cpSync(source, destination);
+    }
+  }
   const hashes = Object.fromEntries(
     files(bundle)
       .filter((p) => !p.endsWith("build-receipt.json"))
@@ -409,20 +422,18 @@ else if (command === "native") {
     console.log(installed(ssh));
     ssh(`rm -rf ${remote}`);
   });
-} else if (command === "sync")
+} else if (command === "sync") {
+  const places = selectIPodPlaces(PLACES, opt("--place", ""));
+  if (!places.length) throw new Error("No matching iPod release places");
   await device((ssh, scp) => {
     const app = installed(ssh);
     ssh("/usr/bin/killall PocketAtlas 2>/dev/null || true");
-    const folder = join(out, "assets"),
-      place = opt("--place", "");
+    const folder = join(out, "assets");
     const inputs = files(folder).filter(
       (f) =>
+        isIPodAsset(f.slice(folder.length + 1), places) &&
         (!args.includes("--packs") || f.endsWith(".place")) &&
-        (!args.includes("--shaders") || !f.endsWith(".place")) &&
-        (!place ||
-          f.includes("/shaders/") ||
-          f.endsWith("effects.json") ||
-          f.startsWith(join(folder, place + "."))),
+        (!args.includes("--shaders") || !f.endsWith(".place")),
     );
     const names = inputs.map((f) => f.slice(folder.length + 1)),
       archive = join(out, "assets.tar.gz");
@@ -451,7 +462,7 @@ else if (command === "native") {
     ssh(`rm -f ${shellQuote(remote)}`);
     console.log(`Synced and read back ${names.length} assets`);
   });
-else if (command === "launch")
+} else if (command === "launch")
   await device(async (ssh) => {
     const app = installed(ssh);
     ssh(

@@ -29,6 +29,7 @@ pub mod display;
 pub mod meta;
 pub mod parts;
 pub mod products;
+pub mod ipod;
 
 pub use meta::*;
 
