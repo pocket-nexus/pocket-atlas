@@ -594,6 +594,7 @@ fn push_texture(src: &Rgba, alpha: bool, tex: &mut Vec<u8>, textures: &mut Vec<[
 }
 fn sun_occluder(scene: &crate::source::Scene) -> Option<crate::occlusion::Occluder> {
     let m = scene;
+    assert!(m.materials.iter().all(|m| !m.vertex_pbr), "PICA lowering requires source materials, not Vita PBR palettes");
     m.sun.as_ref()?.shadow.as_ref()?;
     let mut tris = Vec::new();
     for d in &m.draws {
@@ -620,6 +621,13 @@ fn sun_occluder(scene: &crate::source::Scene) -> Option<crate::occlusion::Occlud
         }
     }
     Some(crate::occlusion::Occluder::new(tris, 1, 2000.0))
+}
+
+/// Keep the two coarsest shared levels in PICA's three main-view slots.
+/// Extra fine rigid levels must not inflate LOD2 or its reflection proxy.
+fn main_lods<'a>(indices: &'a [u32], levels: &'a [crate::source::Lod]) -> impl Iterator<Item = (&'a [u32], u32, f32)> {
+    std::iter::once((indices, indices.len() as u32, 0.0))
+        .chain(levels.iter().skip(levels.len().saturating_sub(2)).map(|l| (l.indices.as_slice(), l.indices.len() as u32, l.error)))
 }
 
 pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,String> {
@@ -1006,8 +1014,7 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
             positions.push(pos);
         }
         let mut lod = Vec::new();
-        for (indices, count, error) in std::iter::once((d.indices(), d.index_count(), 0.0))
-            .chain(d.lods().iter().map(|l| (l.indices.as_slice(), l.indices.len() as u32, l.error)))
+        for (indices, count, error) in main_lods(d.indices(), d.lods())
         {
             if lod.len() == 3 {
                 break;
@@ -1387,6 +1394,16 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fine_levels_do_not_replace_coarse_handheld_slots() {
+        let levels: Vec<crate::source::Lod> = [0.01, 0.025, 0.06, 0.25].into_iter().enumerate().map(|(i, error)| crate::source::Lod { indices: vec![i as u32; 3], error }).collect();
+        let base = [4, 5, 6];
+        let selected: Vec<_> = main_lods(&base, &levels).collect();
+        assert_eq!(selected, vec![(base.as_slice(), 3, 0.0), (levels[2].indices.as_slice(), 3, 0.06), (levels[3].indices.as_slice(), 3, 0.25)]);
+        assert_eq!(main_lods(&base, &[]).count(), 1);
+        assert_eq!(main_lods(&base, &levels[..1]).count(), 2);
+    }
+
     #[test]
     fn structural_classifier_preserves_rotated_tubes_but_rejects_wires_and_panels() {
         let rotation = Quat::from_euler(glam::EulerRot::YXZ, 0.7, 0.4, 0.2);

@@ -103,6 +103,10 @@ pub struct Material {
     pub orm: Option<u32>,
     pub emission: Option<u32>,
     pub vertex_color: bool,
+    /// Compiled solid PBR palette: UV stores roughness/metalness and vertex
+    /// RGB stores base colour. Native targets keep their authored materials.
+    #[serde(default)]
+    pub vertex_pbr: bool,
     /// Interior surface: emission carries its lighting (no scene lights, no fog).
     pub interior: bool,
     pub fog: bool,

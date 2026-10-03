@@ -1,4 +1,4 @@
-import { CubeCamera, HalfFloatType, PMREMGenerator, Scene, Vector3, WebGLCubeRenderTarget, type DirectionalLight, type FogExp2, type Mesh, type PerspectiveCamera, type Texture } from "three";
+import { CubeCamera, HalfFloatType, PMREMGenerator, Scene, Vector3, WebGLCubeRenderTarget, type DirectionalLight, type FogExp2, type InstancedMesh, type Mesh, type PerspectiveCamera, type Skeleton, type SkinnedMesh, type Texture, type WebGLRenderTarget } from "three";
 import type { PlaceDef, Stage, StageContext } from "../../core/types";
 import type { Baker } from "./bake";
 import { CameraRig, type Box6, type Shot, type ShotKey } from "./camera";
@@ -41,10 +41,11 @@ export abstract class PlaceStage<W extends ExportWorld = ExportWorld, A extends 
   protected post!: PlacePost;
   protected rig!: CameraRig;
   protected sun: DirectionalLight | null = null;
-  private env: Texture | null = null;
+  private envTarget: WebGLRenderTarget | null = null;
   private envCube: WebGLCubeRenderTarget | null = null;
   private envAt = new Vector3();
   private shadowFrames = 0;
+  private exportHook?: (seconds?: number) => Promise<unknown>;
   private keyHandler = (e: KeyboardEvent) => {
     if (e.key === "c" || e.key === "C") this.rig.toggleCinematic();
   };
@@ -118,11 +119,11 @@ export abstract class PlaceStage<W extends ExportWorld = ExportWorld, A extends 
     opts.after?.();
     this.scene.remove(cube);
     const pmrem = new PMREMGenerator(renderer);
-    this.env = pmrem.fromCubemap(rt.texture).texture;
+    this.envTarget = pmrem.fromCubemap(rt.texture);
     pmrem.dispose();
     if (this.ctx.params.exporting) this.envCube = rt;
     else rt.dispose();
-    this.scene.environment = this.env;
+    this.scene.environment = this.envTarget.texture;
     this.scene.environmentIntensity = opts.intensity;
   }
 
@@ -133,7 +134,7 @@ export abstract class PlaceStage<W extends ExportWorld = ExportWorld, A extends 
    */
   protected exposeExport(opts: { seconds: number; files?: { name: string; texture: Texture }[]; meta: (c: CommonMeta, seconds: number) => Record<string, unknown> }): void {
     const w = window as unknown as { pocketAtlasExport?: (seconds?: number) => Promise<unknown> };
-    w.pocketAtlasExport = async (seconds = opts.seconds) => {
+    this.exportHook = async (seconds = opts.seconds) => {
       const { exportPlace } = await import("./export");
       const fog = this.scene.fog as FogExp2;
       try {
@@ -159,6 +160,7 @@ export abstract class PlaceStage<W extends ExportWorld = ExportWorld, A extends 
         this.envCube = null;
       }
     };
+    w.pocketAtlasExport = this.exportHook;
   }
 
   /** The tone curve, grade and bloom for the export's `post`. */
@@ -180,13 +182,13 @@ export abstract class PlaceStage<W extends ExportWorld = ExportWorld, A extends 
     addEventListener("keydown", this.keyHandler);
     this.audio.start();
     const p = this.ctx.params;
-    if (p.shot) {
+    if (p.shot || p.cam) {
       this.rig.goTo(p.cam ?? shots[0].name);
       if (p.view && p.view.length >= 6) {
         const v = p.view;
         this.rig.goToKey({ pos: [v[0], v[1], v[2]], target: [v[3], v[4], v[5]], fov: v[6] ?? viewFov ?? 40 });
       }
-      this.rig.autoCinematicAfter = Infinity;
+      if (p.shot) this.rig.autoCinematicAfter = Infinity;
     } else {
       this.rig.startIntro(intro, shots[0].to, introSeconds);
     }
@@ -212,7 +214,7 @@ export abstract class PlaceStage<W extends ExportWorld = ExportWorld, A extends 
     u.get("uFade")!.value = this.rig.fade;
     const bars = u.get("uBars")!;
     bars.value += ((this.rig.mode === "cinematic" ? 1 : 0) - bars.value) * (1 - Math.exp(-dt * 2.5));
-    // Every caster is static: the sun's shadow map renders on the first frames only.
+    // Static places reuse the map; an advance() with moving casters may invalidate it.
     if (this.shadowFrames < 2) {
       this.ctx.renderer.shadowMap.needsUpdate = true;
       this.shadowFrames++;
@@ -225,11 +227,14 @@ export abstract class PlaceStage<W extends ExportWorld = ExportWorld, A extends 
     this.rig.dispose();
     this.post.dispose();
     this.baker.dispose();
-    this.env?.dispose();
+    this.envTarget?.dispose();
     this.envCube?.dispose();
+    const skeletons = new Set<Skeleton>();
     this.scene.traverse((o) => {
       const m = o as Mesh;
       if (m.isMesh) {
+        if ((m as InstancedMesh).isInstancedMesh) (m as InstancedMesh).dispose();
+        if ((m as SkinnedMesh).isSkinnedMesh) skeletons.add((m as SkinnedMesh).skeleton);
         m.geometry.dispose();
         const mats = Array.isArray(m.material) ? m.material : [m.material];
         for (const mat of mats) {
@@ -238,7 +243,10 @@ export abstract class PlaceStage<W extends ExportWorld = ExportWorld, A extends 
         }
       }
     });
+    for (const skeleton of skeletons) skeleton.dispose();
     this.sun?.shadow.map?.dispose();
+    const w = window as unknown as { pocketAtlasExport?: unknown };
+    if (w.pocketAtlasExport === this.exportHook) delete w.pocketAtlasExport;
     renderer.shadowMap.enabled = false;
     renderer.shadowMap.autoUpdate = true;
     renderer.toneMappingExposure = 1;

@@ -43,6 +43,7 @@ pub(super) fn swizzle(pixels: &[u8], row: usize, height: usize) -> Vec<u8> {
 
 pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,String> {
     let m = scene;
+    assert!(m.materials.iter().all(|m| !m.vertex_pbr), "PSP lowering requires source materials, not Vita PBR palettes");
     assert_eq!(
         m.kind, "night-street",
         "PSP currently supports the night-street material/effect set"
@@ -194,7 +195,7 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
                     draw.skin.is_some() && scene.vertex(draw, i).weights.iter().filter(|&&w| w > 0).count() > 1
                 })
                 .collect();
-            if let Some((tris, _)) = crate::geometry::simplify(&verts, &tris, 0.15, 0.025, &locks) {
+            if let Some((tris, _)) = crate::geometry::simplify(&verts, &tris, 0.15, 0.025, &locks, 0.02) {
                 selected = tris.iter().flatten().map(|&i| i as u16).collect();
             }
         }

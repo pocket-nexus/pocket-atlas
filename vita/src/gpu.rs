@@ -98,6 +98,7 @@ pub enum U {
     Wave,
     WaterK,
     WaterShallow,
+    MovingShadowK,
     Vista,
     VistaEye,
     VistaSun,
@@ -119,6 +120,7 @@ const UNIFORM_NAMES: [&str; U::Count as usize] = [
     "uRect", "uLocal", "uTexRect", "uShape", "uFill", "uFill2", "uStroke", "uStrokeW",
     "uTwBand", "uTwBelt", "uTwShape", "uTwShadow",
     "uWave", "uWaterK", "uWaterShallow",
+    "uMovingShadowK",
     "uVista", "uVistaEye", "uVistaSun", "uVistaGlow", "uVistaSky", "uVistaSunSky", "uField", "uFieldT",
 ];
 
@@ -148,12 +150,14 @@ pub enum S {
     Inscatter,
     Transmit,
     Shadow,
+    MovingShadow,
     Count,
 }
 
 const SAMPLER_NAMES: [&str; S::Count as usize] = [
     "uAlbedo", "uNormalMap", "uOrm", "uEmission", "uEnv", "uPuddles", "uRipples", "uReflSharp", "uReflBlur", "uBeads", "uClouds",
     "uScene", "uHazeTex", "uBloom", "uSource", "uSupport", "uLut", "uMask", "uGrain", "uLights", "uInscatter", "uTransmit", "uShadow",
+    "uMovingShadow",
 ];
 
 pub type Param = *const g::SceGxmProgramParameter;
@@ -260,7 +264,9 @@ pub enum BlendMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Out {
     Uchar4,
+    Ushort2,
     Half4,
+    Float,
 }
 
 pub struct Pipeline {
@@ -450,7 +456,9 @@ impl Gpu {
         };
         let output = match key.output {
             Out::Uchar4 => Output::Uchar4,
+            Out::Ushort2 => Output::Ushort2,
             Out::Half4 => Output::Half4,
+            Out::Float => Output::Float,
         };
         let fp = match program::fragment_program(self.patcher, &fs.reg, output, key.msaa, blend, vs.reg.program()) {
             Ok(fp) => fp,

@@ -5,6 +5,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { PLACES } from "../web/src/places/registry";
+import { readPack, VITA_PACK_VERSION } from "./place-container";
 
 const root = resolve(import.meta.dir, "..");
 const arg = (name: string, fallback: string) => {
@@ -14,21 +15,7 @@ const arg = (name: string, fallback: string) => {
 const source = resolve(arg("atlas", `${root}/.pocket-build/atlas/atlas.pack`));
 const globeDir = resolve(arg("globe", `${root}/.pocket-build/atlas/globe`));
 const out = resolve(arg("out", `${root}/.pocket-build/3ds/romfs/atlas.3ds`));
-const pack = readFileSync(source);
-if (pack.toString("ascii", 0, 4) !== "ATLS")
-  throw new Error("Expected canonical ATLS pack");
-function section(tag: string): Buffer {
-  for (let i = 0; i < pack.readUInt32LE(8); i++) {
-    const at = 16 + i * 16;
-    if (pack.toString("ascii", at, at + 4) === tag) {
-      const offset = pack.readUInt32LE(at + 4),
-        size = pack.readUInt32LE(at + 8);
-      if (offset + size > pack.length) throw new Error(`Truncated ${tag}`);
-      return pack.subarray(offset, offset + size);
-    }
-  }
-  throw new Error(`Missing ${tag}`);
-}
+const { section } = readPack(readFileSync(source), "ATLS", VITA_PACK_VERSION);
 const meta = JSON.parse(section("META").toString());
 const coverage = section("FONT"),
   texdata = section("TEXD");

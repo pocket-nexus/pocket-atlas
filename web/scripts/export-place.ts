@@ -4,7 +4,7 @@
  * names (baked sky layers), and a report. Needs a running dev server
  * (`bun run dev`) and a local Google Chrome.
  *
- *   bun scripts/export-place.ts [--place tokyo-konbini] [--out ../.pocket-build/places/<place>] [--seconds 20] [--base http://127.0.0.1:5173]
+ *   bun scripts/export-place.ts [--place tokyo-konbini] [--out ../.pocket-build/places/<place>] [--seconds 20] [--geometry full|handheld] [--base http://127.0.0.1:5173]
  *
  * The device loops the recorded tracks; the Tokyo konbini pack uses 20 s.
  * Every place stage exposes `window.pocketAtlasExport` under `?export`
@@ -23,6 +23,8 @@ const place = opt("place", "tokyo-konbini");
 const out = resolve(opt("out", join(import.meta.dir, `../../.pocket-build/places/${place}`)));
 const seconds = Number(opt("seconds", "20"));
 const base = opt("base", "http://127.0.0.1:5173");
+const geometry = opt("geometry", "full");
+if (geometry !== "full" && geometry !== "handheld") throw new Error("--geometry must be full or handheld");
 mkdirSync(out, { recursive: true });
 
 const browser = await chromium.launch({ channel: "chrome", headless: true, args: ["--use-angle=metal", "--enable-gpu", "--ignore-gpu-blocklist"] });
@@ -42,7 +44,7 @@ await page.exposeFunction("__pcChunk", (name: string, b64: string) => {
   writeSync(fd, Buffer.from(b64, "base64"));
 });
 
-await page.goto(`${base}/?shot&export&q=ultra#/place/${place}`, { waitUntil: "load" });
+await page.goto(`${base}/?shot&export&q=ultra&geometry=${geometry}#/place/${place}`, { waitUntil: "load" });
 await page.waitForFunction(() => typeof (window as unknown as { pocketAtlasExport?: unknown }).pocketAtlasExport === "function", null, { timeout: 180_000 });
 console.log("scene built; exporting");
 const t0 = Date.now();
@@ -65,7 +67,7 @@ const report = await page.evaluate(async (secs: number) => {
   return r.report;
 }, seconds);
 for (const fd of files.values()) closeSync(fd);
-writeFileSync(join(out, "report.json"), JSON.stringify({ ...report, wallMs: Date.now() - t0 }, null, 2) + "\n");
+writeFileSync(join(out, "report.json"), JSON.stringify({ ...report, geometry, wallMs: Date.now() - t0 }, null, 2) + "\n");
 console.log(JSON.stringify(report, null, 2));
 console.log(`wrote ${out}`);
 await browser.close();

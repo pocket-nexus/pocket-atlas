@@ -5,7 +5,7 @@ packs and renderers. OpenStrike owns BSP/FPS behavior. Pocket3D names the family
 of techniques used to build these systems. Sharing a device kernel does not
 require sharing a scene engine, material model or runtime ABI.
 
-## Milestone 1
+## Compiler stages
 
 ```mermaid
 flowchart LR
@@ -25,7 +25,7 @@ its quantized vertices. Shared analysis passes still perform world transforms,
 spatial chunking, lighting and animation sampling. PICA / GE now receive float
 positions, normals, tangents and UVs and original material pixels. Their own
 lowerings choose texture sizes/layouts, vertex layouts, lighting approximations,
-batching and runtime data. Vita retains its existing encoding and shaders.
+batching and runtime data. Vita retains its encoding and shaders, including solid PBR palette batching.
 
 `crates/pocket3d-place-cook/src/ir.rs` implements import, integrity checks and
 capability checks. `source.rs` describes typed transient shared-pass output: float vertices,
@@ -41,6 +41,14 @@ its PLCE envelope to v5 and its binary table to v3 independently of Vita v6.
 Previously a Vita version bump leaked into PICA output and the C reader rejected
 it; the integration test now checks cooked output using the runtime's C format
 header and header validator.
+
+The current recipes preserve full-attribute welds, deformation and palette
+seams, bounded rigid simplification, world-scaled motion errors and oversized
+triangle boundaries. Vita alone selects solid PBR palette batching and merges
+GPU-identical encoded vertices; that representation never enters PICA/GE.
+PICA keeps the two coarsest analysis LODs in its limited main-view slots. Vita
+interns identical geometry/animation buffers at serialization. Unsupported skin
+sizes fail before publication; omitted inverse-bind matrices use identity.
 
 ## PlaceIR v1
 
@@ -124,9 +132,10 @@ Future device receipts can replace this manually maintained release eligibility.
 A successful cook establishes asset construction and structural checks. A host
 build establishes binding/link compatibility. Console launch, SceShaccCg
 compilation, scene switching, visual fidelity and measured frame budgets are
-separate checks. Native output has changed for PICA/GE because it now retains
-source precision and avoids the BC round trip; existing hardware measurements
-must not be treated as measurements of these new artifacts.
+separate checks. The earlier PlaceIR migration changed PICA/GE output to retain source precision
+and avoid the BC round trip. This typed-analysis refactor preserves the current
+pack bytes for sealed regression inputs. Measurements still belong to the exact
+asset and runtime identities tested.
 
 The regression test `tests/pipeline.rs` imports a small textured scene, deletes
 the web export, compiles PSP and PICA before Vita, validates the PSP payload,

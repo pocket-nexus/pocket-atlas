@@ -190,6 +190,9 @@ impl Scene {
         let meta_bytes = f.section(&s_meta)?;
         let meta: pc::Meta = serde_json::from_slice(&meta_bytes).map_err(|e| format!("META: {e}"))?;
         drop(meta_bytes);
+        if meta.skins.iter().any(|s| s.joints.is_empty() || s.joints.len() > 24 || s.inverse_bind.size as usize != s.joints.len() * 64) {
+            return Err("skin must contain 1..24 joints and one inverse bind matrix per joint".into());
+        }
         let total = meta.textures.len() + 3;
 
         let mut up = Uploader::new(4 << 20)?;
@@ -449,11 +452,24 @@ impl Scene {
                 m.x_axis.z.abs() * e.x + m.y_axis.z.abs() * e.y + m.z_axis.z.abs() * e.z,
             );
             (wc - we, wc + we)
-        } else if d.skin.is_some() {
-            // People walk the whole street: bounds from the root joint each frame.
-            let s = &self.meta.skins[d.skin.unwrap() as usize];
-            let root = self.node_world[s.joints[0] as usize].transform_point3(Vec3::ZERO);
-            (root - Vec3::new(1.2, 0.2, 1.2), root + Vec3::new(1.2, 2.2, 1.2))
+        } else if let Some(skin) = d.skin {
+            // A skin can be a person or a batch of independently moving parts.
+            // The union of every joint-transformed bind box contains all
+            // nonnegative weighted blends; never assume a human-sized root.
+            let s = &self.meta.skins[skin as usize];
+            let base = s.inverse_bind.offset as usize / 4;
+            let c = (d.min + d.max) * 0.5;
+            let e = (d.max - d.min) * 0.5;
+            let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+            for (j, &node) in s.joints.iter().enumerate() {
+                let ibm = Mat4::from_cols_slice(&self.anim[base + j * 16..base + j * 16 + 16]);
+                let m = self.node_world[node as usize] * ibm;
+                let wc = m.transform_point3(c);
+                let we = m.x_axis.truncate().abs() * e.x + m.y_axis.truncate().abs() * e.y + m.z_axis.truncate().abs() * e.z;
+                lo = lo.min(wc - we);
+                hi = hi.max(wc + we);
+            }
+            (lo, hi)
         } else {
             (d.min, d.max)
         }

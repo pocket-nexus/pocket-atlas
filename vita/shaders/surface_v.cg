@@ -51,6 +51,13 @@ void main(
     uniform float4 uEye,
     out half4 oHaze : TEXCOORD7,
 #endif
+#if defined(SUN) && !defined(FLAT)
+    uniform float4 uSunMat[2],
+    uniform float4 uSunDir,
+    uniform float4 uSunRad,
+    uniform float4 uShadowK,
+    out float3 oShadow : TEXCOORD6,
+#endif
     out float4 oPosition : POSITION,
 #ifndef FLAT
     out half3 oNormal : TEXCOORD1,
@@ -96,6 +103,14 @@ void main(
     oWorld = world;
 #ifndef FLAT
     oNormal = (half3)normalize(n);
+#ifdef SUN
+    // The sun projection is affine. Interpolating its result removes
+    // three world-space dot products from every shaded fragment.
+    float3 shadowWorld = world + normalize(n) * uSunRad.w;
+    float4 sw = float4(shadowWorld, 1.0);
+    oShadow = float3(dot(uSunMat[0], sw), dot(uSunMat[1], sw),
+        (-dot(uSunDir.xyz, shadowWorld) - uShadowK.x) * uShadowK.y);
+#endif
 #ifdef WAVES
     oUv = world.xz * uWave[0].x + uWave[0].zw;
     oUv2 = world.xz * uWave[1].x + uWave[1].zw;
