@@ -4,7 +4,7 @@
 use bytemuck::{Pod, Zeroable};
 
 pub const MAGIC: u32 = u32::from_le_bytes(*b"PLPS");
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 pub const MAX_BYTES: usize = 18 * 1024 * 1024;
 pub const NONE: u32 = u32::MAX;
 pub const ALPHA: u32 = 1;
@@ -46,7 +46,9 @@ pub struct Header {
     pub door_trigger: [f32; 3],
     pub door_radius: f32,
     pub door_travel: f32,
-    pub reserved: [u32; 3],
+    /// Camera-centered, unindexed sky dome; empty for the night clear colour.
+    pub sky_vertices: Span,
+    pub sky_texture: u32,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Default, Pod, Zeroable)]
@@ -192,6 +194,31 @@ pub fn validate(bytes: &[u8]) -> Result<&Header, &'static str> {
             return Err("texture layout");
         }
         slice::<u8>(bytes, t.pixels)?;
+    }
+    if h.rain > 1 {
+        return Err("rain flag");
+    }
+    if h.sky_vertices.count == 0 {
+        if h.sky_texture != NONE {
+            return Err("sky texture without geometry");
+        }
+    } else {
+        if h.sky_texture as usize >= ts.len()
+            || h.sky_vertices.offset % 16 != 0
+            || h.sky_vertices.count % 3 != 0
+            || h.sky_vertices.count as usize > MAX_INDICES
+        {
+            return Err("sky geometry");
+        }
+        for v in slice::<Vertex>(bytes, h.sky_vertices)? {
+            let length2: f32 = v.pos.iter().map(|x| x * x).sum();
+            if v.pos.iter().chain(v.uv.iter()).any(|x| !x.is_finite())
+                || !(0.99..=1.01).contains(&length2)
+                || v.uv.iter().any(|x| !(0.0..=1.0).contains(x))
+            {
+                return Err("sky vertex");
+            }
+        }
     }
     let ms = slice::<Material>(bytes, h.materials)?;
     for m in ms {
@@ -355,6 +382,7 @@ mod tests {
         h.fps = 30.0;
         h.fog_far = 100.0;
         h.doors = [NONE; 2];
+        h.sky_texture = NONE;
         h.shots = Span {
             offset: core::mem::size_of::<Header>() as u32,
             count: 1,

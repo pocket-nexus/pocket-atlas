@@ -2,7 +2,9 @@
 //! already baked by the common cooker. PSP stores compact indexed GE vertices,
 //! RGBA4444 swizzled textures and the original rigid/skeletal animation.
 use bytemuck::{Pod, Zeroable};
-use glam::Vec3;
+use glam::{Mat4, Vec3};
+#[path = "psp_daylight.rs"]
+mod daylight;
 use pocket3d_place as pc;
 use pocket3d_place_psp as pp;
 use std::{collections::HashMap, path::Path};
@@ -58,10 +60,7 @@ pub fn cook(input: &Path, output: &Path) {
     let bytes = std::fs::read(input).expect("input place");
     let pack = pc::Pack::parse(&bytes).expect("cook this revision's Vita pack first");
     let m = pack.meta().expect("place metadata");
-    assert_eq!(
-        m.kind, "night-street",
-        "PSP currently supports the night-street material/effect set"
-    );
+    let daytime = daylight::enabled(&m.kind);
     let tex = pack.section(pc::TAG_TEXTURES).unwrap();
     let geom = pack.section(pc::TAG_GEOMETRY).unwrap();
     let anim = pack.section(pc::TAG_ANIMATION).unwrap();
@@ -98,7 +97,13 @@ pub fn cook(input: &Path, output: &Path) {
                 m.albedo.or(m.emission) == Some(id)
                     && (m.emissive.iter().any(|&e| e > 0.1) || m.kind == pc::Kind::Unlit)
             });
-            let cap = if luminous { 512 } else { 128 };
+            let cap = if luminous {
+                512
+            } else if daytime {
+                256
+            } else {
+                128
+            };
             let width = t.width.min(cap).max(8);
             let height = t.height.min(cap).max(8);
             let img = image::RgbaImage::from_raw(t.width, t.height, rgba).unwrap();
@@ -159,7 +164,7 @@ pub fn cook(input: &Path, output: &Path) {
                     pp::DOUBLE_SIDED
                 } else {
                     0
-                } | if mat.wet.as_ref().is_some_and(|v| v.planar) {
+                } | if !daytime && mat.wet.as_ref().is_some_and(|v| v.planar) {
                     pp::WET
                 } else {
                     0
@@ -193,9 +198,21 @@ pub fn cook(input: &Path, output: &Path) {
         (m.atmosphere.hemisphere_sky, m.atmosphere.hemisphere_ground),
         None,
     );
+    let occluder = if daytime {
+        crate::pica::sun_occluder(&m, geom)
+    } else {
+        None
+    };
+    let world = daylight::world_matrices(&m, anim);
     let mut draws = Vec::new();
     for draw in &m.draws {
         let mat = &m.materials[draw.material as usize];
+        let model = if daytime {
+            draw.node.map_or(Mat4::IDENTITY, |i| world[i as usize])
+        } else {
+            Mat4::IDENTITY
+        };
+        let normal_matrix = model.inverse().transpose();
         if mat.kind == pc::Kind::Products {
             super::psp_products::cook(
                 draw,
@@ -280,14 +297,28 @@ pub fn cook(input: &Path, output: &Path) {
                 });
                 let normal = Vec3::new(b[8] as i8 as f32, b[9] as i8 as f32, b[10] as i8 as f32)
                     .normalize_or(Vec3::Y);
-                let irradiance = if draw.layout == pc::VertexLayout::Baked {
+                let world_pos = model.transform_point3(Vec3::from_array(pos));
+                let world_normal = normal_matrix.transform_vector3(normal).normalize_or(normal);
+                let mut irradiance = if draw.layout == pc::VertexLayout::Baked {
                     let a = b[27] as f32 / 255.0;
                     Vec3::from_array(core::array::from_fn(|i| {
                         (b[24 + i] as f32 / 255.0 * a).powi(2) * 64.0
                     }))
                 } else {
-                    baker.irradiance(Vec3::from_array(pos), normal, mat.env_strength, true, 1.0)
+                    baker.irradiance(world_pos, world_normal, mat.env_strength, true, 1.0)
                 };
+                if daytime
+                    && !mat.interior
+                    && !matches!(mat.kind, pc::Kind::Unlit | pc::Kind::Water)
+                {
+                    irradiance += daylight::sun_light(
+                        m.sun.as_ref(),
+                        occluder.as_ref(),
+                        world_pos,
+                        world_normal,
+                        draw.node.is_none() && draw.skin.is_none(),
+                    );
+                }
                 let base =
                     Vec3::new(mat.color[0], mat.color[1], mat.color[2]) * Vec3::from_array(vc);
                 let light = match mat.kind {
@@ -305,7 +336,11 @@ pub fn cook(input: &Path, output: &Path) {
                 };
                 vertices.push(pp::Vertex {
                     uv,
-                    color: color((light * m.post.exposure).to_array(), alpha),
+                    color: if daytime {
+                        daylight::graded(light, alpha, &m.post)
+                    } else {
+                        color((light * m.post.exposure).to_array(), alpha)
+                    },
                     pos,
                 });
                 if draw.layout == pc::VertexLayout::Skinned {
@@ -381,6 +416,7 @@ pub fn cook(input: &Path, output: &Path) {
     let mut lights: Vec<_> = m
         .fog_lights
         .iter()
+        .filter(|_| !daytime)
         .map(|l| pp::Light {
             pos: l.position,
             color: color(l.color, 1.0),
@@ -431,7 +467,14 @@ pub fn cook(input: &Path, output: &Path) {
     let mut h = pp::Header::zeroed();
     h.magic = pp::MAGIC;
     h.version = pp::VERSION;
-    h.rain = m.rain.active as u32;
+    h.rain = (!daytime && m.rain.active) as u32;
+    let (sky_vertices, sky_texture) = if daytime {
+        daylight::sky(&m, tex, &mut w, &mut textures)
+    } else {
+        (pp::Span::default(), pp::NONE)
+    };
+    h.sky_vertices = sky_vertices;
+    h.sky_texture = sky_texture;
     h.textures = w.push(&textures);
     h.materials = w.push(&materials);
     h.draws = w.push(&draws);
@@ -442,8 +485,16 @@ pub fn cook(input: &Path, output: &Path) {
     h.walkable = w.push(&m.camera.walkable);
     h.fps = m.fps;
     h.frames = m.frames;
-    h.fog_color = color(m.atmosphere.fog_color, 1.0);
-    h.sky_color = color(m.atmosphere.sky_horizon, 1.0);
+    h.fog_color = if daytime {
+        daylight::graded(Vec3::from(m.atmosphere.fog_color), 1.0, &m.post)
+    } else {
+        color(m.atmosphere.fog_color, 1.0)
+    };
+    h.sky_color = if daytime {
+        daylight::graded(Vec3::from(m.atmosphere.sky_horizon), 1.0, &m.post)
+    } else {
+        color(m.atmosphere.sky_horizon, 1.0)
+    };
     h.fog_near = 12.0;
     h.fog_far = (1.8 / m.atmosphere.fog_density.max(0.001)).min(250.0);
     h.doors = [pp::NONE; 2];
@@ -474,7 +525,7 @@ pub fn cook(input: &Path, output: &Path) {
         .iter()
         .map(|v| v.1)
         .sum();
-    let report = serde_json::json!({"target":"psp","draws":draws.len(),"triangles":triangles,"vertices":vertices_total,"textures":textures.len(),"bytes":w.0.len(),"animatedNodes":nodes.iter().filter(|n|n.track.count>0).count(),"skinnedDraws":draws.iter().filter(|d|d.weights.count>0).count(),"shots":shots.len()});
+    let report = serde_json::json!({"target":"psp","kind":m.kind,"skyTriangles":h.sky_vertices.count / 3,"sunBake":daytime && m.sun.is_some(),"rain":h.rain != 0,"draws":draws.len(),"triangles":triangles,"vertices":vertices_total,"textures":textures.len(),"bytes":w.0.len(),"animatedNodes":nodes.iter().filter(|n|n.track.count>0).count(),"skinnedDraws":draws.iter().filter(|d|d.weights.count>0).count(),"shots":shots.len()});
     std::fs::write(
         output.with_extension("json"),
         serde_json::to_string_pretty(&report).unwrap(),
@@ -587,6 +638,88 @@ fn compact(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn converts_daylight_sky_and_disables_night_effects_without_changing_night() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.pocket-build/validation/psp-daylight-tests");
+        std::fs::create_dir_all(&root).unwrap();
+        let key = serde_json::json!({"pos":[0,1,3],"target":[0,1,0],"fov":50});
+        for kind in ["night-street", "daytime-slope", "daytime-street"] {
+            let meta = serde_json::json!({
+                "version":pc::VERSION,"name":"Daylight conversion regression","kind":kind,
+                "min":[-10,0,-10],"max":[10,20,10],"textures":[],"materials":[],"draws":[],
+                "nodes":[],"skins":[],"lights":[],"fog_tracks":[],"material_tracks":[],
+                "fog_lights":[{"position":[1,2,3],"color":[1,0.5,0.2],"intensity":1,"radius":2,"spot":null,"track":null}],
+                "fps":30,"frames":1,"beacons":[],"doors":null,"stats":{},
+                "atmosphere":{"fog_color":[0.4,0.5,0.6],"fog_density":0.003,"haze_density":0,
+                    "haze_ambient":[0,0,0],"haze_ambient_density":0,"dry_min":[0,0,0],"dry_max":[0,0,0],
+                    "hemisphere_sky":[0.4,0.45,0.5],"hemisphere_ground":[0.2,0.2,0.2],
+                    "sky_zenith":[0.1,0.2,0.4],"sky_horizon":[0.4,0.5,0.6],"sky_glow":[0,0,0],
+                    "environment":null,"environment_strength":0},
+                "rain":{"active":true,"dry_boxes":[],"drip_edges":[],"steam_vents":[]},
+                "camera":{"shots":[{"name":"Sky","from":key,"to":key,"duration":10}],"intro":key,"walkable":[]},
+                "day_sky":{"zenith":[0.1,0.2,0.4],"horizon":[0.4,0.5,0.6],"ground":[0.04,0.04,0.04],
+                    "gradient_power":1,"ground_blend":2,"sun_direction":[1,0,0],"sun_color":[1,1,1],
+                    "glow":0,"glow_wide":[1,2],"glow_tight":[1,20],"disc":0,
+                    "disc_cos_inner":0.9999,"disc_cos_outer":0.999,"clouds":null,
+                    "cloud_sun":[1,1,1],"cloud_ambient":[0.1,0.1,0.1],"fade_elevation":0.1,"drift":0.001}
+            });
+            let json = serde_json::to_vec(&meta).unwrap();
+            let source = root.join(format!("{kind}.place"));
+            let output = root.join(format!("{kind}.psp.place"));
+            std::fs::write(
+                &source,
+                pc::write(&[
+                    (pc::TAG_META, &json, 4),
+                    (pc::TAG_TEXTURES, &[], 16),
+                    (pc::TAG_GEOMETRY, &[], 16),
+                    (pc::TAG_ANIMATION, &[], 16),
+                ]),
+            )
+            .unwrap();
+            cook(&source, &output);
+            let bytes = std::fs::read(output).unwrap();
+            let h = pp::validate(&bytes).unwrap();
+            assert_eq!(core::mem::size_of::<pp::Header>(), 144);
+            if kind == "night-street" {
+                assert_eq!(h.rain, 1);
+                assert_eq!(h.lights.count, 1);
+                assert_eq!(h.sky_texture, pp::NONE);
+                assert_eq!(h.sky_vertices.count, 0);
+                assert_eq!(h.sky_color, color([0.4, 0.5, 0.6], 1.0));
+            } else {
+                assert_eq!(h.rain, 0);
+                assert_eq!(h.lights.count, 0);
+                assert_eq!(h.sky_vertices.count, 48 * 24 * 6);
+                let t =
+                    &pp::slice::<pp::Texture>(&bytes, h.textures).unwrap()[h.sky_texture as usize];
+                assert_eq!((t.width, t.height), (512, 256));
+                let pixels = pp::slice::<u16>(
+                    &bytes,
+                    pp::Span {
+                        offset: t.pixels.offset,
+                        count: t.pixels.count / 2,
+                    },
+                )
+                .unwrap();
+                assert!(pixels.iter().all(|v| v & 0xf000 == 0xf000));
+                assert_ne!(
+                    pixels[0],
+                    pixels[pixels.len() - 1],
+                    "ground and zenith retain different colours"
+                );
+                // Payload corruption must be caught before passing pointers to GE.
+                let mut bad = bytes.clone();
+                bad[h.sky_vertices.offset as usize + 12..h.sky_vertices.offset as usize + 16]
+                    .copy_from_slice(&f32::NAN.to_le_bytes());
+                assert_eq!(pp::validate(&bad).err(), Some("sky vertex"));
+                let mut bad = bytes.clone();
+                let head = bytemuck::from_bytes_mut::<pp::Header>(&mut bad[..144]);
+                head.sky_texture = head.textures.count;
+                assert_eq!(pp::validate(&bad).err(), Some("sky geometry"));
+            }
+        }
+    }
     #[test]
     fn batching_rebases_indices_without_losing_spatial_chunks() {
         let mut w = Writer(vec![0; core::mem::size_of::<pp::Header>()]);

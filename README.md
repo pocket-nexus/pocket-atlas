@@ -2,13 +2,13 @@
 
 A world map of places people remember. A place is a small, self-contained 3D scene of one real spot — a street corner, a stairway, a café — pinned to its location on a shared globe. People will publish their own places (publicly or privately) and download other people's places to visit them.
 
-This repository holds the first-party places, the pipeline that turns a place into a pack for a handheld GPU, and native PS Vita, Nintendo 3DS and PSP renderers. Publishing and downloading are not built yet. Vita and 3DS target 30 fps; PSP currently supports the Rainy Night Konbini place through its fixed-function GE pipeline.
+This repository holds the first-party places, the pipeline that turns a place into a pack for a handheld GPU, and native PS Vita, Nintendo 3DS and PSP renderers. Publishing and downloading are not built yet. Vita and 3DS target 30 fps; PSP supports night streets and daytime slopes/streets through its fixed-function GE pipeline.
 
 Places share their assets across the reference and handheld renderers:
 
 - **`web/`** is the reference renderer: a standalone three.js + Vite app with no PocketJS dependency, with a night-side globe to pick a place. Every asset is generated at load time.
 - **`vita/`** renders the same place on a PS Vita with its own GXM pipeline: Cg programs compiled on the device by SceShaccCg, 4× MSAA HDR targets and the effect set the place needs.
-- **`n3ds/`** renders the shared globe, place browser and all four scenes on an Old 3DS, using a PICA200 cook of the same assets, native 400 × 240 output and a 30fps quality budget. See [the 3DS build and debug workflow](n3ds/README.md).
+- **`n3ds/`** renders the shared globe, place browser and five supported scenes on an Old 3DS, using a PICA200 cook of the same assets, native 400 × 240 output and a 30fps quality budget. Unsupported kinds remain visible with an unavailable label. See [the 3DS build and debug workflow](n3ds/README.md).
 
 A pack connects the renderers: the web app exports a place as glTF 2.0 with `extras.pocketAtlas`, and the cooker (`crates/pocket3d-place-cook`) turns it into a `.place` pack for the handheld GPU.
 
@@ -21,6 +21,7 @@ A pack connects the renderers: the web app exports a place as glTF 2.0 with `ext
 | Radio Kaikan at Blue Hour | `akihabara-radio-kaikan` | Akihabara, Tokyo (秋葉原ラジオ会館, the 2014 building) | twilight sky (sun below the horizon), animated LED signage (flipbooks and scrolling strips), backlit window artwork, panel lights and lamps baked with sky occlusion, pedestrians and a passing train |
 | Kamakura-Kōkōmae Crossing | `kamakura-koko-mae-crossing` | Shichirigahama, Kamakura (鎌倉高校前1号踏切 on the Enoden) | open water (wave layers, Fresnel sky reflection, glitter path) to a 16 km horizon in FogExp2 haze, scrolling surf strips, flashing crossing lamps and gates driven by material and node tracks, a train, Route 134 traffic |
 | Griffith Observatory at Blue Hour | `griffith-observatory` | Mount Hollywood, Los Angeles, over the basin (September 2015) | light fields of GXM point sprites (52k city lights, 5k moving), height haze with an inversion layer to a 71 km horizon, floodlit masonry baked into vertices, parallax windows, a resolution boost to 640×362 |
+| Lombard Street in Bloom | `sf-lombard-street` | Hyde to Leavenworth, Russian Hill, San Francisco | eight surveyed switchbacks, stepped footways, red brick paving, hydrangeas and bougainvillea, bay-window houses, a clear daytime sky, three cars and three visitors in a 120 s loop; shared daylight adaptation for PSP |
 
 Real places fall into a finite set of kinds; the registry names them (`PlaceKind` in `web/src/core/types.ts`): `night-street`, `daytime-slope`, `dusk-street`, `daytime-coast`, `dusk-vista` for the places built so far, and `daytime-street`, `night-slope`, `dusk-coast`, `night-coast`, `interior` and `rooftop` for the places still to come. Each first-party place brings its kind's rendering to the best quality the handheld holds, and the work goes into the shared renderer and cooker so later places of the same kind reuse it. Glass (`places/shared/glass.ts`) blends premultiplied on the web as on the device. The workflow and quality bar for making a place are in the `pocket-atlas-place` skill (`.claude/skills/pocket-atlas-place/`).
 
@@ -51,6 +52,8 @@ bun run dev          # http://127.0.0.1:5173
 Controls and URL switches are listed in `web/README.md`.
 
 ## PSP
+
+Lombard Street uses the same viewer and controls, with a graded sky panorama, baked directional light and static shadows. Rain and wet-road reflections are disabled by the pack's features. Export its full 120-second loop, then pass `--place sf-lombard-street` to `cook`, `build` and `package`; see [the PSP daylight details and limitations](psp/README.md). Runtime and frame budgets for Lombard still require physical hardware measurement.
 
 Rainy Night Konbini runs locally at **480×272**, with baked lighting, alpha-tested shelf facings, planar reflections of lit surfaces and moving objects, rain, lamp halos, the six authored camera shots, the taxi and skinned pedestrians. The analog stick moves; the D-pad looks. L/R change shots, START resumes the camera sequence, × pauses, □ toggles rain, △ toggles reflections, ○ mutes sound, and SELECT toggles the diagnostic readout. Walking near the entrance opens the doors and plays the door chime; the rain bed quiets indoors. HOME exits.
 

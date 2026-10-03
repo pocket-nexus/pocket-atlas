@@ -47,7 +47,7 @@ fn byte(x: f32) -> u8 {
 fn grade(c: Vec3, p: &pc::Post) -> Vec3 {
     Vec3::from(pc::color::tone(c.to_array(), p))
 }
-fn decode(t: &pc::Texture, blob: &[u8]) -> Rgba {
+pub(super) fn decode(t: &pc::Texture, blob: &[u8]) -> Rgba {
     let data = &blob[t.data.offset as usize..(t.data.offset + t.data.size) as usize];
     let mut rgba = vec![0u8; (t.width * t.height * 4) as usize];
     match t.format {
@@ -467,7 +467,7 @@ fn recover_structural_details(
 
 // Display-referred panoramas preserve authored day/twilight colour, sunlight
 // and clouds without spending fragment instructions or an HDR target on PICA.
-fn sky_radiance(s: &pc::DaySky, d: Vec3) -> Vec3 {
+pub(super) fn sky_radiance(s: &pc::DaySky, d: Vec3) -> Vec3 {
     let h = d.y;
     let mut color =
         Vec3::from(s.horizon).lerp(Vec3::from(s.zenith), h.max(0.0).powf(s.gradient_power));
@@ -503,7 +503,7 @@ fn sky_radiance(s: &pc::DaySky, d: Vec3) -> Vec3 {
     color
 }
 // Match a filtered GPU panorama sample (repeat azimuth, clamp elevation).
-fn bilinear(image: &Rgba, u: f32, v: f32) -> [f32; 4] {
+pub(super) fn bilinear(image: &Rgba, u: f32, v: f32) -> [f32; 4] {
     let x = u * image.w as f32 - 0.5;
     let y = v * image.h as f32 - 0.5;
     let (ix, iy) = (x.floor() as i32, y.floor() as i32);
@@ -613,12 +613,13 @@ fn source_position(d: &pc::Draw, bytes: &[u8], i: usize) -> Vec3 {
     let p = &bytes[d.vertices.offset as usize + i * d.layout.stride() as usize..];
     Vec3::from(d.pos_offset) + Vec3::new(q16(p, 0), q16(p, 2), q16(p, 4)) * Vec3::from(d.pos_scale)
 }
-fn sun_occluder(m: &pc::Meta, bytes: &[u8]) -> Option<crate::occlusion::Occluder> {
+pub(super) fn sun_occluder(m: &pc::Meta, bytes: &[u8]) -> Option<crate::occlusion::Occluder> {
     m.sun.as_ref()?.shadow.as_ref()?;
     let mut tris = Vec::new();
     for d in &m.draws {
         let mat = &m.materials[d.material as usize];
-        if d.node.is_some()
+        if !d.cast_shadow
+            || d.node.is_some()
             || d.skin.is_some()
             || mat.kind == pc::Kind::Glass
             || mat.kind == pc::Kind::Water
@@ -644,6 +645,33 @@ fn sun_occluder(m: &pc::Meta, bytes: &[u8]) -> Option<crate::occlusion::Occluder
     Some(crate::occlusion::Occluder::new(tris, 1, 2000.0))
 }
 
+fn validate_support(
+    kind: &str,
+    layouts: impl Iterator<Item = pc::VertexLayout>,
+    vista_haze: bool,
+) -> Result<(), &'static str> {
+    if !matches!(
+        kind,
+        "night-street" | "daytime-slope" | "daytime-street" | "dusk-street" | "daytime-coast"
+    ) {
+        return Err(
+            "3DS does not support this place kind; keep it unavailable in the native catalog",
+        );
+    }
+    if vista_haze {
+        return Err("3DS does not implement vista haze");
+    }
+    if layouts
+        .into_iter()
+        .any(|layout| layout == pc::VertexLayout::Lights)
+    {
+        return Err(
+            "3DS does not implement light fields; they cannot be converted as indexed triangles",
+        );
+    }
+    Ok(())
+}
+
 pub fn cook(input: &Path, output: &Path, cap: u32) {
     assert!(
         cap.is_power_of_two() && (64..=1024).contains(&cap),
@@ -652,6 +680,12 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
     let bytes = std::fs::read(input).expect("read source place");
     let pack = pc::Pack::parse(&bytes).unwrap();
     let m = pack.meta().unwrap();
+    validate_support(
+        &m.kind,
+        m.draws.iter().map(|d| d.layout),
+        m.vista_haze.is_some(),
+    )
+    .expect("PICA renderer capability validation");
     let src_tex = pack.section(pc::TAG_TEXTURES).unwrap();
     let src_geom = pack.section(pc::TAG_GEOMETRY).unwrap();
     let src_anim = pack.section(pc::TAG_ANIMATION).unwrap();
@@ -1454,6 +1488,31 @@ pub fn cook(input: &Path, output: &Path, cap: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unsupported_features_fail_before_decoding_triangle_geometry() {
+        for kind in [
+            "night-street",
+            "daytime-slope",
+            "daytime-street",
+            "dusk-street",
+            "daytime-coast",
+        ] {
+            assert!(validate_support(
+                kind,
+                [pc::VertexLayout::Baked, pc::VertexLayout::Skinned].into_iter(),
+                false
+            )
+            .is_ok());
+        }
+        assert!(validate_support("dusk-vista", [].into_iter(), false).is_err());
+        assert!(validate_support(
+            "daytime-slope",
+            [pc::VertexLayout::Lights].into_iter(),
+            false
+        )
+        .is_err());
+        assert!(validate_support("daytime-slope", [].into_iter(), true).is_err());
+    }
     #[test]
     fn structural_classifier_preserves_rotated_tubes_but_rejects_wires_and_panels() {
         let rotation = Quat::from_euler(glam::EulerRot::YXZ, 0.7, 0.4, 0.2);

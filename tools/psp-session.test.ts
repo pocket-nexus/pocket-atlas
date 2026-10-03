@@ -22,7 +22,7 @@ describe("PSP mailbox boundary", () => {
   test("camera table requires matching magic, version, length and bounded span", () => {
     const bytes = Buffer.alloc(160 + 76);
     bytes.write("PLPS");
-    bytes.writeUInt32LE(1, 4);
+    bytes.writeUInt32LE(2, 4);
     bytes.writeUInt32LE(bytes.length, 8);
     bytes.writeUInt32LE(160, 48);
     bytes.writeUInt32LE(1, 52);
@@ -30,7 +30,7 @@ describe("PSP mailbox boundary", () => {
     bytes.writeUInt32LE(2, 52);
     expect(() => shotCount(bytes)).toThrow();
     bytes.writeUInt32LE(1, 52);
-    bytes.writeUInt32LE(2, 4);
+    bytes.writeUInt32LE(1, 4);
     expect(() => shotCount(bytes)).toThrow();
   });
 });
