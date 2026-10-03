@@ -7,8 +7,8 @@ use std::io::Read;
 
 use glam::{Mat4, Quat, Vec3, Vec4};
 use pocket3d_place as pc;
-use pocket3d_gxm::mem::{Arena, Kind};
-use pocket3d_gxm::texture::{Format, Texture, Uploader, Wrap};
+use pocket_vita_gxm::mem::{Arena, Kind};
+use pocket_vita_gxm::texture::{Format, Texture, Uploader, Wrap};
 
 pub struct DrawGpu {
     pub vb: *const u8,

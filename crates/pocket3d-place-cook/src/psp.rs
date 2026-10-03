@@ -1,4 +1,4 @@
-//! Shared fixed-function adaptation of a cooked place. Static irradiance is
+//! Fixed-function lowering from shared scene analysis to a PSP device pack. Static irradiance is
 //! already baked by the common cooker. PSP stores compact indexed GE vertices,
 //! RGBA4444 swizzled textures and the original rigid/skeletal animation.
 use bytemuck::{Pod, Zeroable};
@@ -34,9 +34,6 @@ pub(super) fn color(c: [f32; 3], alpha: f32) -> u32 {
         (alpha.clamp(0.0, 1.0) * 255.0) as u8,
     ])
 }
-fn word(b: &[u8], o: usize) -> i16 {
-    i16::from_le_bytes([b[o], b[o + 1]])
-}
 fn float(b: &[u8], o: usize) -> f32 {
     f32::from_le_bytes(b[o..o + 4].try_into().unwrap())
 }
@@ -54,17 +51,15 @@ pub(super) fn swizzle(pixels: &[u8], row: usize, height: usize) -> Vec<u8> {
     out
 }
 
-pub fn cook(input: &Path, output: &Path) {
-    let bytes = std::fs::read(input).expect("input place");
-    let pack = pc::Pack::parse(&bytes).expect("cook this revision's Vita pack first");
-    let m = pack.meta().expect("place metadata");
+pub fn cook(scene: &crate::source::Scene, output: &Path) {
+    let m = &scene.meta;
     assert_eq!(
         m.kind, "night-street",
         "PSP currently supports the night-street material/effect set"
     );
-    let tex = pack.section(pc::TAG_TEXTURES).unwrap();
-    let geom = pack.section(pc::TAG_GEOMETRY).unwrap();
-    let anim = pack.section(pc::TAG_ANIMATION).unwrap();
+    let tex = scene.textures();
+    let geom = scene.geometry();
+    let anim = scene.animation();
     let mut w = Writer(vec![0; core::mem::size_of::<pp::Header>()]);
     let mut textures = Vec::new();
     let mut tex_map = HashMap::new();
@@ -99,8 +94,8 @@ pub fn cook(input: &Path, output: &Path) {
                     && (m.emissive.iter().any(|&e| e > 0.1) || m.kind == pc::Kind::Unlit)
             });
             let cap = if luminous { 512 } else { 128 };
-            let width = t.width.min(cap).max(8);
-            let height = t.height.min(cap).max(8);
+            let width = t.width.next_power_of_two().min(cap).max(8);
+            let height = t.height.next_power_of_two().min(cap).max(8);
             let img = image::RgbaImage::from_raw(t.width, t.height, rgba).unwrap();
             let small =
                 image::imageops::resize(&img, width, height, image::imageops::FilterType::Lanczos3);
@@ -200,9 +195,7 @@ pub fn cook(input: &Path, output: &Path) {
             super::psp_products::cook(
                 draw,
                 mat,
-                &m,
-                geom,
-                tex,
+                scene,
                 &mut w,
                 &mut textures,
                 &mut materials,
@@ -228,23 +221,7 @@ pub fn cook(input: &Path, output: &Path) {
             .collect();
         if draw.node.is_some() || draw.skin.is_some() {
             let verts: Vec<_> = (0..draw.vertex_count as usize)
-                .map(|i| {
-                    let offset = draw.vertices.offset as usize + i * draw.layout.stride() as usize;
-                    let b = &geom[offset..offset + draw.layout.stride() as usize];
-                    crate::geometry::Vertex {
-                        pos: Vec3::from_array(core::array::from_fn(|k| {
-                            word(b, k * 2) as f32 / 32767.0 * draw.pos_scale[k] + draw.pos_offset[k]
-                        })),
-                        normal: Vec3::new(b[8] as i8 as f32, b[9] as i8 as f32, b[10] as i8 as f32)
-                            .normalize_or(Vec3::Y),
-                        uv: glam::Vec2::from_array(core::array::from_fn(|k| {
-                            word(b, 16 + k * 2) as f32 / 32767.0 * draw.uv_scale[k]
-                                + draw.uv_offset[k]
-                        })),
-                        color: b[20..24].try_into().unwrap(),
-                        ..Default::default()
-                    }
-                })
+                .map(|i| *scene.vertex(draw, i))
                 .collect();
             let tris: Vec<_> = selected
                 .chunks_exact(3)
@@ -254,10 +231,7 @@ pub fn cook(input: &Path, output: &Path) {
             // each garment/prop while retaining the original bone weights.
             let locks: Vec<bool> = (0..verts.len())
                 .map(|i| {
-                    draw.skin.is_some() && {
-                        let at = draw.vertices.offset as usize + i * 32 + 28;
-                        geom[at..at + 4].iter().filter(|&&w| w > 0).count() > 1
-                    }
+                    draw.skin.is_some() && scene.vertex(draw, i).weights.iter().filter(|&&w| w > 0).count() > 1
                 })
                 .collect();
             if let Some((tris, _)) = crate::geometry::simplify(&verts, &tris, 0.15, 0.025, &locks) {
@@ -266,24 +240,15 @@ pub fn cook(input: &Path, output: &Path) {
         }
         for old in selected {
             let index = *remap.entry(old).or_insert_with(|| {
-                let offset =
-                    draw.vertices.offset as usize + old as usize * draw.layout.stride() as usize;
-                let b = &geom[offset..offset + draw.layout.stride() as usize];
-                let pos = core::array::from_fn(|i| {
-                    word(b, i * 2) as f32 / 32767.0 * draw.pos_scale[i] + draw.pos_offset[i]
-                });
-                let uv = core::array::from_fn(|i| {
-                    word(b, 16 + i * 2) as f32 / 32767.0 * draw.uv_scale[i] + draw.uv_offset[i]
-                });
-                let vc = core::array::from_fn::<_, 3, _>(|i| {
-                    pc::color::decode(b[20 + i] as f32 / 255.0)
-                });
-                let normal = Vec3::new(b[8] as i8 as f32, b[9] as i8 as f32, b[10] as i8 as f32)
-                    .normalize_or(Vec3::Y);
+                let v = scene.vertex(draw, old as usize);
+                let pos = v.pos.to_array();
+                let uv = v.uv.to_array();
+                let vc = core::array::from_fn::<_, 3, _>(|i| pc::color::decode(v.color[i] as f32 / 255.0));
+                let normal = v.normal.normalize_or(Vec3::Y);
                 let irradiance = if draw.layout == pc::VertexLayout::Baked {
-                    let a = b[27] as f32 / 255.0;
+                    let a = v.light[3] as f32 / 255.0;
                     Vec3::from_array(core::array::from_fn(|i| {
-                        (b[24 + i] as f32 / 255.0 * a).powi(2) * 64.0
+                        (v.light[i] as f32 / 255.0 * a).powi(2) * 64.0
                     }))
                 } else {
                     baker.irradiance(Vec3::from_array(pos), normal, mat.env_strength, true, 1.0)
@@ -301,7 +266,7 @@ pub fn cook(input: &Path, output: &Path) {
                 let alpha = if mat.kind == pc::Kind::Glass {
                     0.14
                 } else {
-                    mat.color[3] * b[23] as f32 / 255.0
+                    mat.color[3] * v.color[3] as f32 / 255.0
                 };
                 vertices.push(pp::Vertex {
                     uv,
@@ -310,8 +275,8 @@ pub fn cook(input: &Path, output: &Path) {
                 });
                 if draw.layout == pc::VertexLayout::Skinned {
                     weights.push(pp::Weights {
-                        joints: b[24..28].try_into().unwrap(),
-                        weights: b[28..32].try_into().unwrap(),
+                        joints: v.joints,
+                        weights: v.weights,
                     });
                 }
                 (vertices.len() - 1) as u16
@@ -447,7 +412,7 @@ pub fn cook(input: &Path, output: &Path) {
     h.fog_near = 12.0;
     h.fog_far = (1.8 / m.atmosphere.fog_density.max(0.001)).min(250.0);
     h.doors = [pp::NONE; 2];
-    if let Some(d) = m.doors {
+    if let Some(d) = &m.doors {
         h.doors = [d.left, d.right];
         h.door_trigger = d.trigger;
         h.door_radius = d.radius;

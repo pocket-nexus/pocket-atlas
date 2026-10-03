@@ -1,10 +1,10 @@
 # Host-side crates: the pack format and the cooker. The Vita runtime (vita/)
-# and its GXM layer (crates/pocket3d-gxm) build through cargo-vita as their
-# own workspaces.
+# builds through cargo-vita as its own workspace. Its shared GXM mechanisms
+# come from the pinned PocketJS device kernel.
 [workspace]
 resolver = "2"
 members = ["crates/pocket3d-place", "crates/pocket3d-place-cook", "crates/pocket3d-place-psp"]
-exclude = ["crates/pocket3d-gxm", "vita", "psp", "ipod", "vendor"]
+exclude = ["vita", "psp", "ipod", "vendor"]
 
 [profile.release]
 debug = false
