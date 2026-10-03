@@ -20,7 +20,7 @@ Any material may carry `frames`/`scroll` (e.g. surf strips): `UvAnim` applies to
 
 ## Nodes
 
-- `dynamic: true` — the node moves (tracks recorded for the loop); not baked, not in the sun's shadow map, one draw per node. Do not use it to keep a static mesh out of the web's batching: batching keeps vertex colours.
+- `dynamic: true` — the node moves (translation/rotation tracks recorded for the loop); not baked, one draw per primitive/node. Rigid opaque/cut-out parts receive LODs and cast into the separate moving sun-shadow map; skinned content does neither. Do not use it to keep a static mesh out of the web's batching: batching keeps vertex colours. Animated instance matrices are not recorded: use ordinary nodes or small skins (`shared/rigid-particles.ts`) when every instance moves independently.
 - Lights: point, spot and the panel lights the exporter writes are baked into static vertices; `castShadow` on the directional light makes it the per-pixel sun.
 
 ## Scene (`extras.pocketAtlas` on the scene)

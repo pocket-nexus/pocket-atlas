@@ -1,1 +1,1 @@
-export { DayLib, type Tint } from "../../shared/daylight/materials";
+export * from "../../shared/daylight/materials";

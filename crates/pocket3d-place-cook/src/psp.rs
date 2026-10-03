@@ -55,6 +55,7 @@ pub(super) fn swizzle(pixels: &[u8], row: usize, height: usize) -> Vec<u8> {
 
 pub fn cook(scene: &crate::source::Scene, output: &Path) {
     let m = &scene.meta;
+    assert!(m.materials.iter().all(|m| !m.vertex_pbr), "PSP lowering requires source materials, not Vita PBR palettes");
     let daytime = daylight::enabled(&m.kind);
     let tex = scene.textures();
     let geom = scene.geometry();
@@ -256,7 +257,7 @@ pub fn cook(scene: &crate::source::Scene, output: &Path) {
                     draw.skin.is_some() && scene.vertex(draw, i).weights.iter().filter(|&&w| w > 0).count() > 1
                 })
                 .collect();
-            if let Some((tris, _)) = crate::geometry::simplify(&verts, &tris, 0.15, 0.025, &locks) {
+            if let Some((tris, _)) = crate::geometry::simplify(&verts, &tris, 0.15, 0.025, &locks, 0.02) {
                 selected = tris.iter().flatten().map(|&i| i as u16).collect();
             }
         }

@@ -32,10 +32,11 @@ capability checks. `source.rs` describes transient shared-pass output; it is not
 a serialized interchange format. `main.rs` still orchestrates the existing
 analysis and Vita writer; `pica.rs` and `psp.rs` own native lowerings. Existing
 `pocket3d-place::Meta` types are reused internally during this migration. They
-are not the public definition of PlaceIR. Milestone 1 retained device format
-versions; the later PSP daylight update uses PLPS v3 and requires re-cooking
-PSP assets with its matching renderer. PICA pins
-its PLCE envelope to v5 and its binary table to v3 independently of Vita v6.
+are not the public definition of PlaceIR. The PlaceIR migration itself retained
+device formats. Vita now uses PLCE/ATLS v7 and Place META v7 for vertex-PBR
+palettes; older runtimes reject these packs.
+PICA pins its PLCE envelope to v5 and its binary table to v3 independently.
+PSP uses PLPS v3 with explicit texture precision and requires matching assets and renderer.
 Previously a Vita version bump leaked into PICA output and the C reader rejected
 it; the integration test now checks cooked output using the runtime's C format
 header and header validator.

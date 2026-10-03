@@ -2,6 +2,7 @@ import { Color, DoubleSide, MeshBasicMaterial, MeshStandardMaterial, Vector2, ty
 import type { Quality } from "../../../core/quality";
 import type { Baker, SurfaceMaps } from "../bake";
 import * as SURF from "./surfaces";
+import { glassMaterial } from "../glass";
 
 export type Tint = [number, number, number];
 
@@ -125,9 +126,9 @@ export class DayLib {
 
   // ---------------------------------------------------------- ground
 
-  asphalt(): MeshStandardMaterial {
-    return this.memo("asphalt", () => {
-      const m = withMaps(this.surf("asphalt", SURF.ASPHALT, 1024, 4, 2), { normalScale: new Vector2(0.5, 0.5) });
+  asphalt(tileMeters = 4, tint = 0xffffff): MeshStandardMaterial {
+    return this.memo(`asphalt-${tileMeters}-${tint}`, () => {
+      const m = withMaps(this.surf(tileMeters === 4 ? "asphalt" : `asphalt-${tileMeters}`, SURF.ASPHALT, 1024, tileMeters, 2), { color: tint, normalScale: new Vector2(0.5, 0.5) });
       m.userData.worldUV = true;
       return m;
     });
@@ -195,8 +196,8 @@ export class DayLib {
     );
   }
 
-  bark(): MeshStandardMaterial {
-    return this.memo("bark", () => withMaps(this.surf("bark", SURF.BARK, 512, 1, 3), { normalScale: new Vector2(1.4, 1.4) }));
+  bark(tint = 0xffffff): MeshStandardMaterial {
+    return this.memo(`bark-${tint}`, () => withMaps(this.surf("bark", SURF.BARK, 512, 1, 3), { color: tint, normalScale: new Vector2(1.4, 1.4) }));
   }
 
   /** Painted steel in any colour (rails, poles, frames). */
@@ -204,6 +205,22 @@ export class DayLib {
     return this.memo(`paint-${hex.toString(16)}-${rough}`, () =>
       withMaps(this.surf("paint", SURF.PAINT, 512, 1, 1), { color: hex, roughness: rough / 0.5, normalScale: new Vector2(0.6, 0.6) }),
     );
+  }
+
+  /** Brushed stainless sheets with restrained relief at close viewing distances. */
+  stainless(): MeshStandardMaterial {
+    return this.memo("stainless", () => withMaps(this.surf("stainless", SURF.STAINLESS, 1024, 1, 0.05), {
+      normalScale: new Vector2(0.07, 0.07), envMapIntensity: 0.85,
+    }));
+  }
+
+  /** Thin railway glazing: real openings and interior geometry behind the reflection. */
+  clearGlass(): MeshStandardMaterial {
+    return this.memo("clear-glass", () => glassMaterial({
+      color: 0x708f91, roughness: 0.13, metalness: 0.18,
+      transparent: true, opacity: 0.24, depthWrite: false, side: DoubleSide,
+      envMapIntensity: 0.85,
+    }));
   }
 
   /** Plain PBR without maps (small props, far field). */
