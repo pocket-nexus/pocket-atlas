@@ -143,6 +143,7 @@ pub struct MaterialTrack {
 }
 
 pub struct Scene {
+    pub provenance: serde_json::Value,
     pub name: String,
     pub kind: String,
     pub min: Vec3,

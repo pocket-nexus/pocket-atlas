@@ -37,6 +37,12 @@ function withMaps(maps: SurfaceMaps, params: ConstructorParameters<typeof MeshSt
  * GPU and tinted per use; wet/damp/glass patches hook the rain uniforms.
  */
 export class MaterialLib {
+  private textureKeys = new Map<Texture, number>();
+  private textureKey(texture?: Texture): string {
+    if (!texture) return "none";
+    if (!this.textureKeys.has(texture)) this.textureKeys.set(texture, this.textureKeys.size);
+    return `texture-${this.textureKeys.get(texture)}`;
+  }
   readonly wet: WetShared;
   private baker: Baker;
   private size: number;
@@ -108,7 +114,7 @@ export class MaterialLib {
   }
 
   roadStencil(alpha: Texture): MeshStandardMaterial {
-    return this.memo(`stencil-${alpha.uuid}`, () => {
+    return this.memo(`stencil-${this.textureKey(alpha)}`, () => {
       const m = new MeshStandardMaterial({
         color: 0xe8e8e2,
         alphaMap: alpha,
@@ -239,7 +245,7 @@ export class MaterialLib {
    * appearance as emission (the planar reflection and IBL add the gloss).
    */
   interior(hex: number, lit = 0.9, rough = 0.5, map?: Texture, key = ""): MeshStandardMaterial {
-    return this.memo(`interior-${hex.toString(16)}-${lit}-${rough}-${map?.uuid ?? ""}-${key}`, () => {
+    return this.memo(`interior-${hex.toString(16)}-${lit}-${rough}-${this.textureKey(map)}-${key}`, () => {
       const m = new MeshStandardMaterial({
         color: hex,
         map: map ?? null,
@@ -315,7 +321,7 @@ export class MaterialLib {
 
   /** Textured emissive panel (signs, vending displays, screens). */
   sign(tex: Texture, intensity: number, opts: { rough?: number; fog?: boolean; key?: string } = {}): MeshStandardMaterial {
-    return this.memo(`sign-${opts.key ?? tex.uuid}-${intensity}`, () => {
+    return this.memo(`sign-${opts.key ?? this.textureKey(tex)}-${intensity}`, () => {
       const m = new MeshStandardMaterial({
         color: 0x111111,
         map: tex,
@@ -333,7 +339,7 @@ export class MaterialLib {
 
   /** Unlit texture (interior displays behind glass where lighting is baked in). */
   flat(tex: Texture, intensity = 1, key?: string): MeshBasicMaterial {
-    return this.memo(`flat-${key ?? tex.uuid}-${intensity}`, () => {
+    return this.memo(`flat-${key ?? this.textureKey(tex)}-${intensity}`, () => {
       const m = new MeshBasicMaterial({ map: tex, fog: false });
       m.color.setScalar(intensity);
       m.userData.pocketAtlas = { kind: "unlit", color: [intensity, intensity, intensity], fog: false };

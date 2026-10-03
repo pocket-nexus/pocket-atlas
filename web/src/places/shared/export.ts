@@ -1,4 +1,7 @@
 import { exportedTextureUsages } from "./texture-usage";
+import { validateSampling, type EffectiveAuthoring } from "./authoring";
+import { identifySources } from "./provenance";
+import { validateExportMaterial, validateExportObject } from "./export-contract";
 import {
   AnimationClip,
   CanvasTexture,
@@ -78,6 +81,8 @@ export interface CommonMeta {
 }
 
 export interface ExportInput {
+  authoring?: EffectiveAuthoring;
+  startSeconds?: number;
   renderer: WebGLRenderer;
   world: ExportWorld;
   baker: Baker;
@@ -113,9 +118,9 @@ const round = (v: number, p = 1e5) => Math.round(v * p) / p;
 const arr = (v: { x: number; y: number; z: number }) => [round(v.x), round(v.y), round(v.z)];
 const col = (c: Color) => [round(c.r), round(c.g), round(c.b)];
 
-function safeName(o: Object3D): string {
+function safeName(o: Object3D, index: number): string {
   const base = (o.name || o.type).replace(/[^A-Za-z0-9_-]+/g, "-").slice(0, 40);
-  return `${base}_${o.id}`;
+  return `${base}_${index}`;
 }
 
 /** JSON-safe copy of a pocketAtlas annotation (textures become a marker). */
@@ -213,8 +218,9 @@ class Materials {
   convert(m: Material): Material {
     const hit = this.cache.get(m.uuid);
     if (hit) return hit;
+    validateExportMaterial(m);
     const out = this.make(m);
-    out.name = m.name || m.type;
+    out.name = `${m.name || m.type}_${this.cache.size}`;
     this.cache.set(m.uuid, out);
     return out;
   }
@@ -231,6 +237,8 @@ class Materials {
       out.userData = { pocketAtlas: pc };
       return out;
     }
+    if (!(m as MeshBasicMaterial).isMeshBasicMaterial && !(m as MeshStandardMaterial).isMeshStandardMaterial)
+      throw new Error(`Unsupported material ${m.name || m.type}: ${m.type}; add an Atlas semantic lowering before export`);
     const common = {
       side: m.side,
       transparent: m.transparent,
@@ -321,7 +329,7 @@ interface Track {
  * below a dynamic subtree, fog-light positions and gains, and material
  * emissive intensities. Returns only what actually changed.
  */
-function record(world: ExportWorld, seconds: number, fps: number) {
+export function record(world: ExportWorld, seconds: number, fps: number, startSeconds: number) {
   const dynamic: Object3D[] = [];
   world.root.traverse((o) => {
     let under = false;
@@ -337,16 +345,23 @@ function record(world: ExportWorld, seconds: number, fps: number) {
   });
   const frames = Math.round(seconds * fps);
   const dt = 1 / fps;
+  // Each export owns a fresh world. Advance stateful motion from zero using the same fixed step.
+  for (const u of world.updaters) u(0, 0);
+  const firstFrame = Math.round(startSeconds * fps);
+  for (let f = 1; f <= firstFrame; f++) for (const u of world.updaters) u(dt, f * dt);
   const first = new Map<Track, number[]>();
   for (let f = 0; f < frames; f++) {
-    const t = f * dt;
-    for (const u of world.updaters) u(dt, t);
+    const t = startSeconds + f * dt;
+    if (f > 0) for (const u of world.updaters) u(dt, t);
     for (const tr of tracks) {
       const n = tr.node;
       const v = [n.position.x, n.position.y, n.position.z, n.quaternion.x, n.quaternion.y, n.quaternion.z, n.quaternion.w, n.scale.x, n.scale.y, n.scale.z];
+      if (!v.every(Number.isFinite)) throw new Error(`Non-finite animation transform: ${n.userData.pocketAtlas?.sourceId ?? n.name}`);
       if (f === 0) first.set(tr, v);
-      else if (!tr.moved) {
+      else {
         const a = first.get(tr)!;
+        if (v.slice(7).some((value, i) => Math.abs(value - a[i + 7]) > 1e-5))
+          throw new Error(`Animated scale has no Atlas lowering: ${n.userData.pocketAtlas?.sourceId ?? n.name}`);
         if (v.some((x, i) => Math.abs(x - a[i]) > 1e-5)) tr.moved = true;
       }
       tr.pos.push(v[0], v[1], v[2]);
@@ -356,18 +371,29 @@ function record(world: ExportWorld, seconds: number, fps: number) {
     world.fogLights.forEach((l, i) => {
       const s = fogs[i];
       const g = l.gain ?? 1;
-      if (f > 0 && (Math.abs(g - s.gain[0]) > 1e-4 || Math.abs(l.position.x - s.pos[0]) > 1e-4 || Math.abs(l.position.z - s.pos[2]) > 1e-4)) s.moved = true;
+      if (![g, l.position.x, l.position.y, l.position.z].every(Number.isFinite)) throw new Error("Non-finite fog-light animation");
+      if (f > 0 && (Math.abs(g - s.gain[0]) > 1e-4 || Math.abs(l.position.x - s.pos[0]) > 1e-4 || Math.abs(l.position.y - s.pos[1]) > 1e-4 || Math.abs(l.position.z - s.pos[2]) > 1e-4)) s.moved = true;
       s.pos.push(l.position.x, l.position.y, l.position.z);
       s.gain.push(g);
     });
     for (const [m, s] of mats) {
       const e = (m as MeshStandardMaterial).emissiveIntensity;
+      if (!Number.isFinite(e)) throw new Error(`Non-finite emissive animation: ${m.name}`);
       if (f > 0 && Math.abs(e - s.values[0]) > 1e-4) s.moved = true;
       s.values.push(e);
     }
   }
   // Back to the first frame's pose for the exported rest state.
-  for (const u of world.updaters) u(0, 0);
+  for (const [track, pose] of first) {
+    track.node.position.fromArray(pose, 0);
+    track.node.quaternion.fromArray(pose, 3);
+    track.node.scale.fromArray(pose, 7);
+  }
+  world.fogLights.forEach((light, i) => {
+    light.position.fromArray(fogs[i].pos);
+    light.gain = fogs[i].gain[0];
+  });
+  for (const [material, samples] of mats) (material as MeshStandardMaterial).emissiveIntensity = samples.values[0];
   return { tracks: tracks.filter((t) => t.moved), fogs, mats, frames };
 }
 
@@ -404,11 +430,15 @@ export async function exportPlace(input: ExportInput): Promise<ExportOutput> {
   const say = input.onProgress ?? (() => {});
   const started = performance.now();
 
-  // Unique, binding-safe names for every node so animation tracks resolve.
-  world.root.traverse((o) => (o.name = safeName(o)));
+  validateSampling({ startSeconds: input.startSeconds ?? 0, durationSeconds: input.record, fps: input.fps });
+  identifySources(world.root);
+  world.root.traverse(validateExportObject);
+  // Traversal-local IDs are stable across fresh instances and unrelated Three allocations.
+  let nodeIndex = 0;
+  world.root.traverse((o) => (o.name = safeName(o, nodeIndex++)));
 
   say("recording motion");
-  const rec = record(world, input.record, input.fps);
+  const rec = record(world, input.record, input.fps, input.startSeconds ?? 0);
   const times = Array.from({ length: rec.frames }, (_, i) => i / input.fps);
   const clipTracks = [];
   for (const tr of rec.tracks) {
@@ -517,7 +547,7 @@ export async function exportPlace(input: ExportInput): Promise<ExportOutput> {
       const child = l.children.find((c) => c.name === l.target.name);
       if (child) l.target = child;
     }
-    if (light.isLight) o.userData = { pocketAtlas: { castShadow: !!light.castShadow } };
+    if (light.isLight) o.userData = { pocketAtlas: { ...o.userData.pocketAtlas, castShadow: !!light.castShadow } };
     else if (o.userData.pocketAtlas || o.userData.dynamic) o.userData = { pocketAtlas: clean({ ...(o.userData.pocketAtlas ?? {}), dynamic: !!o.userData.dynamic || undefined }) };
     else o.userData = {};
   });
@@ -569,7 +599,7 @@ export async function exportPlace(input: ExportInput): Promise<ExportOutput> {
     ...c.special,
     tracks: c.tracks,
   });
-  root.userData = { pocketAtlas: (input.meta ?? defaultMeta)(common) };
+  root.userData = { pocketAtlas: { ...(input.meta ?? defaultMeta)(common), ...(input.authoring ? { authoring: input.authoring } : {}) } };
 
   say("encoding glTF");
   const exporter = new GLTFExporter();
@@ -642,4 +672,3 @@ export async function exportPlace(input: ExportInput): Promise<ExportOutput> {
   };
   return { glb, env, files, report };
 }
-

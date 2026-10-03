@@ -34,6 +34,10 @@ import { resolve } from "node:path";
 import { packageVitaVpk } from "../vendor/pocketjs/tools/vita-package.ts";
 import { prepareVitaUsb } from "../vendor/pocketjs/tools/vita-usb.ts";
 import { VitaUsbClient } from "../vendor/pocketjs/tools/vita-dev-client.ts";
+import { guardDeviceCommand } from "../vendor/pocketjs/tools/device-lease.ts";
+import { DeviceEvidence, assertDeviceIdentity, fileSha256, type DeviceIdentity } from "../vendor/pocketjs/tools/device-evidence.ts";
+import { assertFrameSample, assertVitaMeasurement, compileIdentity } from "./device-validation";
+import { readPack, VITA_PACK_VERSION } from "./place-container";
 
 const ROOT = resolve(import.meta.dir, "..");
 const POCKETJS = resolve(ROOT, "vendor/pocketjs");
@@ -44,6 +48,7 @@ const vitasdk = process.env.VITASDK || `${home}/vitasdk`;
 const rustup = Bun.which("rustup") ?? `${home}/.cargo/bin/rustup`;
 const argv = Bun.argv.slice(2);
 const command = argv[0] ?? "build";
+const lease = ["build", "cook", "cook-atlas", "lint", "vpk"].includes(command) ? undefined : await guardDeviceCommand(command === "serve" ? "vita:usb:transport" : "vita:usb");
 
 function value(flag: string, fallback: string): string {
   const i = argv.indexOf(flag);
@@ -175,6 +180,7 @@ function copyIfChanged(src: string, dst: string): boolean {
 // The device reads the pack and shader sources from the USB share; shaders
 // recompile on the device when their source changes.
 function sync(): void {
+  lease?.assertHeld();
   // The device never creates directories on host0: (stat-style requests stall
   // the USB channel); every directory it writes into exists up front.
   for (const dir of ["shaders", "gxp", "errors", "places"]) mkdirSync(`${SHARE}/${dir}`, { recursive: true });
@@ -251,16 +257,51 @@ async function lint(): Promise<void> {
 // Every measurement names the render profile, which resets the device's
 // switches and governor to the profile's; `settings` then overrides them.
 const RENDER = value("--render", "vita30");
+let evidence: DeviceEvidence<object> | undefined;
+let expectedIdentity: DeviceIdentity | undefined;
+let compilation: ReturnType<typeof compileIdentity> | undefined;
+const sampledCameras = new Set<string>();
+const timingWindows = new Map<string, { frame: number; shaderGeneration: number }>();
+const evidenceDirectory = resolve(ROOT, `.pocket-build/validation/vita/${command}-${Date.now()}`);
+function shaderIdentity(): string {
+  const hash = createHash("sha256");
+  for (const name of readdirSync(`${APP_DIR}/shaders`).sort()) hash.update(name).update(readFileSync(`${APP_DIR}/shaders/${name}`));
+  return hash.digest("hex");
+}
+function observe(e: any, detail: object) {
+  if (!expectedIdentity) throw new Error("Missing Vita runtime identity");
+  evidence ??= new DeviceEvidence<object>(expectedIdentity);
+  compilation ??= compileIdentity(PACK, "vita", value("--compile", PACK.replace(/\.place$/, ".compile.json")));
+  if (compilation.packSha256 !== expectedIdentity.assets.pack) throw new Error("Vita pack changed before its measurement");
+  if (!["capture", "begin"].includes((detail as any).kind)) {
+    const key = JSON.stringify(detail), previous = timingWindows.get(key);
+    assertFrameSample(e, previous?.frame ?? -1, ["frameMs", "cpuSubmitMs", "waitMs", "swapMs", "shaderGeneration"]);
+    if (e.settings?.profile !== RENDER || e.pending || e.main?.missing || e.reflection?.missing ||
+        (previous && previous.shaderGeneration !== e.shaderGeneration)) throw new Error("Vita render settings/programs changed during timing");
+    timingWindows.set(key, { frame: e.frame, shaderGeneration: e.shaderGeneration });
+  }
+  evidence.observe({ device: expectedIdentity.device, runtimeBuild: e.runtimeBuild, assets: { pack: e.packSha256, shaders: e.shaderSourceSha256 } },
+    { ...detail, sample: e, missedBudget: Number(e.frameMs) > compilation.budgetMs });
+}
 
 /** The device's engine status (the USB host replaces the file while it is read). */
 function engine(): any {
+  lease?.assertHeld();
   for (let i = 0; ; i++) {
     try {
       const status = new VitaUsbClient(USB_SHARE, title).status();
       const runtime = JSON.parse(readFileSync(`${OUT_DIR}/${output}.runtime.json`, "utf8"));
       if (status.nativeBuild !== runtime.nativeBuild) throw new Error("another native build owns the Vita; refusing to measure it");
       if (status.error || status.engine?.renderError || status.engine?.errors?.length) throw new Error(`Vita renderer error: ${JSON.stringify(status.error || status.engine.renderError || status.engine.errors)}`);
-      return status.engine ?? {};
+      const e = status.engine ?? {};
+      if (e.stage === "running") {
+        if (e.place !== PLACE) throw new Error(`Expected ${PLACE}, found ${e.place}`);
+        expectedIdentity ??= { device: "vita:usb", runtimeBuild: runtime.nativeBuild, assets: { pack: fileSha256(PACK), shaders: shaderIdentity() } };
+        assertDeviceIdentity(expectedIdentity, { device: "vita:usb", runtimeBuild: String(status.nativeBuild), assets: { pack: e.packSha256, shaders: e.shaderSourceSha256 } });
+        e.runtimeBuild = status.nativeBuild;
+        e.frame = status.frame;
+      }
+      return e;
     } catch (e) { if (i > 20) throw e; }
     Bun.sleepSync(50);
   }
@@ -268,11 +309,9 @@ function engine(): any {
 
 interface Shot { name: string; from: { pos: number[]; target: number[]; fov: number }; to: { pos: number[]; target: number[]; fov: number } }
 
-/** The cinematic shots authored in the cooked scene (scene.glb extras). */
+/** Camera coverage comes from the measured pack, not a potentially newer browser export. */
 function shotList(): Shot[] {
-  const b = readFileSync(`${PLACE_DIR}/scene.glb`);
-  const json = JSON.parse(b.subarray(20, 20 + b.readUInt32LE(12)).toString("utf8"));
-  return json.scenes[0].extras.pocketAtlas.camera.shots;
+  return JSON.parse(readPack(readFileSync(PACK), "PLCE", VITA_PACK_VERSION).section("META").toString("utf8")).camera.shots;
 }
 
 /** A shot's view halfway through its move, as the rig eases it. */
@@ -316,6 +355,8 @@ async function bench(): Promise<void> {
     for (let i = 0; i < 8; i++) {
       await Bun.sleep(500);
       const e = engine();
+      assertVitaMeasurement(e, { ...shot, settings: { ...base, ...off } });
+      observe(e, { kind: "timing", mode: "bench", variant: name, view: shot.view, time: shot.time });
       for (const k of Object.keys(sum) as (keyof typeof sum)[]) sum[k] += (e[k] ?? 0) / 8;
     }
     const f = (v: number) => v.toFixed(1).padStart(6);
@@ -329,7 +370,7 @@ async function bench(): Promise<void> {
 async function profile(): Promise<void> {
   const extra = argv[1] && !argv[1].startsWith("--") ? JSON.parse(argv[1]) : {};
   const shot = { place: PLACE, renderProfile: RENDER, ...measuredView() };
-  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ ...shot, settings: { profile: true, ...extra } }) + "\n");
+  await Bun.write(`${SHARE}/control.json`, JSON.stringify({ ...shot, settings: { ...extra, profile: true } }) + "\n");
   await settle();
   // Reflection and haze redraw on alternate frames: each scene averages
   // over the sampled frames that drew it, with the share of frames it ran in.
@@ -341,6 +382,8 @@ async function profile(): Promise<void> {
     const seen = new Map<string, number>();
     const e = engine();
     if (e.stage !== "running" || e.place !== PLACE) throw new Error("requested place changed during GPU profiling");
+    assertVitaMeasurement(e, { ...shot, settings: { ...extra, profile: true } });
+    observe(e, { kind: "serialized-gpu-timing", view: shot.view, time: shot.time });
     for (const [name, ms] of e.passes ?? []) seen.set(name, (seen.get(name) ?? 0) + ms);
     for (const [name, ms] of seen) {
       const a = sum.get(name) ?? { ms: 0, frames: 0 };
@@ -383,27 +426,36 @@ async function sweep(): Promise<void> {
   const extra = argv[1] && !argv[1].startsWith("--") ? JSON.parse(argv[1]) : {};
   const names = value("--shots", "").split(",").filter(Boolean).map((n) => n.toLowerCase());
   const shots = shotList().filter((s) => !names.length || names.includes(s.name.toLowerCase()));
+  if (!shots.length || names.some(n => !shots.some(s => s.name.toLowerCase() === n))) throw new Error("Unknown or empty Vita camera selection");
   const time = Number(value("--time", "100"));
   mkdirSync(SHARE, { recursive: true });
   await Bun.write(`${SHARE}/control.json`, JSON.stringify({ place: PLACE, renderProfile: RENDER }) + "\n");
   await Bun.sleep(1500);
   const steps = Number(value("--steps", String(engine().settings?.steps ?? 1)));
+  if (!Number.isSafeInteger(steps) || steps < 1 || steps > engine().settings.steps) throw new Error("Invalid Vita quality-step count");
   console.log(`render profile ${RENDER}, time ${time} s, frame ms per step (cpu submit ms)`);
   console.log(`${"".padEnd(10)} ${[...Array(steps).keys()].map((k) => `step ${k}`.padStart(13)).join("")}`);
   for (const s of shots) {
     const row: string[] = [];
     for (let k = 0; k < steps; k++) {
-      await Bun.write(`${SHARE}/control.json`, JSON.stringify({ place: PLACE, renderProfile: RENDER, view: shotView(s), time, settings: { step: k, hold: true, ...extra } }) + "\n");
+      await Bun.write(`${SHARE}/control.json`, JSON.stringify({ place: PLACE, renderProfile: RENDER, view: shotView(s), time, settings: { ...extra, step: k, hold: true } }) + "\n");
       await settle();
       let ms = 0;
       let cpu = 0;
       for (let i = 0; i < 6; i++) {
         await Bun.sleep(400);
         const e = engine();
+        assertVitaMeasurement(e, { view: shotView(s), time, settings: { ...extra, step: k, hold: true } });
+        observe(e, { kind: "timing", shot: s.name, step: k, view: shotView(s), time });
+        sampledCameras.add(s.name);
         ms += e.frameMs / 6;
         cpu += e.cpuSubmitMs / 6;
       }
       row.push(`${ms.toFixed(1)} (${cpu.toFixed(1)})`.padStart(13));
+      mkdirSync(evidenceDirectory, { recursive: true });
+      const capture = `${evidenceDirectory}/camera-${shots.indexOf(s)}-step-${k}.png`;
+      await dev("capture", "--out", capture);
+      observe(engine(), { kind: "capture", shot: s.name, step: k, path: capture, sha256: fileSha256(capture), visualReview: "not-recorded" });
     }
     console.log(`${s.name.padEnd(10)} ${row.join("")}`);
   }
@@ -448,6 +500,8 @@ async function shots(): Promise<void> {
     try {
       const e = engine();
       if (e.stage !== "running" || e.place !== PLACE) throw new Error("requested place is not running");
+      observe(e, { kind: "timing", shot: e.view.shot });
+      sampledCameras.add(e.view.shot);
       const a = acc.get(e.view.shot) ?? { ms: [], steps: new Set(), levels: new Set() };
       a.ms.push(e.frameMs);
       a.steps.add(e.settings.step);
@@ -480,6 +534,9 @@ async function pushVpk(): Promise<void> {
   console.log(`atlas: ${readFileSync(done, "utf8").trim()}`);
 }
 
+let completed = false;
+try {
+if (["bench", "profile", "shots", "sweep"].includes(command)) observe(engine(), { kind: "begin" });
 if (command === "build") await build();
 else if (command === "push-vpk") await pushVpk();
 else if (command === "vpk") await vpk();
@@ -515,3 +572,18 @@ else if (command === "ctl") {
   const rest = argv.slice(1).filter((a, i, all) => a !== "--title" && all[i - 1] !== "--title");
   await dev(command, ...rest);
 } else throw new Error(`unknown atlas command: ${command}`);
+completed = true;
+} finally {
+  if (evidence) {
+    mkdirSync(evidenceDirectory, { recursive: true });
+    const cameras = shotList().map(s => s.name);
+    writeFileSync(`${evidenceDirectory}/device.json`, JSON.stringify({ ...evidence.receipt(), compilation, complete: completed, renderProfile: RENDER,
+      cameras: [...sampledCameras], allCameras: cameras.every(n => sampledCameras.has(n)) }, null, 2));
+    // Release fixed-time/profile controls even after an interrupted measurement.
+    lease?.assertHeld();
+    const status = new VitaUsbClient(USB_SHARE, title).status();
+    if (expectedIdentity && status.nativeBuild === expectedIdentity.runtimeBuild && status.engine?.packSha256 === expectedIdentity.assets.pack)
+      writeFileSync(`${SHARE}/control.json`, JSON.stringify({ place: PLACE, renderProfile: RENDER }) + "\n");
+    console.log(`Device evidence: ${evidenceDirectory}/device.json`);
+  }
+}

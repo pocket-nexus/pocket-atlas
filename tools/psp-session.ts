@@ -13,6 +13,8 @@ export interface Status {
   draws: number;
   triangles: number;
   controlNonce: number;
+  packSha256: string;
+  runtimeBuild: string;
 }
 
 export function readStatus(path: string): Status {
@@ -22,6 +24,7 @@ export function readStatus(path: string): Status {
   const value = JSON.parse(readFileSync(path, "utf8"));
   if (
     value.target !== "psp" ||
+    !/^[a-f0-9]{64}$/.test(value.packSha256) || !/^[a-f0-9]{32}$/.test(value.runtimeBuild) ||
     typeof value.shot !== "string" ||
     [
       "frame",

@@ -386,7 +386,7 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
     let report = serde_json::json!({"target":"psp","draws":draws.len(),"triangles":triangles,"vertices":vertices_total,"textures":textures.len(),"bytes":w.0.len(),"animatedNodes":nodes.iter().filter(|n|n.track.count>0).count(),"skinnedDraws":draws.iter().filter(|d|d.weights.count>0).count(),"shots":shots.len()});
     Ok(Artifact {
         bytes: w.0, summary: report, sections: Default::default(),
-        textures: textures.iter().enumerate().map(|(id,t)|serde_json::json!({"id":id,"width":t.width,"height":t.height,"levels":t.mips,"bytes":t.pixels.count})).collect(),
+        textures: textures.iter().enumerate().map(|(id,t)|serde_json::json!({"id":id,"sourceTextures":tex_map.iter().filter_map(|(source,output)|(*output as usize==id).then_some(*source)).collect::<std::collections::BTreeSet<_>>(),"sources":tex_map.iter().filter(|(_,output)|**output as usize==id).flat_map(|(source,_)|crate::provenance::texture_sources(scene,*source as usize)).collect::<std::collections::BTreeSet<_>>(),"width":t.width,"height":t.height,"levels":t.mips,"bytes":t.pixels.count})).collect(),
     })
 }
 

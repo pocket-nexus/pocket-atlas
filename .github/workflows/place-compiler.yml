@@ -24,12 +24,13 @@ jobs:
       - run: bun install --frozen-lockfile
         working-directory: web
       - run: bun test tools/*.test.ts web/scripts/*.test.ts web/src/places/shared/daylight/geometry.test.ts
+      - run: bun web/node_modules/typescript/bin/tsc -p tsconfig.tools.json
       - name: Shadow receiver bounds
         run: |
           mkdir -p .pocket-build/validation/ci
           rustc --edition=2021 --test vita/src/sun_bounds.rs -o .pocket-build/validation/ci/sun-bounds
           .pocket-build/validation/ci/sun-bounds
-      - run: bun test test/texture-usage.test.ts
+      - run: bun test test/*.test.ts
         working-directory: web
       - run: bun run build
         working-directory: web
