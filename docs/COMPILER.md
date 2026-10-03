@@ -32,9 +32,10 @@ capability checks. `source.rs` describes transient shared-pass output; it is not
 a serialized interchange format. `main.rs` still orchestrates the existing
 analysis and Vita writer; `pica.rs` and `psp.rs` own native lowerings. Existing
 `pocket3d-place::Meta` types are reused internally during this migration. They
-are not the public definition of PlaceIR. Device format names/versions remain
-unchanged so this step does not require a runtime format migration. PICA pins
-its PLCE envelope to v5 and its binary table to v3 independently of Vita v6.
+are not the public definition of PlaceIR. The PlaceIR migration itself retained
+device formats. Vita now uses PLCE/ATLS v7 and Place META v7 for vertex-PBR
+palettes; older runtimes reject these packs.
+PICA pins its PLCE envelope to v5 and its binary table to v3 independently.
 Previously a Vita version bump leaked into PICA output and the C reader rejected
 it; the integration test now checks cooked output using the runtime's C format
 header and header validator.

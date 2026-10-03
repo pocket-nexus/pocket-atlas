@@ -155,6 +155,11 @@ pub struct Material {
     pub orm: Option<u32>,
     pub emission: Option<u32>,
     pub vertex_color: bool,
+    /// Solid PBR palette: decoded UV.x/UV.y carry roughness/metalness;
+    /// vertex RGB carries base colour in sRGB. Scalar material factors select
+    /// shader features; the actual surface values always come from UVs.
+    #[serde(default)]
+    pub vertex_pbr: bool,
     /// Interior surface: emission carries its lighting (no scene lights, no fog).
     pub interior: bool,
     pub fog: bool,

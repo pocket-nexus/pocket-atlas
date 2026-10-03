@@ -1,0 +1,23 @@
+// Pair neighbouring shadow depths: destination (x,y).rg stores source
+// (x,y).r and (min(x+1,N-1),y).r. Both maps are N by N; uShadowK.w is N.
+// Use post_v.cg, opaque output, no MSAA/dither/gamma conversion, and an
+// Rg16Unorm target patched as USHORT2. Sample the paired map with POINT
+// filtering for PCF: interpolating depths before comparison is incorrect.
+// Return a complete COLOR float4: SceShaccCg accepts float2 COLOR but its
+// USHORT2-patched program produced zero pixels on the device. Unused z/w
+// do not change the RG16 storage. The channels remain normalized [0,1].
+// All sampling and arithmetic stay float until the UNORM16 output pack;
+// a nearest-rounded UNORM16 value adds at most 0.5/65535 normalized error.
+
+uniform sampler2D uShadow;
+uniform float4 uShadowK;
+
+float4 main(float2 vUv : TEXCOORD0) : COLOR
+{
+    // This full-screen triangle covers a target with the source's exact
+    // dimensions. Its interpolated UV already names the texel centre;
+    // the clamped sampler duplicates the final column at the right edge.
+    float left = tex2D(uShadow, vUv).r;
+    float right = tex2D(uShadow, vUv + float2(1.0 / uShadowK.w, 0.0)).r;
+    return float4(saturate(left), saturate(right), 0.0, 1.0);
+}

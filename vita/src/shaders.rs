@@ -45,6 +45,7 @@ pub const SOURCES: &[(&str, &str)] = &[
     ("text_f.cg", include_str!("../shaders/text_f.cg")),
     ("ui_f.cg", include_str!("../shaders/ui_f.cg")),
     ("shadow_f.cg", include_str!("../shaders/shadow_f.cg")),
+    ("shadow_pair_f.cg", include_str!("../shaders/shadow_pair_f.cg")),
     ("fill_f.cg", include_str!("../shaders/fill_f.cg")),
     ("sky_day_f.cg", include_str!("../shaders/sky_day_f.cg")),
     ("blit_f.cg", include_str!("../shaders/blit_f.cg")),

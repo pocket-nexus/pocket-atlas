@@ -15,6 +15,7 @@ import { resolve, join } from "node:path";
 import { crc32 } from "node:zlib";
 import { PLACES } from "../web/src/places/registry";
 import { syncAssets } from "./atlas-3ds-delivery";
+import { readPack, PICA_PACK_VERSION } from "./place-container";
 import {
   runContainer,
   THREE_DS_CONTAINER_IMAGE,
@@ -213,17 +214,8 @@ async function enterPlace(c: PocketRuntimeClient, id: string) {
 }
 function shotNames(id: string): string[] {
   const data = readFileSync(join(nativePlaces, `${id}.place`));
-  for (let i = 0; i < data.readUInt32LE(8); i++) {
-    const at = 16 + i * 16;
-    if (data.toString("ascii", at, at + 4) === "META") {
-      const offset = data.readUInt32LE(at + 4),
-        bytes = data.readUInt32LE(at + 8);
-      return JSON.parse(
-        data.toString("utf8", offset, offset + bytes),
-      ).camera.shots.map((shot: { name: string }) => shot.name);
-    }
-  }
-  throw new Error(`Missing camera metadata: ${id}`);
+  return JSON.parse(readPack(data, "PLCE", PICA_PACK_VERSION).section("META").toString("utf8"))
+    .camera.shots.map((shot: { name: string }) => shot.name);
 }
 if (command === "cook") {
   mkdirSync(nativePlaces, { recursive: true });

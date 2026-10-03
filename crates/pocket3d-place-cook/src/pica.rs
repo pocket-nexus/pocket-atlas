@@ -644,12 +644,22 @@ fn sun_occluder(scene: &crate::source::Scene) -> Option<crate::occlusion::Occlud
     Some(crate::occlusion::Occluder::new(tris, 1, 2000.0))
 }
 
+/// PICA has three main-view slots. The shared cooker may add fine rigid
+/// levels ahead of the existing coarse ones; retain the two coarsest so
+/// LOD2 and its reflection proxy keep their handheld geometry budget.
+fn main_lods<'a>(indices: &'a pc::Range, count: u32, levels: &'a [pc::DrawLod]) -> Vec<(&'a pc::Range, u32, f32)> {
+    std::iter::once((indices, count, 0.0))
+        .chain(levels.iter().skip(levels.len().saturating_sub(2)).map(|l| (&l.indices, l.index_count, l.error)))
+        .collect()
+}
+
 pub fn cook(scene: &crate::source::Scene, output: &Path, cap: u32) {
     assert!(
         cap.is_power_of_two() && (64..=1024).contains(&cap),
         "--tex must be a power of two in 64..1024"
     );
     let m = &scene.meta;
+    assert!(m.materials.iter().all(|m| !m.vertex_pbr), "PICA lowering requires source materials, not Vita PBR palettes");
     let src_tex = scene.textures();
     let src_geom = scene.geometry();
     let src_anim = scene.animation();
@@ -1059,17 +1069,13 @@ pub fn cook(scene: &crate::source::Scene, output: &Path, cap: u32) {
             positions.push(pos);
         }
         let mut lod = Vec::new();
-        for (range, count, error) in std::iter::once((&d.indices, d.index_count, 0.0))
-            .chain(d.lods.iter().map(|l| (&l.indices, l.index_count, l.error)))
-        {
-            if lod.len() == 3 {
-                break;
-            }
+        for (range, count, error) in main_lods(&d.indices, d.index_count, &d.lods) {
             align(&mut geom, 4);
             let off = geom.len();
             geom.extend(&src_geom[range.offset as usize..(range.offset + range.size) as usize]);
             lod.push((off as u32, count, error));
         }
+        // Missing slots alias the last range rather than duplicate payloads.
         while lod.len() < 3 {
             lod.push(*lod.last().unwrap());
         }
@@ -1452,6 +1458,29 @@ pub fn cook(scene: &crate::source::Scene, output: &Path, cap: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn main_view_keeps_coarse_lods_when_rigid_fine_levels_are_added() {
+        let base = pc::Range { offset: 0, size: 1200 };
+        let levels: Vec<_> = [(0.01, 300), (0.025, 180), (0.06, 90), (0.25, 0)]
+            .into_iter().enumerate().map(|(i, (error, count))| pc::DrawLod {
+                indices: pc::Range { offset: 1200 + i as u32 * 600, size: count * 2 },
+                index_count: count, error,
+            }).collect();
+        let selected = main_lods(&base, 600, &levels);
+        let records: Vec<_> = selected.iter().map(|(r, count, error)| (r.offset, r.size, *count, *error)).collect();
+        // Preserve the empty far level too: a vanished thin detail must not
+        // reappear because the converter retained its first fine LODs.
+        assert_eq!(records, [(0, 1200, 600, 0.0), (2400, 180, 90, 0.06), (3000, 0, 0, 0.25)]);
+        // Existing two-level packs select exactly their original main slots.
+        let ordinary = main_lods(&base, 600, &levels[2..]);
+        assert_eq!(ordinary.iter().map(|(r, _, _)| r.offset).collect::<Vec<_>>(), [0, 2400, 3000]);
+        // Fewer levels leave payloads unique; cook aliases the final range
+        // into unused slots instead of writing duplicate index buffers.
+        assert_eq!(main_lods(&base, 600, &[]).len(), 1);
+        assert_eq!(main_lods(&base, 600, &levels[3..]).len(), 2);
+    }
+
     #[test]
     fn structural_classifier_preserves_rotated_tubes_but_rejects_wires_and_panels() {
         let rotation = Quat::from_euler(glam::EulerRot::YXZ, 0.7, 0.4, 0.2);

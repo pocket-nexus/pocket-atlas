@@ -25,8 +25,13 @@ pub mod meta;
 pub use meta::*;
 
 pub const MAGIC: [u8; 4] = *b"PLCE";
-/// Vita schema: 6 adds light fields and vista haze. PICA owns its version.
-pub const VERSION: u32 = 6;
+/// Vita schema (PICA owns its independent container/table versions).
+/// 7: solid PBR palettes reinterpret UVs as roughness/metalness and vertex
+/// colour as the combined material tint. A reader without `vertex_pbr`
+/// support must reject these packs rather than silently render them wrong.
+/// 6 added light fields (`Kind::Lights`, `VertexLayout::Lights`) and vista haze.
+pub const VERSION: u32 = 7;
+
 
 pub const TAG_META: [u8; 4] = *b"META";
 pub const TAG_TEXTURES: [u8; 4] = *b"TEXD";
@@ -182,5 +187,31 @@ mod tests {
         let tex = pack.sections.iter().find(|s| s.tag == TAG_TEXTURES).unwrap();
         assert_eq!(tex.offset % 4096, 0);
         assert_eq!(pack.section(TAG_TEXTURES).unwrap(), blob);
+    }
+
+    #[test]
+    fn incompatible_vertex_encodings_are_rejected_by_both_read_paths() {
+        // Both full-buffer conversion tools and streaming runtimes must
+        // reject pre-palette packs, even when their section table is valid.
+        let meta = br#"{"materials":[{"vertex_pbr":true}]}"#;
+        let bytes = write(&[(TAG_META, meta, 4), (TAG_GEOMETRY, &[0; 24], 16)]);
+        assert_eq!(u32_at(&bytes, 4).unwrap(), 7);
+        assert!(Pack::parse(&bytes).is_ok());
+        assert!(Pack::parse_header(&bytes[..48]).is_ok());
+        for version in [5u32, 6, 8] {
+            let mut incompatible = bytes.clone();
+            incompatible[4..8].copy_from_slice(&version.to_le_bytes());
+            assert!(matches!(Pack::parse(&incompatible), Err(Error::Version(v)) if v == version));
+            assert!(matches!(Pack::parse_header(&incompatible[..48]), Err(Error::Version(v)) if v == version));
+        }
+    }
+
+    #[test]
+    fn atlas_container_uses_the_same_version_gate() {
+        let mut bytes = write_as(atlas::MAGIC, &[(TAG_META, b"{}", 4)]);
+        assert_eq!(u32_at(&bytes, 4).unwrap(), VERSION);
+        assert!(Pack::parse_header_as(&bytes[..32], atlas::MAGIC).is_ok());
+        bytes[4..8].copy_from_slice(&6u32.to_le_bytes());
+        assert!(matches!(Pack::parse_header_as(&bytes[..32], atlas::MAGIC), Err(Error::Version(6))));
     }
 }
