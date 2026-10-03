@@ -1,5 +1,6 @@
 import type { MeshBuilder, V3 } from "../mesh";
-import { normalize } from "../mesh";
+import { normalize, WHITE } from "../mesh";
+import { fbm2 } from "../noise";
 import type { Probe, Road, RouteWorld } from "../world";
 
 /**
@@ -12,10 +13,23 @@ import type { Probe, Road, RouteWorld } from "../world";
  * follow the edge of the union of the bands).
  */
 
-/** Bank and verge stations beyond the ploughed edge (m): cut face, crest, back slope, verge. */
-const BEYOND = [0.12, 0.4, 0.9, 2.2, 3.6, 6, 9];
+/** Bank and verge stations beyond the ploughed edge (m): cut face, shoulder, crest, back slope, verge. */
+export const BEYOND = [0.2, 0.5, 0.9, 1.7, 2.6, 3.6, 6, 9];
+
+/**
+ * Tint of the bank's snow by distance beyond the ploughed edge (sRGB): in
+ * January the cut face is a little greyer than the top and neutral (the
+ * brown grit is March's), darkest at its foot and in lengths along the
+ * road; the shoulder above it is clean.
+ */
+function bankTint(e: number, s: number, side: number): readonly [number, number, number, number] {
+  if (e >= 0.9) return WHITE;
+  const dirt = Math.exp(-Math.max(e, 0) / 0.25) * (0.4 + 0.8 * fbm2(s / 9 + side * 31.7, side * 5.3, 3, 11));
+  return [Math.round(255 - 64 * dirt), Math.round(255 - 62 * dirt), Math.round(255 - 56 * dirt), 255];
+}
+
 /** How far the strip's outer edge drops under the terrain grid it meets. */
-const SKIRT = 0.6;
+export const SKIRT = 0.6;
 /** Metres of road per repeat of the surface texture along the road. */
 export const SURFACE_REPEAT = 8;
 
@@ -138,7 +152,7 @@ export function roadStrip(world: RouteWorld, road: Road, x0: number, z0: number,
     const n: V3 = [nrm[o], nrm[o + 1], nrm[o + 2]];
     const u = planar ? (p[0] - x0) / 4 : (off.d[j] + road.half) / (2 * road.half);
     const v = planar ? (p[2] - z0) / 4 : st[lo + k] / SURFACE_REPEAT;
-    const i = mb.vertex(material, p, n, u, v);
+    const i = mb.vertex(material, p, n, u, v, material === "snow" ? bankTint(edge[k * nd + j], st[lo + k], j < off.first ? -1 : 1) : WHITE);
     seen.set(key, i);
     return i;
   };

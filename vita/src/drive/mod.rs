@@ -30,7 +30,7 @@ use pack::RoutePack;
 use stream::Streamer;
 
 /// Where the car keeps to: the left lane's middle, metres right of the centre line.
-const LANE: f64 = -1.7;
+const LANE: f64 = -1.65;
 /// The render origin moves when the camera is this far from it (m), to a multiple of its grid.
 const REBASE: f64 = 2048.0;
 const ORIGIN_GRID: f64 = 1024.0;

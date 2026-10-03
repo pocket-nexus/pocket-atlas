@@ -31,14 +31,14 @@ for (let s = 0; s <= 3000; s += 5) {
   z -= Math.cos(heading) * 5;
 }
 const line = new Line(xs, ys, zs);
-const surface: Surface = { line, half: () => 4.25, grip: (s, d) => 0.34 + 0.06 * Math.sin(s * 0.013) * Math.sin(s * 0.0031 + d) };
+const surface: Surface = { line, half: () => 3.6, grip: (s, d) => 0.34 + 0.06 * Math.sin(s * 0.013) * Math.sin(s * 0.0031 + d) };
 const stops = [
   { name: "A", native: "A", s: 0 },
   { name: "B", native: "B", s: 1500 },
   { name: "C", native: "C", s: line.length },
 ];
 
-const car = startState(surface, 12, -1.7);
+const car = startState(surface, 12, -1.65);
 const trip = newTrip();
 const chase = newChase();
 const traffic = newTraffic(car.s, line.length);
@@ -57,9 +57,9 @@ for (let f = 0; f < 30 * 150; f++) {
   else if (t < 26) c = { steer: 0.1, throttle: 0, brake: 1 };
   else if (t < 30) c = { steer: -0.3, throttle: 0, brake: 1 };
   else if (t < 34) c = { steer: 0, throttle: 1, brake: 0 };
-  else if (t < 110) c = autopilot(car, line, 22, -1.7, KEI, auto);
+  else if (t < 110) c = autopilot(car, line, 22, -1.65, KEI, auto);
   else if (t < 114) c = { steer: 1, throttle: 0.8, brake: 0 };
-  else c = autopilot(car, line, 30, -1.7, KEI, auto);
+  else c = autopilot(car, line, 30, -1.65, KEI, auto);
   inputs.push([c.steer, c.throttle, c.brake]);
   const before = car.odometer;
   stepCar(car, c, surface, dt);
@@ -74,5 +74,5 @@ for (let f = 0; f < 30 * 150; f++) {
   if (f % 15 === 14) frames.push([f, car.x, car.z, car.y, car.heading, car.vx, car.vy, car.yawRate, car.steer, car.s, car.d, car.odometer, trip.reached, trip.scrapes, trip.metres, eye.pos[0], eye.pos[1], eye.pos[2], eye.fov, car.reverse ? 1 : 0, hits, ...traffic.cars.flatMap((c) => [c.s, c.v, c.body])]);
 }
 const out = join(import.meta.dir, "../../crates/pocket3d-drive/tests/vehicle-trace.json");
-writeFileSync(out, JSON.stringify({ note: "web/scripts/vehicle-trace.ts", dt, spec: KEI, line: { x: xs, y: ys, z: zs, half: 4.25 }, stops: stops.map((s) => s.s), inputs, columns: "frame x z y heading vx vy yawRate steer s d odometer reached scrapes metres eyeX eyeY eyeZ fov reverse hits (traffic s v body)×5", frames }) + "\n");
+writeFileSync(out, JSON.stringify({ note: "web/scripts/vehicle-trace.ts", dt, spec: KEI, line: { x: xs, y: ys, z: zs, half: 3.6 }, stops: stops.map((s) => s.s), inputs, columns: "frame x z y heading vx vy yawRate steer s d odometer reached scrapes metres eyeX eyeY eyeZ fov reverse hits (traffic s v body)×5", frames }) + "\n");
 console.log(`${frames.length} samples; the car ends at s = ${car.s.toFixed(1)} m, ${trip.scrapes} scrapes, ${hits} traffic hits, phase ${trip.phase}`);

@@ -7,7 +7,10 @@ import type { Line } from "./line";
  *   detail  256 m   small things by the road: poles, signs, wires, near trees
  *   base    256 m   the corridor: roads and banks, terrain at 8 m, buildings, woods
  *   mid    1024 m   terrain at 32 m and the woods' canopy out to 4 km
- *   far    8192 m   terrain at 512 m to the mountains
+ *   far    8192 m   terrain at 512 m beyond that
+ *
+ * The radii follow the weather: in light snow things are gone by about 2 km
+ * (`weather.ts`), so the corridor loads to 1.8 km and the country to 3 km.
  *
  * Which cells exist is fixed by the driven line (`reach`: a cell exists when
  * it comes within that distance of the line). A coarser layer still covers
@@ -32,9 +35,9 @@ export interface Layer {
 
 export const LAYERS: readonly Layer[] = [
   { index: 0, name: "detail", size: 256, reach: 360, radius: 640, step: 0, sink: 0 },
-  { index: 1, name: "base", size: 256, reach: 360, radius: 2400, step: 8, sink: 0 },
-  { index: 2, name: "mid", size: 1024, reach: 4000, radius: 7200, step: 32, sink: 5 },
-  { index: 3, name: "far", size: 8192, reach: 28000, radius: 48000, step: 512, sink: 40 },
+  { index: 1, name: "base", size: 256, reach: 360, radius: 1800, step: 8, sink: 0 },
+  { index: 2, name: "mid", size: 1024, reach: 4000, radius: 3000, step: 32, sink: 5 },
+  { index: 3, name: "far", size: 8192, reach: 9000, radius: 9000, step: 512, sink: 40 },
 ];
 
 export const DETAIL = LAYERS[0];

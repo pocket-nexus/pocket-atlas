@@ -29,7 +29,7 @@ export interface Traffic {
 export const TRAFFIC_CARS = 5;
 export const TRAFFIC_BODIES = 4;
 /** Lane centre (m from the centre line) and the window around the driver traffic lives in. */
-const LANE = 1.7;
+const LANE = 1.65;
 const BEHIND = 260;
 const AHEAD = 1500;
 

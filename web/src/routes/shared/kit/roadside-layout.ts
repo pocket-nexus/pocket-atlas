@@ -15,14 +15,22 @@ export const ATLAS_PAD = 8;
  * Towns a distance board or a boundary sign can name: the OSM `place-*`
  * name without its suffix, the suffix, and the romanisation the real boards
  * carry. A town the survey finds that is not listed here gets no board.
+ *
+ * `boundary` is where Route 237, driven south from Asahikawa, enters the
+ * town (km of the surveyed line; estimates from the research report, the
+ * survey has no boundaries). Without it the generator puts the boundary
+ * halfway between two towns' centres.
  */
-export const TOWNS = [
-  { key: "美瑛", suffix: "町", en: "Biei", kind: "Town" },
-  { key: "上富良野", suffix: "町", en: "Kamifurano", kind: "Town" },
-  { key: "中富良野", suffix: "町", en: "Nakafurano", kind: "Town" },
-  { key: "富良野", suffix: "市", en: "Furano", kind: "City" },
+export const TOWNS: readonly { key: string; suffix: string; en: string; kind: string; boundary?: number }[] = [
+  { key: "美瑛", suffix: "町", en: "Biei", kind: "Town", boundary: 12.5 },
+  { key: "上富良野", suffix: "町", en: "Kamifurano", kind: "Town", boundary: 27.5 },
+  { key: "中富良野", suffix: "町", en: "Nakafurano", kind: "Town", boundary: 38 },
+  { key: "富良野", suffix: "市", en: "Furano", kind: "City", boundary: 45 },
   { key: "旭川", suffix: "市", en: "Asahikawa", kind: "City" },
-] as const;
+];
+
+/** Junction names a signal's plate can carry (OSM names of `traffic_signals` points). */
+export const SIGNAL_NAMES = ["西神楽2線15号", "青い池入口", "ふらのワイン工場入口"] as const;
 
 /** Speed limits a sign exists for (km/h). */
 export const SPEEDS = [30, 40, 50, 60] as const;
@@ -33,9 +41,9 @@ export const SHIELDS = ["237", "38"] as const;
 /** Cells: name, width, height (pixels of the 1024 atlas). */
 const SIZES: [string, number, number][] = [
   // Tall cells first: the shelves pack tighter.
-  ["arrow", 88, 256],
-  ["stripes", 32, 256],
-  ["pole", 48, 256],
+  ["arrow", 40, 208],
+  ["stripes", 32, 208],
+  ["pole", 48, 208],
   ["busPlate", 96, 152],
   ...SHIELDS.map((r): [string, number, number] => [`shield-${r}`, 192, 176]),
   ["stop", 192, 168],
@@ -44,15 +52,15 @@ const SIZES: [string, number, number][] = [
   ["sigTop", 64, 128],
   ["sigGo", 64, 64],
   ["sigStop", 64, 64],
-  ...TOWNS.map((_, i): [string, number, number] => [`bound-${i}`, 288, 104]),
+  ...SIGNAL_NAMES.map((_, i): [string, number, number] => [`signame-${i}`, 200, 56]),
+  ["country", 96, 96],
+  ...TOWNS.map((_, i): [string, number, number] => [`bound-${i}`, 232, 88]),
   ["slip", 256, 104],
   ["curve", 256, 104],
-  ...TOWNS.map((_, i): [string, number, number] => [`name-${i}`, 208, 88]),
-  ...Array.from({ length: 10 }, (_, i): [string, number, number] => [`digit-${i}`, 44, 88]),
-  ["km", 72, 88],
+  ...TOWNS.map((_, i): [string, number, number] => [`name-${i}`, 192, 80]),
+  ...Array.from({ length: 10 }, (_, i): [string, number, number] => [`digit-${i}`, 40, 80]),
+  ["km", 64, 80],
   ["rail", 64, 64],
-  ["reflWhite", 48, 48],
-  ["reflOrange", 48, 48],
   ["blue", 24, 24],
   ["white", 24, 24],
   ["lamp", 24, 24],
@@ -142,30 +150,34 @@ export const STOP_OUTLINE: Outline = roundedTriangle(0.5, -0.5, 0.5, 0.09, 1);
 export const DISC_OUTLINE: Outline = disc(12);
 
 /**
- * 矢羽根 (the arrow of a 固定式視線誘導柱): a chevron-striped plate with a
- * notched tail and a point, hanging point down over the edge of the
- * carriageway. The notch and the point are this fraction of the height.
+ * 矢羽根 (the arrow of a 固定式視線誘導柱): a board 1200 × 150 mm in red and
+ * white bands with a solid red head 350 mm wide, hanging point down over
+ * the outer edge line (北海道開発局 道路設計要領). The head is this fraction
+ * of the height; the shaft this fraction of the width.
  */
-export const ARROW_NOTCH = 0.16;
-export const ARROW_TIP = 0.24;
+export const ARROW_HEAD = 0.25;
+export const ARROW_SHAFT = 0.15 / 0.35;
+/** Bands on the shaft, red first from the top; the head below them is red. */
+export const ARROW_BANDS = 6;
 
 /**
- * Real sizes (m). Sign faces follow the Japanese sign order's standard
- * sizes; the 矢羽根 plate is an estimate from photographs until the research
- * report has the maker's figure.
+ * Real sizes (m), from the research report: the arrow from the design
+ * manual, the shield measured off a photograph, the speed disc from the
+ * sign order; the boards and plates are estimates.
  */
 export const SIZE = {
-  arrow: { w: 0.42, h: 1.27 },
-  shield: { w: 0.8, h: 0.73 },
+  arrow: { w: 0.35, h: 1.2 },
+  shield: { w: 0.74, h: 0.69 },
   stop: { w: 0.8, h: 0.7 },
   speed: 0.6,
   warn: { w: 1.3, h: 0.53 },
-  bound: { w: 1.6, h: 0.56 },
+  /** A boundary sign: a square picture panel over the name. */
+  bound: { w: 1.2, name: 0.45 },
   /** A row of a distance board: a name cell, two digits and "km". */
-  row: { h: 0.56, name: 1.3, digit: 0.28, km: 0.47 },
-  board: { w: 3.0, frame: 0.04, pad: 0.08 },
-  signal: { w: 0.36, h: 1.08 },
+  row: { h: 0.45, name: 1.04, digit: 0.225, km: 0.37 },
+  board: { w: 2.4, frame: 0.035, pad: 0.07 },
+  signal: { w: 0.4, h: 1.25 },
+  signalName: { w: 1.0, h: 0.3 },
   busDisc: 0.46,
   busPlate: { w: 0.34, h: 0.54 },
-  reflector: 0.14,
 } as const;

@@ -86,7 +86,7 @@ export function stand(x: number, z: number): Stand {
  */
 export const STAND_TINT: readonly (readonly [number, number, number])[] = [
   // Bare larch: a brown-grey haze.
-  [136, 121, 110],
+  [130, 120, 113],
   // Mixed bare broadleaf and birch: grey with a violet cast.
   [124, 120, 126],
   // Fir and spruce with snow on them.

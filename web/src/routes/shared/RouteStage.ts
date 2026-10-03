@@ -1,11 +1,11 @@
-import { BufferAttribute, BufferGeometry, CircleGeometry, FogExp2, Group, HemisphereLight, Mesh, PerspectiveCamera, Vector3, type Material } from "three";
+import { BufferAttribute, BufferGeometry, CircleGeometry, FogExp2, Group, HemisphereLight, Mesh, PerspectiveCamera, Vector3, type Material, type Texture } from "three";
 import type { PlaceDef, Progress, StageContext } from "../../core/types";
 import { Baker } from "../../places/shared/bake";
 import type { Box6, Shot, ShotKey } from "../../places/shared/camera";
 import type { ExportFogLight } from "../../places/shared/export";
 import { bearing } from "../../places/shared/geo";
 import { createPlacePost } from "../../places/shared/post";
-import { buildSky, type Sky } from "../../places/shared/sky";
+import { bakeCloudPanorama, buildSky, type Sky } from "../../places/shared/sky";
 import { PlaceStage } from "../../places/shared/stage";
 import { driveSound, QUIET, RouteAudio, type DriveSound } from "./audio";
 import type { RouteDef, RouteView } from "./def";
@@ -116,6 +116,8 @@ function viewKey(line: Line, v: RouteView, travel: number): ShotKey {
  */
 export class RouteStage extends PlaceStage<RouteExport, RouteAudio> {
   private sky!: Sky;
+  /** The weather's cloud panorama, when it has one (exported as `sky-clouds.png`). */
+  private clouds: Texture | null = null;
   private kit!: Kit;
   private streamer!: Streamer;
   private car!: Car;
@@ -166,7 +168,7 @@ export class RouteStage extends PlaceStage<RouteExport, RouteAudio> {
     this.sunDir = bearing(sun.azimuth, Math.max(sun.elevation, 4));
     this.surface = {
       line,
-      half: () => 4.25,
+      half: () => 3.6,
       // Packed snow; ice where traffic has polished it, in long patches.
       grip: (s, d) => 0.34 + 0.06 * Math.sin(s * 0.013) * Math.sin(s * 0.0031 + d),
     };
@@ -215,7 +217,7 @@ export class RouteStage extends PlaceStage<RouteExport, RouteAudio> {
     const km = Number(q.get("km"));
     this.auto = (Number(q.get("auto")) || 0) / 3.6;
     const startS = Number.isFinite(km) && km > 0 ? Math.min(this.line.length - 50, km * 1000) : 12;
-    this.state = startState(this.surface, startS, -1.7);
+    this.state = startState(this.surface, startS, -1.65);
     this.trip.reached = Math.max(0, this.stops.findIndex((st) => st.s > startS) - 1);
     this.car.pose(this.state, false);
     this.fleet = buildTraffic();
@@ -223,6 +225,10 @@ export class RouteStage extends PlaceStage<RouteExport, RouteAudio> {
     this.traffic = newTraffic(this.state.s, this.line.length);
     root.add(this.swatches());
 
+    if (w.clouds) {
+      this.clouds = bakeCloudPanorama(this.baker, this.sunDir, w.clouds.bake);
+      skySpec.clouds = { texture: this.clouds, ...w.clouds };
+    }
     this.sky = buildSky(root, skySpec, 30000);
     root.add(new HemisphereLight(w.hemiSky, w.hemiGround, w.hemiIntensity));
     this.scene.add(root);
@@ -294,6 +300,7 @@ export class RouteStage extends PlaceStage<RouteExport, RouteAudio> {
     const w = this.def.weather;
     this.exposeExport({
       seconds: 1,
+      files: this.clouds ? [{ name: "sky-clouds.png", texture: this.clouds }] : undefined,
       meta: (c) => ({
         version: c.version,
         units: c.units,
@@ -352,14 +359,14 @@ export class RouteStage extends PlaceStage<RouteExport, RouteAudio> {
       if (k === "v") this.view = this.view === "chase" ? "hood" : "chase";
       if (k === "r") {
         // Back to the last stop reached, in the left lane.
-        this.state = startState(this.surface, Math.max(12, this.stops[this.trip.reached].s), -1.7);
+        this.state = startState(this.surface, Math.max(12, this.stops[this.trip.reached].s), -1.65);
         this.traffic = newTraffic(this.state.s, this.line.length);
         this.chase.ready = false;
         return;
       }
     }
     const before = c.odometer;
-    const wheel = this.auto > 0 ? autopilot(c, this.line, this.auto, -1.7) : this.pad.controls;
+    const wheel = this.auto > 0 ? autopilot(c, this.line, this.auto, -1.65) : this.pad.controls;
     const input = this.trip.phase === "arrived" ? { steer: wheel.steer, throttle: 0, brake: 1 } : wheel;
     stepCar(c, input, this.surface, dt);
     if (stepTraffic(this.traffic, c, this.line.length, dt)) {

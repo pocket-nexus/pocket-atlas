@@ -15,7 +15,7 @@ fn reproduces_the_web_drive() {
     let l = &t["line"];
     let col = |k: &str| l[k].as_array().unwrap().iter().map(f).collect::<Vec<f64>>();
     let n = l["x"].as_array().unwrap().len();
-    let line = Line::new(col("x"), col("y"), col("z"), vec![f(&l["half"]) as f32; n]).unwrap();
+    let line = Line::new(col("x"), col("y"), col("z"), vec![f(&l["half"]); n]).unwrap();
     let s = &t["spec"];
     let k = Spec {
         mass: f(&s["mass"]),
@@ -41,7 +41,7 @@ fn reproduces_the_web_drive() {
     };
     let stops: Vec<Stop> = t["stops"].as_array().unwrap().iter().map(|s| Stop { name: String::new(), native: String::new(), s: f(s) }).collect();
     let dt = f(&t["dt"]);
-    let mut car = Car::start(&line, 12.0, -1.7);
+    let mut car = Car::start(&line, 12.0, -1.65);
     let mut trip = Trip::new(0);
     let mut chase = Chase::default();
     let mut traffic = Traffic::new(car.s, line.length);

@@ -2,7 +2,7 @@ import { Color, MeshBasicMaterial } from "three";
 import { extrudeEdges } from "../../../places/shared/atlas";
 import { canvas, HEAVY, JP_SANS, LATIN, toTexture, type Ctx } from "../../../places/shared/canvas";
 import type { Kit } from "./materials";
-import { ARROW_NOTCH, ARROW_TIP, ATLAS_PAD, ATLAS_SIZE, CELLS, DISC_OUTLINE, SHIELD_OUTLINE, SHIELDS, SPEEDS, STOP_OUTLINE, TOWNS, type Outline } from "./roadside-layout";
+import { ARROW_BANDS, ARROW_HEAD, ATLAS_PAD, ATLAS_SIZE, CELLS, SHIELD_OUTLINE, SHIELDS, SIGNAL_NAMES, SPEEDS, STOP_OUTLINE, TOWNS, type Outline } from "./roadside-layout";
 
 /**
  * The kit materials of `gen/roadside.ts`, both on one atlas
@@ -19,9 +19,12 @@ import { ARROW_NOTCH, ARROW_TIP, ATLAS_PAD, ATLAS_SIZE, CELLS, DISC_OUTLINE, SHI
  */
 
 // Sign colours as the reflective sheeting reads in overcast daylight.
-const BLUE = "#1b4e9e";
-const RED = "#c9232b";
-const WHITE = "#eef0f0";
+// Sampled from photographs taken under overcast (research report §2).
+const BLUE = "#1c609d";
+const RED = "#b2201a";
+const ARROW_RED = "#a81910";
+const ARROW_WHITE = "#dcdad5";
+const WHITE = "#e4e3de";
 const YELLOW = "#f2c018";
 const BLACK = "#16171a";
 const SPEED_BLUE = "#17429a";
@@ -124,8 +127,8 @@ const townName =
     g.fillStyle = BLUE;
     g.fillRect(0, 0, w, h);
     g.fillStyle = WHITE;
-    text(g, jp, w / 2, h * 0.36, h * jpSize, w * 0.94);
-    text(g, en, w / 2, h * 0.82, h * 0.24, w * 0.9, LATIN);
+    text(g, jp, w / 2, h * 0.38, h * jpSize, w * 0.96);
+    text(g, en, w / 2, h * 0.86, h * 0.2, w * 0.9, LATIN);
   };
 
 const digit =
@@ -137,35 +140,57 @@ const digit =
     text(g, d, w / 2, h * (0.92 - size / 2), h * size, w * 0.98, LATIN);
   };
 
-/** 矢羽根: red and white chevrons pointing down, to the cell's edge (the generator's outline cuts the arrow). */
+/** 矢羽根: the shaft's bands, red first from the top, over the solid red of the head (the generator's outline cuts the shape). */
 const arrow: Paint = (g, w, h) => {
-  g.fillStyle = WHITE;
+  g.fillStyle = ARROW_RED;
   g.fillRect(0, 0, w, h);
-  g.fillStyle = RED;
-  const drop = ARROW_TIP * h;
-  const band = (h - ARROW_NOTCH * h) / 5;
-  // Bands follow the point: each is a chevron `band` tall, red first at the tip.
-  for (let k = -1; k < 8; k += 2) {
-    const y1 = h - k * band;
-    const y0 = y1 - band;
+  g.fillStyle = ARROW_WHITE;
+  const band = (h * (1 - ARROW_HEAD)) / ARROW_BANDS;
+  for (let k = 1; k < ARROW_BANDS; k += 2) g.fillRect(0, k * band, w, band);
+  weather(g, w, h, 0.08);
+};
+
+/**
+ * The picture panel of a boundary sign. The real ones carry each town's own
+ * illustration; this is a generic landscape (sky, a far range, two swells
+ * of field) that stands for all of them.
+ */
+const country: Paint = (g, w, h) => {
+  g.fillStyle = "#9fc1dc";
+  g.fillRect(0, 0, w, h);
+  const hill = (colour: string, base: number, amp: number, phase: number, freq: number) => {
+    g.fillStyle = colour;
     g.beginPath();
-    g.moveTo(0, y0 - drop);
-    g.lineTo(w / 2, y0);
-    g.lineTo(w, y0 - drop);
-    g.lineTo(w, y1 - drop);
-    g.lineTo(w / 2, y1);
-    g.lineTo(0, y1 - drop);
+    g.moveTo(0, h);
+    for (let x = 0; x <= w; x += 2) g.lineTo(x, h * (base - amp * Math.sin((x / w) * Math.PI * freq + phase)));
+    g.lineTo(w, h);
     g.closePath();
     g.fill();
-  }
-  weather(g, w, h, 0.12);
+  };
+  hill("#e9edf0", 0.5, 0.1, 0.4, 2.6);
+  hill("#6f9a57", 0.66, 0.06, 2.0, 1.7);
+  hill("#c9b45a", 0.8, 0.05, 0.2, 1.3);
+  hill("#4f7f49", 0.93, 0.04, 3.4, 1.1);
+  g.strokeStyle = WHITE;
+  g.lineWidth = Math.max(2, w * 0.035);
+  g.strokeRect(0, 0, w, h);
 };
+
+/** A junction's name beside the signal head: white on blue. */
+const signalName =
+  (name: string): Paint =>
+  (g, w, h) => {
+    g.fillStyle = BLUE;
+    g.fillRect(0, 0, w, h);
+    g.fillStyle = WHITE;
+    text(g, name, w / 2, h * 0.52, h * 0.6, w * 0.9);
+  };
 
 /** A snow pole: red and white bands of about 30 cm. */
 const stripes: Paint = (g, w, h) => {
   const n = 8;
   for (let k = 0; k < n; k++) {
-    g.fillStyle = k % 2 === 0 ? RED : WHITE;
+    g.fillStyle = k % 2 === 0 ? ARROW_RED : ARROW_WHITE;
     g.fillRect(0, (k * h) / n, w, h / n + 1);
   }
   weather(g, w, h, 0.14);
@@ -208,25 +233,6 @@ const rail: Paint = (g, w, h) => {
   g.fillStyle = grad;
   g.fillRect(0, 0, w, h);
 };
-
-const reflector =
-  (lens: string, glint: string): Paint =>
-  (g, w, h) => {
-    g.fillStyle = "#d6d8d8";
-    g.fillRect(0, 0, w, h);
-    g.fillStyle = "#6f7376";
-    g.beginPath();
-    g.arc(w / 2, h / 2, w * 0.44, 0, Math.PI * 2);
-    g.fill();
-    g.fillStyle = lens;
-    g.beginPath();
-    g.arc(w / 2, h / 2, w * 0.38, 0, Math.PI * 2);
-    g.fill();
-    g.fillStyle = glint;
-    g.beginPath();
-    g.arc(w * 0.42, h * 0.4, w * 0.16, 0, Math.PI * 2);
-    g.fill();
-  };
 
 function lens(g: Ctx, x: number, y: number, r: number, rim: string, core: string): void {
   const grad = g.createRadialGradient(x, y, r * 0.1, x, y, r);
@@ -307,17 +313,17 @@ function painters(): Record<string, Paint> {
     curve: warning("急カーブ注意"),
     km: digit("km", 0.5),
     rail,
-    reflWhite: reflector("#f3f4ef", "#ffffff"),
-    reflOrange: reflector("#f08a12", "#ffc35a"),
+    country,
     blue: flat(BLUE),
     white: flat("#ffffff"),
     lamp: flat("#fff3d6"),
   };
   for (const r of SHIELDS) p[`shield-${r}`] = shield(r);
   for (const v of SPEEDS) p[`speed-${v}`] = speed(v);
+  SIGNAL_NAMES.forEach((n, i) => (p[`signame-${i}`] = signalName(n)));
   TOWNS.forEach((t, i) => {
-    p[`name-${i}`] = townName(t.key, t.en, t.key.length > 3 ? 0.5 : 0.58);
-    p[`bound-${i}`] = townName(t.key + t.suffix, `${t.en} ${t.kind}`, 0.56);
+    p[`name-${i}`] = townName(t.key, t.en, 0.68);
+    p[`bound-${i}`] = townName(t.key + t.suffix, `${t.en} ${t.kind}`, 0.62);
   });
   for (let d = 0; d < 10; d++) p[`digit-${d}`] = digit(String(d), 0.78);
   return p;

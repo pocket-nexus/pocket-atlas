@@ -152,7 +152,7 @@ impl Car {
         let hz = -c.heading.cos();
         let slope = point.grade * (hx * point.tx + hz * point.tz);
         let mut resist = k.rolling * weight + k.drag * c.vx * c.vx + if throttle < 0.05 { k.engine_brake } else { 0.0 };
-        let half = line.half_at(c.s) as f64;
+        let half = line.half_at(c.s);
         let room = half - k.half_width - c.d.abs();
         let loose = (1.0 - room / 0.5).clamp(0.0, 1.0);
         resist += loose * 0.05 * weight;

@@ -25,10 +25,10 @@ export const ROUTE: RouteDef = {
   views: [
     { name: "Departure", km: 0.06, right: -7.5, up: 1.6, ahead: 60, aheadRight: 0, fov: 42, travel: 4 },
     { name: "Nishi-Kagura", km: 4.6, right: 6.5, up: 2.2, ahead: 90, fov: 38, travel: 6 },
-    { name: "Biei", km: 16.2, right: -6, up: 3.0, ahead: 80, fov: 40, travel: 6 },
+    { name: "Biei", km: 18.0, right: -6, up: 3.0, ahead: 80, fov: 40, travel: 6 },
     { name: "Hills", km: 22.4, right: 9, up: 5, ahead: 160, aheadUp: 4, fov: 34, travel: 8 },
-    { name: "Miyama Pass", km: 25.9, right: -8, up: 2.4, ahead: 120, fov: 36, travel: 6 },
-    { name: "Kami-Furano", km: 33.6, right: 5, up: 1.8, ahead: 70, fov: 42, travel: 5 },
+    { name: "Miyama Pass", km: 27.7, right: -8, up: 2.4, ahead: 120, fov: 36, travel: 6 },
+    { name: "Kami-Furano", km: 35.2, right: 5, up: 1.8, ahead: 70, fov: 42, travel: 5 },
     { name: "Furano", km: 49.9, right: -5.5, up: 1.7, ahead: 60, fov: 44, travel: 4 },
   ],
 };

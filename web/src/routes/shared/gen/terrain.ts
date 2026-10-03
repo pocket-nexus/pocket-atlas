@@ -1,8 +1,10 @@
 import { BASE, FAR, MID, type Cells, type Layer } from "../layers";
 import type { MeshBuilder, V3 } from "../mesh";
+import { STAND_FLOOR, STAND_TINT, stand } from "../kit/plants-layout";
 import { clamp, fbm2, smoothstep } from "../noise";
 import type { Feature } from "../source";
 import type { Probe, RouteWorld } from "../world";
+import { groundCut } from "./structures";
 
 /**
  * The ground of one cell: a regular grid of the layer's step over the
@@ -16,12 +18,9 @@ import type { Probe, RouteWorld } from "../world";
 /** Snow as the land under it colours it from a distance (sRGB tint of the snow material). */
 const TINT = {
   open: [255, 255, 255],
-  /** Bare larch and birch over snow, seen from across a valley. */
-  wood: [112, 116, 124],
-  /** Conifer plantations. */
-  conifer: [70, 82, 84],
-  /** Under the trees the corridor draws as trees. */
-  woodFloor: [214, 219, 228],
+  /** Woods seen from across a valley, by stand (larch, mixed, conifer), and the snow under trees the corridor draws: `kit/plants-layout.ts`. */
+  wood: STAND_TINT,
+  woodFloor: STAND_FLOOR,
   scrub: [206, 208, 210],
   town: [226, 228, 232],
   water: [168, 186, 204],
@@ -95,6 +94,8 @@ export function terrain(world: RouteWorld, cells: Cells, layer: Layer, ix: numbe
     if (layer === FAR) return world.elevation(x, z);
     world.probe(x, z, probe);
     let h = world.base(x, z, probe);
+    // Under the bridges and in the rivers' channels (drawn by `gen/structures.ts`).
+    if (layer === BASE) h -= groundCut(world, x, z, h);
     // Under a road's strip mesh.
     if (layer === BASE && probe.zone > 0) h -= 0.7 * smoothstep(0, 2.5, probe.zone);
     return h;
@@ -160,16 +161,17 @@ function tint(world: RouteWorld, cover: Cover, layer: Layer, x: number, z: numbe
   const kind = cover.at(x, z);
   if (kind || cover.surveyed(x, z)) {
     if (kind === "water") c = TINT.water;
-    else if (kind === "conifer") c = layer === BASE ? TINT.woodFloor : TINT.conifer;
-    else if (kind === "wood" || kind === "forest") c = layer === BASE ? TINT.woodFloor : TINT.wood;
+    else if (kind === "conifer" || kind === "wood" || kind === "forest") {
+      // The same stands the trees are drawn from (`gen/plants.ts`).
+      c = (layer === BASE ? TINT.woodFloor : TINT.wood)[stand(x, z)];
+    }
     else if (kind === "scrub") c = TINT.scrub;
     else if (kind === "residential" || kind === "commercial" || kind === "industrial" || kind === "retail") c = TINT.town;
   } else {
     // Beyond the survey: hillsides are wooded up to the tree line (about 1100 m here), the plain is farmed.
     const slope = Math.acos(clamp(up, 0, 1));
     const wooded = smoothstep(0.1, 0.24, slope) * (1 - smoothstep(1000, 1250, y)) * smoothstep(0.25, 0.6, fbm2(x / 900, z / 900, 3, 11) + slope);
-    const mix = fbm2(x / 2600, z / 2600, 2, 4);
-    const w = mix > 0.5 ? TINT.wood : TINT.conifer;
+    const w = TINT.wood[stand(x, z)];
     c = [TINT.open[0] + (w[0] - 255) * wooded, TINT.open[1] + (w[1] - 255) * wooded, TINT.open[2] + (w[2] - 255) * wooded];
   }
   // Wind crust and drift: a little value variation over open snow.

@@ -8,7 +8,7 @@ pub struct Line {
     pub x: Vec<f64>,
     pub y: Vec<f64>,
     pub z: Vec<f64>,
-    pub half: Vec<f32>,
+    pub half: Vec<f64>,
     /// Arc length at every sample.
     pub s: Vec<f64>,
     pub length: f64,
@@ -38,11 +38,11 @@ impl Line {
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
         let n = bytes.len() / 16;
         let f = |i: usize, k: usize| f32::from_le_bytes(bytes[i * 16 + k * 4..i * 16 + k * 4 + 4].try_into().unwrap());
-        Self::new((0..n).map(|i| f(i, 0) as f64).collect(), (0..n).map(|i| f(i, 1) as f64).collect(), (0..n).map(|i| f(i, 2) as f64).collect(), (0..n).map(|i| f(i, 3)).collect())
+        Self::new((0..n).map(|i| f(i, 0) as f64).collect(), (0..n).map(|i| f(i, 1) as f64).collect(), (0..n).map(|i| f(i, 2) as f64).collect(), (0..n).map(|i| f(i, 3) as f64).collect())
     }
 
     /// From samples and the half width at each.
-    pub fn new(x: Vec<f64>, y: Vec<f64>, z: Vec<f64>, half: Vec<f32>) -> Result<Self, String> {
+    pub fn new(x: Vec<f64>, y: Vec<f64>, z: Vec<f64>, half: Vec<f64>) -> Result<Self, String> {
         let n = x.len();
         if n < 2 || y.len() != n || z.len() != n || half.len() != n {
             return Err("route: the driven line is empty".into());
@@ -101,7 +101,7 @@ impl Line {
     }
 
     /// Ploughed half width at an arc length.
-    pub fn half_at(&self, s: f64) -> f32 {
+    pub fn half_at(&self, s: f64) -> f64 {
         self.half[self.segment(s.clamp(0.0, self.length))]
     }
 

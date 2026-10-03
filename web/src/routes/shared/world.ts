@@ -34,14 +34,14 @@ export interface RoadClass {
 }
 
 export const ROAD_CLASSES: Record<string, RoadClass> = {
-  // National routes: two 3.25 m lanes and 1 m shoulders ploughed full width.
-  trunk: { half: 4.25, verge: 9, grade: 22, bank: 1.1, surface: "road" },
-  primary: { half: 4.0, verge: 6, grade: 16, bank: 1.0, surface: "road" },
-  secondary: { half: 3.5, verge: 5, grade: 12, bank: 0.9, surface: "lane" },
-  tertiary: { half: 3.25, verge: 5, grade: 12, bank: 0.9, surface: "lane" },
-  unclassified: { half: 2.75, verge: 4, grade: 9, bank: 0.8, surface: "lane" },
-  residential: { half: 2.75, verge: 4, grade: 9, bank: 0.8, surface: "lane" },
-  living_street: { half: 2.5, verge: 4, grade: 8, bank: 0.7, surface: "lane" },
+  // National routes: two 3.25 m lanes; in January the shoulders are under the bank (ploughed width 6.5–7.5 m).
+  trunk: { half: 3.6, verge: 9, grade: 22, bank: 1.1, surface: "road" },
+  primary: { half: 3.5, verge: 6, grade: 16, bank: 1.0, surface: "road" },
+  secondary: { half: 3.25, verge: 5, grade: 12, bank: 0.9, surface: "lane" },
+  tertiary: { half: 3.0, verge: 5, grade: 12, bank: 0.9, surface: "lane" },
+  unclassified: { half: 2.5, verge: 4, grade: 9, bank: 0.8, surface: "lane" },
+  residential: { half: 2.5, verge: 4, grade: 9, bank: 0.8, surface: "lane" },
+  living_street: { half: 2.25, verge: 4, grade: 8, bank: 0.7, surface: "lane" },
   service: { half: 2.0, verge: 3, grade: 6, bank: 0.55, surface: "lane" },
 };
 for (const k of ["trunk", "primary", "secondary", "tertiary"]) ROAD_CLASSES[`${k}_link`] = { ...ROAD_CLASSES[k], half: 3.0 };
@@ -356,13 +356,15 @@ export class RouteWorld {
 
   /**
    * Height of the ploughed bank `e` metres beyond the edge, at arc length
-   * `s`: a cut face, a crest 0.9 m back, a slope spent 3.6 m back. Its
-   * height swells and sags along the road.
+   * `s`: the face the plough's wing cuts (two thirds of the height in the
+   * first 20 cm), a rounded shoulder up to the crest 0.9 m back, a slope
+   * spent 3.6 m back. Its height swells and sags along the road.
    */
   bank(e: number, s: number, cls: RoadClass, side: number): number {
     if (e <= 0 || e >= 3.6) return 0;
     const h = cls.bank * (0.62 + 0.76 * fbm2(s / 55 + side * 17.3, side * 3.1, 3, 5));
-    const rise = e < 0.15 ? (e / 0.15) * 0.62 : e < 0.9 ? 0.62 + 0.38 * smoothstep(0.15, 0.9, e) : 1 - smoothstep(0.9, 3.6, e);
+    const t = (e - 0.2) / 0.7;
+    const rise = e < 0.2 ? (e / 0.2) * 0.68 : e < 0.9 ? 0.68 + 0.32 * (1 - (1 - t) * (1 - t)) : 1 - smoothstep(0.9, 3.6, e);
     return h * rise;
   }
 }

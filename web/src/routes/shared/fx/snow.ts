@@ -23,7 +23,14 @@ export interface SnowSpec {
   opacity: number;
 }
 
-export const LIGHT_SNOW: SnowSpec = { count: 5200, box: [44, 26, 44], fall: 1.25, wind: [0.9, 0.4], size: 0.028, shutter: 1 / 60, color: [1, 1, 1.03], opacity: 0.55 };
+/**
+ * Light snow: a flake to every three cubic metres out to 17 m, falling at
+ * a little over a metre a second on a light north-westerly, as bright as
+ * the snow on the ground. Seen against the road and the trees, lost against
+ * the fields; at 60 km/h the 1/160 s exposure draws each into a hand's
+ * length of streak rushing at the screen.
+ */
+export const LIGHT_SNOW: SnowSpec = { count: 7200, box: [34, 20, 34], fall: 1.15, wind: [0.8, 0.5], size: 0.026, shutter: 1 / 160, color: [1.5, 1.5, 1.56], opacity: 0.9 };
 
 const VERT = /* glsl */ `
 attribute vec4 aSeed;

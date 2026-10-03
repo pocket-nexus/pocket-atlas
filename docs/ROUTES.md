@@ -67,9 +67,9 @@ the page's worker, and under Bun for the export.
   | Layer | Cell | Exists within | Loads within | Holds |
   | --- | --- | --- | --- | --- |
   | `detail` | 256 m | 360 m of the line | 640 m | poles, signs, wires, near trees |
-  | `base` | 256 m | 360 m | 2.4 km | roads and banks, terrain at 8 m, buildings, woods |
-  | `mid` | 1024 m | 4 km | 7.2 km | terrain at 32 m, canopy |
-  | `far` | 8192 m | 28 km | all | terrain at 512 m |
+  | `base` | 256 m | 360 m | 1.8 km | roads and banks, terrain at 8 m, buildings, woods |
+  | `mid` | 1024 m | 4 km | 3 km | terrain at 32 m, canopy |
+  | `far` | 8192 m | 9 km | 9 km | terrain at 512 m |
 
   A coarser layer still covers the ground under a finer one, sunk below it
   (5 m, 40 m), so an unloaded finer cell leaves no hole; where a finer
@@ -136,10 +136,12 @@ place renderer draws it unchanged; the drive adds:
   Everything handed to the renderer is relative to an origin on a 1024 m
   grid near the camera, moved when the camera is 2 km from it.
 - **The simulation** (`crates/pocket3d-drive`): the port of the web's
-  `line.ts` and `drive/*.ts`, statement for statement in f64. A trace
-  written by `web/scripts/vehicle-trace.ts` (150 s of scripted controls and
-  autopilot) is replayed by `cargo test -p pocket3d-drive` and must match
-  to 10⁻⁶.
+  `line.ts` and `drive/*.ts` (car, trip, traffic, cameras, autopilot, sound
+  parameters), statement for statement in f64. A trace written by
+  `web/scripts/vehicle-trace.ts` (150 s of scripted controls and autopilot)
+  is replayed by `cargo test -p pocket3d-drive` and must match to 10⁻⁶.
+- **Sound** (`audio.rs`): four voices mixed on their own thread from the
+  drive's numbers, as the web builds them from WebAudio nodes.
 - **Falling snow** (`fx_v.cg`/`fx_f.cg`, `FLAKE`; `Meta::snow`): flakes in a
   box around the camera, drawn along their velocity relative to it.
 - **The display** (`hud.rs`) and the trip: stops reached are saved to
@@ -161,4 +163,5 @@ time, draws, triangles and cells per kilometre.
 - The car stays on the driven road; side roads are drawn, not driven.
 - One weather and hour per route; the light does not change along the way.
 - The dual carriageway north of the start is outside the route.
-- No traffic, pedestrians or sound on the handheld yet.
+- Traffic keeps to its lane at a steady speed and does not react to the car; meeting it stops both. No pedestrians.
+- The car's sound is synthesised (engine, tyres, wind, snowbank); there is no ambient sound.

@@ -19,7 +19,7 @@ pub struct TrafficCar {
 
 pub const TRAFFIC_CARS: usize = 5;
 pub const TRAFFIC_BODIES: usize = 4;
-const LANE: f64 = 1.7;
+const LANE: f64 = 1.65;
 const BEHIND: f64 = 260.0;
 const AHEAD: f64 = 1500.0;
 

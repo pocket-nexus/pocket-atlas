@@ -181,15 +181,15 @@ function paintAtlas(): HTMLCanvasElement {
     const rows = 20;
     const bh = s.h / rows;
     const bw = ATLAS / 16;
-    g.fillStyle = "#b9b7b0";
+    g.fillStyle = "#cdcbc4";
     g.fillRect(0, s.y, ATLAS, s.h);
     for (let j = 0; j < rows; j++)
       for (let i = -1; i < 17; i++) {
-        const v = 222 + Math.round((r() - 0.5) * 22);
+        const v = 226 + Math.round((r() - 0.5) * 10);
         const x = i * bw + (j & 1 ? bw / 2 : 0);
         g.fillStyle = `rgb(${v},${v - 1},${v - 4})`;
         g.fillRect(x + 1, s.y + j * bh + 1, bw - 1.5, bh - 1.5);
-        g.fillStyle = "rgba(255,255,255,0.3)";
+        g.fillStyle = "rgba(255,255,255,0.2)";
         g.fillRect(x + 1, s.y + j * bh + 1, bw - 1.5, 1);
       }
     streaks(g, s, 14, 0.07, 9);
@@ -261,14 +261,14 @@ function paintAtlas(): HTMLCanvasElement {
       const x = i * 64;
       g.fillStyle = `rgba(0,0,0,${0.02 + r() * 0.05})`;
       g.fillRect(x, s.y, 64, s.h);
-      g.fillStyle = "#fbfbf9";
+      g.fillStyle = "#f0f0ee";
       g.fillRect(x + 30, s.y, 2, s.h);
-      g.fillStyle = "#8e8e8c";
+      g.fillStyle = "#b2b2b0";
       g.fillRect(x + 32, s.y, 3, s.h);
-      g.fillStyle = "#c4c4c2";
+      g.fillStyle = "#d0d0ce";
       g.fillRect(x + 35, s.y, 2, s.h);
     }
-    grain(g, 0, s.y, ATLAS, s.h, 0.06, 59);
+    grain(g, 0, s.y, ATLAS, s.h, 0.03, 59);
     finishStrip(g, s);
   }
 
@@ -491,6 +491,9 @@ function paintLitAtlas(): HTMLCanvasElement {
       g.fillStyle = "rgba(255,255,255,0.6)";
       g.fillRect(x + 2, s.y + 110, 7, 3);
     }
+    // The glass between: the room is paler and flatter from outside.
+    g.fillStyle = "rgba(226,230,228,0.42)";
+    g.fillRect(0, s.y, S, s.h - 20);
     // Kick panel and mullions (every 1.5 m).
     g.fillStyle = "#4c4e50";
     g.fillRect(0, s.y + s.h - 20, S, 20);
