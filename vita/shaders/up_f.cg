@@ -9,10 +9,12 @@ uniform float4 uTexel;       // texel of the source, radius, -
 half4 main(float2 vUv : TEXCOORD0) : COLOR
 {
     float2 o = uTexel.xy;
-    half3 c = tex2D(uSource, vUv + float2(-o.x, -o.y)).rgb;
-    c += tex2D(uSource, vUv + float2(o.x, -o.y)).rgb;
-    c += tex2D(uSource, vUv + float2(-o.x, o.y)).rgb;
-    c += tex2D(uSource, vUv + float2(o.x, o.y)).rgb;
+    // Average before accumulation so four finite HDR samples cannot
+    // overflow solely because their unweighted intermediate sum is large.
+    half3 c = (half3)tex2D(uSource, vUv + float2(-o.x, -o.y)).rgb * (half)0.25;
+    c += (half3)tex2D(uSource, vUv + float2(o.x, -o.y)).rgb * (half)0.25;
+    c += (half3)tex2D(uSource, vUv + float2(-o.x, o.y)).rgb * (half)0.25;
+    c += (half3)tex2D(uSource, vUv + float2(o.x, o.y)).rgb * (half)0.25;
     half3 s = tex2D(uSupport, vUv).rgb;
-    return half4(lerp(s, c * (half)0.25, (half)uTexel.z), 1.0);
+    return half4(lerp(s, c, (half)uTexel.z), (half)1.0);
 }

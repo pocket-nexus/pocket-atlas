@@ -69,7 +69,7 @@ export function tree(w: DayWorld, spec: TreeSpec): void {
   const r = new Rng(spec.seed), base = new Vector3(...spec.at);
   const handheld = w.geometry === "handheld";
   const branch = (pts: Vector3[], r0: number, r1: number, radial: number) =>
-    limb(pts, r0, r1, handheld ? Math.max(3, Math.ceil(radial * 0.6)) : radial, handheld ? 1.5 : 3);
+    limb(pts, r0, handheld && r1 <= 0.006 ? 0 : r1, handheld ? Math.max(3, Math.ceil(radial * 0.6)) : radial, handheld ? 1.5 : 3, handheld ? (r0 <= 0.04 ? 0.022 : 0.012) : 0);
   const h = spec.height, radius = spec.radius;
   const top = base.clone().add(new Vector3(spec.lean?.[0] ?? 0.25, h * 0.4, spec.lean?.[1] ?? 0));
   const woods: BufferGeometry[] = [branch([base, base.clone().lerp(top, 0.5).add(new Vector3(-0.12, 0, 0.08)), top], h * 0.045, h * 0.026, 10)];
@@ -98,7 +98,7 @@ export function tree(w: DayWorld, spec: TreeSpec): void {
       woods.push(branch([p, p.clone().lerp(end, 0.6).add(new Vector3(0, 0.15, 0)), end], 0.034, 0.006, 5));
       for (const f of [0.48, 0.8, 1.0]) {
         const at = p.clone().lerp(end, f);
-        cluster(cards, r, at, crown, cr, radius * 0.11, density, spec.bloom ? r.pick([0, 0, 2, 3]) : r.pick([0, 1, 2]), spec.bloom ? 0.55 : 0.73);
+        cluster(cards, r, at, crown, cr, radius * 0.11, density, spec.bloom ? r.pick([0, 0, 2, 3]) : r.pick([0, 1, 2]), spec.bloom ? 0.55 : 0.73, handheld);
       }
     }
   }
@@ -111,27 +111,45 @@ export function tree(w: DayWorld, spec: TreeSpec): void {
   for (let j = 0; j < 75; j++) {
     const a = r.range(0, Math.PI * 2), d = Math.sqrt(r.next()) * radius * 0.92;
     const at = crown.clone().add(new Vector3(Math.cos(a) * d, h * 0.1 - d * 0.18 + r.range(-0.65, 0.7), Math.sin(a) * d));
-    cluster(cards, r, at, crown, cr, radius * 0.16, density + 5, spec.bloom ? r.pick([0, 2, 3]) : r.pick([0, 1, 2]), spec.bloom ? 0.7 : 0.84);
+    cluster(cards, r, at, crown, cr, radius * 0.16, density + 5, spec.bloom ? r.pick([0, 2, 3]) : r.pick([0, 1, 2]), spec.bloom ? 0.7 : 0.84, handheld);
   }
   w.mesh(merge(woods), w.lib.bark(0x9a8279));
   w.mesh(cardsGeometry(cards), material);
 }
 
-/** Curved, notched petal with a pale edge and pink base. Used for settled and airborne petals. */
-function petalGeometry(): BufferGeometry {
-  const pos = [0, 0, 0, -0.35, 0.3, 0.08, -0.45, 0.7, 0.14, -0.21, 1, 0.22, 0, 0.88, 0.25, 0.21, 1, 0.22, 0.45, 0.7, 0.14, 0.35, 0.3, 0.08];
+/** Exact source outline, also used by the handheld alpha mask. */
+export const PETAL_OUTLINE = [[0, 0, 0], [-0.35, 0.3, 0.08], [-0.45, 0.7, 0.14], [-0.21, 1, 0.22], [0, 0.88, 0.25], [0.21, 1, 0.22], [0.45, 0.7, 0.14], [0.35, 0.3, 0.08]] as const;
+
+/** Curved, notched petal, or its silhouette-preserving two-triangle card. */
+export function petalGeometry(handheld = false): BufferGeometry {
+  const pos = handheld ? [-0.45, 0, 0, 0.45, 0, 0, 0.45, 1, 0.25, -0.45, 1, 0.25] : PETAL_OUTLINE.flat();
   const g = new BufferGeometry();
   g.setAttribute("position", new Float32BufferAttribute(pos, 3));
-  g.setIndex([0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 5, 0, 5, 6, 0, 6, 7]);
+  if (handheld) g.setAttribute("uv", new Float32BufferAttribute([0, 0, 1, 0, 1, 1, 0, 1], 2));
+  g.setIndex(handheld ? [0, 2, 1, 0, 3, 2] : [0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 5, 0, 5, 6, 0, 6, 7]);
   g.computeVertexNormals();
   return g;
 }
 
 export function petalDrift(w: DayWorld, groundY: (z: number) => number, loopSeconds = 64): void {
   const r = new Rng(500), dummy = new Object3D();
+  const handheld = w.geometry === "handheld";
   const mat = new MeshStandardMaterial({ color: 0xffd5e3, roughness: 0.9, side: DoubleSide, emissive: 0x5e283e, emissiveIntensity: 0.16 });
   mat.name = "fallen-cherry-petal";
-  const settled = new InstancedMesh(petalGeometry(), mat, 2100);
+  if (handheld) {
+    // Keep the notch and every outline vertex in a white alpha mask. The
+    // sloped card differs from the original fold by <= 2 mm at maximum size,
+    // while each of the 2,100 fallen and 260 flying petals keeps its pose/size.
+    const { c, g } = canvas(256, 256);
+    g.fillStyle = "#ffffff"; g.beginPath();
+    PETAL_OUTLINE.forEach(([x, y], i) => {
+      const u = (x + 0.45) / 0.9 * 256, v = (1 - y) * 256;
+      if (i === 0) g.moveTo(u, v); else g.lineTo(u, v);
+    });
+    g.closePath(); g.fill();
+    mat.map = toTexture(c); mat.alphaTest = 0.45;
+  }
+  const settled = new InstancedMesh(petalGeometry(handheld), mat, 2100);
   settled.name = "petals-in-gutters";
   for (let i = 0; i < settled.count; i++) {
     const z = r.range(-40, 29);

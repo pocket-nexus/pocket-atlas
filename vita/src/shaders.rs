@@ -16,6 +16,7 @@ use pocket3d_gxm::shacccg::{Compiler, Stage};
 
 pub const SOURCES: &[(&str, &str)] = &[
     ("common.cgh", include_str!("../shaders/common.cgh")),
+    ("vista.cgh", include_str!("../shaders/vista.cgh")),
     ("surface_v.cg", include_str!("../shaders/surface_v.cg")),
     ("standard_f.cg", include_str!("../shaders/standard_f.cg")),
     ("unlit_f.cg", include_str!("../shaders/unlit_f.cg")),
@@ -44,10 +45,13 @@ pub const SOURCES: &[(&str, &str)] = &[
     ("text_f.cg", include_str!("../shaders/text_f.cg")),
     ("ui_f.cg", include_str!("../shaders/ui_f.cg")),
     ("shadow_f.cg", include_str!("../shaders/shadow_f.cg")),
+    ("shadow_pair_f.cg", include_str!("../shaders/shadow_pair_f.cg")),
     ("fill_f.cg", include_str!("../shaders/fill_f.cg")),
     ("sky_day_f.cg", include_str!("../shaders/sky_day_f.cg")),
     ("blit_f.cg", include_str!("../shaders/blit_f.cg")),
     ("debug_f.cg", include_str!("../shaders/debug_f.cg")),
+    ("lights_v.cg", include_str!("../shaders/lights_v.cg")),
+    ("lights_f.cg", include_str!("../shaders/lights_f.cg")),
 ];
 
 const SHARE: &str = "host0:atlas";

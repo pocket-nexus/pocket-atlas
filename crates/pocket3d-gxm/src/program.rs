@@ -226,6 +226,12 @@ pub enum Output {
     Half2,
     /// Single-channel F32 (32-bit) targets.
     Float,
+    /// Two unsigned-normalized 16-bit channels in one 32-bit register.
+    /// The shader returns float4 COLOR in [0, 1], not integer-valued floats
+    /// in [0, 65535]; patching selects the final normalized conversion.
+    /// Keep source arithmetic/output float precision, with blending and
+    /// dithering disabled when storing data such as paired shadow depths.
+    Ushort2,
 }
 
 /// # Safety
@@ -244,6 +250,7 @@ pub unsafe fn fragment_program(
         Output::Half4 => g::SceGxmOutputRegisterFormat_SCE_GXM_OUTPUT_REGISTER_FORMAT_HALF4,
         Output::Half2 => g::SceGxmOutputRegisterFormat_SCE_GXM_OUTPUT_REGISTER_FORMAT_HALF2,
         Output::Float => g::SceGxmOutputRegisterFormat_SCE_GXM_OUTPUT_REGISTER_FORMAT_FLOAT,
+        Output::Ushort2 => g::SceGxmOutputRegisterFormat_SCE_GXM_OUTPUT_REGISTER_FORMAT_USHORT2,
     };
     let mut out: *mut g::SceGxmFragmentProgram = ptr::null_mut();
     let r = g::sceGxmShaderPatcherCreateFragmentProgram(

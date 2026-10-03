@@ -1,6 +1,35 @@
 import { BufferGeometry, Float32BufferAttribute, Vector3 } from "three";
 import { rod } from "../shapes";
 
+export interface SolidBox {
+  min: [number, number, number];
+  max: [number, number, number];
+}
+
+/**
+ * Remove only triangles wholly inside a solid, opaque box. A box is convex,
+ * so containing all three vertices contains the entire triangle. The small
+ * inset protects coincident/exterior faces, including the box's own faces.
+ * Geometry and boxes must already be in the same object-local coordinates.
+ */
+export function removeEnclosedTriangles(geometry: BufferGeometry, boxes: readonly SolidBox[]): BufferGeometry {
+  const position = geometry.getAttribute("position"), index = geometry.index;
+  const count = index?.count ?? position.count, keep: number[] = [];
+  for (let at = 0; at < count; at += 3) {
+    const a = index ? index.getX(at) : at;
+    const b = index ? index.getX(at + 1) : at + 1;
+    const c = index ? index.getX(at + 2) : at + 2;
+    const lo = [Math.min(position.getX(a), position.getX(b), position.getX(c)), Math.min(position.getY(a), position.getY(b), position.getY(c)), Math.min(position.getZ(a), position.getZ(b), position.getZ(c))];
+    const hi = [Math.max(position.getX(a), position.getX(b), position.getX(c)), Math.max(position.getY(a), position.getY(b), position.getY(c)), Math.max(position.getZ(a), position.getZ(b), position.getZ(c))];
+    const hidden = boxes.some(box => lo[0] > box.min[0] + 1e-5 && hi[0] < box.max[0] - 1e-5
+      && lo[1] > box.min[1] + 1e-5 && hi[1] < box.max[1] - 1e-5
+      && lo[2] > box.min[2] + 1e-5 && hi[2] < box.max[2] - 1e-5);
+    if (!hidden) keep.push(a, b, c);
+  }
+  if (keep.length !== count) geometry.setIndex(keep);
+  return geometry;
+}
+
 /** Accumulates quads with explicit normals and UVs into one geometry. */
 export class QuadBuilder {
   private pos: number[] = [];

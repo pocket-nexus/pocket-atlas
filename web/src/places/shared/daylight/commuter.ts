@@ -3,9 +3,10 @@ import {
   Shape, ShapeGeometry, TorusGeometry, type BufferGeometry, type Material, type Vector3,
 } from "three";
 import { box } from "../geo";
-import { atlasPlane, instance, Parts, rod, tube, v3 } from "../shapes";
+import { atlasPlane, instance, Parts, quad, rod, tube, v3 } from "../shapes";
 import { JP_SANS } from "../canvas";
 import type { DayWorld } from "./context";
+import { removeEnclosedTriangles, type SolidBox } from "./geometry";
 
 /** A 20 m, four-door stainless commuter set. Site code supplies livery and formation. */
 export interface CommuterCar {
@@ -50,7 +51,11 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
   const sheets = new Map<Material, Material>();
   const parts = () => {
     const p = new Parts();
+    const solids: SolidBox[] = [];
     return {
+      solid(size: [number, number, number], at: [number, number, number]) {
+        if (handheld) solids.push({ min: at.map((v, i) => v - size[i] / 2) as SolidBox["min"], max: at.map((v, i) => v + size[i] / 2) as SolidBox["max"] });
+      },
       add(mat: Material, geo: BufferGeometry, cast = true) {
         if (geo.userData.thinBand) {
           if (!sheets.has(mat)) {
@@ -61,7 +66,10 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
         }
         p.add(mat, geo, cast);
       },
-      bake: () => p.bake(),
+      bake: () => p.bake().map(part => {
+        if (handheld) removeEnclosedTriangles(part.geo, solids);
+        return part;
+      }),
     };
   };
   const cylinder = (r0: number, r1: number, height: number, sides: number) =>
@@ -70,7 +78,9 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
   const hose = (pts: Vector3[], radius: number) => tube(pts, radius, handheld ? 3 : 6, handheld ? 4 : 16);
   const hoop = (radius: number, thickness: number, radial: number, sides: number) => {
     if (!handheld) return new TorusGeometry(radius, thickness, radial, sides);
-    const g = new RingGeometry(radius - thickness, radius + thickness, sides > 20 ? 12 : 8);
+    // Small straps and spring turns stay hollow. Six sides differ from the
+    // former eight-sided contour by at most 6 mm; larger guards keep twelve.
+    const g = new RingGeometry(radius - thickness, radius + thickness, sides > 20 ? 12 : radius <= 0.1 ? 6 : 8);
     // Opaque, two-sided bands retain handles, fan guards and spring windings.
     g.userData.thinBand = true;
     return g;
@@ -109,8 +119,9 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
     if (car.cab === "rear") body.rotation.y = Math.PI;
     root.add(body);
     const p = parts();
-    const b = (mat: Material, size: [number, number, number], at: [number, number, number]) => {
+    const b = (mat: Material, size: [number, number, number], at: [number, number, number], mountedSide = 0) => {
       const g = box(...size);
+      if (!mat.transparent && mat.alphaTest === 0) p.solid(size, at);
       if (handheld) {
         const axes = [0, 1, 2].sort((a, b) => size[a] - size[b]);
         const [thin, middle, long] = axes, idx = Array.from(g.index!.array);
@@ -118,10 +129,34 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
         // at handheld scale. Preserve both broad faces and their exact extent.
         if ((size[thin] <= 0.07 && size[thin] < size[middle] * 0.28) || (size[thin] <= 0.035 && size[middle] <= 0.08)) g.setIndex(idx.slice(thin * 12, thin * 12 + 12));
         else if (size[middle] <= 0.07 && size[middle] < size[long] * 0.15) g.setIndex(idx.filter((_v, i) => Math.floor(i / 12) !== long));
+        // A plate explicitly mounted on an opaque side panel has no exposed
+        // back. Keep its front and any previously retained edge faces.
+        if (mountedSide) g.setIndex(Array.from(g.index!.array).filter(v => Math.floor(v / 4) !== 4 + (mountedSide > 0 ? 1 : 0)));
       }
       p.add(mat, g.translate(...at));
     };
     const bar = (mat: Material, a: [number, number, number], z: [number, number, number], r = 0.012, n = 8) => {
+      if (handheld && r <= 0.007 && Math.abs(a[1] - z[1]) < 1e-8) {
+        // Only luggage-rack wires and fan spokes use this radius range. A
+        // two-sided strip keeps their longitudinal extent and exact width.
+        // Fit halfway through the original triangular cross-section, bounding
+        // displacement to <= 6.1 mm (< 0.5 px at the closest Train view).
+        // Substantial rails and pipework stay round.
+        const start = v3(...a), end = v3(...z), along = end.clone().sub(start).normalize();
+        const normal = v3(0, 1, 0), side = along.clone().cross(normal).normalize();
+        const source = rod(start, end, r, 3), position = source.getAttribute("position"), v = v3(0, 0, 0);
+        let u0 = Infinity, u1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+        for (let i = 0; i < position.count; i++) {
+          v.fromBufferAttribute(position, i).sub(start);
+          const u = v.dot(side); u0 = Math.min(u0, u); u1 = Math.max(u1, u);
+          y0 = Math.min(y0, v.y); y1 = Math.max(y1, v.y);
+        }
+        source.dispose();
+        start.y += (y0 + y1) / 2; end.y += (y0 + y1) / 2;
+        const g = quad(start.clone().addScaledVector(side, u0), start.clone().addScaledVector(side, u1), end.clone().addScaledVector(side, u1), end.clone().addScaledVector(side, u0), normal);
+        g.userData.thinBand = true; p.add(mat, g);
+        return;
+      }
       const g = rod(v3(...a), v3(...z), r, handheld ? (r <= 0.018 ? 3 : 5) : n);
       // The ends meet a support or another bar; leave them open on handheld.
       if (handheld) g.setIndex(Array.from(g.index!.array).slice(0, g.groups[0].count));
@@ -151,14 +186,14 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
       const lowPanels: [number, number][] = [[-HALF, -7.25], [-5.75, -2.85], [-1.35, 1.35], [2.85, 5.75], [7.25, HALF]];
       for (const [a, end] of lowPanels) {
         b(steel, [end - a, 0.8, 0.065], [(a + end) / 2, 1.68, z]);
-        b(blue, [end - a, 0.28, 0.012], [(a + end) / 2, 1.85, z + s * 0.042]);
+        b(blue, [end - a, 0.28, 0.012], [(a + end) / 2, 1.85, z + s * 0.042], s);
         for (const [y, h] of [[1.32, 0.025], [1.5, 0.018], [2.025, 0.022]] as const)
-          b(edge, [end - a, h, 0.034], [(a + end) / 2, y, z + s * 0.04]);
+          b(edge, [end - a, h, 0.034], [(a + end) / 2, y, z + s * 0.04], s);
       }
       b(steel, [19.42, 0.23, 0.065], [0, 3.235, z]);
       // Formed waist seam, sill extrusion, shoulder rain gutter and lower panel ribs.
       for (const [y, h] of [[3.14, 0.018], [3.37, 0.04]] as const)
-        b(edge, [19.45, h, 0.034], [0, y, z + s * 0.04]);
+        b(edge, [19.45, h, 0.034], [0, y, z + s * 0.04], s);
       for (let x = -9.5; x <= 9.5; x += 1.14) b(dust, [0.009, 0.19, 0.005], [x, 1.43, z + s * 0.036]);
       const windows: [number, number][] = [[-8.52, 1.91], [-4.3, 2.33], [0, 2.14], [4.3, 2.33], [8.52, car.cab ? 1.65 : 1.91]];
       const openings = [...windows.map(([x, width]) => [x - width / 2, x + width / 2]), ...[-6.5, -2.1, 2.1, 6.5].map(x => [x - 0.75, x + 0.75])].sort((a, b) => a[0] - b[0]);
@@ -196,13 +231,13 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
         b(rubber, [1.54, 0.035, 0.085], [x, 1.32, z + s * 0.015]);
         for (const dx of [-0.747, 0.747]) {
           b(steel, [0.038, 1.98, 0.08], [x + dx, 2.29, z]);
-          b(blue, [0.038, 0.28, 0.014], [x + dx, 1.85, z + s * 0.049]);
+          b(blue, [0.038, 0.28, 0.014], [x + dx, 1.85, z + s * 0.049], s);
         }
         b(steel, [1.56, 0.11, 0.1], [x, 3.24, z]);
         for (const dx of [-0.367, 0.367]) {
           const xx = x + dx;
           b(steel, [0.717, 0.93, 0.045], [xx, 1.8, dz]);
-          b(blue, [0.717, 0.28, 0.012], [xx, 1.85, dz + s * 0.03]);
+          b(blue, [0.717, 0.28, 0.012], [xx, 1.85, dz + s * 0.03], s);
           b(steel, [0.717, 0.15, 0.045], [xx, 3.13, dz]);
           for (const wx of [-0.299, 0.299]) b(steel, [0.119, 0.86, 0.045], [xx + wx, 2.665, dz]);
           sideGeo(rubber, roundedRing(0.51, 0.87, 0.075, 0.027), xx, 2.655, dz + s * 0.03, s);
@@ -240,8 +275,8 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
       b(dust, [2.53, 0.055, 1.67], [x, 3.86, 0]);
       b(w.lib.plain(0xa2aaa8, 0.56, 0.45), [2.48, 0.23, 1.6], [x, 4.0, 0]);
       for (const s of [-1, 1]) {
-        b(chassis, [1.73, 0.12, 0.012], [x, 3.99, s * 0.806]);
-        for (let xx = -0.83; xx < 0.86; xx += 0.08) b(edge, [0.025, 0.12, 0.022], [x + xx, 3.99, s * 0.818]);
+        b(chassis, [1.73, 0.12, 0.012], [x, 3.99, s * 0.806], s);
+        for (let xx = -0.83; xx < 0.86; xx += 0.08) b(edge, [0.025, 0.12, 0.022], [x + xx, 3.99, s * 0.818], s);
         for (const dx of [-1.12, 1.12]) b(chassis, [0.025, 0.025, 0.017], [x + dx, 4.03, s * 0.81]);
       }
       for (const dx of [-0.62, 0.62]) {
@@ -281,8 +316,8 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
       const len = j === 2 && car.motor ? 2.35 : 1.45;
       b(chassis, [len, 0.57, 1.8], [x, 0.7, 0]);
       for (const s of [-1, 1]) {
-        b(dust, [len - 0.055, 0.51, 0.035], [x, 0.7, s * 0.92]);
-        if ((j + index) % 2 === 0) for (let xx = -len / 2 + 0.12; xx < len / 2 - 0.08; xx += 0.09) b(chassis, [0.027, 0.31, 0.014], [x + xx, 0.74, s * 0.947]);
+        b(dust, [len - 0.055, 0.51, 0.035], [x, 0.7, s * 0.92], s);
+        if ((j + index) % 2 === 0) for (let xx = -len / 2 + 0.12; xx < len / 2 - 0.08; xx += 0.09) b(chassis, [0.027, 0.31, 0.014], [x + xx, 0.74, s * 0.947], s);
         else for (const dx of [-len * 0.27, len * 0.27]) {
           b(chassis, [0.012, 0.43, 0.014], [x + dx, 0.7, s * 0.947]);
           b(edge, [0.075, 0.019, 0.02], [x + dx + 0.17, 0.75, s * 0.953]);
@@ -326,7 +361,13 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
             if (s < 0) flange.rotateY(Math.PI);
           }
           q.add(edge, flange.translate(0, 0, s * 0.484));
-          for (let a = 0; a < Math.PI * 2; a += Math.PI / 3) q.add(edge, cylinder(0.018, 0.018, 0.012, 6).rotateX(Math.PI / 2).translate(Math.cos(a) * 0.23, Math.sin(a) * 0.23, s * 0.605));
+          for (let a = 0; a < Math.PI * 2; a += Math.PI / 3) {
+            // The inner bolt cap is buried in the wheel disk; the 12 mm barrel
+            // is subpixel. Keep each head at its exact exposed face position.
+            const bolt = handheld ? new CircleGeometry(0.018, 4).rotateY(s < 0 ? Math.PI : 0)
+              : cylinder(0.018, 0.018, 0.012, 6).rotateX(Math.PI / 2);
+            q.add(edge, bolt.translate(Math.cos(a) * 0.23, Math.sin(a) * 0.23, s * (handheld ? 0.611 : 0.605)));
+          }
         }
         instance(q.bake(), axle);
       }

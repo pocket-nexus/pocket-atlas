@@ -2,14 +2,15 @@
 
 A world map of places people remember. A place is a small, self-contained 3D scene of one real spot — a street corner, a stairway, a café — pinned to its location on a shared globe. People will publish their own places (publicly or privately) and download other people's places to visit them.
 
-This repository holds the first-party places, the pipeline that turns a place into a pack for a handheld GPU, and the PS Vita renderer. Publishing and downloading are not built yet; the current work is distributing places at the highest image quality the PS Vita can hold at 30 fps.
+This repository holds the first-party places, the pipeline that turns a place into a pack for a handheld GPU, and native PS Vita, Nintendo 3DS and PSP renderers. Publishing and downloading are not built yet. Vita and 3DS target 30 fps; PSP currently supports the Rainy Night Konbini place through its fixed-function GE pipeline.
 
-Every place exists twice:
+Places share their assets across the reference and handheld renderers:
 
 - **`web/`** is the reference renderer: a standalone three.js + Vite app with no PocketJS dependency, with a night-side globe to pick a place. Every asset is generated at load time.
 - **`vita/`** renders the same place on a PS Vita with its own GXM pipeline: Cg programs compiled on the device by SceShaccCg, 4× MSAA HDR targets and the effect set the place needs.
+- **`n3ds/`** renders the shared globe, place browser and all four scenes on an Old 3DS, using a PICA200 cook of the same assets, native 400 × 240 output and a 30fps quality budget. See [the 3DS build and debug workflow](n3ds/README.md).
 
-A pack connects the two: the web app exports a place as glTF 2.0 with `extras.pocketAtlas`, and the cooker (`crates/pocket3d-place-cook`) turns it into a `.place` pack for the handheld GPU.
+A pack connects the renderers: the web app exports a place as glTF 2.0 with `extras.pocketAtlas`, and the cooker (`crates/pocket3d-place-cook`) turns it into a `.place` pack for the handheld GPU.
 
 ## Places
 
@@ -20,8 +21,9 @@ A pack connects the two: the web app exports a place as glTF 2.0 with `extras.po
 | Radio Kaikan at Blue Hour | `akihabara-radio-kaikan` | Akihabara, Tokyo (秋葉原ラジオ会館, the 2014 building) | twilight sky (sun below the horizon), animated LED signage (flipbooks and scrolling strips), backlit window artwork, panel lights and lamps baked with sky occlusion, pedestrians and a passing train |
 | Kamakura-Kōkōmae Crossing | `kamakura-koko-mae-crossing` | Shichirigahama, Kamakura (鎌倉高校前1号踏切 on the Enoden) | open water (wave layers, Fresnel sky reflection, glitter path) to a 16 km horizon in FogExp2 haze, scrolling surf strips, flashing crossing lamps and gates driven by material and node tracks, a train, Route 134 traffic |
 | Sangubashi in Bloom | `sangubashi-crossing` | Yoyogi, Tokyo (参宮橋３号踏切) | spring foliage, animated petals, an eight-car commuter train, synchronised barriers and moving sunlight shadows; Vita compile/captures verified, performance acceptance pending |
+| Griffith Observatory at Blue Hour | `griffith-observatory` | Mount Hollywood, Los Angeles, over the basin (September 2015) | light fields of GXM point sprites (52k city lights, 5k moving), height haze with an inversion layer to a 71 km horizon, floodlit masonry baked into vertices, parallax windows, a resolution boost to 640×362 |
 
-Real places fall into a finite set of kinds; the registry names them (`PlaceKind` in `web/src/core/types.ts`): `night-street`, `daytime-slope`, `dusk-street`, `daytime-coast` and the Three.js `daytime-street` reference for the places built so far, and `night-slope`, `dusk-coast`, `night-coast`, `interior` and `rooftop` for the places still to come. Each first-party place brings its kind's rendering to the best quality the handheld holds, and the work goes into the shared renderer and cooker so later places of the same kind reuse it. Glass (`places/shared/glass.ts`) blends premultiplied on the web as on the device. The workflow and quality bar for making a place are in the `pocket-atlas-place` skill (`.claude/skills/pocket-atlas-place/`).
+Real places fall into a finite set of kinds; the registry names them (`PlaceKind` in `web/src/core/types.ts`): `night-street`, `daytime-slope`, `dusk-street`, `daytime-coast`, `daytime-street`, `dusk-vista` for the places built so far, and `night-slope`, `dusk-coast`, `night-coast`, `interior` and `rooftop` for the places still to come. Each first-party place brings its kind's rendering to the best quality the handheld holds, and the work goes into the shared renderer and cooker so later places of the same kind reuse it. Glass (`places/shared/glass.ts`) blends premultiplied on the web as on the device. The workflow and quality bar for making a place are in the `pocket-atlas-place` skill (`.claude/skills/pocket-atlas-place/`).
 
 ## Layout
 
@@ -32,8 +34,12 @@ Real places fall into a finite set of kinds; the registry names them (`PlaceKind
 | `crates/pocket3d-place-cook` | glTF → pack: BC1/BC3/BC5 textures with mips, quantized vertices, baked vertex lighting and sky occlusion, low-poly shelf stock, octahedral environment, effect textures; the atlas pack and its baked font (`atlas.rs`, `uifont.rs`); annotation readers (`extras.rs`) |
 | `crates/pocket3d-gxm` | GXM layer: GXP registration and patching, own shader patcher, render targets, texture upload, runtime SceShaccCg |
 | `vita/` | Vita app: place loader (`scene.rs`), frame renderer (`frame.rs`), atlas globe (`atlas.rs`), place browser (`browser.rs`), settings sheet (`settings.rs`), interface drawing and text (`ui.rs`), file locations (`paths.rs`), Cg programs (`vita/shaders`), LiveArea art |
+| `psp/` | Native PSP place viewer: GE rendering, animated nodes and skinning, camera controls, procedural rain audio, PSPLINK telemetry |
+| `crates/pocket3d-place-psp` | Validated `PLPS` payload: shared GE vertex buffers, spatial index chunks, swizzled RGBA4444 mip chains, animation and camera data; no JSON on the device |
+| `n3ds/`, `tools/atlas-3ds.ts` | PICA renderer, native cooker, paired wireless deployment, capture and performance measurement |
 | `tools/atlas.ts` | cook (places and the atlas with its font), build, deploy over USB, status/capture/profile/sweep/shots, shader lint, standalone VPK |
-| `vendor/pocketjs` | PocketJS: Vita dev host and wired debug transport |
+| `tools/atlas-psp.ts` | PSP cook/build, PSPLINK serve/run/control/capture/shot measurements, standalone EBOOT package |
+| `vendor/pocketjs` | PocketJS: Vita dev host and wired debug transport; 3DS paired transport and native installer; pinned PSP toolchain resolver |
 
 ## Web
 
@@ -44,6 +50,43 @@ bun run dev          # http://127.0.0.1:5173
 ```
 
 Controls and URL switches are listed in `web/README.md`.
+
+## PSP
+
+Rainy Night Konbini runs locally at **480×272**, with baked lighting, alpha-tested shelf facings, planar reflections of lit surfaces and moving objects, rain, lamp halos, the six authored camera shots, the taxi and skinned pedestrians. The analog stick moves; the D-pad looks. L/R change shots, START resumes the camera sequence, × pauses, □ toggles rain, △ toggles reflections, ○ mutes sound, and SELECT toggles the diagnostic readout. Walking near the entrance opens the doors and plays the door chime; the rain bed quiets indoors. HOME exits.
+
+Requirements: `usbhostfs_pc` and `pspsh`, PSPLINK running on the console, and PocketJS's pinned PSP toolchain. Run `bun tools/bootstrap.ts` in `vendor/pocketjs` to provision it. An existing SDK may be selected with `PSP_SDK=/absolute/path/to/mipsel-sony-psp`; the toolchain resolver checks that override. PocketJS's submodule stays unchanged.
+
+```sh
+# Export and cook the current checkout, with the web dev server running.
+(cd web && bun scripts/export-place.ts --place tokyo-konbini --seconds 20)
+bun tools/atlas.ts cook --place tokyo-konbini
+bun tools/atlas-psp.ts cook
+bun tools/atlas-psp.ts build
+
+# Keep exactly one PSP USB host running in a terminal.
+bun tools/atlas-psp.ts serve
+# In another terminal:
+bun tools/atlas-psp.ts run --no-build
+bun tools/atlas-psp.ts status
+bun tools/atlas-psp.ts ctl '{"shot":0,"time":10}'  # fixed halfway view
+bun tools/atlas-psp.ts capture --out .pocket-build/validation/psp/view.bmp
+bun tools/atlas-psp.ts shots                     # every authored shot, captures + measurements
+bun tools/atlas-psp.ts ctl '{}'                  # live clock
+
+# Standalone files beside each other; no USB host needed after installation.
+bun tools/atlas-psp.ts package                  # dist/PSP/GAME/PocketAtlas/{EBOOT.PBP,scene.place}
+```
+
+The PSP cook is a second stage over this checkout's ordinary `.place` output, and writes `<id>.psp.place` with separate `PLPS` magic/version. It rejects unsupported place kinds and packs above 18 MiB. It preserves rigid and skeletal tracks, uses the shared cooker's coarse geometry, bakes the Products material onto world-space shelf cards, shares static vertex buffers across spatial chunks, and combines only visible chunks at draw time. GPU pointers, indices, texture layouts and animation ranges are validated before upload. The current 20-second export follows the existing Vita workflow; it does not contain the web traffic simulation's full, longer schedule.
+
+This is a fixed-function adaptation: it does not reproduce Vita's HDR/PBR shaders, normal maps, volumetric haze, per-pixel wet ripples, dynamic per-pixel lights or bloom. The PSP's 16-bit depth and reduced texture sizes also limit fine facade detail and lettering. Reflection geometry is limited to lit surfaces and moving objects. The atlas globe and multi-place browser are not part of the PSP viewer. PSP `workMs` includes CPU submission and waiting for the GE; `gpuWaitMs` is only the wait after submission, **not** serialized GPU pass timing. Captures and USB transfers must be kept outside measurement windows. Host build, physical runtime, installed-file readback, manual control feel and listening to the sound are separate evidence.
+
+On the connected PSP (333 MHz CPU, 166 MHz bus, PSPLINK, 2026-10-01), five 30-frame windows per fixed halfway camera at t=10 with rain and reflections enabled measured: Konbini 19.9 fps, Puddles 15.0, Vending 15.0, Crossing 20.0, Inside 20.0, Wires 30.0. These are fixed-view measurements, not a claim that the live sequence or every free-camera position sustains 30 fps. The pack is 15.38 MiB with 68,206 triangles across the whole place, 38 textures, 111 animated nodes and 16 skinned chunks. PSP support remains a first port with performance and visual quality below the Vita renderer.
+
+PSPLINK control and status live in an optional mailbox module. Standalone startup probes the control file once; without a host it performs no per-frame host0 I/O. Control writes are atomic and commands are acknowledged by nonce before measurement. The runtime validates camera bases, finite transforms, skin weights, texture grids and GE draw counts before submitting geometry.
+
+`psp/Psp.toml` embeds the 144×80 Pocket Atlas icon and a 480×272 PSP scene capture as the XMB background. Artwork sources and regeneration instructions live in `psp/assets/`.
 
 ## Vita
 
@@ -101,7 +144,7 @@ Commands that cook, sync or measure take `--place ID` (default `tokyo-konbini`).
 
 If a USB host is already running from another checkout, `--share /absolute/path/to/its/share` directs sync, native replacement, control, capture and measurements through that live session. Use it only when the device is available for this task; the command does not restart the existing host. Back up shared shader/atlas files before replacing them from another branch.
 
-`bun tools/atlas.ts ctl '{"renderProfile":"vita30","view":…,"time":…,"settings":{…}}'` steers the camera and the renderer: `shot` cuts to a camera shot by index; `time` freezes the loop at that second and `view` pins a camera until a message without them. Naming a profile resets its switches and governor; `settings` then overrides them: `reflection`, `haze`, `bloom`, `rain`, `msaa`, `maxLights`, `fx`, `skip`, `flat`, `hud`, `profile` (serialized GPU timing), `step` and `hold` (pin a quality step), and the step or profile values `detailM`, `lodPixels`, `cullSize`, `hazeSize`, `hazeLights`, `bloomFull`, `reflSize`, `streaks`, `steam`, `detailMaps`, `vertexLights`.
+`bun tools/atlas.ts ctl '{"renderProfile":"vita30","view":…,"time":…,"settings":{…}}'` steers the camera and the renderer: `shot` cuts to a camera shot by index; `time` freezes the loop at that second and `view` pins a camera until a message without them. Naming a profile resets its switches and governor; `settings` then overrides them: `reflection`, `haze`, `bloom`, `rain`, `msaa`, `maxLights`, `fx`, `skip` (bits of material classes; 0x80 the sky, 0x100 the light fields), `flat`, `hud`, `profile` (serialized GPU timing), `step` and `hold` (pin a quality step), the step or profile values `detailM`, `lodPixels`, `cullSize`, `hazeSize`, `hazeLights`, `bloomFull`, `reflSize`, `streaks`, `steam`, `detailMaps`, `vertexLights`, and for light fields `fieldMin` and `fieldMax` (every field's sprite range, pixels of a 272-pixel-high frame).
 
 ## Render profiles
 
@@ -118,11 +161,15 @@ If a USB host is already running from another checkout, `--share /absolute/path/
 | Rain | 7000 streaks, steam | 1500 streaks | 7000 streaks, steam |
 | Moving lights | one per pixel on baked surfaces (only the wet ground beyond the detail distance), per vertex on people and the taxi | same | one per pixel on baked surfaces, four per pixel on people and the taxi |
 
-Static draws carry LOD1 (≤ 6 cm) and LOD2 (≤ 25 cm) index lists: meshoptimizer with only the vertices on chunk-cell cuts locked, and parts of plain lit surfaces narrower than a level's error (window bars, rails, curb pieces) removed at that level. A draw takes the coarsest level whose error projects under the step's pixel threshold; the mirror pass uses twice the threshold. Shelf stock switches to one card per item.
+Above step 0, `vita30` climbs to 544×308 and then 640×362 while the GPU has room. The renderer measures each frame's GPU time without serializing it: it polls the frame's last scene's notification in 0.5 ms steps while the CPU waits for the refresh. It climbs one level when the time predicted there (the measured time × (1 + 0.35 × (pixel ratio − 1))) stays under 80 % of the period for two seconds, and drops one after 3 late frames or a smoothed GPU time over 92 %, doubling the wait before the next climb. A resolution fixed in the settings sheet, or a pinned step, turns it off. Griffith Observatory holds 30.0 fps at 640×362 in every shot under the camera rig (measured GPU 14.5–24.5 ms per frame).
+
+Static draws carry LOD1 (≤ 6 cm) and LOD2 (≤ 25 cm) index lists (chunks beyond 1 km three coarser ones, see Dusk vistas): meshoptimizer with only the vertices on chunk-cell cuts locked, and parts of plain lit surfaces narrower than a level's error (window bars, rails, curb pieces) removed at that level. A draw takes the coarsest level whose error projects under the step's pixel threshold; the mirror pass uses twice the threshold. Shelf stock switches to one card per item.
 
 Rigid moving draws also receive LODs, with additional 1 cm and 2.5 cm candidates for small mechanical details. Their non-emissive standard surfaces can drop subpixel parts; skinned meshes keep all their joint and weight seams and do not use this simplifier. Identical complete packed vertex records and identical geometry/animation byte ranges share storage. Unused standard-material UVs and tangents are canonicalized before welding. Rain lookup textures are generated only when the place uses them; dry glass gets a small neutral bead texture.
 
 Opaque solid standard materials without maps or special surface effects can share a `vertex_pbr` palette: sRGB vertex colour carries the albedo and UV carries each surface's roughness/metalness. Static geometry keeps its spatial chunks; fixed siblings in an animated hierarchy can share their parent's frame, keeping independent wheel or gate tracks intact. Sidedness, environment strength, depth state and other retained material fields remain batch boundaries. Static palettes separate rough non-metal surfaces from those requiring a sun highlight; moving assemblies keep one palette. The renderer reads these PBR constants in full, distant and reflection variants.
+
+This encoding requires PLCE/ATLS container version 7 (version 6 introduced light fields and vista haze). Readers reject other container versions before interpreting the payload; re-cook every place and the atlas when updating the renderer. Place META uses version 7, while the independent AtlasMeta, PICA and PSP payload schemas retain versions 1, 3 and 1 respectively.
 
 `bun web/scripts/place-budget.ts --in PACK.place --out REPORT.json` validates a cooked pack and estimates `vita30` step-0 main-pass geometry over the full animation loop at each shot's start, middle and end camera positions. Its draw and triangle counts are CPU planning evidence, not a GPU measurement or frame-rate claim.
 
@@ -163,9 +210,22 @@ A `daytime-coast` place adds open water to the daytime pipeline (sun with a shad
 
 - **Water** (`places/shared/water.ts`): a material annotated `kind: "water"` cooks as `Kind::Water` (`water_f.cg`, `surface_v.cg` under `WAVES`) and stays one draw however far it reaches (the cooker does not chunk it). Its normal map (BC5) is laid twice on the world's x/z plane, `waves: [[repeatsPerMetre, scrollX, scrollZ], …]` in m/s; `normalScale.x` scales the slopes, `roughness` is the GGX α near the camera and `distanceRoughness` adds α² per metre while the slopes flatten as 1 / (1 + 40 · d · distanceRoughness); `mask` tilts the wave faces toward the eye (the backs of the waves hide at grazing views, so far water reflects less sky). The environment probe is reflected by Schlick Fresnel (f0 = 0.02, the reflection folded above the horizon); `body` × the hemisphere sky fills the rest, mixed toward `shallow` by the mesh's vertex colour (red) over a sandy bottom; the sun adds a GGX highlight; FogExp2 on top, no shadows. The web material patches three.js' standard program to evaluate the same expressions, so the probe, sun and hemisphere it reads are the ones the exporter writes.
 - **Surf** (`foamMaterial` in the same file): alpha-blended lit strips whose vertex alpha fades the foam across the surf zone and whose texture scrolls shoreward (`scroll`, the cooker's `UvAnim`); each strip is one moving node, one draw.
-- **Draw budget**: within 140 m of the origin the cooker chunks static geometry into 32 m cells per material, beyond that into 256 m cells, so a view along a coast pays one draw per material per cell. Kamakura-Kōkōmae Crossing paints its small props (posts, wires, fences, housings, cabinets) from one equipment atlas, merges each vehicle and each train body into one mesh and keeps far land to a few large triangles.
+- **Draw budget**: within 140 m of the origin the cooker chunks static geometry into 32 m cells per material, beyond that into 256 m cells (and beyond 1 km into the growing cells of Dusk vistas), so a view along a coast pays one draw per material per cell. Kamakura-Kōkōmae Crossing paints its small props (posts, wires, fences, housings, cabinets) from one equipment atlas, merges each vehicle and each train body into one mesh and keeps far land to a few large triangles.
 
 Kamakura-Kōkōmae Crossing loops 120 s: one Fujisawa-bound train, the crossing's 35 s warning, lamps alternating every 0.6 s, four gate arms, six vehicles on 60 s cycles and a cyclist on a 120 s one.
+
+## Dusk vistas
+
+A `dusk-vista` place is a lookout over a lit city at blue hour, its scene reaching tens of kilometres:
+
+- **Light fields** (`places/shared/lights.ts`): a `THREE.Points` whose material is annotated `kind: "lights"` exports as glTF POINTS with COLOR_0 and the custom attributes `_LIGHT`, `_PATH` and `_BLINK` (annotations: `lights`). The cooker sorts the lights into the cells of far terrain below, no smaller than 512 m (a wide shot over a uniform ±40 km field draws 24–32 cells and processes about 30 % of the lights where 16–19 % are in view; cells twice that size drew a third fewer field draws at Griffith Observatory's Lawn but cost 0.64 ms more GPU, the clipper's work on the extra lights outside the view), at most 16 384 per draw, and stores each light as one 40-byte vertex (`VertexLayout::Lights`): quantized position and phase, sRGB colour and twinkle, intensity, radius, path and cycles, blink cycles and duty. The Vita draws a field draw as a GXM point list (`SCE_GXM_PRIMITIVE_POINTS`, polygon mode `POINT_01UV`): `lights_v.cg` moves the light along its path (`position + path · fract(phase + cycles · t / loop)`), blinks it (on while `fract(phase + blink cycles · t / loop) < duty`), sizes the sprite (`D = radius · H / (d · tan(fovY/2))` render pixels, `S = clamp(D, minPixels, maxPixels)` with the range in pixels of a 272-pixel-high frame, at least 2 render pixels on the Vita: below that the pixel centres under a sprite no longer sum to its area), moves its depth toward the eye by `clamp(depthPull · d / 1 km, 0.002, 0.5)` of the distance d (screen position unchanged, as on the web; at grazing angles the ground under the pixels below a far light is nearer than the light), keeps its energy (`(D / S)²` while D < S), twinkles it (`1 + twinkle · min(1, d / 8 km) · 0.35 · sin(2π(13.7 · phase + 4t))`) and dims it by the vista haze's T; it writes the size to `PSIZE`, and `lights_f.cg` spreads the value over a `(1 − r²)²` profile across the sprite, whose coordinate it reads as `POINTCOORD` (the device's SceShaccCg rejects `SPRITECOORD`; the coordinate is generated only under the `POINT_01UV` and `POINT_10UV` polygon modes). Additive, depth-tested against the scene, no depth write, after the sky and before blended surfaces. Measured on the Vita (`vita30`, 480×272, 4× MSAA, serialized main pass with and without the light pass): 1.3–1.5 ms per 10 000 lights in view (2-pixel sprites; rasterization dominates: 4× MSAA adds about 35 %), 0.35–0.4 ms per 10 000 lights the clipper drops, the same for moving and static lights (one program).
+- **Vista haze** (`places/shared/haze.ts`, scene annotation `haze` with an `inversion`): extinction ρ0 up to the inversion top H and ρ0 · e^(−(y − H)/s) above, optical depth `d · (G(y_p) − G(y_e)) / (y_p − y_e)` with G its antiderivative, `T = e^(−τ)`. Every material with fog takes `c · T + inscatter · (1 − T)` (premultiplied glass: the inscatter × its coverage) under `VISTA` instead of FogExp2; the light fields take T. `surface_v.cg` evaluates it per vertex (`vista.cgh`): T, and the inscatter `gain · (base + w · sun) + glow · ρ(y_p)/ρ0`: base and sun are the two parts of the sky on the horizon toward the point (the gradient's horizon and the belt; the glow lobes and the afterglow band; both under the Earth's shadow), and `w = band + (1 − band) · (1 − T)` lets the afterglow's share grow with optical depth, so far terrain meets the sky in every azimuth. The horizon depends only on the azimuth to the sun; the CPU tabulates both parts at 17 knots of `sqrt((1 − a)/2)` (`VistaHaze::sky_tables`, a the azimuth cosine; within 2 % of the dome). The fragment programs read one extra varying.
+- **Cells and LOD for far terrain**: static geometry beyond 1 km of the origin chunks into cells as wide as the octave of distance they sit in (1 km cells from 1 to 2 km, 2 km cells from 2 to 4 km, up to 64 km), and those chunks carry three LOD levels at 3·10⁻⁴, 1.2·10⁻³ and 4.8·10⁻³ of their distance (a pixel of a 5° telephoto at 480×272 at the first, of a 40° view at the last). The renderer's choice by projected error holds a telephoto: its pixel is smaller, so it keeps the finer levels.
+- **Window grids**: GXM has no anisotropic filtering, and its mip choice follows the denser of a texture's two directions. A window grid laying 5.3 texels per metre across and 2 up (16 windows of 3 m, 32 floors of 4 m in 256²) loses its floors from a few kilometres at 480×272. A material annotated `lodBias: "auto"` makes the cooker measure that ratio over the area the texture covers and store a negative LOD bias of its log2 (−1.42 for Griffith Observatory's towers), so the mip follows the sparser direction.
+- **Depth**: reversed infinite depth into a 32-bit float buffer (`DF32M`) resolves about 3 mm at 45 km; positions quantize per chunk (16-bit over the chunk's box: 25 cm in a 16 km cell).
+- **No sun**: a sun below the horizon draws no shadow map and lights nothing; the floodlights and lamps are point and spot lights baked into the vertices, and bloom carries the lit windows and the city.
+
+The day sky's tight glow lobe takes its weight (`glow.tight[0]`) on the Vita as on the web; the places before Griffith Observatory all used 1.
 
 ## Status on hardware
 

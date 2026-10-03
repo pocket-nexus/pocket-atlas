@@ -1,0 +1,55 @@
+// Light field (`kind: "lights"`, web places/shared/lights.ts): one vertex per
+// light, drawn as a point sprite (PSIZE; the fragment program reads
+// POINTCOORD under the POINT_01UV polygon mode). At distance d the light's physical
+// diameter is D = radius · H / (d · tan(fovY/2)) render pixels; the sprite
+// is S = clamp(D, min, max) pixels and keeps the light's energy, (D / S)²
+// while D < S. Value: colour · intensity · gain · (D / S)² · twinkle
+// · blink, × the vista haze's T; moving lights travel their path once per
+// cycle: p = position + path · fract(phase + cycles · t / period). The
+// sprite's depth moves toward the eye by clamp(depthPull · d / 1 km, 0.002,
+// 0.5) of the distance, its screen position unchanged (web `depthPull`): at
+// grazing angles the ground under the pixels below a far light is nearer
+// than the light.
+//
+// Defines: VISTA (the haze's transmittance).
+
+#include "common.cgh"
+#ifdef VISTA
+#include "vista.cgh"
+#endif
+
+void main(
+    float4 aPosition, // s16n xyz, phase in w
+    float4 aColor,    // sRGB colour, twinkle
+    float2 aLight,    // intensity, radius (m)
+    float4 aPath,     // travel per cycle (m), cycles per period
+    float4 aBlink,    // blink cycles per period, duty × 255, -, -
+    uniform float4 uDequant[2],
+    uniform float4x4 uViewProj,
+    uniform float4 uEye,    // camera position, -
+    uniform float4 uField,  // H / tan(fovY/2), min pixels, max pixels, gain
+    uniform float4 uFieldT, // t / period, 2π · fract(4 t), depth pull per metre, -
+    out float4 oPosition : POSITION,
+    out float oSize : PSIZE,
+    out half3 oColor : TEXCOORD0)
+{
+    float phase = aPosition.w;
+    float3 p = aPosition.xyz * uDequant[0].xyz + uDequant[1].xyz;
+    p += aPath.xyz * frac(phase + aPath.w * uFieldT.x);
+    float d = max(length(p - uEye.xyz), 0.01);
+    float D = aLight.y * uField.x / d;
+    float S = clamp(D, uField.y, uField.z);
+    float k = min(D / S, 1.0);
+    // Scintillation grows over the first 8 km of air.
+    float twinkle = 1.0 + aColor.a * min(d * (1.0 / 8000.0), 1.0) * 0.35 * sin(phase * (6.2831853 * 13.7) + uFieldT.y);
+    float on = 1.0 - step(aBlink.y * (1.0 / 255.0), frac(phase + aBlink.x * uFieldT.x));
+    float3 c = (float3)srgbToLinear((half3)aColor.rgb) * (aLight.x * uField.w * k * k * twinkle * on);
+#ifdef VISTA
+    float rho;
+    c *= vistaTransmittance(p, d, rho);
+#endif
+    float pull = clamp(uFieldT.z * d, 0.002, 0.5);
+    oPosition = mul(uViewProj, float4(uEye.xyz + (p - uEye.xyz) * (1.0 - pull), 1.0));
+    oSize = S;
+    oColor = (half3)c;
+}

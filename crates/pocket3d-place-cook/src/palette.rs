@@ -123,7 +123,7 @@ mod tests {
             ao_strength: 0.0, env_strength: 0.9, albedo: None, normal: None, orm: None,
             emission: None, vertex_color: false, vertex_pbr: false, interior: false,
             fog: true, wet: None, damp: None, drops: 0.0, clearcoat: 0.0,
-            polygon_offset: None, emissive_track: None, uv_anim: None, water: None,
+            polygon_offset: None, emissive_track: None, uv_anim: None, water: None, lights: None, tint: None,
         }
     }
 

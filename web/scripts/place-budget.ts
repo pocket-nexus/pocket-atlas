@@ -7,18 +7,21 @@ import { Matrix4, Quaternion, Vector3 } from 'three';
 import { mkdir } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 
+// Keep in sync with pocket3d-place::VERSION; v7 requires vertex PBR decoding.
+export const PLACE_VERSION = 7;
+
 interface Range { offset: number; size: number }
 type V3 = [number, number, number];
 interface Lod { indices: Range; index_count: number; error: number }
 interface Draw {
-  material: number; layout: 'static' | 'baked' | 'skinned';
+  material: number; layout: 'static' | 'baked' | 'skinned' | 'lights';
   vertices: Range; vertex_count: number; indices: Range; index_count: number;
   pos_offset: V3; pos_scale: V3; uv_offset: number[]; uv_scale: number[];
   min: V3; max: V3; node: number | null; skin: number | null; lods: Lod[];
 }
 interface Node { name: string; parent: number | null; translation: V3; rotation: number[]; scale: V3; track: Range | null }
 interface Skin { joints: number[]; inverse_bind: Range }
-interface Material { name: string; blend: string; albedo: number | null; normal: number | null; orm: number | null; emission: number | null; emissive_track: number | null }
+interface Material { name: string; blend: string; albedo: number | null; normal: number | null; orm: number | null; emission: number | null; emissive_track: number | null; vertex_pbr?: boolean }
 interface Texture { data: Range; width: number; height: number; mips: number }
 export interface ShotKey { pos: V3; target: V3; fov: number }
 interface Shot { name: string; from: ShotKey; to: ShotKey; duration: number }
@@ -38,7 +41,7 @@ export interface Counts {
   draws: number; triangles: number; movingDraws: number; movingTriangles: number;
   transparentDraws: number; culledFrustum: number; culledLod: number; lodDraws: Record<string, number>;
 }
-const STRIDE = { static: 24, baked: 28, skinned: 32 };
+const STRIDE = { static: 24, baked: 28, skinned: 32, lights: 40 };
 const WIDTH = 480, HEIGHT = 272, NEAR = 0.1;
 const PHASES = ['from', 'mid', 'to'] as const;
 function assert(ok: unknown, message: string): asserts ok { if (!ok) throw new Error(message); }
@@ -76,7 +79,7 @@ export function readPlace(bytes: Uint8Array): Place {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const decoder = new TextDecoder('utf-8', { fatal: true });
   assert(bytes.length >= 16 && decoder.decode(bytes.subarray(0, 4)) === 'PLCE', 'not a .place pack');
-  assert(view.getUint32(4, true) === 5, 'unsupported .place version');
+  assert(view.getUint32(4, true) === PLACE_VERSION, 'unsupported .place version');
   const count = view.getUint32(8, true), tableEnd = 16 + count * 16;
   assert(count > 0 && tableEnd <= bytes.length, 'truncated section table');
   const sections: Section[] = [], tags = new Set<string>();
@@ -96,7 +99,7 @@ export function readPlace(bytes: Uint8Array): Place {
   };
   const md = section('META'), geom = section('GEOM'), anim = section('ANIM'), tex = section('TEXD');
   const meta: Meta = JSON.parse(decoder.decode(new Uint8Array(md.buffer, md.byteOffset, md.byteLength)));
-  assert(meta.version === 5, 'META version differs from container');
+  assert(meta.version === PLACE_VERSION, 'META version differs from container');
   for (const field of ['textures', 'materials', 'draws', 'nodes', 'skins', 'fog_tracks', 'material_tracks', 'lights', 'fog_lights'] as const) assert(Array.isArray(meta[field]), `missing META.${field}`);
   integer(meta.frames, 'frames'); assert(meta.frames > 0 && Number.isFinite(meta.fps) && meta.fps > 0, 'animation rate/length must be positive');
   boundsValid(meta.min, meta.max, 'scene');
@@ -141,6 +144,19 @@ export function readPlace(bytes: Uint8Array): Place {
     boundsValid(d.min, d.max, label); finite(d.pos_offset, 3, `${label}.pos_offset`); finite(d.pos_scale, 3, `${label}.pos_scale`);
     assert(d.pos_scale.every(v => v >= 0), `${label}: negative dequantisation extent`);
     finite(d.uv_offset, 2, `${label}.uv_offset`); finite(d.uv_scale, 2, `${label}.uv_scale`);
+    if (d.layout === 'lights') {
+      // Light fields use the native shared sequential index buffer; their
+      // index_count counts points, not triangle indices in the GEOM blob.
+      assert(d.vertex_count <= 16384 && d.index_count === d.vertex_count, `${label}: invalid light point count`);
+      range(d.indices, geom, 2, `${label}.indices`, 0);
+      assert(d.node == null && d.skin == null && !d.lods.length, `${label}: light fields cannot have mesh transforms or LODs`);
+      for (let v = 0; v < d.vertex_count; v++) {
+        const at = d.vertices.offset + v * stride;
+        for (let k = 12; k <= 32; k += 4) assert(Number.isFinite(geom.getFloat32(at + k, true)), `${label}: nonfinite light value`);
+        assert(geom.getFloat32(at + 12, true) >= 0 && geom.getFloat32(at + 16, true) >= 0, `${label}: negative light intensity or radius`);
+      }
+      continue;
+    }
     const indices = (r: Range, n: number, label: string) => {
       integer(n, `${label}.count`); assert(n % 3 === 0, `${label}: incomplete triangle`); range(r, geom, 2, label, n * 2);
       for (let k = 0; k < n; k++) assert(geom.getUint16(r.offset + k * 2, true) < d.vertex_count, `${label}: index ${k} exceeds vertex count`);
@@ -245,6 +261,7 @@ export function selectLod(draw: Draw, b: Bounds, key: ShotKey): number {
 function countFrame(place: Place, bounds: Bounds[], key: ShotKey, planes: Plane[]): Counts {
   const count: Counts = { draws: 0, triangles: 0, movingDraws: 0, movingTriangles: 0, transparentDraws: 0, culledFrustum: 0, culledLod: 0, lodDraws: {} };
   place.meta.draws.forEach((d, i) => {
+    if (d.layout === 'lights') return;
     const b = bounds[i]!;
     if (!visible(planes, b)) { count.culledFrustum++; return; }
     const lod = selectLod(d, b, key), triangles = (lod ? d.lods[lod - 1]!.index_count : d.index_count) / 3;
@@ -265,6 +282,7 @@ function peakDetails(place: Place, p: Peak) {
   const key = lerpKey(shot.from, shot.to, PHASES.indexOf(p.pose as typeof PHASES[number]) / 2);
   const world = pose(place, p.time), planes = frustum(key);
   const draws = place.meta.draws.flatMap((d, i) => {
+    if (d.layout === 'lights') return [];
     const bounds = drawBounds(place, d, world);
     if (!visible(planes, bounds)) return [];
     const lod = selectLod(d, bounds, key), chosen = lod ? d.lods[lod - 1]! : null;
@@ -312,8 +330,8 @@ export function budget(place: Place, sampleFps = 15) {
     evidence: 'offline CPU main-camera culling and geometry estimate; NOT device compile, GPU timing, frame rate, or visual acceptance',
     model: { profile: 'vita30', step: 0, width: WIDTH, height: HEIGHT, near: NEAR, far: 'infinite', lodPixels: 1, cullSize: 0, skinBounds: 'union of bind AABB transformed by each joint world * inverse bind', doorState: 'closed', numericPrecision: 'host double; device uses float32' },
     sampling: { fps: sampleFps, duration, frames: samples, cameraPoses: PHASES, combinations: samples * views.length, interval: '[0, duration)' },
-    limits: ['Main scene mesh passes only; excludes shadow, reflection, sky, postprocessing, rain, UI and draw submission costs.', 'Conservative bounds include occluded geometry; no occlusion or raster coverage estimate.', 'Three camera poses per shot and fixed time samples are estimates; between-sample and free-camera peaks may be higher.', 'No device connected or read. Planning guides are not performance gates.'],
-    pack: { name: meta.name, kind: meta.kind, bytes: place.bytes, MiB: place.bytes / 1048576, sections: place.sections, draws: meta.draws.length, triangles: meta.draws.reduce((n, d) => n + d.index_count / 3, 0), movingDraws: moving.length, movingTriangles: moving.reduce((n, d) => n + d.index_count / 3, 0), drawsWithLod: meta.draws.filter(d => d.lods.length).length, nodes: meta.nodes.length, animatedNodes: meta.nodes.filter(n => n.track).length, skins: meta.skins.length, textures: meta.textures.length },
+    limits: ['Main scene mesh passes only; excludes light-field sprites, shadow, reflection, sky, postprocessing, rain, UI and draw submission costs.', 'Conservative bounds include occluded geometry; no occlusion or raster coverage estimate.', 'Three camera poses per shot and fixed time samples are estimates; between-sample and free-camera peaks may be higher.', 'No device connected or read. Planning guides are not performance gates.'],
+    pack: { name: meta.name, kind: meta.kind, bytes: place.bytes, MiB: place.bytes / 1048576, sections: place.sections, draws: meta.draws.length, triangles: meta.draws.reduce((n, d) => n + (d.layout === 'lights' ? 0 : d.index_count / 3), 0), lightPoints: meta.draws.reduce((n, d) => n + (d.layout === 'lights' ? d.vertex_count : 0), 0), movingDraws: moving.length, movingTriangles: moving.reduce((n, d) => n + d.index_count / 3, 0), drawsWithLod: meta.draws.filter(d => d.lods.length).length, nodes: meta.nodes.length, animatedNodes: meta.nodes.filter(n => n.track).length, skins: meta.skins.length, textures: meta.textures.length },
     readback: { valid: true, checked: ['section table and range alignment', 'geometry and texture ranges', 'all base and LOD indices', 'material/node/skin/texture/track references', 'skin joint indices and nonzero weights', 'parent-before-child hierarchy', 'finite animation and inverse-bind floats', 'nondegenerate interpolated quaternion keys', 'camera and dequantisation bounds'] },
     peaks: { draws: drawPeak, triangles: trianglePeak, movingTriangles: movingPeak }, lodDrawSamples,
     peakDetails: { triangles: peakDetails(place, trianglePeak!), movingTriangles: peakDetails(place, movingPeak!) },

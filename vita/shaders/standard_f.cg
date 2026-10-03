@@ -7,7 +7,7 @@
 // Defines: LIGHTS (0..4), ALBEDO_MAP, NORMAL_MAP, ORM_MAP, EMISSION_MAP,
 // VERTEX_COLOR, VERTEX_PBR (solid roughness/metalness in UV), ALPHA_TEST,
 // BLEND (alpha-blended), WET, PLANAR, DAMP,
-// CLEARCOAT, INTERIOR, FOG,
+// CLEARCOAT, INTERIOR, FOG, VISTA (vertex-stage vista haze instead of fog),
 // REFLECTION (mirror pass: cheaper film, no planar lookup), BAKED (static
 // diffuse lighting from the vertices; LIGHTS then counts moving lights only),
 // VERTEX_LIGHTS (lights evaluated per vertex, added to the irradiance),
@@ -70,47 +70,46 @@ uniform sampler2D uMovingShadow;
 uniform float4 uMovingShadowK; // same depth range and UV projection, smaller moving map
 #endif
 
-// Orthographic distance stored as R32F and sampled without filtering.
-float shadowDepth(float2 uv)
-{
-    return tex2D(uShadow, uv).r;
-}
-
 // Share of the sun that reaches `sp`: the four map texels around it
 // compared and blended by the position between their centres (what a
 // hardware PCF lookup does), so shadow edges do not step with the texels.
-half sunLit(float3 sp)
+half sunLit(float3 shadow)
 {
     // Keep light-space coordinates and depth comparisons in float. Only
     // bounded comparison results and filter weights use half precision.
-    float4 wp = float4(sp, 1.0);
-    float2 mapUv = float2(dot(uSunMat[0], wp), dot(uSunMat[1], wp));
+    float2 mapUv = shadow.xy;
     if (mapUv.x < 0.0 || mapUv.y < 0.0 || mapUv.x > 1.0 || mapUv.y > 1.0) return (half)1.0;
-    float depth = (-dot(uSunDir.xyz, sp) - uShadowK.x) * uShadowK.y;
+    float depth = shadow.z;
     half lit = (half)1.0;
 #ifndef FAR
-    float2 t = mapUv * uShadowK.w - 0.5;
-    float2 f = frac(t);
-    float2 uv = (t - f + 0.5) / uShadowK.w;
     float o = 1.0 / uShadowK.w;
+    // Clamp before selecting the pair: at an edge both original PCF
+    // columns sampled the edge texel, not its interior neighbour.
+    float2 sampleUv = clamp(mapUv, 0.5 * o, 1.0 - 0.5 * o);
+    float2 f = frac(sampleUv * uShadowK.w - 0.5);
+    float2 uv = sampleUv - 0.5 * o;
+    float2 top = tex2D(uShadow, uv).rg;
+    float2 bottom = tex2D(uShadow, uv + float2(0.0, o)).rg;
     float d = depth - uShadowK.z;
-    half s00 = (half)step(d, shadowDepth(uv));
-    half s10 = (half)step(d, shadowDepth(uv + float2(o, 0.0)));
-    half s01 = (half)step(d, shadowDepth(uv + float2(0.0, o)));
-    half s11 = (half)step(d, shadowDepth(uv + float2(o, o)));
+    half s00 = (half)step(d, top.x);
+    half s10 = (half)step(d, top.y);
+    half s01 = (half)step(d, bottom.x);
+    half s11 = (half)step(d, bottom.y);
     lit = lerp(lerp(s00, s10, (half)f.x), lerp(s01, s11, (half)f.x), (half)f.y);
 #endif
 #ifdef MOVING_SHADOW
     if (lit <= (half)0.0) return (half)0.0;
-    float2 mt = mapUv * uMovingShadowK.w - 0.5;
-    float2 mf = frac(mt);
-    float2 muv = (mt - mf + 0.5) / uMovingShadowK.w;
     float mo = 1.0 / uMovingShadowK.w;
+    float2 movingUv = clamp(mapUv, 0.5 * mo, 1.0 - 0.5 * mo);
+    float2 mf = frac(movingUv * uMovingShadowK.w - 0.5);
+    float2 muv = movingUv - 0.5 * mo;
+    float2 mtop = tex2D(uMovingShadow, muv).rg;
+    float2 mbottom = tex2D(uMovingShadow, muv + float2(0.0, mo)).rg;
     float md = depth - uMovingShadowK.z;
-    half m00 = (half)step(md, tex2D(uMovingShadow, muv).r);
-    half m10 = (half)step(md, tex2D(uMovingShadow, muv + float2(mo, 0.0)).r);
-    half m01 = (half)step(md, tex2D(uMovingShadow, muv + float2(0.0, mo)).r);
-    half m11 = (half)step(md, tex2D(uMovingShadow, muv + float2(mo, mo)).r);
+    half m00 = (half)step(md, mtop.x);
+    half m10 = (half)step(md, mtop.y);
+    half m01 = (half)step(md, mbottom.x);
+    half m11 = (half)step(md, mbottom.y);
     lit = min(lit, lerp(lerp(m00, m10, (half)mf.x), lerp(m01, m11, (half)mf.x), (half)mf.y));
 #endif
     return lit;
@@ -146,6 +145,12 @@ half4 main(
 #endif
 #ifdef VERTEX_COLOR
     half4 vColor : COLOR0,
+#endif
+#ifdef VISTA
+    half4 vHaze : TEXCOORD7,
+#endif
+#ifdef SUN
+    float3 vShadow : TEXCOORD6,
 #endif
     float2 vUv : TEXCOORD3) : COLOR
 {
@@ -188,7 +193,9 @@ half4 main(
         half2 dfg = DFGApprox(rough, saturate(V.y));
         half3 sky = (half3)uHemiSky.rgb * (half)uEnvK.x;
         half3 color = vLight * a.rgb + lerp(sky, refl, w) * ((half)0.04 * dfg.x + dfg.y) + (half3)uEmissive.rgb;
-#ifdef FOG
+#if defined(VISTA)
+        color = color * vHaze.a + vHaze.rgb;
+#elif defined(FOG)
         color = lerp(color, (half3)uFog.rgb, (half)fogFactor(dist, uFog.w));
 #endif
 #ifdef BLEND
@@ -347,7 +354,7 @@ half4 main(
             half lit = (half)1.0;
 #else
             // Offset along the geometric normal against self-shadowing acne.
-            half lit = sunLit(vWorld + (float3)Ng * uSunRad.w);
+            half lit = sunLit(vShadow);
 #endif
             half3 E = (half3)uSunRad.rgb * (lit * ndl);
             diffuse += E * (half)INV_PI * diffuseColor;
@@ -420,7 +427,9 @@ half4 main(
 #endif
     color += emission;
 
-#if defined(FOG) && !defined(INTERIOR)
+#if defined(VISTA) && !defined(INTERIOR)
+    color = color * vHaze.a + vHaze.rgb;
+#elif defined(FOG) && !defined(INTERIOR)
     color = lerp(color, (half3)uFog.rgb, (half)fogFactor(dist, uFog.w));
 #endif
 #if defined(BLEND)

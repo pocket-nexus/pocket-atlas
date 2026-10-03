@@ -1,12 +1,12 @@
 import { describe, expect, test } from 'bun:test';
 import { Matrix4 } from 'three';
-import { budget, drawBounds, frustum, pose, readPlace, selectLod, visible } from './place-budget';
+import { budget, drawBounds, frustum, PLACE_VERSION, pose, readPlace, selectLod, visible } from './place-budget';
 import type { Meta, ShotKey } from './place-budget';
 
 const key: ShotKey = { pos: [0, 0, 0], target: [0, 0, -1], fov: 60 };
 function fixture() {
   const meta: Meta = {
-    version: 5, name: 'Fixture', kind: 'daytime-street', min: [-1, -1, -11], max: [1, 1, -9],
+    version: PLACE_VERSION, name: 'Fixture', kind: 'daytime-street', min: [-1, -1, -11], max: [1, 1, -9],
     textures: [], materials: [{ name: 'Metal', blend: 'opaque', albedo: null, normal: null, orm: null, emission: null, emissive_track: null }],
     draws: [{ material: 0, layout: 'static', vertices: { offset: 0, size: 72 }, vertex_count: 3, indices: { offset: 72, size: 6 }, index_count: 3,
       pos_offset: [0, 0, -10], pos_scale: [1, 1, 1], uv_offset: [0, 0], uv_scale: [1, 1], min: [-1, -1, -11], max: [1, 1, -9], node: null, skin: null,
@@ -23,7 +23,7 @@ function serialize(f: ReturnType<typeof fixture>): Uint8Array {
   const offsets: number[] = []; let end = 80;
   sections.forEach(([, data]) => { end = Math.ceil(end / 4) * 4; offsets.push(end); end += data.length; });
   const result = new Uint8Array(end), view = new DataView(result.buffer);
-  result.set(new TextEncoder().encode('PLCE')); view.setUint32(4, 5, true); view.setUint32(8, 4, true);
+  result.set(new TextEncoder().encode('PLCE')); view.setUint32(4, PLACE_VERSION, true); view.setUint32(8, 4, true);
   sections.forEach(([tag, data], i) => {
     const h = 16 + i * 16;
     result.set(new TextEncoder().encode(tag), h); view.setUint32(h + 4, offsets[i]!, true); view.setUint32(h + 8, data.length, true); view.setUint32(h + 12, 4, true);
@@ -57,6 +57,38 @@ function withSkin() {
 }
 
 describe('place readback rejects unusable GPU inputs', () => {
+  test('v7 palette encoding rejects pre-palette containers and mismatched META', async () => {
+    const f = fixture(); f.meta.materials[0]!.vertex_pbr = true;
+    const bytes = serialize(f);
+    expect(PLACE_VERSION).toBe(7);
+    expect(readPlace(bytes).meta.materials[0]!.vertex_pbr).toBe(true);
+    for (const version of [5, 6, 8]) {
+      const other = bytes.slice(); new DataView(other.buffer).setUint32(4, version, true);
+      expect(() => readPlace(other)).toThrow('unsupported .place version');
+      f.meta.version = version;
+      expect(() => readPlace(serialize(f))).toThrow('META version differs');
+    }
+    // These independent language boundaries must change together.
+    const rust = await Bun.file(new URL('../../crates/pocket3d-place/src/lib.rs', import.meta.url)).text();
+    const pica = await Bun.file(new URL('../../n3ds/src/format.h', import.meta.url)).text();
+    expect(Number(rust.match(/pub const VERSION: u32 = (\d+);/)![1])).toBe(PLACE_VERSION);
+    expect(Number(pica.match(/ATLAS_PLACE_VERSION = (\d+)/)![1])).toBe(PLACE_VERSION);
+    expect(pica).toContain('ATLAS_PICA_VERSION = 3');
+  });
+
+  test('v6 light records remain readable without counting points as triangles', () => {
+    const f = fixture(), d = f.meta.draws[0]!;
+    Object.assign(d, { layout: 'lights', vertex_count: 2, vertices: { offset: 0, size: 80 }, indices: { offset: 0, size: 0 }, index_count: 2, lods: [] });
+    f.geom = new Uint8Array(80);
+    const report = budget(readPlace(serialize(f)));
+    expect(report.pack.lightPoints).toBe(2); expect(report.pack.triangles).toBe(0);
+    expect(report.peaks.draws!.counts.draws).toBe(0); expect(report.peaks.draws!.counts.culledLod).toBe(0);
+    new DataView(f.geom.buffer).setFloat32(12, NaN, true);
+    expect(() => readPlace(serialize(f))).toThrow('nonfinite light value');
+    new DataView(f.geom.buffer).setFloat32(12, 0, true); d.index_count = 3;
+    expect(() => readPlace(serialize(f))).toThrow('invalid light point count');
+  });
+
   test('reads complete ranges, indices and metadata', () => {
     const pack = readPlace(serialize(fixture())); expect(pack.meta.name).toBe('Fixture');
     const report = budget(pack); expect(report.readback.valid).toBe(true); expect(report.sampling.combinations).toBe(45);

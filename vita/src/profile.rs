@@ -89,6 +89,9 @@ pub struct Profile {
     /// vertex, diffuse only: they are dense, and 4 per-pixel lights on a
     /// pedestrian near the camera cost ~15 ms at 480×272.
     pub vertex_lights: bool,
+    /// Resolution levels above step 0's, nearest first, that the governor
+    /// climbs to while the measured GPU time leaves room (see `Governor`).
+    pub boost: &'static [usize],
 }
 
 /// The full effect set, around 20 fps.
@@ -105,6 +108,7 @@ pub const CINEMATIC: Profile = Profile {
     detail_maps: true,
     alternate: true,
     vertex_lights: false,
+    boost: &[],
 };
 
 /// 60 fps. Measured on the device (Konbini view, 544×308): haze costs
@@ -130,6 +134,7 @@ pub const VITA60: Profile = Profile {
     detail_maps: false,
     alternate: true,
     vertex_lights: true,
+    boost: &[],
 };
 
 /// 30 fps at 480×272 (the display doubles it to 960×544): the full effect
@@ -158,6 +163,15 @@ pub const VITA30: Profile = Profile {
     detail_maps: true,
     alternate: false,
     vertex_lights: true,
+    // 544×308 and 640×362. Measured at Griffith Observatory (serialized GPU
+    // at step 0): the Lawn takes 20.8, 22.7, 25.0 and 27.8 ms from 480×272
+    // to 720×408; the main pass grows ~2.2 ms per 480×272 of pixels and the
+    // composite with it, the bloom chain not at all. 720×408 rendered for
+    // minutes without a fault but leaves the Lawn no headroom while running
+    // (its frames finish at the refresh), and both device hangs of its
+    // first tests came in sessions that had made its targets: left out
+    // until a hang-free run proves it.
+    boost: &[3, 2],
 };
 
 pub const ALL: [&Profile; 3] = [&VITA30, &VITA60, &CINEMATIC];
@@ -171,6 +185,15 @@ pub fn by_name(name: &str) -> Option<&'static Profile> {
 /// period and headroom is invisible: the governor steps down after sustained
 /// misses and probes one step up after holding the period, backing off
 /// (doubling the wait) each time a probe misses.
+///
+/// Above step 0 it climbs the profile's `boost` resolutions on the GPU time
+/// it measures (each frame's completion, polled while the CPU waits for the
+/// refresh): one level once the time predicted there — the measured time ×
+/// (1 + 0.35 × (pixel ratio − 1)), the share that grows with pixels at
+/// Griffith Observatory being 0.26 — stays under 80 % of the period for two
+/// seconds; one level down after 3 slipped frames or a smoothed GPU time
+/// over 92 % of the period, and the wait before the next climb doubles.
+/// A place that never predicts under 80 % (the konbini) never climbs.
 pub struct Governor {
     pub step: usize,
     /// Measurements pin the step.
@@ -179,17 +202,77 @@ pub struct Governor {
     probing: bool,
     /// Frames to hold before probing the step above each step.
     wait: [u32; 8],
+    /// Boost resolutions climbed (0: step 0's own), the most allowed (video
+    /// memory), frames held at the current one, frames to hold before the
+    /// next climb, consecutive slipped frames.
+    pub boost: usize,
+    pub boost_cap: usize,
+    boost_held: u32,
+    boost_wait: u32,
+    slips: u32,
+    /// Smoothed GPU frame time (ms), 0 before the first measurement.
+    pub gpu_ms: f32,
+}
+
+/// Pixels of a resolution level (`frame::SCALES`).
+fn pixels(level: usize) -> f32 {
+    let (w, h) = crate::frame::SCALES[level.min(crate::frame::SCALES.len() - 1)];
+    (w * h) as f32
 }
 
 impl Governor {
     pub fn new() -> Self {
-        Self { step: 0, hold: false, held: 0, probing: false, wait: [90; 8] }
+        Self { step: 0, hold: false, held: 0, probing: false, wait: [90; 8], boost: 0, boost_cap: usize::MAX, boost_held: 0, boost_wait: 60, slips: 0, gpu_ms: 0.0 }
     }
 
-    /// `frame_ms`: smoothed frame time.
-    pub fn feedback(&mut self, profile: &Profile, frame_ms: f32) {
+    /// The resolution level the governor holds: a boost level, or the step's.
+    pub fn level(&self, profile: &Profile) -> usize {
+        if self.step == 0 && self.boost > 0 { profile.boost[self.boost - 1] } else { profile.steps[self.step.min(profile.steps.len() - 1)].level }
+    }
+
+    /// `frame_ms`: smoothed frame time; `gpu_ms`: this frame's GPU time, or
+    /// None when it did not finish before the refresh it was due at.
+    /// `boost`: whether resolution boosts are allowed (not with a fixed
+    /// resolution). Returns true when it climbed to a new boost level (its
+    /// targets must be made).
+    pub fn feedback(&mut self, profile: &Profile, frame_ms: f32, gpu_ms: Option<f32>, raw_ms: f32, boost: bool) -> bool {
         if self.hold {
-            return;
+            return false;
+        }
+        if !boost {
+            self.boost = 0;
+        }
+        let g = gpu_ms.unwrap_or(profile.budget_ms);
+        self.gpu_ms = if self.gpu_ms == 0.0 { g } else { self.gpu_ms * 0.9 + g * 0.1 };
+        if self.boost > 0 {
+            self.slips = if raw_ms > profile.budget_ms * 1.06 { self.slips + 1 } else { 0 };
+            if self.slips >= 3 || self.gpu_ms > profile.budget_ms * 0.92 {
+                let from = self.level(profile);
+                self.boost -= 1;
+                self.gpu_ms *= pixels(self.level(profile)) / pixels(from);
+                self.boost_held = 0;
+                self.boost_wait = (self.boost_wait * 2).min(3600);
+                self.slips = 0;
+                return false;
+            }
+            self.boost_held += 1;
+        } else if self.step == 0 && !self.probing {
+            self.boost_held += 1;
+        } else {
+            self.boost_held = 0;
+        }
+        if boost && self.step == 0 && self.boost < profile.boost.len().min(self.boost_cap) && self.boost_held >= self.boost_wait && gpu_ms.is_some() {
+            let (from, to) = (self.level(profile), profile.boost[self.boost]);
+            let predicted = self.gpu_ms * (1.0 + 0.35 * (pixels(to) / pixels(from) - 1.0));
+            if predicted <= profile.budget_ms * 0.8 {
+                self.boost += 1;
+                self.gpu_ms = predicted;
+                self.boost_held = 0;
+                return true;
+            }
+        }
+        if self.boost > 0 {
+            return false;
         }
         self.held += 1;
         let over = frame_ms > profile.budget_ms * 1.06;
@@ -207,5 +290,6 @@ impl Governor {
         } else if self.probing && self.held > 45 {
             self.probing = false;
         }
+        false
     }
 }

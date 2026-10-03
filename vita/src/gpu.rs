@@ -99,6 +99,14 @@ pub enum U {
     WaterK,
     WaterShallow,
     MovingShadowK,
+    Vista,
+    VistaEye,
+    VistaSun,
+    VistaGlow,
+    VistaSky,
+    VistaSunSky,
+    Field,
+    FieldT,
     Count,
 }
 
@@ -113,6 +121,7 @@ const UNIFORM_NAMES: [&str; U::Count as usize] = [
     "uTwBand", "uTwBelt", "uTwShape", "uTwShadow",
     "uWave", "uWaterK", "uWaterShallow",
     "uMovingShadowK",
+    "uVista", "uVistaEye", "uVistaSun", "uVistaGlow", "uVistaSky", "uVistaSunSky", "uField", "uFieldT",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -200,6 +209,8 @@ pub enum Layout {
     Globe,
     /// Interface text: position f32×2 (display pixels), uv f32×2 (16 bytes).
     Text,
+    /// Pack `Lights`: one light of a field per vertex (40 bytes).
+    Lights,
 }
 
 impl Layout {
@@ -227,6 +238,7 @@ impl Layout {
             Layout::Pos2 => (&[("aPosition", 0, F32, 2)], 8),
             Layout::Globe => (&[("aPosition", 0, F32, 3), ("aUv", 12, F32, 2)], 20),
             Layout::Text => (&[("aPosition", 0, F32, 2), ("aUv", 8, F32, 2)], 16),
+            Layout::Lights => (&[("aPosition", 0, S16N, 4), ("aColor", 8, U8N, 4), ("aLight", 12, F32, 2), ("aPath", 20, F32, 4), ("aBlink", 36, U8, 4)], 40),
         }
     }
 }
@@ -252,6 +264,7 @@ pub enum BlendMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Out {
     Uchar4,
+    Ushort2,
     Half4,
     Float,
 }
@@ -443,6 +456,7 @@ impl Gpu {
         };
         let output = match key.output {
             Out::Uchar4 => Output::Uchar4,
+            Out::Ushort2 => Output::Ushort2,
             Out::Half4 => Output::Half4,
             Out::Float => Output::Float,
         };

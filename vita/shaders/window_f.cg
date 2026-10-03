@@ -3,13 +3,14 @@
 // plus the pane's own environment reflection. UV: floor = per-window seed,
 // frac = position across the pane; vertex colour RG = pane size / 16 m.
 //
-// Defines: FOG, REFLECTION.
+// Defines: FOG, VISTA (the vista haze from the vertex stage in place of the
+// fog), REFLECTION.
 
 #include "common.cgh"
 
 uniform sampler2D uEnv;
 uniform sampler2D uPuddles;
-uniform float4 uEmissive; // room intensity, -, -, -
+uniform float4 uEmissive; // room intensity, tint (linear, white without one)
 uniform float4 uEnvK;     // env intensity
 uniform float4 uEye;
 uniform float4 uFog;
@@ -26,6 +27,9 @@ float4 main(
     half3 vNormal : TEXCOORD1,
     half4 vTangent : TEXCOORD2,
     float2 vUv : TEXCOORD3,
+#ifdef VISTA
+    half4 vHaze : TEXCOORD7,
+#endif
     half4 vColor : COLOR0) : COLOR
 {
     float3 toEye = uEye.xyz - vWorld;
@@ -49,6 +53,11 @@ float4 main(
         float3 p = float3(0.7 + local.x * W, sill + local.y * H, 0.0);
         float3 d = normalize(float3(dot(V, t), dot(V, b), -dot(V, n)));
         d.z = max(d.z, 0.05);
+        // Never exactly 0 across or up the pane: a 0 there made tw ±inf and
+        // h = p + d · tt multiply 0 by inf (NaN, which the bloom spread into
+        // a black block).
+        d.x = d.x >= 0.0 ? max(d.x, 1e-4) : min(d.x, -1e-4);
+        d.y = d.y >= 0.0 ? max(d.y, 1e-4) : min(d.y, -1e-4);
         float3 tw;
         tw.x = (d.x > 0.0 ? room.x - p.x : -p.x) / d.x;
         tw.y = (d.y > 0.0 ? room.y - p.y : -p.y) / d.y;
@@ -104,10 +113,10 @@ float4 main(
         inside = lerp(col, curtainCol * glow, curtainA);
         float2 e = min(local, 1.0 - local);
         inside *= smoothstep(0.0, 0.04, min(e.x, e.y)) * 0.85 + 0.15;
-        inside *= uEmissive.x;
+        inside *= uEmissive.x * uEmissive.yzw;
     }
 #else
-    inside = float3(0.02, 0.018, 0.015) * uEmissive.x;
+    inside = float3(0.02, 0.018, 0.015) * uEmissive.x * uEmissive.yzw;
 #endif
     // Pane: dark glass, roughness 0.06.
     float3 N = n;
@@ -115,7 +124,9 @@ float4 main(
     float3 radiance = tex2Dlod(uEnv, float4(octUv(reflect(V, N)), 0.0, 0.3)).rgb * uEnvK.x;
     half2 dfg = DFGApprox(0.06, (half)dotNV);
     float3 color = inside + radiance * (0.04 * dfg.x + dfg.y);
-#ifdef FOG
+#if defined(VISTA)
+    color = color * vHaze.a + vHaze.rgb;
+#elif defined(FOG)
     color = lerp(color, uFog.rgb, fogFactor(dist, uFog.w));
 #endif
 #ifdef REFLECTION

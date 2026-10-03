@@ -1,11 +1,38 @@
-// Bloom input: 4 bilinear taps (a 4×4 box) of the scene plus haze,
+// Bloom input: 4 bilinear taps (a 4×4 box) of the scene plus optional haze,
 // Karis-weighted against fireflies, soft luminance threshold.
+// HAZE: include the haze buffer only when its pass is active.
+//
+// PER_PIXEL (places with light fields): the threshold on each scene pixel
+// of the 2×2 block under the output pixel, no Karis weights, as the web's
+// bloom thresholds at full resolution before its downsampling: a light a
+// few pixels wide keeps its peak, which a box average would spread under
+// the threshold.
 
 uniform sampler2D uScene;
+#ifdef HAZE
 uniform sampler2D uHazeTex;
-uniform float4 uTexel;     // 1 / scene size, -
+#endif
+uniform float4 uTexel;     // 1 / scene size, tap offset (texels, PER_PIXEL), -
 uniform float4 uThreshold; // threshold, smoothing, haze weight, -
 
+#ifdef PER_PIXEL
+float3 tap(float2 uv)
+{
+    float3 c = tex2D(uScene, uv).rgb;
+    return c * smoothstep(uThreshold.x, uThreshold.x + uThreshold.y, dot(c, float3(0.2126, 0.7152, 0.0722)));
+}
+
+float4 main(float2 vUv : TEXCOORD0) : COLOR
+{
+    float2 o = uTexel.xy * uTexel.z;
+    float3 c = (tap(vUv + float2(-o.x, -o.y)) + tap(vUv + float2(o.x, -o.y)) + tap(vUv + float2(-o.x, o.y)) + tap(vUv + float2(o.x, o.y))) * 0.25;
+#ifdef HAZE
+    float3 h = tex2D(uHazeTex, vUv).rgb * uThreshold.z;
+    c += h * smoothstep(uThreshold.x, uThreshold.x + uThreshold.y, dot(h, float3(0.2126, 0.7152, 0.0722)));
+#endif
+    return float4(c, 1.0);
+}
+#else
 float3 tap(float2 uv, out float w)
 {
     float3 c = tex2D(uScene, uv).rgb;
@@ -19,8 +46,11 @@ float4 main(float2 vUv : TEXCOORD0) : COLOR
     float w0, w1, w2, w3;
     float3 c = tap(vUv + float2(-o.x, -o.y), w0) + tap(vUv + float2(o.x, -o.y), w1) + tap(vUv + float2(-o.x, o.y), w2) + tap(vUv + float2(o.x, o.y), w3);
     c /= (w0 + w1 + w2 + w3);
+#ifdef HAZE
     c += tex2D(uHazeTex, vUv).rgb * uThreshold.z;
+#endif
     float l = dot(c, float3(0.2126, 0.7152, 0.0722));
     float k = smoothstep(uThreshold.x, uThreshold.x + uThreshold.y, l);
     return float4(c * k, 1.0);
 }
+#endif

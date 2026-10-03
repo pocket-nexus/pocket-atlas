@@ -18,6 +18,11 @@ pub enum ColorFormat {
     R11G11B10f,
     /// Single-channel 32-bit float, sampled through the red component.
     R32f,
+    /// Two unsigned-normalized 16-bit channels (32 bits per pixel).
+    /// Matching GR surface/texture swizzles preserve shader R/G as sampled
+    /// `.rg`. Write normalized float4 values through `Output::Ushort2`;
+    /// precision-sensitive data must not pass through half arithmetic.
+    Rg16Unorm,
 }
 
 impl ColorFormat {
@@ -27,6 +32,7 @@ impl ColorFormat {
             ColorFormat::Rgba16f => g::SceGxmColorFormat_SCE_GXM_COLOR_FORMAT_F16F16F16F16_ABGR,
             ColorFormat::R11G11B10f => g::SceGxmColorFormat_SCE_GXM_COLOR_FORMAT_F11F11F10_RGB,
             ColorFormat::R32f => g::SceGxmColorFormat_SCE_GXM_COLOR_FORMAT_F32_R,
+            ColorFormat::Rg16Unorm => g::SceGxmColorFormat_SCE_GXM_COLOR_FORMAT_U16U16_GR,
         }
     }
 
@@ -36,6 +42,7 @@ impl ColorFormat {
             ColorFormat::Rgba16f => g::SceGxmTextureFormat_SCE_GXM_TEXTURE_FORMAT_F16F16F16F16_ABGR,
             ColorFormat::R11G11B10f => g::SceGxmTextureFormat_SCE_GXM_TEXTURE_FORMAT_F11F11F10_RGB,
             ColorFormat::R32f => g::SceGxmTextureFormat_SCE_GXM_TEXTURE_FORMAT_F32_RRRR,
+            ColorFormat::Rg16Unorm => g::SceGxmTextureFormat_SCE_GXM_TEXTURE_FORMAT_U16U16_GR,
         }
     }
 
@@ -60,6 +67,7 @@ impl ColorFormat {
             ColorFormat::Rgba16f => Output::Half4,
             ColorFormat::R11G11B10f => Output::Half4,
             ColorFormat::R32f => Output::Float,
+            ColorFormat::Rg16Unorm => Output::Ushort2,
         }
     }
 }
@@ -271,6 +279,12 @@ impl Fence {
         let s = &mut self.slots[i % n];
         s.value = self.next;
         s
+    }
+
+    /// Whether the GPU has written slot `i`'s last value (non-blocking).
+    pub fn done(&self, i: usize) -> bool {
+        let s = &self.slots[i % self.slots.len()];
+        s.value == 0 || unsafe { core::ptr::read_volatile(s.address) } == s.value
     }
 
     pub fn wait(&self, i: usize) {

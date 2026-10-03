@@ -4,10 +4,27 @@ import { canvas, toTexture, type Ctx } from "../canvas";
 import type { DayWorld } from "./context";
 
 /** Tapered tube along a smooth curve; UVs in metres (u around, v along). */
-export function limb(pts: Vector3[], r0: number, r1: number, radial: number, perMeter = 3): BufferGeometry {
+export function limb(pts: Vector3[], r0: number, r1: number, radial: number, perMeter = 3, chordError = 0): BufferGeometry {
   const curve = new CatmullRomCurve3(pts, false, "centripetal");
   const len = curve.getLength();
-  const segs = Math.max(3, Math.ceil(len * perMeter));
+  const limit = Math.max(3, Math.ceil(len * perMeter));
+  let segs = limit;
+  if (chordError > 0) {
+    // Thin twigs often need only their bend and endpoints. Keep the complete
+    // branch skeleton, and retain the original segmentation on tighter bends.
+    const a = new Vector3(), b = new Vector3(), linear = new Vector3();
+    for (let n = 2; n < limit; n++) {
+      let within = true;
+      for (let segment = 0; segment < n && within; segment++) {
+        curve.getPointAt(segment / n, a); curve.getPointAt((segment + 1) / n, b);
+        for (let sample = 1; sample < 16; sample++) {
+          const t = sample / 16;
+          if (curve.getPointAt((segment + t) / n).distanceTo(linear.lerpVectors(a, b, t)) > chordError) { within = false; break; }
+        }
+      }
+      if (within) { segs = n; break; }
+    }
+  }
   const frames = curve.computeFrenetFrames(segs, false);
   const pos: number[] = [];
   const nor: number[] = [];
@@ -31,7 +48,9 @@ export function limb(pts: Vector3[], r0: number, r1: number, radial: number, per
     for (let j = 0; j < radial; j++) {
       const a = i * (radial + 1) + j;
       const b = a + radial + 1;
-      idx.push(a, b, a + 1, b, b + 1, a + 1);
+      idx.push(a, b, a + 1);
+      // A pointed twig ends in one vertex, not a ring of degenerate faces.
+      if (i !== segs - 1 || r1 !== 0) idx.push(b, b + 1, a + 1);
     }
   const g = new BufferGeometry();
   g.setAttribute("position", new Float32BufferAttribute(pos, 3));
@@ -186,19 +205,30 @@ export interface Cards {
  * and carry normals blended toward the crown's outward direction, so the
  * canopy shades as a volume rather than as flat cards.
  */
-export function cluster(out: Cards, r: Rng, c: Vector3, crown: Vector3, crownR: Vector3, radius: number, count: number, cell: number, size: number): void {
+export function cluster(out: Cards, r: Rng, c: Vector3, crown: Vector3, crownR: Vector3, radius: number, count: number, cell: number, size: number, thinInterior = false): void {
   const u0 = (cell % 2) * 0.5;
   const v0 = cell < 2 ? 0.5 : 0;
   const q = new Quaternion();
   const m = new Matrix4();
   for (let i = 0; i < count; i++) {
     const p = c.clone().add(new Vector3(r.range(-1, 1), r.range(-0.6, 0.8), r.range(-1, 1)).multiplyScalar(radius));
-    const outward = p.clone().sub(crown).divide(crownR).normalize();
+    const outward = p.clone().sub(crown).divide(crownR);
+    const crownDistance = outward.length();
+    outward.normalize();
     // Card normal: mostly outward and up, with scatter.
     const n = outward.clone().multiplyScalar(0.6).add(new Vector3(r.range(-0.6, 0.6), r.range(0.1, 0.9), r.range(-0.6, 0.6))).normalize();
     q.setFromUnitVectors(new Vector3(0, 0, 1), n);
     q.multiply(new Quaternion().setFromAxisAngle(new Vector3(0, 0, 1), r.range(0, Math.PI * 2)));
     const s = size * r.range(0.8, 1.2);
+    // Keep every card in the outer crown, including its original orientation
+    // and size. Inside it, retain several layers per twig instead of stacking
+    // seven or twelve almost coincident sprays. Consume the same random values
+    // even when omitting a card, so every later branch and outer spray is stable.
+    if (thinInterior && crownDistance < 0.9) {
+      const t = Math.max(0, Math.min(1, (crownDistance - 0.6) / 0.3));
+      const fraction = 0.2 + 0.8 * t * t * (3 - 2 * t);
+      if (i >= Math.max(2, Math.ceil(count * fraction))) continue;
+    }
     m.compose(p, q, new Vector3(s, s, s));
     const base = out.pos.length / 3;
     const corners = [

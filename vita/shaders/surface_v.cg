@@ -9,7 +9,12 @@
 // wave layers (repeats per metre, scroll offset) instead of the mesh UV.
 // VERTEX_LIGHTS=n: diffuse irradiance from n lights per vertex (moving and
 // skinned meshes are dense enough), in the baked lighting varying.
+// VISTA: the vista haze per vertex (vista.cgh), (inscatter · (1 − T), T).
 // FLAT (profiling) writes position and world only.
+
+#if defined(VISTA) && !defined(FLAT)
+#include "vista.cgh"
+#endif
 
 void main(
     float4 aPosition,
@@ -41,6 +46,17 @@ void main(
 #ifdef WAVES
     uniform float4 uWave[2], // repeats per metre, -, offset
     out float2 oUv2 : TEXCOORD6,
+#endif
+#if defined(VISTA) && !defined(FLAT)
+    uniform float4 uEye,
+    out half4 oHaze : TEXCOORD7,
+#endif
+#if defined(SUN) && !defined(FLAT)
+    uniform float4 uSunMat[2],
+    uniform float4 uSunDir,
+    uniform float4 uSunRad,
+    uniform float4 uShadowK,
+    out float3 oShadow : TEXCOORD6,
 #endif
     out float4 oPosition : POSITION,
 #ifndef FLAT
@@ -87,6 +103,14 @@ void main(
     oWorld = world;
 #ifndef FLAT
     oNormal = (half3)normalize(n);
+#ifdef SUN
+    // The sun projection is affine. Interpolating its result removes
+    // three world-space dot products from every shaded fragment.
+    float3 shadowWorld = world + normalize(n) * uSunRad.w;
+    float4 sw = float4(shadowWorld, 1.0);
+    oShadow = float3(dot(uSunMat[0], sw), dot(uSunMat[1], sw),
+        (-dot(uSunDir.xyz, shadowWorld) - uShadowK.x) * uShadowK.y);
+#endif
 #ifdef WAVES
     oUv = world.xz * uWave[0].x + uWave[0].zw;
     oUv2 = world.xz * uWave[1].x + uWave[1].zw;
@@ -101,6 +125,9 @@ void main(
 #endif
 #ifdef COLOR
     oColor = (half4)aColor;
+#endif
+#ifdef VISTA
+    oHaze = vistaHaze(world, uEye.xyz);
 #endif
 #endif
 #if defined(BAKED) && !defined(FLAT)

@@ -215,14 +215,21 @@ async function lint(): Promise<void> {
     ["products_f.cg", []], ["skyline_f.cg", []], ["tower_f.cg", []], ["sky_v.cg", []], ["sky_f.cg", []],
     ...["STREAK", "SPLASH", "DRIP", "STEAM", "BEACON"].map((d): [string, string[]] => ["fx_v.cg", [d]]),
     ...["STREAK", "SPLASH", "STEAM", "BEACON"].map((d): [string, string[]] => ["fx_f.cg", [d]]),
+    ...[[], ["BAKED", "TANGENT", "COLOR"], ["SKINNED", "MAX_BONES=24"], ["VISTA"]].map((v): [string, string[]] => ["surface_v.cg", ["SUN", ...v]]),
     ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "SUN_SPEC", "ALBEDO_MAP", "NORMAL_MAP", "ORM_MAP", "FOG"]], ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "ALPHA_TEST", "ALBEDO_MAP", "EMISSION_MAP", "FOG"]],
-    ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "FAR", "ALBEDO_MAP", "FOG"]], ["shadow_f.cg", []], ["shadow_f.cg", ["ALPHA_TEST"]], ["fill_f.cg", []], ["sky_day_f.cg", []], ["sky_day_f.cg", ["TWILIGHT"]],
+    ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "FAR", "ALBEDO_MAP", "FOG"]], ["shadow_f.cg", []], ["shadow_f.cg", ["ALPHA_TEST"]], ["shadow_pair_f.cg", []], ["fill_f.cg", []], ["sky_day_f.cg", []], ["sky_day_f.cg", ["TWILIGHT"]],
     ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "MOVING_SHADOW", "SUN_SPEC", "ALBEDO_MAP", "NORMAL_MAP", "ORM_MAP", "FOG"]],
     ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "MOVING_SHADOW", "FAR", "ALBEDO_MAP", "FOG"]],
     ["standard_f.cg", ["LIGHTS=0", "SUN", "MOVING_SHADOW", "SUN_SPEC", "FOG"]],
     ...[[], ["FAR"], ["LITE"], ["REFLECTION"]].map((tier): [string, string[]] => ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "MOVING_SHADOW", "SUN_SPEC", "VERTEX_COLOR", "VERTEX_PBR", "FOG", ...tier]]),
     ["globe_v.cg", []], ["globe_f.cg", []], ["marker_v.cg", []], ["marker_f.cg", []], ["ui_v.cg", []], ["ui_f.cg", []], ["ui_f.cg", ["TEX"]], ["text_v.cg", []], ["text_f.cg", []], ["surface_v.cg", ["WAVES"]], ["water_f.cg", ["SUN", "FOG"]], ["water_f.cg", []], ["water_f.cg", ["SUN", "FOG", "SHALLOW"]], ["surface_v.cg", ["WAVES", "COLOR"]], ["surface_v.cg", ["FLAT"]], ["surface_v.cg", ["BAKED", "FLAT"]],
-    ["post_v.cg", []], ["post_v.cg", ["GRAIN"]], ["haze_f.cg", ["HAZE_LIGHTS=2"]], ["haze_f.cg", ["HAZE_LIGHTS=6"]], ["prefilter_f.cg", []], ["down_f.cg", []], ["up_f.cg", []], ["composite_f.cg", []], ["composite_f.cg", ["HAZE", "BLOOM"]], ["blit_f.cg", []],
+    // Light fields and the vista haze (dusk-vista places).
+    ["lights_v.cg", []], ["lights_v.cg", ["VISTA"]], ["lights_f.cg", []],
+    ["surface_v.cg", ["BAKED", "VISTA"]], ["surface_v.cg", ["VISTA", "COLOR", "TANGENT"]], ["surface_v.cg", ["SKINNED", "MAX_BONES=24", "VISTA", "VERTEX_LIGHTS=2"]], ["surface_v.cg", ["WAVES", "VISTA"]], ["surface_v.cg", ["VISTA", "FLAT"]],
+    ["standard_f.cg", ["LIGHTS=0", "BAKED", "FAR", "ALBEDO_MAP", "VISTA"]], ["standard_f.cg", ["LIGHTS=1", "BAKED", "ALBEDO_MAP", "NORMAL_MAP", "ORM_MAP", "EMISSION_MAP", "VISTA"]],
+    ["standard_f.cg", ["LIGHTS=2", "BAKED", "LITE", "WET", "PLANAR", "ALBEDO_MAP", "VISTA"]], ["standard_f.cg", ["LIGHTS=0", "VERTEX_LIGHTS", "ALBEDO_MAP", "VISTA", "BLEND"]],
+    ["unlit_f.cg", ["ALBEDO_MAP", "VERTEX_COLOR", "VISTA"]], ["glass_f.cg", ["LIGHTS=0", "BAKED", "VISTA"]], ["window_f.cg", ["VISTA"]], ["water_f.cg", ["VISTA"]],
+    ["post_v.cg", []], ["post_v.cg", ["GRAIN"]], ["haze_f.cg", ["HAZE_LIGHTS=2"]], ["haze_f.cg", ["HAZE_LIGHTS=6"]], ["prefilter_f.cg", []], ["prefilter_f.cg", ["PER_PIXEL"]], ["prefilter_f.cg", ["HAZE"]], ["prefilter_f.cg", ["HAZE", "PER_PIXEL"]], ["down_f.cg", []], ["up_f.cg", []], ["composite_f.cg", []], ["composite_f.cg", ["HAZE", "BLOOM"]], ["blit_f.cg", []],
   ];
   const tmp = resolve(ROOT, ".pocket-build/atlas/lint");
   mkdirSync(tmp, { recursive: true });
@@ -361,13 +368,13 @@ async function profile(): Promise<void> {
  */
 async function settle(): Promise<void> {
   await Bun.sleep(2000);
-  for (let i = 0; i < 600; i++) {
+  for (let i = 0; i < 1200; i++) {
     const e = engine();
     if (e.stage === "running" && e.place === PLACE && !(e.main?.missing || e.reflection?.missing || e.pending)) return;
     if (i % 10 === 0) console.log(`waiting for programs: ${e.pending ?? 0} compiling, ${e.main?.missing ?? 0} + ${e.reflection?.missing ?? 0} draws missing`);
     await Bun.sleep(500);
   }
-  throw new Error("programs still compiling after 5 minutes");
+  throw new Error("programs still compiling after 10 minutes");
 }
 
 // Frame time per shot (halfway view, fixed time) at every quality step of

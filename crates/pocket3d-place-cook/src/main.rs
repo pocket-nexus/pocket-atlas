@@ -17,7 +17,10 @@ mod env;
 mod geometry;
 mod occlusion;
 mod palette;
+mod pica;
 mod procedural;
+mod psp;
+mod psp_products;
 mod textures;
 
 use geometry::Vertex;
@@ -61,13 +64,12 @@ fn pc_of(raw: &gltf::json::Extras) -> Value {
 use extras::{f, v3};
 use pc::color::encode8 as srgb8;
 
-/// Where static geometry is chunked: a grid cell (32 m near the middle,
-/// 256 m beyond), or one chunk for the whole primitive (open water: its cost
-/// is per pixel, and chunks only add draws). Faces wider than a normal cell
-/// use their own bucket so they do not expand the local cells' bounds.
+/// Static geometry uses distance-scaled grid cells, or one whole-primitive
+/// chunk for open water. Long street-scale faces have a separate bucket
+/// so they do not expand the local cells' bounds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum Cell {
-    Grid(i32, i32),
+    Grid(u32, i32, i32),
     Whole,
     /// Long faces must not pull a normal cell's AABB across the scene.
     Oversized,
@@ -76,14 +78,16 @@ enum Cell {
 fn triangle_cell(p: [Vec3; 3], cell: f32) -> Cell {
     let lo = p[0].min(p[1]).min(p[2]);
     let hi = p[0].max(p[1]).max(p[2]);
-    if (hi.x - lo.x).max(hi.z - lo.z) > cell {
-        return Cell::Oversized;
-    }
     let center = (p[0] + p[1] + p[2]) / 3.0;
-    let far = center.x.abs() > 140.0 || center.z.abs() > 140.0;
-    let size = if far { 256.0 } else { cell };
-    let offset = if far { 1000 } else { 0 };
-    Cell::Grid((center.x / size).floor() as i32 + offset, (center.z / size).floor() as i32 + offset)
+    // Rails and wires must not pull ordinary street chunks across the scene,
+    // including the 256 m band beyond 140 m: a long face centred just past
+    // that boundary can still reach the camera. Beyond the 1 km street LOD
+    // region, terrain retains the vista's growing cells and coarser bounds.
+    if center.x.abs().max(center.z.abs()) < 1024.0 && (hi.x - lo.x).max(hi.z - lo.z) > cell {
+        Cell::Oversized
+    } else {
+        cell_at(center, cell, 0.0)
+    }
 }
 
 /// Quantized skinning must remain a convex combination: both camera and
@@ -116,6 +120,54 @@ fn chunk_boundaries(verts: &[Vertex], tris: &[[u32; 3]], cells: &[Cell]) -> Hash
     }
     cut
 }
+
+/// Cell edge for a point `r` metres (the larger of |x| and |z|) from the
+/// origin: `near` within 140 m, 256 m to 1 km, then the power of two at or
+/// below r (1 km cells from 1 to 2 km, 2 km cells from 2 to 4 km, … up to
+/// 64 km), so a chunk covers a similar angle from the shots near the origin
+/// and a vista to the horizon stays a few draws per material per octave of
+/// distance.
+fn cell_size(r: f32, near: f32) -> f32 {
+    if r <= 140.0 {
+        near
+    } else if r <= 1024.0 {
+        256.0
+    } else {
+        r.log2().floor().exp2().min(65536.0)
+    }
+}
+
+/// The cell of a point; edges no smaller than `min`.
+fn cell_at(p: Vec3, near: f32, min: f32) -> Cell {
+    let size = cell_size(p.x.abs().max(p.z.abs()), near).max(min);
+    Cell::Grid(size as u32, (p.x / size).floor() as i32, (p.z / size).floor() as i32)
+}
+
+
+/// A cell's nearest distance from the origin (the larger of |x| and |z|).
+fn cell_distance(cell: Cell) -> f32 {
+    match cell {
+        Cell::Grid(size, ix, iz) => {
+            let near = |i: i32| {
+                let (lo, hi) = (i as f32 * size as f32, (i + 1) as f32 * size as f32);
+                if lo <= 0.0 && hi >= 0.0 { 0.0 } else { lo.abs().min(hi.abs()) }
+            };
+            near(ix).max(near(iz))
+        }
+        Cell::Whole | Cell::Oversized => 0.0,
+    }
+}
+
+/// LOD errors (m) for a chunk: 6 and 25 cm within 1 km of the origin;
+/// beyond, three levels that grow with the chunk's distance r: 3·10⁻⁴ r
+/// (a pixel of the 5° telephoto shots at 480×272), then ×4 and ×16 (a
+/// pixel of a 40° view at ×16), so far terrain thins out as it recedes
+/// and the renderer's projected-error choice still holds a telephoto.
+fn lod_bounds(cell: Cell) -> Vec<f32> {
+    let r = cell_distance(cell);
+    if r < 1024.0 { vec![0.06, 0.25] } else { vec![3e-4 * r, 1.2e-3 * r, 4.8e-3 * r] }
+}
+
 
 // ------------------------------------------------------------------ builder
 
@@ -172,6 +224,11 @@ struct Cook<'a> {
     mat_keys: HashMap<usize, u32>,
     material_names: HashMap<String, u32>,
     log: Vec<String>,
+    /// The place's loop (s): what light fields repeat over unless their
+    /// material names its own.
+    period: f32,
+    /// Materials annotated `lodBias` (pack index → bias, None = "auto").
+    lod_bias: HashMap<u32, Option<f32>>,
 }
 
 impl<'a> Cook<'a> {
@@ -224,6 +281,7 @@ impl<'a> Cook<'a> {
             wrap_t: wrap(sampler.wrap_t()),
             has_alpha,
             mean,
+            lod_bias: 0.0,
         });
         let i = (self.textures.len() - 1) as u32;
         self.tex_keys.insert(key, i);
@@ -247,10 +305,12 @@ impl<'a> Cook<'a> {
             Some("products") => pc::Kind::Products,
             Some("tower") => pc::Kind::Tower,
             Some("water") => pc::Kind::Water,
+            Some("lights") => pc::Kind::Lights,
             _ if m.unlit() => pc::Kind::Unlit,
             _ => pc::Kind::Standard,
         };
         let blend = match m.alpha_mode() {
+            _ if kind == pc::Kind::Lights => pc::Blend::Additive,
             gltf::material::AlphaMode::Blend if kind == pc::Kind::Glass => pc::Blend::Premultiplied,
             gltf::material::AlphaMode::Blend => pc::Blend::Alpha,
             _ => pc::Blend::Opaque,
@@ -298,6 +358,7 @@ impl<'a> Cook<'a> {
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0) as f32;
         let water = (kind == pc::Kind::Water).then(|| extras::water(&x, m.name().unwrap_or("material")));
+        let lights = (kind == pc::Kind::Lights).then(|| extras::light_field(&x, self.period));
         let name = m.name().unwrap_or("material").to_string();
         let out = pc::Material {
             name: name.clone(),
@@ -329,9 +390,14 @@ impl<'a> Cook<'a> {
             emissive_track: None,
             uv_anim,
             water,
+            lights,
+            tint: (kind == pc::Kind::InteriorWindow).then(|| extras::tint(&x)).flatten(),
         };
         self.materials.push(out);
         let i = (self.materials.len() - 1) as u32;
+        if let Some(b) = extras::lod_bias(&x) {
+            self.lod_bias.insert(i, b);
+        }
         self.mat_keys.insert(key, i);
         self.material_names.insert(name, i);
         (i, transform)
@@ -476,6 +542,55 @@ fn read_primitive(
     Some((verts, tris, material))
 }
 
+/// A POINTS primitive of a light field (`kind: "lights"`): every point in
+/// the place frame, with its custom attributes (`_LIGHT`, `_PATH`, `_BLINK`).
+/// Other point primitives are skipped.
+fn read_light_field(cook: &mut Cook, prim: &gltf::Primitive, xf: Mat4, moving: bool, out: &mut Vec<(u32, pc::LightPoint)>) {
+    let (material, _) = cook.material(prim.material());
+    let name = cook.materials[material as usize].name.clone();
+    if cook.materials[material as usize].kind != pc::Kind::Lights {
+        cook.log.push(format!("skipped POINTS of {name}: not a light field"));
+        return;
+    }
+    let reader = prim.reader(|b| Some(&cook.buffers[b.index()]));
+    let Some(pos) = reader.read_positions() else { return };
+    let pos: Vec<Vec3> = pos.map(Vec3::from).collect();
+    let colors: Vec<[f32; 3]> = reader.read_colors(0).map(|c| c.into_rgb_f32().collect()).unwrap_or_else(|| vec![[1.0; 3]; pos.len()]);
+    let custom = |key: &str| {
+        prim.get(&gltf::Semantic::Extras(key.into())).map(|a| (accessor_f32(cook.doc, cook.buffers, a.index()), a.dimensions().multiplicity()))
+    };
+    let (light, path, blink) = (custom("LIGHT"), custom("PATH"), custom("BLINK"));
+    if light.is_none() {
+        cook.log.push(format!("light field {name}: no _LIGHT attribute (every light dark)"));
+    }
+    if moving {
+        cook.log.push(format!("light field {name}: under a moving node, cooked at its rest pose"));
+    }
+    // Paths turn with the node; radii stay as authored (the web's sprites
+    // do not scale them either).
+    let lin = Mat3::from_mat4(xf);
+    let n = pos.len();
+    let blinks = blink.as_ref().map(|(v, m)| (0..n).filter(|i| v.get(i * m).copied().unwrap_or(0.0) > 0.0).count()).unwrap_or(0);
+    for (i, p) in pos.iter().enumerate() {
+        fn at(c: &Option<(Vec<f32>, usize)>, i: usize) -> Option<&[f32]> {
+            c.as_ref().and_then(|(v, m)| v.get(i * m..i * m + m))
+        }
+        let mut l = extras::light_point(xf.transform_point3(*p).to_array(), colors[i], at(&light, i), at(&path, i), at(&blink, i));
+        l.path = (lin * Vec3::from(l.path)).to_array();
+        out.push((material, l));
+    }
+    let moving_n = path.as_ref().map(|(v, m)| (0..n).filter(|i| (0..3).any(|k| v.get(i * m + k).copied().unwrap_or(0.0) != 0.0)).count()).unwrap_or(0);
+    cook.log.push(format!("light field {name}: {n} lights ({moving_n} moving, {blinks} blinking)"));
+}
+
+/// The LOD bias for a texture whose mapping averages `log2_ratio` (log2 of
+/// its texel densities' ratio): the full difference, so the mip follows the
+/// sparser direction, from a ratio of 1.5 up to a bias of −2. Below 1.5 the
+/// texture keeps the renderer's own bias.
+fn anisotropy_bias(log2_ratio: f32) -> Option<f32> {
+    (log2_ratio >= 1.5f32.log2()).then(|| -log2_ratio.min(2.0))
+}
+
 fn node_matrix(n: &gltf::Node) -> Mat4 {
     Mat4::from_cols_array_2d(&n.transform().matrix())
 }
@@ -537,6 +652,25 @@ fn push_draw(b: geometry::Built, material: u32, layout: pc::VertexLayout, node: 
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("psp") {
+        let argv: Vec<String> = std::env::args().collect();
+        let get = |k: &str| argv.iter().position(|x| x == k).and_then(|i| argv.get(i + 1));
+        let input = get("--in").expect("psp --in <cooked.place> --out <psp.place>");
+        let output = get("--out").expect("psp --out <psp.place>");
+        psp::cook(std::path::Path::new(input), std::path::Path::new(output));
+        return;
+    }
+    let cli: Vec<String> = std::env::args().collect();
+    if let Some(i) = cli.iter().position(|a| a == "--pica-from") {
+        let get = |k: &str| cli.iter().position(|a| a == k).and_then(|i| cli.get(i + 1));
+        pica::cook(
+            std::path::Path::new(cli.get(i + 1).expect("--pica-from PATH")),
+            std::path::Path::new(get("--out").expect("--out PATH")),
+            get("--tex").and_then(|s| s.parse().ok()).unwrap_or(256),
+        );
+        return;
+    }
+
     if std::env::args().nth(1).as_deref() == Some("atlas") {
         let argv: Vec<String> = std::env::args().collect();
         let get = |k: &str| argv.iter().position(|x| x == k).and_then(|i| argv.get(i + 1)).cloned();
@@ -603,11 +737,19 @@ fn main() {
         mat_keys: HashMap::new(),
         material_names: HashMap::new(),
         log: Vec::new(),
+        period: {
+            let t = &sx["tracks"];
+            let p = f(t, "frames", 0.0) / f(t, "fps", 15.0).max(1e-3);
+            if p > 0.0 { p } else { 120.0 }
+        },
+        lod_bias: HashMap::new(),
     };
 
     // ---- walk the scene
     let mut prims: Vec<Prim> = Vec::new();
     let mut stock: Vec<Stock> = Vec::new();
+    // Light fields: (material, light) in the place frame.
+    let mut field: Vec<(u32, pc::LightPoint)> = Vec::new();
     let mut lights: Vec<(usize, Mat4, gltf::khr_lights_punctual::Light)> = Vec::new();
     let mut stack: Vec<(gltf::Node, Mat4, f32)> = scene.nodes().map(|n| (n, Mat4::IDENTITY, 1.0)).collect();
     let mut world_of: HashMap<usize, Mat4> = HashMap::new();
@@ -628,6 +770,10 @@ fn main() {
             let inst = node.extensions().and_then(|e| e.get("EXT_mesh_gpu_instancing")).and_then(|e| e.get("attributes")).cloned();
             let skin = node.skin().map(|s| s.index());
             for prim in mesh.primitives() {
+                if prim.mode() == gltf::mesh::Mode::Points {
+                    read_light_field(&mut cook, &prim, w, is_moving, &mut field);
+                    continue;
+                }
                 if let Some(attrs) = &inst {
                     // Expand GPU instancing into static geometry (shop stock).
                     let get = |k: &str| attrs.get(k).and_then(|v| v.as_u64()).map(|i| accessor_f32(&doc, &buffers, i as usize));
@@ -688,6 +834,61 @@ fn main() {
         }
     }
     println!("walked scene: {} primitives, {} materials, {} textures ({} ms)", prims.len(), cook.materials.len(), cook.textures.len(), t0.elapsed().as_millis());
+
+    // ---- `lodBias` (materials that ask for it): a number, or "auto" — a
+    // texture whose mapping lays more texels per metre one way than the
+    // other (mean over the area it covers) gets a negative bias, so the
+    // GPU's isotropic mip choice follows the sparser direction instead of
+    // blurring it (window grids whose floors blur at 480×272).
+    let mut aniso: HashMap<u32, (f64, f64)> = HashMap::new();
+    let mut manual: HashMap<u32, f32> = HashMap::new();
+    for (&mi, &b) in &cook.lod_bias {
+        let m = &cook.materials[mi as usize];
+        for t in [m.albedo, m.emission].into_iter().flatten() {
+            match b {
+                Some(b) => {
+                    let e = manual.entry(t).or_insert(b);
+                    *e = e.min(b);
+                }
+                None => {
+                    aniso.entry(t).or_default();
+                }
+            }
+        }
+    }
+    for p in &prims {
+        if !cook.lod_bias.contains_key(&p.material) {
+            continue;
+        }
+        let m = &cook.materials[p.material as usize];
+        for t in [m.albedo, m.emission].into_iter().flatten() {
+            if !aniso.contains_key(&t) {
+                continue;
+            }
+            let tex = &cook.textures[t as usize];
+            let texels = Vec2::new(tex.width as f32, tex.height as f32);
+            let e = aniso.entry(t).or_default();
+            for tri in &p.tris {
+                let v = tri.map(|i| p.verts[i as usize]);
+                if let Some((log2_ratio, area)) = geometry::texel_anisotropy(v.map(|v| v.pos), v.map(|v| v.uv), texels) {
+                    e.0 += (log2_ratio * area) as f64;
+                    e.1 += area as f64;
+                }
+            }
+        }
+    }
+    for (t, (sum, area)) in aniso {
+        let mean = if area > 0.0 { (sum / area) as f32 } else { 0.0 };
+        let bias = anisotropy_bias(mean).unwrap_or(0.0);
+        let tex = &mut cook.textures[t as usize];
+        tex.lod_bias = bias;
+        cook.log.push(format!("texture {}: texels {:.2}:1 across its {:.0} m², LOD bias {bias:.2}", tex.name, mean.exp2(), area));
+    }
+    for (t, bias) in manual {
+        let tex = &mut cook.textures[t as usize];
+        tex.lod_bias = tex.lod_bias.min(bias);
+        cook.log.push(format!("texture {}: LOD bias {:.2}", tex.name, tex.lod_bias));
+    }
 
     // Fold solid materials into a vertex PBR palette before static chunking
     // and lighting bake. Keep named animated materials on their own path.
@@ -855,6 +1056,8 @@ fn main() {
             emissive_track: None,
             uv_anim: None,
             water: None,
+            lights: None,
+            tint: None,
         };
         cook.materials.push(mat);
         let mi = (cook.materials.len() - 1) as u32;
@@ -969,6 +1172,7 @@ fn main() {
                 wrap_t: pc::Wrap::Clamp,
                 has_alpha: false,
                 mean: [0.0; 4],
+                lod_bias: 0.0,
             });
             (cook.textures.len() - 1) as u32
         })
@@ -1112,7 +1316,7 @@ fn main() {
     }
     let mats = cook.materials.clone();
     #[allow(clippy::too_many_arguments)]
-    let emit = |verts: &[Vertex], tris: &[[u32; 3]], locks: Option<&HashSet<[u32; 3]>>, material: u32, layout: pc::VertexLayout, node: Option<u32>, skin: Option<u32>, metric_scale: f32, no_reflect: bool, blobs: &mut Blobs, draws: &mut Vec<pc::Draw>| {
+    let emit = |verts: &[Vertex], tris: &[[u32; 3]], locks: Option<&HashSet<[u32; 3]>>, bounds: &[f32], material: u32, layout: pc::VertexLayout, node: Option<u32>, skin: Option<u32>, metric_scale: f32, no_reflect: bool, blobs: &mut Blobs, draws: &mut Vec<pc::Draw>| {
         // Whole thin parts may vanish at distance from rigid lit surfaces
         // without emission. Animated rigid meshes use the same local-space
         // error bound; signs and lamps stay, and skinned people keep limbs.
@@ -1143,7 +1347,6 @@ fn main() {
                 base_error = error;
             }
         }
-        let bounds: &[f32] = if node.is_some() { &[0.01, 0.025, 0.06, 0.25] } else { &[0.06, 0.25] };
         let bounds: Vec<f32> = bounds.iter().map(|e| e / metric_scale).collect();
         for (v, t) in geometry::split(&verts, &tris) {
             let mut locked: Vec<bool> = v.iter().map(|v| locks.is_some_and(|l| l.contains(&geometry::pos_bits(v.pos)))).collect();
@@ -1191,9 +1394,9 @@ fn main() {
             }
         }
     };
-    for ((material, _, no_reflect, baked), (verts, tris, locks)) in &static_buckets {
+    for ((material, cell, no_reflect, baked), (verts, tris, locks)) in &static_buckets {
         let layout = if *baked { pc::VertexLayout::Baked } else { pc::VertexLayout::Static };
-        emit(verts, tris, Some(locks), *material, layout, None, None, 1.0, *no_reflect, &mut cook.blobs, &mut draws);
+        emit(verts, tris, Some(locks), &lod_bounds(*cell), *material, layout, None, None, 1.0, *no_reflect, &mut cook.blobs, &mut draws);
     }
     emit_stock(&mut cook.blobs, &mut draws);
     let static_draws = draws.len();
@@ -1204,9 +1407,61 @@ fn main() {
         let skin = p.skin.map(|s| skin_ids[&s]);
         let node = if skin.is_none() { node_ids.get(&p.mesh_node).copied() } else { None };
         let layout = if skin.is_some() { pc::VertexLayout::Skinned } else { pc::VertexLayout::Static };
-        emit(&p.verts, &p.tris, None, p.material, layout, node, skin, scale_of[&p.mesh_node], false, &mut cook.blobs, &mut draws);
+        emit(&p.verts, &p.tris, None, &[0.01, 0.025, 0.06, 0.25], p.material, layout, node, skin, scale_of[&p.mesh_node], false, &mut cook.blobs, &mut draws);
     }
     let _ = &prims.iter().map(|p| p.world).count();
+
+    // ---- light fields: one vertex per light, by geometry's cells (no
+    // smaller than 512 m), at most `LightPoint::PER_DRAW` per draw. Twice
+    // those cells drew 32 instead of 47 field draws at Griffith
+    // Observatory's Lawn but cost 0.64 ms more GPU: the clipper's work on
+    // 20 000 more lights outside the view outweighs 15 draws.
+    let mut field_cells: BTreeMap<(u32, Cell), Vec<pc::LightPoint>> = BTreeMap::new();
+    for (material, l) in &field {
+        let (lo, hi) = l.bounds();
+        field_cells.entry((*material, cell_at((Vec3::from(lo) + Vec3::from(hi)) * 0.5, a.cell, 512.0))).or_default().push(*l);
+    }
+    let field_draws = draws.len();
+    for ((material, _), lights) in &field_cells {
+        for chunk in lights.chunks(pc::LightPoint::PER_DRAW) {
+            let (mut plo, mut phi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+            let (mut lo, mut hi) = (plo, phi);
+            for l in chunk {
+                plo = plo.min(Vec3::from(l.position));
+                phi = phi.max(Vec3::from(l.position));
+                let (a, b) = l.bounds();
+                lo = lo.min(Vec3::from(a));
+                hi = hi.max(Vec3::from(b));
+            }
+            let (center, half) = ((plo + phi) * 0.5, ((phi - plo) * 0.5).max(Vec3::splat(1e-3)));
+            let mut bytes = Vec::with_capacity(chunk.len() * pc::LightPoint::STRIDE);
+            for l in chunk {
+                l.encode(center.to_array(), half.to_array(), &mut bytes);
+            }
+            scene_min = scene_min.min(lo);
+            scene_max = scene_max.max(hi);
+            draws.push(pc::Draw {
+                material: *material,
+                layout: pc::VertexLayout::Lights,
+                vertices: Blobs::push(&mut cook.blobs.geom, &bytes, 16),
+                vertex_count: chunk.len() as u32,
+                indices: pc::Range::default(),
+                index_count: chunk.len() as u32,
+                pos_offset: center.to_array(),
+                pos_scale: half.to_array(),
+                uv_offset: [0.0; 2],
+                uv_scale: [1.0; 2],
+                min: lo.to_array(),
+                max: hi.to_array(),
+                node: None,
+                skin: None,
+                no_reflect: true,
+                cast_shadow: false,
+                lods: Vec::new(),
+            });
+        }
+    }
+    let field_draws = draws.len() - field_draws;
 
     // ---- fog lights and scalar tracks
     let tracks = sx.get("tracks").cloned().unwrap_or(Value::Null);
@@ -1337,6 +1592,7 @@ fn main() {
             wrap_t: wrap,
             has_alpha: false,
             mean: [0.0; 4],
+                lod_bias: 0.0,
         });
         (cook.textures.len() - 1) as u32
     };
@@ -1358,7 +1614,7 @@ fn main() {
     };
     println!("effect textures in {} ms", t_fx.elapsed().as_millis());
 
-    let tri_count: u32 = draws.iter().map(|d| d.index_count / 3).sum();
+    let tri_count: u32 = draws.iter().filter(|d| d.layout != pc::VertexLayout::Lights).map(|d| d.index_count / 3).sum();
     let stats = json!({
         "draws": draws.len(),
         "staticDraws": static_draws,
@@ -1369,6 +1625,8 @@ fn main() {
         "animatedNodes": nodes.iter().filter(|n| n.track.is_some()).count(),
         "skins": skins.len(),
         "lights": out_lights.len(),
+        "fieldLights": field.len(),
+        "fieldDraws": field_draws,
         "fogLights": fog_lights.len(),
         "textureBytes": cook.blobs.tex.len(),
         "geometryBytes": cook.blobs.geom.len(),
@@ -1422,6 +1680,7 @@ fn main() {
                 wrap_t: pc::Wrap::Clamp,
                 has_alpha: false,
                 mean: [0.0; 4],
+                lod_bias: 0.0,
             });
             Some((cook.textures.len() - 1) as u32)
         });
@@ -1496,6 +1755,7 @@ fn main() {
         sun,
         day_sky,
         post,
+        vista_haze: extras::vista_haze(&sx["haze"]),
         stats: stats.clone(),
     };
     let meta_json = serde_json::to_vec(&meta).unwrap();
@@ -1539,9 +1799,9 @@ mod chunk_tests {
         for triangle in input { groups.entry(triangle_cell(triangle, 32.0)).or_default().push(triangle); }
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[&Cell::Oversized], [long]);
-        assert_eq!(groups[&Cell::Grid(1, 0)], [local]);
+        assert_eq!(groups[&Cell::Grid(32, 1, 0)], [local]);
         assert_eq!(groups.values().map(Vec::len).sum::<usize>(), input.len());
-        let local_max = groups[&Cell::Grid(1, 0)].iter().flatten().map(|v| v.x).fold(f32::MIN, f32::max);
+        let local_max = groups[&Cell::Grid(32, 1, 0)].iter().flatten().map(|v| v.x).fold(f32::MIN, f32::max);
         assert_eq!(local_max, 61.0);
     }
 
@@ -1553,7 +1813,7 @@ mod chunk_tests {
         verts[5].normal = Vec3::X;
         let tris = [[0, 1, 2], [3, 5, 4]];
         let cells: Vec<_> = tris.iter().map(|tri| triangle_cell(tri.map(|i| verts[i as usize].pos), 32.0)).collect();
-        assert_eq!(cells, [Cell::Grid(0, 0), Cell::Oversized]);
+        assert_eq!(cells, [Cell::Grid(32, 0, 0), Cell::Oversized]);
         let cut = chunk_boundaries(&verts, &tris, &cells);
         assert_eq!(cut, HashSet::from([geometry::pos_bits(verts[0].pos), geometry::pos_bits(verts[1].pos)]));
         // The same edge is not a chunk boundary when both triangles share a bucket.
@@ -1564,9 +1824,22 @@ mod chunk_tests {
     fn oversized_threshold_follows_horizontal_cell_size() {
         let triangle = [Vec3::ZERO, Vec3::new(10.0, 0.0, 0.0), Vec3::new(10.0, 80.0, 0.0)];
         assert_eq!(triangle_cell(triangle, 8.0), Cell::Oversized);
-        assert_eq!(triangle_cell(triangle, 32.0), Cell::Grid(0, 0));
+        assert_eq!(triangle_cell(triangle, 32.0), Cell::Grid(32, 0, 0));
         let distant = triangle.map(|p| p + Vec3::X * 200.0);
-        assert_eq!(triangle_cell(distant, 32.0), Cell::Grid(1000, 1000));
+        assert_eq!(triangle_cell(distant, 32.0), Cell::Grid(256, 0, 0));
+    }
+
+    #[test]
+    fn distant_terrain_keeps_vista_cells_and_lod_errors() {
+        // A face centred in the first far band still extends back into the
+        // street: it must not widen the ordinary 256 m palette bucket.
+        let street = [Vec3::new(4.0, 0.0, 0.0), Vec3::new(210.0, 0.0, 0.0), Vec3::new(210.0, 1.0, 0.0)];
+        assert_eq!(triangle_cell(street, 32.0), Cell::Oversized);
+        let terrain = [Vec3::new(4100.0, 0.0, 0.0), Vec3::new(5100.0, 0.0, 0.0), Vec3::new(5100.0, 100.0, 10.0)];
+        let cell = triangle_cell(terrain, 32.0);
+        assert_eq!(cell, Cell::Grid(4096, 1, 0));
+        assert_eq!(lod_bounds(cell), vec![1.2288, 4.9152, 19.6608]);
+        assert_eq!(lod_bounds(Cell::Oversized), vec![0.06, 0.25]);
     }
 }
 
@@ -1601,5 +1874,55 @@ mod blob_tests {
         let r = Blobs::intern(&mut buf, &mut ranges, &[4, 5, 6]);
         assert_eq!(r.offset, 16);
         assert_eq!(&buf[r.offset as usize..][..3], &[4, 5, 6]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cells_grow_with_distance() {
+        // 32 m near the middle, 256 m to 1 km, then octaves up to 16 km.
+        assert_eq!(cell_at(Vec3::new(100.0, 0.0, -20.0), 32.0, 0.0), Cell::Grid(32, 3, -1));
+        assert_eq!(cell_at(Vec3::new(-300.0, 0.0, 900.0), 32.0, 0.0), Cell::Grid(256, -2, 3));
+        assert_eq!(cell_at(Vec3::new(1500.0, 0.0, 0.0), 32.0, 0.0), Cell::Grid(1024, 1, 0));
+        assert_eq!(cell_at(Vec3::new(0.0, 0.0, 30_000.0), 32.0, 0.0), Cell::Grid(16384, 0, 1));
+        assert_eq!(cell_at(Vec3::new(0.0, 0.0, 45_000.0), 32.0, 0.0), Cell::Grid(32768, 0, 1));
+        assert_eq!(cell_at(Vec3::new(-110_000.0, 0.0, 5_000.0), 32.0, 0.0), Cell::Grid(65536, -2, 0));
+        // Light fields: no cell under 512 m.
+        assert_eq!(cell_at(Vec3::new(100.0, 0.0, 100.0), 32.0, 512.0), Cell::Grid(512, 0, 0));
+    }
+
+    #[test]
+    fn anisotropic_mappings_get_a_bias() {
+        // A wall 48 m wide and 128 m tall over a 256² window grid: 5.3
+        // texels per metre across, 2 up.
+        let p = [Vec3::ZERO, Vec3::new(48.0, 0.0, 0.0), Vec3::new(48.0, 128.0, 0.0)];
+        let uv = [Vec2::ZERO, Vec2::new(1.0, 0.0), Vec2::new(1.0, 1.0)];
+        let (r, area) = geometry::texel_anisotropy(p, uv, Vec2::splat(256.0)).unwrap();
+        assert!((r - (8.0f32 / 3.0).log2()).abs() < 1e-4, "{r}");
+        assert!((area - 48.0 * 64.0).abs() < 1e-2);
+        assert!((anisotropy_bias(r).unwrap() + 1.415).abs() < 1e-3);
+        // Square texels on a slanted face; a ratio under 1.5 keeps no bias.
+        let q = [Vec3::ZERO, Vec3::new(2.0, 0.0, 0.0), Vec3::new(2.0, 2.0, 1.0)];
+        let (r, _) = geometry::texel_anisotropy(q, [Vec2::ZERO, Vec2::new(0.5, 0.0), Vec2::new(0.5, 0.5)], Vec2::splat(256.0)).unwrap();
+        assert!((r - (5.0f32.sqrt() / 2.0).log2()).abs() < 1e-4, "{r}");
+        assert_eq!(anisotropy_bias(r), None);
+        assert_eq!(anisotropy_bias(3.0), Some(-2.0));
+        // A constant UV (roofs reading one texel) has no mapping.
+        assert!(geometry::texel_anisotropy(p, [Vec2::splat(0.1); 3], Vec2::splat(256.0)).is_none());
+    }
+
+    #[test]
+    fn far_chunks_get_coarser_levels() {
+        assert_eq!(lod_bounds(Cell::Grid(256, 3, -4)), vec![0.06, 0.25]);
+        assert_eq!(lod_bounds(Cell::Whole), vec![0.06, 0.25]);
+        // A 2 km cell from 4 to 6 km east: errors from its near edge.
+        assert_eq!(cell_distance(Cell::Grid(2048, 2, -1)), 4096.0);
+        let b = lod_bounds(Cell::Grid(2048, 2, -1));
+        assert!((b[0] - 1.2288).abs() < 1e-4 && (b[2] / b[0] - 16.0).abs() < 1e-4, "{b:?}");
+        // A cell straddling an axis is as near as its other coordinate.
+        assert_eq!(cell_distance(Cell::Grid(1024, -1, 1)), 1024.0);
     }
 }
