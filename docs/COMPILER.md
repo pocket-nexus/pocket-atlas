@@ -16,10 +16,11 @@ flowchart LR
   IR --> GE[GE analysis and lowering]
   Vita --> VP[Vita .place]
   Pica --> PP[PICA .place]
+  Pica --> IP[GLES .place]
   GE --> GP[PLPS .place]
 ```
 
-All three cooks start from the same immutable source. PICA and GE no longer
+All cooks start from the same immutable source. PICA and GE no longer
 parse a Vita pack, decompress its BC textures, or reconstruct positions from
 its quantized vertices. Shared analysis passes still perform world transforms,
 spatial chunking, lighting and animation sampling. PICA / GE now receive float
@@ -38,6 +39,11 @@ handles the CLI. The analysis representation is not a serialized interchange
 format or a shared scene language for OpenStrike. Vita uses PLCE/ATLS v7 and META v7. PICA pins its PLCE envelope to v5 and
 its binary table to v3 independently. PSP uses PLPS v3 with explicit texture
 precision; all packs require their matching target readers.
+The iPod touch 4 (`--target ipod`, GLES 2 on an SGX535) is lowered by `pica.rs`
+as well: the same v3 table with texels in plain rows, surfaces up to 512, and
+a `FELD` section of light sprites, under PLCE v1 with six sections so that
+neither device loads the other's pack. A change to that lowering must leave
+the 3DS pack byte-identical unless the 3DS is meant to change.
 Previously a Vita version bump leaked into PICA output and the C reader rejected
 it; the integration test now checks cooked output using the runtime's C format
 header and header validator.
@@ -124,7 +130,9 @@ need device headroom measurements.
 ## Capability, release eligibility and evidence
 
 `check --target` rejects known missing lowerings before cooking. Currently
-PICA/GE reject city-light fields and vista height haze. GE also rejects water
+PICA/GE reject city-light fields and vista height haze; the GLES pack cooks
+both as seen from the middle of the camera shots (`light_fields`, `vista`).
+GE also rejects water
 and kinds outside night streets and dry daytime
 streets/slopes. Its shared daytime lowering bakes the sky and sun from the IR.
 The GE analysis includes static sunlight before refinement/LOD, with an explicit
@@ -160,7 +168,7 @@ version/capability and resource integrity. Run `cargo test --locked --workspace`
 
 ## Profiles, recipes and compile receipts
 
-`profiles/vita30.json`, `old3ds30.json` and `psp30.json` describe the existing
+`profiles/vita30.json`, `old3ds30.json`, `psp30.json` and `ipod30.json` describe the existing
 runtimes: host OS/ABI, GPU family, render/display dimensions, auxiliary display,
 frame target, texture policies, animation palette budget and reader limits.
 `--profile` accepts a built-in ID or a JSON file. A custom profile can tune the

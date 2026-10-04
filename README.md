@@ -2,15 +2,16 @@
 
 A world map of places people remember. A place is a small, self-contained 3D scene of one real spot — a street corner, a stairway, a café — pinned to its location on a shared globe. People will publish their own places (publicly or privately) and download other people's places to visit them.
 
-This repository holds the first-party places, the pipeline that turns a place into a pack for a handheld GPU, and native PS Vita, Nintendo 3DS and PSP renderers. Publishing and downloading are not built yet. Vita and 3DS target 30 fps; PSP supports night streets and daytime slopes/streets through its fixed-function GE pipeline.
+This repository holds the first-party places, the pipeline that turns a place into a pack for a handheld GPU, and native PS Vita, Nintendo 3DS, PSP and iPod touch 4 renderers. Publishing and downloading are not built yet. Vita and 3DS target 30 fps; PSP supports night streets and daytime slopes/streets through its fixed-function GE pipeline; the iPod touch draws five places from the 3DS's kind of pack.
 
 Places share their assets across the reference and handheld renderers:
 
 - **`web/`** is the reference renderer: a standalone three.js + Vite app with no PocketJS dependency, with a night-side globe to pick a place. Every asset is generated at load time.
 - **`vita/`** renders the same place on a PS Vita with its own GXM pipeline: Cg programs compiled on the device by SceShaccCg, 4× MSAA HDR targets and the effect set the place needs.
 - **`n3ds/`** renders the shared globe, place browser and five supported scenes on an Old 3DS, using a PICA200 cook of the same assets, native 400 × 240 output and a 30fps quality budget. Unsupported kinds remain visible with an unavailable label. See [the 3DS build and debug workflow](n3ds/README.md).
+- **`ipod/`** lists and renders five places on an iPod touch 4 (iOS 6, SGX535, OpenGL ES 2) at 480 × 320, from the 3DS lowering with GLES texels and Griffith's lights and haze cooked for it. See [how it draws, builds and is measured](ipod/README.md).
 
-The web app exports glTF 2.0 with `extras.pocketAtlas`. The cooker seals a lossless PlaceIR, then independently lowers it into Vita, PICA or GE assets. See [the compiler boundaries, commands and migration plan](docs/COMPILER.md).
+The web app exports glTF 2.0 with `extras.pocketAtlas`. The cooker seals a lossless PlaceIR, then independently lowers it into Vita, PICA, GE or GLES assets. See [the compiler boundaries, commands and migration plan](docs/COMPILER.md).
 
 ## Places
 
@@ -40,7 +41,8 @@ Real places fall into a finite set of kinds; the registry names them (`PlaceKind
 | `n3ds/`, `tools/atlas-3ds.ts` | PICA renderer, native cooker, paired wireless deployment, capture and performance measurement |
 | `tools/atlas.ts` | cook (places and the atlas with its font), build, deploy over USB, status/capture/profile/sweep/shots, shader lint, standalone VPK |
 | `tools/atlas-psp.ts` | PSP cook/build, PSPLINK serve/run/control/capture/shot measurements, standalone EBOOT package |
-| `vendor/pocketjs` | PocketJS: Vita dev host and wired debug transport; 3DS paired transport and native installer; pinned PSP toolchain resolver |
+| `ipod/`, `tools/atlas-ipod.ts` | iPod touch 4 app (two C files: the GLES 2 renderer and the UIKit shell) and its cook/build/install/control/capture/measure tool |
+| `vendor/pocketjs` | PocketJS: Vita dev host and wired debug transport; 3DS paired transport and native installer; pinned PSP toolchain resolver; iPod touch 4 sysroot, startup objects and installer |
 
 ## Web
 

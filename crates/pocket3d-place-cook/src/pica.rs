@@ -2,6 +2,11 @@
 //! annotations, lighting bake, cameras and motion; no place-name branches.
 //! RGB565/RGBA4 mip chains are tiled offline, and lighting is converted to
 //! display-referred vertex colour because PICA200 has fixed TEV combiners.
+//!
+//! The iPod touch 4 (GLES 2 on an SGX535) draws the same table as it is
+//! cooked, one texture times one vertex colour (`gles` below). That pack keeps
+//! its texels in plain rows and adds what a dusk vista needs (`light_fields`,
+//! `vista`), both cooked as seen from the middle of the camera shots.
 use crate::textures::{self, Rgba};
 use glam::{Mat4, Quat, Vec3};
 use pocket3d_place as pc;
@@ -12,6 +17,8 @@ use crate::{artifact::Artifact, profile::Profile};
 // tests/pipeline.rs verifies emitted packs against n3ds/src/format.h.
 const CONTAINER_VERSION: u32 = 5;
 const TABLE_VERSION: u32 = 3;
+// ipod/src/scene.c reads the same table from its own container.
+const GLES_CONTAINER_VERSION: u32 = 1;
 
 fn u32s(out: &mut Vec<u8>, v: &[u32]) {
     for n in v {
@@ -53,7 +60,31 @@ fn grade(c: Vec3, p: &pc::Post) -> Vec3 {
 fn hash(x: f32) -> f32 {
     (x.sin() * 43758.547).fract().abs()
 }
-fn procedural(kind: pc::Kind) -> Rgba {
+// vita/shaders/common.cgh: the hashes window_f.cg picks a room with.
+fn hash32(p: [f32; 2]) -> Vec3 {
+    let frac = |v: Vec3| v - v.floor();
+    let mut p3 = frac(Vec3::new(p[0], p[1], p[0]) * Vec3::new(0.1031, 0.1030, 0.0973));
+    p3 += p3.dot(Vec3::new(p3.y, p3.x, p3.z) + 33.33);
+    frac((Vec3::new(p3.x, p3.x, p3.y) + Vec3::new(p3.y, p3.z, p3.z)) * Vec3::new(p3.z, p3.y, p3.x))
+}
+fn hash12(p: [f32; 2]) -> f32 {
+    let frac = |v: Vec3| v - v.floor();
+    let mut p3 = frac(Vec3::new(p[0], p[1], p[0]) * 0.1031);
+    p3 += p3.dot(Vec3::new(p3.y, p3.z, p3.x) + 33.33);
+    ((p3.x + p3.y) * p3.z).fract()
+}
+/// The light of the room behind a pane as window_f.cg picks it from the
+/// pane's seed (the floor of its UV): dark, or a warm or a cool lamp, through
+/// the material's tint. GLES draws one neutral room texture times this.
+fn room(seed: [f32; 2], mat: &pc::Material) -> Vec3 {
+    let h = hash32(seed.map(|s| s * 1.37 + 0.5));
+    if h.x >= 0.62 {
+        return Vec3::new(0.015, 0.016, 0.02) * mat.emissive[0];
+    }
+    let lamp = if hash12(seed.map(|s| s + 17.1)) < 0.68 { Vec3::new(1.0, 0.72, 0.45) } else { Vec3::new(0.82, 0.9, 1.0) };
+    lamp * Vec3::from(mat.tint.unwrap_or([1.0; 3])) * ((0.55 + h.y * 0.9) * 0.5 * mat.emissive[0])
+}
+fn procedural(kind: pc::Kind, gles: bool) -> Rgba {
     let (w, h) = (256, 256);
     let px = (0..h)
         .flat_map(|y| {
@@ -63,7 +94,8 @@ fn procedural(kind: pc::Kind) -> Rgba {
                 match kind {
                     pc::Kind::InteriorWindow => {
                         let tile = (x / 32) + (y / 64) * 8;
-                        let lit = hash(tile as f32 * 12.97 + 1.0) > 0.38;
+                        // GLES lights each pane by its vertex colour (`room`).
+                        let lit = gles || hash(tile as f32 * 12.97 + 1.0) > 0.38;
                         let (s, t) = ((x % 32) as f32 / 32.0, (y % 64) as f32 / 64.0);
                         let edge = s < 0.06 || s > 0.94 || t < 0.06 || t > 0.94;
                         let shade = if edge {
@@ -79,7 +111,7 @@ fn procedural(kind: pc::Kind) -> Rgba {
                             1.0
                         };
                         let k = if lit { shade * curtain } else { 0.018 };
-                        [k, k * 0.72, k * 0.44, 1.0]
+                        if gles { [k, k, k, 1.0] } else { [k, k * 0.72, k * 0.44, 1.0] }
                     }
                     pc::Kind::Skyline => {
                         let (s, t) = (x % 16, y % 16);
@@ -117,27 +149,37 @@ fn morton(x: u32, y: u32) -> usize {
     }
     n as usize
 }
-fn tiled(img: &Rgba, alpha: bool) -> Vec<u8> {
-    let mut out = vec![0; (img.w * img.h * 2) as usize];
+/// Texels by the table's format code (0 RGBA8, 3 RGB565, 4 RGBA4). PICA reads
+/// bottom-up 8x8 Morton tiles and RGBA8 as ABGR; GLES reads top-down rows.
+fn texels(img: &Rgba, format: u32, gles: bool) -> Vec<u8> {
+    let size = if format == 0 { 4 } else { 2 };
+    let mut out = vec![0; (img.w * img.h) as usize * size];
     for y in 0..img.h {
         for x in 0..img.w {
-            let p = img.px[((img.h - 1 - y) * img.w + x) as usize];
+            let p = img.px[((if gles { y } else { img.h - 1 - y }) * img.w + x) as usize];
             let c = [
                 byte(srgb(p[0])),
                 byte(srgb(p[1])),
                 byte(srgb(p[2])),
                 byte(p[3]),
             ];
-            let v = if alpha {
-                ((c[0] as u16 >> 4) << 12)
-                    | ((c[1] as u16 >> 4) << 8)
-                    | ((c[2] as u16 >> 4) << 4)
-                    | (c[3] as u16 >> 4)
-            } else {
-                ((c[0] as u16 >> 3) << 11) | ((c[1] as u16 >> 2) << 5) | (c[2] as u16 >> 3)
-            };
-            let i = (((y / 8) * (img.w / 8) + x / 8) * 64) as usize + morton(x % 8, y % 8);
-            out[i * 2..i * 2 + 2].copy_from_slice(&v.to_le_bytes());
+            let i = size
+                * if gles {
+                    (y * img.w + x) as usize
+                } else {
+                    (((y / 8) * (img.w / 8) + x / 8) * 64) as usize + morton(x % 8, y % 8)
+                };
+            let c16 = c.map(u16::from);
+            match format {
+                0 => out[i..i + 4].copy_from_slice(&if gles { c } else { [c[3], c[2], c[1], c[0]] }),
+                3 => out[i..i + 2].copy_from_slice(
+                    &(((c16[0] >> 3) << 11) | ((c16[1] >> 2) << 5) | (c16[2] >> 3)).to_le_bytes(),
+                ),
+                _ => out[i..i + 2].copy_from_slice(
+                    &(((c16[0] >> 4) << 12) | ((c16[1] >> 4) << 8) | ((c16[2] >> 4) << 4) | (c16[3] >> 4))
+                        .to_le_bytes(),
+                ),
+            }
         }
     }
     out
@@ -514,24 +556,6 @@ fn cloud_overlay(base: Vec3, radiance: Vec3, alpha: f32, post: &pc::Post) -> Vec
     let target = grade(base * (1.0 - alpha) + radiance, post);
     (target - grade(base, post) * (1.0 - alpha)).max(Vec3::ZERO)
 }
-fn tiled_rgba8(img: &Rgba) -> Vec<u8> {
-    let mut out = vec![0; (img.w * img.h * 4) as usize];
-    for y in 0..img.h {
-        for x in 0..img.w {
-            let p = img.px[((img.h - 1 - y) * img.w + x) as usize];
-            // PICA GPU_RGBA8 stores ABGR byte order, i.e. little-endian RRGGBBAA.
-            let c = [
-                byte(p[3]),
-                byte(srgb(p[2])),
-                byte(srgb(p[1])),
-                byte(srgb(p[0])),
-            ];
-            let i = (((y / 8) * (img.w / 8) + x / 8) * 64) as usize + morton(x % 8, y % 8);
-            out[i * 4..i * 4 + 4].copy_from_slice(&c);
-        }
-    }
-    out
-}
 fn panorama(s: &pc::DaySky, post: &pc::Post, clouds: Option<&Rgba>) -> Rgba {
     let (w, h) = if clouds.is_some() {
         (1024, 512)
@@ -572,18 +596,14 @@ fn panorama(s: &pc::DaySky, post: &pc::Post, clouds: Option<&Rgba>) -> Rgba {
         .collect();
     Rgba { w, h, px }
 }
-fn push_texture(src: &Rgba, alpha: bool, tex: &mut Vec<u8>, textures: &mut Vec<[u32; 8]>) -> u32 {
+fn push_texture(src: &Rgba, format: u32, gles: bool, tex: &mut Vec<u8>, textures: &mut Vec<[u32; 8]>) -> u32 {
     align(tex, 128);
     let off = tex.len();
-    tex.extend(if alpha {
-        tiled_rgba8(src)
-    } else {
-        tiled(src, false)
-    });
+    tex.extend(texels(src, format, gles));
     textures.push([
         src.w,
         src.h,
-        if alpha { 0 } else { 3 },
+        format,
         1,
         off as u32,
         (tex.len() - off) as u32,
@@ -592,6 +612,100 @@ fn push_texture(src: &Rgba, alpha: bool, tex: &mut Vec<u8>, textures: &mut Vec<[
     ]);
     textures.len() as u32 - 1
 }
+/// A dusk vista's height haze between `eye` and `p` (`VistaHaze`), on a
+/// scene-linear colour: what is left of it, and the horizon scattered in.
+fn vista(m: &crate::source::Scene, eye: Vec3, p: Vec3, c: Vec3, additive: bool) -> Vec3 {
+    let Some(h) = &m.vista_haze else { return c };
+    let t = h.transmittance(eye.to_array(), p.to_array());
+    if additive {
+        return c * t;
+    }
+    let flat = |v: Vec3| Vec3::new(v.x, 0.0, v.z).normalize_or_zero();
+    let (base, sun) = m.day_sky.as_ref().map_or((m.atmosphere.sky_horizon, [0.0; 3]), |s| {
+        s.horizon_parts(flat(p - eye).dot(flat(Vec3::from(s.sun_direction))))
+    });
+    let sky = (Vec3::from(base) + Vec3::from(sun) * h.sun_weight(t)) * h.gain;
+    c * t + (sky + Vec3::from(h.glow) * h.relative_density(p.y)) * (1.0 - t)
+}
+
+/// The sprites of one GLES light field, 52 bytes each: position, radius,
+/// path, path cycles, phase, blink cycles, duty, 1 / k and the display colour
+/// with the twinkle in alpha. A vista's lights sit kilometres from cameras
+/// that move tens of metres, so the colour is the light's energy
+/// k² = (D / S)² (`pc::LightField`) through `air` and the tone curve
+/// `display` as `eye` sees it with `focal` = H / tan(fovY / 2); the vertex
+/// program scales it by its own k over the k here. Sprites blend after the
+/// tone curve on this target, so still, steady lights beyond 1 km within a
+/// pixel and a half of each other there (sprites are wider) are summed into
+/// one before it: a hundred of them would otherwise add up to white. What
+/// the curve leaves at black is dropped.
+fn sprites(lights: &[pc::LightPoint], f: &pc::LightField, eye: Vec3, focal: f32, height: f32, air: impl Fn(Vec3, Vec3) -> Vec3, display: impl Fn(Vec3) -> Vec3) -> Vec<u8> {
+    let (lo, hi) = (f.min_pixels * height / 272.0, f.max_pixels * height / 272.0);
+    // (energy, position weighted by energy with the weight in w, first light with the largest radius)
+    let mut cells: std::collections::BTreeMap<Option<[i32; 2]>, Vec<(Vec3, glam::Vec4, pc::LightPoint)>> = Default::default();
+    for l in lights {
+        let v = Vec3::from(l.position) - eye;
+        let dist = v.length().max(0.01);
+        let size = l.radius * focal / dist;
+        let k = (size / size.clamp(lo, hi)).min(1.0);
+        let energy = air(eye + v, Vec3::from(l.color) * (l.intensity * f.gain * k * k));
+        let steady = l.path == [0.0; 3] && (l.blink_cycles == 0.0 || l.duty >= 1.0);
+        let cell = (steady && dist > 1000.0 && size < lo)
+            .then(|| [v.x.atan2(-v.z), (v.y / dist).asin()].map(|a| (a * focal / 3.0).floor() as i32));
+        let at = (Vec3::from(l.position).extend(1.0)) * energy.max_element().max(1e-12);
+        match cells.entry(cell).or_default() {
+            group if cell.is_some() && !group.is_empty() => {
+                group[0].0 += energy;
+                group[0].1 += at;
+                group[0].2.radius = group[0].2.radius.max(l.radius);
+            }
+            group => group.push((energy, at, *l)),
+        }
+    }
+    let mut points = Vec::new();
+    for (energy, at, l) in cells.into_values().flatten() {
+        let p = at.truncate() / at.w;
+        let dist = (p - eye).length().max(0.01);
+        let size = l.radius * focal / dist;
+        // Added to the frame: less the curve's own black.
+        let color = display(energy) - display(Vec3::ZERO);
+        if color.max_element() < 1.5 / 255.0 {
+            continue;
+        }
+        // Scintillation grows over the first 8 km of air; a display colour
+        // follows about the square root of the energy.
+        let twinkle = l.twinkle * (dist / 8000.0).min(1.0) * 0.35 * 0.5;
+        fs(&mut points, &p.to_array());
+        fs(&mut points, &[l.radius]);
+        fs(&mut points, &l.path);
+        fs(&mut points, &[l.path_cycles, l.phase, l.blink_cycles, l.duty, (size.clamp(lo, hi) / size).max(1.0)]);
+        points.extend([byte(color.x), byte(color.y), byte(color.z), byte(twinkle * 4.0)]);
+    }
+    points
+}
+
+/// The GLES `FELD` section: a count, then per field its first sprite and
+/// count, bounding sphere, sprite sizes in pixels, depth pull and period,
+/// then every field's `sprites`.
+fn light_fields(m: &crate::source::Scene, eye: Vec3, focal: f32, height: f32) -> Vec<u8> {
+    let (mut records, mut points) = (Vec::new(), Vec::new());
+    for d in &m.draws {
+        let crate::source::Geometry::LightField(lights) = &d.geometry else { continue };
+        let f = m.materials[d.material as usize].lights.unwrap_or_default();
+        let field = sprites(lights, &f, eye, focal, height, |p, c| vista(m, eye, p, c, true), |c| grade(c, &m.post));
+        let (min, max) = (Vec3::from(d.min), Vec3::from(d.max));
+        u32s(&mut records, &[points.len() as u32 / 52, field.len() as u32 / 52]);
+        fs(&mut records, &((min + max) * 0.5).to_array());
+        fs(&mut records, &[(max - min).length() * 0.5, f.min_pixels * height / 272.0, f.max_pixels * height / 272.0, f.depth_pull, f.period]);
+        points.extend(field);
+    }
+    let mut out = Vec::new();
+    u32s(&mut out, &[records.len() as u32 / 40]);
+    out.extend(records);
+    out.extend(points);
+    out
+}
+
 pub(super) fn sun_occluder(scene: &crate::source::Scene) -> Option<crate::occlusion::Occluder> {
     let m = scene;
     assert!(m.materials.iter().all(|m| !m.vertex_pbr), "PICA lowering requires source materials, not Vita PBR palettes");
@@ -633,6 +747,17 @@ fn main_lods<'a>(indices: &'a [u32], levels: &'a [crate::source::Lod]) -> impl I
 
 pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,String> {
     let m = scene;
+    let gles = profile.target == crate::ir::Target::Ipod;
+    // GLES adds an emission map of its own to the lit surface (MAT_GLOW). One
+    // texture times one colour draws a floodlit wall white all over where the
+    // map paints cones of light, and a distant tower black between its windows
+    // where its body should fade into the haze.
+    let glows = |mat: &pc::Material| {
+        gles && mat.kind == pc::Kind::Standard && mat.emission.is_some() && mat.albedo != mat.emission
+            && mat.blend == pc::Blend::Opaque && mat.alpha_test == 0.0 && !mat.interior
+    };
+    let eye = m.camera.shots.iter().flat_map(|s| [s.from.pos, s.to.pos]).map(Vec3::from).sum::<Vec3>()
+        / (2 * m.camera.shots.len().max(1)) as f32;
     let mut tex = Vec::new();
     let mut geom = Vec::new();
     let mut anim = Vec::new();
@@ -675,6 +800,7 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         let grid = mat
             .uv_anim
             .map_or([1, 1], |a| [a.cols.max(1), a.rows.max(1)]);
+        let mut texture = |ti: Option<u32>| {
         let key = (
             ti,
             if proc || water {
@@ -684,10 +810,10 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
             },
             grid,
         );
-        let tx = if ti.is_some() || proc {
+        if ti.is_some() || proc {
             *texkeys.entry(key).or_insert_with(|| {
                 let mut src = if proc {
-                    procedural(mat.kind)
+                    procedural(mat.kind, gles)
                 } else {
                     let id = ti.unwrap();
                     let d = decoded
@@ -718,11 +844,13 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
                 let (w, h) = (w.max(8), h.max(8));
                 let mut level = textures::resize(&src, w, h);
                 let alpha = src.px.iter().any(|p| p[3] < 0.98);
+                // GLES keeps eight bits behind an alpha channel; RGBA4 bands its gradients.
+                let format = if !alpha { 3 } else if gles { 0 } else { 4 };
                 align(&mut tex, 128);
                 let off = tex.len();
                 let mut levels = 0;
                 loop {
-                    tex.extend(tiled(&level, alpha));
+                    tex.extend(texels(&level, format, gles));
                     levels += 1;
                     if level.w.min(level.h) <= 8 || level.w / grid[0] <= 4 || level.h / grid[1] <= 4
                     {
@@ -733,7 +861,7 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
                 textures.push([
                     w,
                     h,
-                    if alpha { 4 } else { 3 },
+                    format,
                     levels,
                     off as u32,
                     (tex.len() - off) as u32,
@@ -744,7 +872,9 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
             })
         } else {
             u32::MAX
+        }
         };
+        let (tx, glow) = if glows(mat) { (texture(mat.albedo), texture(mat.emission)) } else { (texture(ti), u32::MAX) };
         let mut flags = 0u32;
         if mat.blend != pc::Blend::Opaque {
             flags |= 1;
@@ -773,6 +903,9 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         if water {
             flags |= 256;
         }
+        if glows(mat) {
+            flags |= 512;
+        }
         let alpha = if mat.kind == pc::Kind::Glass {
             0.16
         } else {
@@ -787,7 +920,8 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         fs(&mut record, &[a.fps, a.scroll[0], a.scroll[1], a.phase]);
         u32s(&mut record, &[mat.emissive_track.unwrap_or(u32::MAX)]);
         let water = mat.water.unwrap_or_default();
-        fs(&mut record, &water.waves[0]);
+        // A MAT_GLOW material has no waves: its emission map's index goes there.
+        fs(&mut record, &if glows(mat) { [glow as f32, 0.0, 0.0] } else { water.waves[0] });
         fs(&mut record, &water.waves[1]);
         fs(
             &mut record,
@@ -835,6 +969,8 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         at += s.joints.len();
     }
     let mut world0 = Vec::new();
+    // Node matrices at eight moments of the loop: GLES lights what moves there.
+    let mut poses = Vec::new();
     for sampled in 0..frames {
         let frame = (sampled as u64 * m.frames.max(1) as u64 / frames as u64) as u32;
         let mut world = vec![Mat4::IDENTITY; m.nodes.len()];
@@ -860,6 +996,9 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
                 );
             }
         }
+        if gles && sampled % (frames / 8).max(1) == 0 {
+            poses.push(world.clone());
+        }
         if sampled == 0 {
             world0 = world;
         }
@@ -883,17 +1022,32 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
             );
         }
     }
-    let occluder = sun_occluder(scene);
+    // One shadow ray per vertex cuts wedges across whole walls where a shadow
+    // map draws an edge: on 480x320 the unshadowed sun over the baked sky
+    // occlusion reads cleaner, so GLES takes that.
+    let occluder = if gles { None } else { sun_occluder(scene) };
     let baker = crate::bake::Baker::new(
         &m.lights,
         (m.atmosphere.hemisphere_sky, m.atmosphere.hemisphere_ground),
         None,
     );
     for d in &m.draws {
+        if matches!(d.geometry, crate::source::Geometry::LightField(_)) {
+            continue;
+        }
         let mat = &m.materials[d.material as usize];
+        let hazed = mat.fog && !mat.interior;
+        let additive = mat.blend == pc::Blend::Additive;
         align(&mut geom, 16);
         let vo = geom.len();
         let mut positions = Vec::new();
+        // The seed of each vertex's pane (GLES windows: `room`).
+        let window = gles && mat.kind == pc::Kind::InteriorWindow;
+        let mut panes = vec![[0.0f32; 2]; if window { d.vertex_count() as usize } else { 0 }];
+        for t in d.indices().chunks_exact(3).filter(|_| window) {
+            let seed = (t.iter().map(|&i| scene.vertex(d, i as usize).uv).sum::<glam::Vec2>() / 3.0).floor().to_array();
+            t.iter().for_each(|&i| panes[i as usize] = seed);
+        }
         for i in 0..d.vertex_count() as usize {
             let v = scene.vertex(d, i);
             let pos = v.pos;
@@ -907,6 +1061,16 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
                 let k = v.light[3] as f32 / 255.0;
                 Vec3::new(v.light[0] as f32, v.light[1] as f32, v.light[2] as f32)
                     .map(|v| (v / 255.0 * k).powi(2) * 64.0)
+            } else if gles {
+                // The mean over its path (a rig goes with its first joint):
+                // the first pose of a walker may stand in the dark.
+                poses.iter().map(|pose| {
+                    let at = d.node.map(|i| pose[i as usize]).or(d.skin.map(|s| {
+                        let skin = &m.skins[s as usize];
+                        pose[skin.joints[0] as usize] * Mat4::from_cols_slice(&skin.inverse_bind[0])
+                    })).unwrap_or(Mat4::IDENTITY);
+                    baker.irradiance(at.transform_point3(pos), at.transform_vector3(n).normalize_or(n), mat.env_strength, false, 1.0)
+                }).sum::<Vec3>() / poses.len().max(1) as f32 + Vec3::splat(0.08)
             } else {
                 baker.irradiance(world, n, mat.env_strength, false, 1.0) + Vec3::splat(0.08)
             };
@@ -926,6 +1090,8 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
                 }
             }
             let base = Vec3::new(mat.color[0], mat.color[1], mat.color[2]);
+            let tone = |c: Vec3| grade(if hazed { vista(m, eye, world, c, additive) } else { c }, &m.post);
+            let mut strength = None;
             let color = match mat.kind {
                 pc::Kind::Products => {
                     let seed = vc.dot(Vec3::new(12.9898, 78.233, 37.719));
@@ -935,14 +1101,11 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
                         h1 * 0.93 + uv[0].clamp(0.0, 1.0) * 0.055,
                         ((h2 * 8.0).floor() + 0.08 + uv[1].clamp(0.0, 1.0) * 0.8) / 8.0,
                     ];
-                    grade(
-                        Vec3::splat(mat.emissive[0] * (0.78 + 0.22 * v.color[3] as f32 / 255.0)),
-                        &m.post,
-                    )
+                    tone(Vec3::splat(mat.emissive[0] * (0.78 + 0.22 * v.color[3] as f32 / 255.0)))
                 }
                 pc::Kind::InteriorWindow => {
                     uv = [uv[0] / 8.0, uv[1] / 4.0];
-                    Vec3::splat(0.9)
+                    if gles { tone(room(panes[i], mat)) } else { Vec3::splat(0.9) }
                 }
                 pc::Kind::Skyline => {
                     let tangent =
@@ -965,12 +1128,9 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
                         },
                     );
                     uv = [world.x, world.z];
-                    grade(body * Vec3::from(m.atmosphere.hemisphere_sky), &m.post)
+                    tone(body * Vec3::from(m.atmosphere.hemisphere_sky))
                 }
-                pc::Kind::Unlit => grade(
-                    base * if mat.vertex_color { vc } else { Vec3::ONE },
-                    &m.post,
-                ),
+                pc::Kind::Unlit => tone(base * if mat.vertex_color { vc } else { Vec3::ONE }),
                 _ => {
                     if !mat.vertex_color {
                         vc = Vec3::ONE;
@@ -996,8 +1156,12 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
                         let height = 0.62 + 0.38 * t * t * (3.0 - 2.0 * t);
                         emission *= vc * ((0.6 + 0.4 * n.y + 0.12 * n.x.abs()) * height);
                     }
-                    let rgb = albedo * irr + emission;
-                    grade(rgb, &m.post)
+                    if glows(mat) {
+                        let lit = grade(vista(m, eye, world, emission, true), &m.post) - grade(Vec3::ZERO, &m.post);
+                        strength = Some(byte(lit.max_element()));
+                        emission = Vec3::ZERO;
+                    }
+                    tone(albedo * irr + emission)
                 }
             };
             fs(&mut geom, &pos.to_array());
@@ -1006,7 +1170,9 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
                 byte(color.x),
                 byte(color.y),
                 byte(color.z),
-                if mat.vertex_color && (mat.blend != pc::Blend::Opaque || mat.alpha_test > 0.0) {
+                if let Some(strength) = strength {
+                    strength
+                } else if mat.vertex_color && (mat.blend != pc::Blend::Opaque || mat.alpha_test > 0.0) {
                     v.color[3]
                 } else {
                     255
@@ -1015,7 +1181,30 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
             positions.push(pos);
         }
         let mut lod = Vec::new();
-        for (indices, count, error) in main_lods(d.indices(), d.lods())
+        // The shared analysis keeps a skinned mesh whole: its error measure
+        // knows no joints. GLES cannot draw a street of people at full detail,
+        // so triangles bound to one joint alone, which stay rigid, collapse
+        // onto each other there.
+        let rigid: Vec<crate::source::Lod> = if gles && d.skin.is_some() {
+            let tris: Vec<[u32; 3]> = d.indices().chunks_exact(3).map(|t| [t[0], t[1], t[2]]).collect();
+            let mut locked = vec![false; d.vertex_count() as usize];
+            for t in &tris {
+                let joint = scene.vertex(d, t[0] as usize).joints[0];
+                if t.iter().map(|&i| scene.vertex(d, i as usize)).any(|v| v.weights[0] != 255 || v.joints[0] != joint) {
+                    t.iter().for_each(|&i| locked[i as usize] = true);
+                }
+            }
+            crate::geometry::lods(d.vertices(), &tris, crate::source::VertexClass::Static, &locked, false, &[0.01, 0.03], 0.02)
+                .into_iter()
+                .map(|(t, error)| crate::source::Lod { indices: t.into_iter().flatten().collect(), error })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // Paint lying on a road collapses within its plane at no measured
+        // error: GLES picks levels by that error, so its decals keep theirs.
+        let levels = if gles && mat.polygon_offset.is_some() { &[][..] } else if d.skin.is_some() { &rigid } else { d.lods() };
+        for (indices, count, error) in main_lods(d.indices(), levels)
         {
             if lod.len() == 3 {
                 break;
@@ -1209,7 +1398,7 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         if flags & 8 == 0 {
             key[20..24].fill(0);
         }
-        if flags & 256 == 0 {
+        if flags & (256 | 512) == 0 {
             key[56..92].fill(0);
         }
         let id = *state_ids.entry(key).or_insert_with(|| {
@@ -1285,7 +1474,8 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         features |= 16;
         sky_texture = push_texture(
             &panorama(sky, &m.post, None),
-            false,
+            if gles { 0 } else { 3 },
+            gles,
             &mut tex,
             &mut textures,
         );
@@ -1293,7 +1483,8 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
             let cloud = m.textures[id as usize].image();
             cloud_texture = push_texture(
                 &panorama(sky, &m.post, Some(&cloud)),
-                true,
+                0,
+                gles,
                 &mut tex,
                 &mut textures,
             );
@@ -1320,7 +1511,8 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         &mut table,
         &[
             fps,
-            m.atmosphere.fog_density,
+            // A vista's haze is in the vertex colours (`vista`).
+            if m.vista_haze.is_some() { 0.0 } else { m.atmosphere.fog_density },
             m.atmosphere.haze_density,
             m.rain.active as u8 as f32,
         ],
@@ -1376,18 +1568,29 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         fs(&mut table, &b[1]);
     }
     table.extend(&skin_data);
-    let summary = serde_json::json!({"target":"3ds","version":TABLE_VERSION,"name":m.name,"kind":m.kind,"sourceMaterials":m.materials.len(),"textures":textures.len(),"draws":draws.len(),"textureBytes":tex.len(),"geometryBytes":geom.len(),"animationBytes":anim.len(),"matrices":matrices,"frames":frames,"fps":fps,"features":features,"sourceNodes":m.nodes.len(),"camera":m.camera});
+    let field = if gles {
+        let fov = m.camera.shots.iter().map(|s| s.from.fov + s.to.fov).sum::<f32>() / (2 * m.camera.shots.len().max(1)) as f32;
+        let height = profile.presentation.render_height as f32;
+        light_fields(m, eye, height / (fov.to_radians() * 0.5).tan(), height)
+    } else {
+        Vec::new()
+    };
+    let summary = serde_json::json!({"target":profile.target.name(),"version":TABLE_VERSION,"name":m.name,"kind":m.kind,"sourceMaterials":m.materials.len(),"textures":textures.len(),"draws":draws.len(),"textureBytes":tex.len(),"geometryBytes":geom.len(),"animationBytes":anim.len(),"matrices":matrices,"frames":frames,"fps":fps,"features":features,"sourceNodes":m.nodes.len(),"camera":m.camera});
     let meta = serde_json::to_vec(&summary).unwrap();
-    let out = pc::write_versioned(pc::MAGIC, CONTAINER_VERSION, &[
+    let mut sections: Vec<([u8; 4], &[u8], u32)> = vec![
         (pc::TAG_META, &meta, 16),
         (*b"PICA", &table, 16),
         (pc::TAG_TEXTURES, &tex, 128),
         (pc::TAG_GEOMETRY, &geom, 128),
         (pc::TAG_ANIMATION, &anim, 16),
-    ]);
+    ];
+    if gles {
+        sections.push((*b"FELD", &field, 16));
+    }
+    let out = pc::write_versioned(pc::MAGIC, if gles { GLES_CONTAINER_VERSION } else { CONTAINER_VERSION }, &sections);
     Ok(Artifact {
         bytes: out, summary,
-        sections: [("META",meta.len()),("PICA",table.len()),("TEXD",tex.len()),("GEOM",geom.len()),("ANIM",anim.len())].into_iter().map(|(k,v)|(k.into(),v)).collect(),
+        sections: [("META",meta.len()),("PICA",table.len()),("TEXD",tex.len()),("GEOM",geom.len()),("ANIM",anim.len())].into_iter().chain(gles.then_some(("FELD",field.len()))).map(|(k,v)|(k.into(),v)).collect(),
         textures: textures.iter().enumerate().map(|(id,t)|serde_json::json!({"id":id,"sourceTextures":texkeys.iter().filter(|(_,output)|**output as usize==id).filter_map(|(key,_)|key.0).collect::<std::collections::BTreeSet<_>>(),"sources":texkeys.iter().filter(|(_,output)|**output as usize==id).filter_map(|(key,_)|key.0).flat_map(|source|crate::provenance::texture_sources(scene,source as usize)).collect::<std::collections::BTreeSet<_>>(),"width":t[0],"height":t[1],"format":t[2],"levels":t[3],"bytes":t[5]})).collect(),
     })
 }
@@ -1601,10 +1804,47 @@ mod tests {
     fn rgba8_upload_has_pica_abgr_channels_and_preserves_alpha() {
         let mut px = vec![[0.0; 4]; 64];
         px[0] = [1.0, linear(0.5), 0.0, 0.25];
-        let bytes = tiled_rgba8(&Rgba { w: 8, h: 8, px });
+        let image = Rgba { w: 8, h: 8, px };
+        let bytes = texels(&image, 0, false);
         let offset = morton(0, 7) * 4;
         assert_eq!(&bytes[offset..offset + 4], &[64, 0, 128, 255]);
         assert_eq!(&bytes[0..4], &[0, 0, 0, 0]);
+        // GLES: the first texel of the first row, RGBA.
+        assert_eq!(&texels(&image, 0, true)[0..4], &[255, 128, 0, 64]);
+    }
+
+    #[test]
+    fn gles_light_field_sums_far_steady_lights_and_drops_the_dark() {
+        let field = pc::LightField { min_pixels: 2.0, max_pixels: 10.0, gain: 1.0, depth_pull: 0.0, period: 120.0 };
+        let light = |x: f32, z: f32, intensity: f32| pc::LightPoint { position: [x, 0.0, z], color: [1.0; 3], intensity, radius: 0.2, duty: 1.0, ..Default::default() };
+        let cook = |lights: &[pc::LightPoint]| sprites(lights, &field, Vec3::ZERO, 800.0, 320.0, |_, c| c, |c| c.min(Vec3::ONE));
+        let color = |bytes: &[u8], i: usize| bytes[i * 52 + 48];
+        // At 5 km a cell is 19 m wide: these two share one, and their energy
+        // (k² = (0.032 / 2.35)² of 1000 each) adds up in one sprite.
+        let one = cook(&[light(0.0, -5000.0, 1000.0)]);
+        let two = cook(&[light(0.0, -5000.0, 1000.0), light(4.0, -5000.0, 1000.0)]);
+        assert_eq!((one.len(), two.len()), (52, 52));
+        assert!((color(&two, 0) as i32 - 2 * color(&one, 0) as i32).abs() <= 1, "{} {}", color(&one, 0), color(&two, 0));
+        // A moving light, a near one and one 100 m to the side stay apart.
+        let mut moving = light(4.0, -5000.0, 1000.0);
+        moving.path = [10.0, 0.0, 0.0];
+        assert_eq!(cook(&[light(0.0, -5000.0, 1000.0), moving, light(0.0, -500.0, 30.0), light(100.0, -5000.0, 1000.0)]).len(), 4 * 52);
+        // A light the tone curve leaves at black is no sprite.
+        assert!(cook(&[light(0.0, -5000.0, 1.0)]).is_empty());
+        // 1 / k: the sub-pixel light's sprite is 2.35 px wide, the light 0.032.
+        let k = f32::from_le_bytes(one[44..48].try_into().unwrap());
+        assert!((k - 2.0 * 320.0 / 272.0 / (0.2 * 800.0 / 5000.0)).abs() < 0.01, "{k}");
+    }
+
+    #[test]
+    fn gles_window_rooms_follow_the_vita_hash() {
+        // window_f.cg lights a room while hash32(seed * 1.37 + 0.5).x < 0.62:
+        // the seed (0, 0), worked by hand, is lit.
+        assert!((hash32([0.5, 0.5]) - Vec3::new(0.3037, 0.3183, 0.3185)).abs().max_element() < 2e-3);
+        let hashes: Vec<Vec3> = (0..200).map(|i| hash32([i as f32 * 1.37 + 0.5, (i / 7) as f32 * 1.37 + 0.5])).collect();
+        let lit = hashes.iter().filter(|h| h.x < 0.62).count();
+        assert!((100..150).contains(&lit), "{lit} of 200 rooms lit");
+        assert!((0..200).all(|i| (0.0..1.0).contains(&hash12([i as f32 + 17.1, 3.0 + 17.1]))));
     }
 
     #[test]
@@ -1624,7 +1864,10 @@ mod tests {
         let mut px = vec![[0., 0., 0., 1.]; 64];
         px[0] = [1., 0., 0., 1.];
         px[63] = [0., 0., 1., 1.];
-        let b = tiled(&Rgba { w: 8, h: 8, px }, false);
+        let image = Rgba { w: 8, h: 8, px };
+        let rows = texels(&image, 3, true);
+        assert_eq!((&rows[0..2], &rows[126..128]), (&0xf800u16.to_le_bytes()[..], &0x001fu16.to_le_bytes()[..]));
+        let b = texels(&image, 3, false);
         let pixel = |x, y| {
             u16::from_le_bytes(
                 b[morton(x, y) * 2..morton(x, y) * 2 + 2]
@@ -1636,3 +1879,5 @@ mod tests {
         assert_eq!(pixel(7, 0), 0x001f);
     }
 }
+
+
