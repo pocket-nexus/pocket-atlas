@@ -27,7 +27,6 @@ mod psp;
 mod psp_products;
 mod source;
 mod textures;
-mod uifont;
 
 mod analysis;
 mod artifact;
@@ -160,21 +159,12 @@ fn main() {
                 .and_then(|i| argv.get(i + 1))
                 .cloned()
         };
-        let need = |k: &str| {
-            PathBuf::from(
-                get(k).unwrap_or_else(|| panic!("atlas: missing {k} (the interface font's faces)")),
-            )
-        };
         let input =
             PathBuf::from(get("--in").unwrap_or_else(|| ".pocket-build/atlas/globe".into()));
         let output = get("--out")
             .map(PathBuf::from)
             .unwrap_or_else(|| input.parent().unwrap_or(&input).join("atlas.pack"));
-        let faces = uifont::Faces {
-            latin: [need("--latin"), need("--latin-bold")],
-            cjk: [need("--cjk"), need("--cjk-bold")],
-        };
-        atlas::cook(&input, &output, &faces);
+        atlas::cook(&input, &output);
         return;
     }
     let mut a = args();

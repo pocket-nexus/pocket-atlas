@@ -83,14 +83,6 @@ pub enum U {
     CloudSun,
     CloudAmb,
     SunCurve,
-    Rect,
-    Local,
-    TexRect,
-    Shape,
-    Fill,
-    Fill2,
-    Stroke,
-    StrokeW,
     TwBand,
     TwBelt,
     TwShape,
@@ -117,7 +109,6 @@ const UNIFORM_NAMES: [&str; U::Count as usize] = [
     "uOpacity", "uBoxMin", "uBoxMax", "uTexel", "uThreshold", "uBloomK", "uGrade",
     "uCurtain", "uGrainK", "uEarthRot", "uSun", "uGlobeK", "uGlobeK2", "uCloudOff", "uMarker", "uMarkerCol", "uMarkerK",
     "uSunDir", "uSunRad", "uSunMat", "uShadowK", "uSkyDay", "uSkySun", "uSkyGlow", "uSkyDisc", "uCloudSun", "uCloudAmb", "uSunCurve",
-    "uRect", "uLocal", "uTexRect", "uShape", "uFill", "uFill2", "uStroke", "uStrokeW",
     "uTwBand", "uTwBelt", "uTwShape", "uTwShadow",
     "uWave", "uWaterK", "uWaterShallow",
     "uMovingShadowK",
@@ -207,8 +198,6 @@ pub enum Layout {
     Pos2,
     /// Atlas globe: position f32×3, uv f32×2 (20 bytes).
     Globe,
-    /// Interface text: position f32×2 (display pixels), uv f32×2 (16 bytes).
-    Text,
     /// Pack `Lights`: one light of a field per vertex (40 bytes).
     Lights,
 }
@@ -237,7 +226,6 @@ impl Layout {
             Layout::Fx => (&[("aSeed", 0, U16N, 4), ("aCorner", 8, F32, 2), ("aA", 16, F32, 3), ("aB", 28, F32, 3)], 40),
             Layout::Pos2 => (&[("aPosition", 0, F32, 2)], 8),
             Layout::Globe => (&[("aPosition", 0, F32, 3), ("aUv", 12, F32, 2)], 20),
-            Layout::Text => (&[("aPosition", 0, F32, 2), ("aUv", 8, F32, 2)], 16),
             Layout::Lights => (&[("aPosition", 0, S16N, 4), ("aColor", 8, U8N, 4), ("aLight", 12, F32, 2), ("aPath", 20, F32, 4), ("aBlink", 36, U8, 4)], 40),
         }
     }

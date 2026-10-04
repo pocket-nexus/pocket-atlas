@@ -9,11 +9,11 @@
 #![recursion_limit = "256"]
 
 mod atlas;
-mod browser;
 mod camera;
 mod frame;
 mod gpu;
 mod hostfs;
+mod interface;
 mod paths;
 mod profile;
 mod provision;
@@ -22,7 +22,6 @@ mod pack_io;
 mod settings;
 mod shaders;
 mod sun_bounds;
-mod ui;
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -31,6 +30,7 @@ use camera::{Mode, Rig, View};
 use frame::{Renderer, Weather};
 use glam::Vec3;
 use gpu::Gpu;
+use pocket_atlas_interface::{Command, Scene as Showing};
 use pocket_vita_gxm::target::{Fence, Msaa};
 use pocketjs_vita::{dev, dev_protocol::Op, devmenu::Action, graphics, input};
 use scene::Scene;
@@ -47,6 +47,8 @@ pub static _newlib_heap_size_user: u32 = 96 * 1024 * 1024;
 
 /// The first place of a development build without an atlas pack.
 const DEFAULT_PLACE: &str = "tokyo-konbini";
+/// What the interface asked to have kept (the saved places), in the data folder.
+const INTERFACE_FILE: &str = "interface.json";
 
 extern "C" {
     fn scePowerSetArmClockFrequency(freq: i32) -> i32;
@@ -78,19 +80,16 @@ unsafe fn clocks_now() -> [i32; 4] {
     [scePowerGetArmClockFrequency(), scePowerGetBusClockFrequency(), scePowerGetGpuClockFrequency(), scePowerGetGpuXbarClockFrequency()]
 }
 
-unsafe fn text(font: *mut g::vita2d_pgf, x: i32, y: i32, color: u32, scale: f32, s: &str) {
-    let c = std::ffi::CString::new(s.replace('\0', " ")).unwrap();
-    g::vita2d_pgf_draw_text(font, x, y, color, scale, c.as_ptr());
-}
-
-unsafe fn loading_frame(font: *mut g::vita2d_pgf, title: &str, lines: &[String], dev: &dev::Host) {
+/// A frame of the interface alone, while there is no scene to draw (a place
+/// loading, programs compiling, an error): the guest turns, then draws.
+unsafe fn interface_frame(ui: &mut interface::Ui, dev: &dev::Host, dt: f32) -> Vec<Command> {
+    let pad = input::read();
+    let asked = ui.turn(dt, pad.buttons, &pad);
     graphics::begin_frame(0xff0a_0806);
-    text(font, 40, 60, 0xffff_ffff, 1.2, title);
-    for (i, l) in lines.iter().enumerate() {
-        text(font, 40, 110 + i as i32 * 26, 0xffc8_c8c8, 0.9, l);
-    }
+    ui.draw();
     dev.overlay();
     graphics::present();
+    asked
 }
 
 /// Copies `host0:atlas/outbox/<name>` to the data folder (a
@@ -223,7 +222,6 @@ fn apply_control(v: &Value, rig: &mut Rig, r: &mut Renderer, ctl: &mut Control, 
 struct App {
     gpu: Gpu,
     dev: dev::Host,
-    font: *mut g::vita2d_pgf,
     live: bool,
     control: mpsc::Receiver<Value>,
     clocks: [i32; 4],
@@ -231,36 +229,38 @@ struct App {
     started: Instant,
     fence: Fence,
     frame_no: u32,
-    prev_buttons: u32,
     manifest_state: (u32, usize),
-    ui: ui::Ui,
-    /// The atlas browser (lists, saved places, query) and the player's
-    /// render settings, kept across screens.
-    browser: browser::Browser,
+    interface: interface::Ui,
+    /// The player's render settings, kept across places.
     prefs: settings::Prefs,
-    /// Every place's display name and accent, from the atlas pack.
-    places: Vec<PlaceRef>,
 }
 
-/// A place to enter: its id, the name its screens show and its accent.
-#[derive(Clone)]
-struct PlaceRef {
-    id: String,
-    name: String,
-    accent: [f32; 3],
-}
-
-impl App {
-    fn place(&self, id: &str) -> PlaceRef {
-        self.places.iter().find(|p| p.id == id).cloned().unwrap_or(PlaceRef { id: id.into(), name: id.into(), accent: [0.4, 0.6, 1.0] })
-    }
-}
-
-/// Which screen runs next: the atlas (with a place to select), or a place
-/// (id, display name, a control message to apply once it runs).
+/// Which screen runs next: the atlas, or a place (its id and a control
+/// message to apply once it runs).
 enum Next {
-    Atlas(Option<String>),
-    Place(PlaceRef, Option<Value>),
+    Atlas,
+    Place(String, Option<Value>),
+}
+
+/// Buttons a control message presses on the interface: `{"press": ["down", "circle"]}`.
+fn press(ui: &mut interface::Ui, v: &Value) {
+    use vitasdk_sys::*;
+    for name in v["press"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+        ui.press(match name {
+            "up" => SCE_CTRL_UP,
+            "down" => SCE_CTRL_DOWN,
+            "left" => SCE_CTRL_LEFT,
+            "right" => SCE_CTRL_RIGHT,
+            "circle" => SCE_CTRL_CIRCLE,
+            "cross" => SCE_CTRL_CROSS,
+            "triangle" => SCE_CTRL_TRIANGLE,
+            "square" => SCE_CTRL_SQUARE,
+            "l" => SCE_CTRL_LTRIGGER,
+            "r" => SCE_CTRL_RTRIGGER,
+            "start" => SCE_CTRL_START,
+            _ => continue,
+        });
+    }
 }
 
 /// The programs this build uses, for packaging (`atlas.ts vpk`): rewritten
@@ -273,9 +273,9 @@ fn write_manifest(gpu: &Gpu, live: bool, state: &mut (u32, usize)) {
     }
 }
 
-/// The atlas: the globe and the place list until a place is picked (or a
-/// control message names one), then its memory is freed.
-unsafe fn run_atlas(app: &mut App, select: Option<String>) -> Next {
+/// The atlas: the globe, with the interface's lists over it, until a place
+/// is picked (or a control message names one); then its memory is freed.
+unsafe fn run_atlas(app: &mut App) -> Next {
     let ctx = g::vita2d_get_context();
     atlas::Atlas::warm(&mut app.gpu);
     let mut error = String::new();
@@ -303,48 +303,40 @@ unsafe fn run_atlas(app: &mut App, select: Option<String>) -> Next {
     let Some(mut atlas) = loaded else {
         // Development builds without an atlas pack go straight to a place.
         pocketjs_vita::vita_log(format_args!("atlas: {error}"));
-        return Next::Place(app.place(DEFAULT_PLACE), None);
+        return Next::Place(DEFAULT_PLACE.into(), None);
     };
-    app.places = atlas.meta.places.iter().map(|p| PlaceRef { id: p.id.clone(), name: format!("{}, {}", p.name, p.locality), accent: p.accent }).collect();
-    app.browser.attach(&mut atlas);
-    if let Some(id) = &select {
-        app.browser.select(&mut atlas, id);
+    {
+        let state = app.interface.state();
+        // The places whose pack is here; looked for once (a miss on the USB
+        // share costs a round trip).
+        if state.installed.is_empty() {
+            state.installed = atlas.meta.places.iter().filter(|p| p.enterable && atlas::place_paths(&p.id).iter().any(|path| std::fs::File::open(path).is_ok())).map(|p| p.id.clone()).collect();
+        }
+        state.scene = Showing::Atlas;
+        state.place.clear();
+        state.shots.clear();
+        state.options.clear();
+        state.stats.clear();
     }
     let mut last = Instant::now();
     let mut frame_ms = 33.3f32;
     let mut last_vcount = sceDisplayGetVcount();
-    let mut prev_buttons = u32::MAX;
+    let mut was_spun = false;
     let exit = loop {
         let pad = input::read();
         let (buttons, action) = app.dev.menu.input(pad.buttons);
-        let pressed = buttons & !prev_buttons;
-        prev_buttons = buttons;
         app.gpu.poll();
         let now = Instant::now();
         let raw = (now - last).as_secs_f32();
         last = now;
         frame_ms = frame_ms * 0.9 + raw * 1000.0 * 0.1;
 
-        // A control message for a place enters it (the selected one when it
-        // names none) and applies there; `{"atlas": true, "select": id}` stays.
+        // A control message for a place enters it and applies there;
+        // `{"atlas": true}` messages stay (probes, and buttons to press).
         let mut go = None;
         while let Ok(v) = app.control.try_recv() {
-            if v["atlas"].as_bool() == Some(true) {
-                if let Some(t) = v["tab"].as_str().and_then(browser::Tab::by_name) {
-                    app.browser.set_tab(&mut atlas, t);
-                }
-                if let Some(q) = v["search"].as_str() {
-                    app.browser.search(&mut atlas, q);
-                }
-                if let Some(id) = v["select"].as_str() {
-                    app.browser.select(&mut atlas, id);
-                }
-                if let Some(id) = v["save"].as_str() {
-                    app.browser.toggle_saved(&mut atlas, id);
-                }
-                if v["keyboard"].as_bool() == Some(true) {
-                    app.browser.open_search();
-                }
+            press(&mut app.interface, &v);
+            if v["atlas"].as_bool() == Some(true) || v["place"].is_null() {
                 let pr = &v["probe"];
                 let flag = |k: &str| pr[k].as_bool().unwrap_or(false);
                 atlas.probe = atlas::Probe { no_ui: flag("ui"), no_globe: flag("globe"), no_bloom: flag("bloom"), no_markers: flag("markers"), no_space: flag("space") };
@@ -361,26 +353,37 @@ unsafe fn run_atlas(app: &mut App, select: Option<String>) -> Next {
                 }
                 continue;
             }
-            let id = v["place"].as_str().map(String::from).or_else(|| app.browser.focused(&atlas).map(|p| p.id.clone())).unwrap_or_else(|| DEFAULT_PLACE.into());
-            go = Some(Next::Place(app.place(&id), Some(v)));
+            go = Some(Next::Place(v["place"].as_str().unwrap_or(DEFAULT_PLACE).into(), Some(v)));
         }
-        // The globe turns while a menu or the keyboard is up; the stick only
-        // when neither is.
-        let input_free = go.is_none() && !app.dev.menu.visible && !app.browser.dialog_running();
-        let still = input::Pad { buttons: 0, lx: 128, ly: 128, rx: 128, ry: 128 };
-        let spun = atlas.update(raw.min(0.1), if input_free { &pad } else { &still });
-        if go.is_none() && !app.dev.menu.visible {
-            if let Some(browser::Action::Enter(id)) = app.browser.update(&mut atlas, raw.min(0.1), pressed, spun) {
-                go = Some(Next::Place(app.place(&id), None));
+        // The interface's turn: the globe faces what it has in focus.
+        for command in app.interface.turn(raw.min(0.1), buttons, &pad) {
+            match command {
+                Command::Globe { lat, lon, pin, .. } => atlas.face(lat, lon, pin.is_some()),
+                Command::Enter(id) => go = Some(Next::Place(id, None)),
+                Command::Prefs(text) => {
+                    crate::paths::write_text(INTERFACE_FILE, &text);
+                    app.interface.state().prefs = text;
+                }
+                _ => {}
             }
         }
+        // The stick spins the globe unless a menu has the pad; where a spin
+        // comes to rest is what the interface's Explore list sorts from.
+        let still = input::Pad { buttons: 0, lx: 128, ly: 128, rx: 128, ry: 128 };
+        let spun = atlas.update(raw.min(0.1), if go.is_none() && !app.dev.menu.visible { &pad } else { &still });
+        if was_spun && !spun {
+            let state = app.interface.state();
+            (state.lat, state.lon) = (atlas.lat, atlas.lon);
+        }
+        was_spun = spun;
 
         let pending = app.gpu.pending();
         if pending > 0 {
-            let lines = vec![format!("compiling {pending} programs ({} done, {} ms)", app.gpu.compiled, app.gpu.compile_ms)];
             app.dev.engine = json!({"stage": "compiling", "pending": pending, "errors": app.gpu.errors});
             app.dev.publish(app.frame_no, "atlas");
-            loading_frame(app.font, "POCKET ATLAS", &lines, &app.dev);
+            graphics::begin_frame(0xff0a_0806);
+            app.dev.overlay();
+            graphics::present();
             serve(&mut app.dev, app.frame_no, action);
             app.frame_no = app.frame_no.wrapping_add(1);
             if let Some(n) = go {
@@ -402,20 +405,13 @@ unsafe fn run_atlas(app: &mut App, select: Option<String>) -> Next {
         let wait_ms = t_wait.elapsed().as_secs_f32() * 1000.0;
         g::vita2d_pool_reset();
         g::vita2d_start_drawing_advanced(core::ptr::null_mut(), 0);
-        app.ui.begin_frame();
         atlas.present(&mut app.gpu);
         g::sceGxmSetViewport(ctx, 480.0, 480.0, 272.0, -272.0, 0.5, 0.5);
         let t_ui = Instant::now();
         if !atlas.probe.no_ui {
-            app.browser.draw(&app.ui, &mut app.gpu, &atlas);
+            app.interface.draw();
         }
         let ui_ms = t_ui.elapsed().as_secs_f32() * 1000.0;
-        if app.prefs.hud {
-            text(app.font, 12, 18, 0x90ff_ffff, 0.6, &format!("{:.1} fps  {:.1} ms", 1000.0 / frame_ms.max(0.1), frame_ms));
-        }
-        if let Some(e) = app.gpu.errors.first().or(render_error.as_ref()) {
-            text(app.font, 12, 24, 0xff60_60ff, 0.75, &e.chars().take(110).collect::<String>());
-        }
         app.dev.overlay();
         g::sceGxmEndScene(ctx, core::ptr::null(), app.fence.signal((app.frame_no % 2) as usize));
         // Paced like the places: every second refresh.
@@ -424,17 +420,12 @@ unsafe fn run_atlas(app: &mut App, select: Option<String>) -> Next {
             sceDisplayWaitVblankStartMulti((2 - since) as u32);
         }
         last_vcount = sceDisplayGetVcount();
-        // The system keyboard draws into the frame about to be shown.
-        if app.browser.dialog_running() {
-            g::vita2d_common_dialog_update();
-        }
         g::vita2d_swap_buffers();
 
         app.dev.engine = json!({
             "stage": "atlas",
-            "selected": app.browser.focused(&atlas).map(|p| p.id.clone()),
-            "browser": app.browser.status(&atlas),
-            "places": atlas.meta.places.iter().map(|p| json!({"id": p.id, "enterable": p.enterable})).collect::<Vec<_>>(),
+            "installed": app.interface.state().installed,
+            "interfaceError": app.interface.error,
             "globe": {"lat": atlas.lat, "lon": atlas.lon},
             "fps": 1000.0 / frame_ms.max(0.1), "frameMs": frame_ms,
             "cpuMs": cpu_ms, "waitMs": wait_ms, "uiMs": ui_ms,
@@ -453,7 +444,6 @@ unsafe fn run_atlas(app: &mut App, select: Option<String>) -> Next {
     };
     g::sceGxmFinish(ctx);
     atlas.release();
-    app.prev_buttons = prev_buttons;
     exit
 }
 
@@ -466,32 +456,23 @@ fn main() {
         let clocks = set_clocks();
         // The system lowers the clocks again after a suspend or a power-mode
         // change; they are checked once a second and set again.
-        input::init();
         let dev = dev::Host::new();
-        let font = g::vita2d_load_default_pgf();
         let live = cfg!(feature = "usb-debug");
-        let mut gpu = match Gpu::new(live) {
+        let gpu = match Gpu::new(live) {
             Ok(g) => g,
             Err(e) => {
                 pocketjs_vita::vita_log(format_args!("atlas: shader patcher {e}"));
                 return;
             }
         };
-        let ui = match ui::Ui::new(font) {
-            Ok(u) => u,
-            Err(e) => {
-                pocketjs_vita::vita_log(format_args!("atlas: ui {e}"));
-                return;
-            }
-        };
-        ui::Ui::warm(&mut gpu);
+        let mut interface = interface::Ui::boot();
+        interface.state().prefs = std::fs::read_to_string(format!("{}/{INTERFACE_FILE}", paths::DATA)).unwrap_or_default();
 
         // Packaged builds have no USB share to be steered from.
         let control = if live { control_watcher() } else { mpsc::channel().1 };
         let mut app = App {
             gpu,
             dev,
-            font,
             live,
             control,
             clocks,
@@ -499,37 +480,59 @@ fn main() {
             started: Instant::now(),
             fence: Fence::new(0, 2),
             frame_no: 0,
-            prev_buttons: 0,
             manifest_state: (u32::MAX, 0),
-            ui,
-            browser: browser::Browser::new(),
+            interface,
             prefs: settings::Prefs::load(live),
-            places: Vec::new(),
         };
-        let mut next = Next::Atlas(None);
+        let mut next = Next::Atlas;
         loop {
             next = match next {
-                Next::Atlas(select) => run_atlas(&mut app, select),
+                Next::Atlas => run_atlas(&mut app),
                 Next::Place(place, first) => run_place(&mut app, place, first),
             };
         }
     }
 }
 
-/// One place: load its pack, render it until START or a control message
-/// leaves it, then free its memory.
-unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Next {
-    let (id, name) = (place.id.as_str(), place.name.as_str());
-    let title = format!("POCKET ATLAS  /  {}", name.to_uppercase());
-    let others = app.places.clone();
-    let (font, live, clocks) = (app.font, app.live, app.clocks);
+/// One place: load its pack, render it until the interface or a control
+/// message leaves it, then free its memory.
+unsafe fn run_place(app: &mut App, id: String, first: Option<Value>) -> Next {
+    let id = id.as_str();
+    let (live, clocks) = (app.live, app.clocks);
     let mut clock_resets = app.clock_resets;
     let mut gpu = &mut app.gpu;
     let mut dev = &mut app.dev;
     let control = &app.control;
     let fence = &mut app.fence;
     let prefs = &mut app.prefs;
-    let ui = &app.ui;
+    let ui = &mut app.interface;
+    {
+        let state = ui.state();
+        state.scene = Showing::Loading;
+        state.place = id.into();
+        state.message.clear();
+    }
+    // A place that cannot be shown: the interface says why until it is left.
+    let failed = |ui: &mut interface::Ui, dev: &mut dev::Host, message: String| -> Next {
+        {
+            let state = ui.state();
+            state.scene = Showing::Error;
+            state.message = message.clone();
+        }
+        // Keep counting frames: the host accepts a native replacement once
+        // the new build reports frame > 1, error screen or not.
+        let mut frame = 0u32;
+        loop {
+            dev.engine = json!({"stage": "error", "place": id, "error": message});
+            dev.publish(frame, "atlas");
+            if interface_frame(ui, dev, 1.0 / 30.0).contains(&Command::Leave) {
+                return Next::Atlas;
+            }
+            let (_, action) = dev.menu.input(input::read().buttons);
+            serve(dev, frame, action);
+            frame = frame.wrapping_add(1);
+        }
+    };
     {
             // ---------------------------------------------------------- load
             let mut scene = None;
@@ -537,10 +540,10 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
             let paths = atlas::place_paths(id);
             for path in paths.iter().map(String::as_str) {
                 let mut last = Instant::now();
-                let r = Scene::load(path, |done, total, what| {
+                let r = Scene::load(path, |_, _, _| {
                     if last.elapsed() > Duration::from_millis(100) {
                         last = Instant::now();
-                        loading_frame(font, &title, &[format!("{path}"), format!("loading {done}/{total}  {what}")], &dev);
+                        interface_frame(ui, dev, 0.1);
                     }
                 });
                 match r {
@@ -554,49 +557,22 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                 }
             }
             let Some((mut scene, pack_path)) = scene else {
-                let msg = if load_error.is_empty() { format!("no place pack found ({})", paths[0]) } else { load_error };
-                // Keep counting frames: the host accepts a native replacement once
-                // the new build reports frame > 1, error screen or not.
-                let mut frame = 0u32;
-                loop {
-                    dev.engine = json!({"stage": "error", "place": id, "error": msg});
-                    dev.publish(frame, "atlas");
-                    loading_frame(font, &title, &[msg.clone(), "Sync the pack with: bun tools/atlas.ts sync".into(), "START: back to the atlas".into()], &dev);
-                    let buttons = input::read().buttons;
-                    if buttons & vitasdk_sys::SCE_CTRL_START != 0 {
-                        return Next::Atlas(Some(id.to_string()));
-                    }
-                    let (_, action) = dev.menu.input(buttons);
-                    serve(&mut dev, frame, action);
-                    frame = frame.wrapping_add(1);
-                }
+                return failed(ui, dev, if load_error.is_empty() { format!("no place pack found ({})", paths[0]) } else { load_error });
             };
             let mut renderer = match Renderer::new(&profile::VITA30, &scene) {
                 Ok(r) => r,
                 Err(e) => {
                     g::sceGxmFinish(g::vita2d_get_context());
                     core::ptr::read(&scene).release();
-                    let mut frame = 0u32;
-                    loop {
-                        dev.engine = json!({"stage": "error", "place": id, "error": e});
-                        dev.publish(frame, "atlas");
-                        loading_frame(font, &title, &[format!("renderer: {e}"), "START: back to the atlas".into()], &dev);
-                        let buttons = input::read().buttons;
-                        if buttons & vitasdk_sys::SCE_CTRL_START != 0 {
-                            return Next::Atlas(Some(id.to_string()));
-                        }
-                        let (_, action) = dev.menu.input(buttons);
-                        serve(&mut dev, frame, action);
-                        frame = frame.wrapping_add(1);
-                    }
+                    return failed(ui, dev, format!("renderer: {e}"));
                 }
             };
             // The player's settings, then anything a control message names.
             prefs.apply(&mut renderer);
             renderer.warm(&mut gpu, &scene);
-            let mut sheet = settings::Sheet::new();
             let mut rig = Rig::new(&scene.meta.camera);
             let mut ctl = Control { frozen: None, view: None };
+            ui.state().shots = rig.shot_names();
 
             // ---------------------------------------------------------- run
             let ctx = g::vita2d_get_context();
@@ -612,8 +588,8 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
             let mut wait_ms = 0.0f32;
             let mut swap_ms = 0.0f32;
             let mut manifest_state = app.manifest_state;
-            // Buttons still held from the atlas (the confirm press) do not count.
-            let mut prev_buttons = u32::MAX;
+            // The interface has the pad (its menu is open); the tour's clock stands still.
+            let (mut held, mut paused) = (false, false);
             let mut view = View { pos: Vec3::new(10.0, 3.0, 12.0), target: Vec3::new(2.0, 1.5, -3.0), fov_y: 45.0 };
             let mut compiling_since = Some(Instant::now());
             if let Some(v) = &first {
@@ -622,34 +598,19 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
             let exit = loop {
                 let pad = input::read();
                 let (buttons, action) = dev.menu.input(pad.buttons);
-                let pressed = buttons & !prev_buttons;
-                prev_buttons = buttons;
                 gpu.poll();
-                // START (outside the menu) or a control message leaves the place.
-                if pressed & vitasdk_sys::SCE_CTRL_START != 0 && !dev.menu.visible {
-                    break Next::Atlas(Some(id.to_string()));
-                }
                 let mut switch = None;
                 while let Ok(v) = control.try_recv() {
+                    press(ui, &v);
                     if v["atlas"].as_bool() == Some(true) {
-                        switch = Some(Next::Atlas(Some(id.to_string())));
+                        switch = Some(Next::Atlas);
                         continue;
                     }
                     if let Some(p) = v["place"].as_str().filter(|p| *p != id) {
-                        let to = others.iter().find(|o| o.id == p).cloned().unwrap_or(PlaceRef { id: p.into(), name: p.into(), accent: place.accent });
-                        switch = Some(Next::Place(to, Some(v.clone())));
+                        switch = Some(Next::Place(p.into(), Some(v.clone())));
                         continue;
                     }
                     apply_control(&v, &mut rig, &mut renderer, &mut ctl, &mut prefs.hud);
-                    if let Some(open) = v["sheet"].as_bool() {
-                        sheet.open = open;
-                    }
-                    if let Some(row) = v["sheetRow"].as_str() {
-                        sheet.focus(row, &renderer);
-                    }
-                    if v["sheetReset"].as_bool() == Some(true) {
-                        sheet.reset(prefs, &mut renderer);
-                    }
                 }
                 if let Some(n) = switch {
                     break n;
@@ -665,24 +626,24 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
 
                 let pending = gpu.pending();
                 if pending > 0 && compiling_since.is_some() {
-                    let mut lines = vec![format!("{pack_path}: {} draws, {} textures in {} ms", scene.draws.len(), scene.textures.len(), scene.load_ms)];
-                    lines.push(match &gpu.compiler {
-                        None => "shader compiler: loading".into(),
-                        Some(Ok(v)) => format!("SceShaccCg {v}: compiling {pending} programs ({} done, {} ms)", gpu.compiled, gpu.compile_ms),
-                        Some(Err(e)) => format!("no runtime compiler ({e}); cached programs only"),
-                    });
-                    for e in gpu.errors.iter().take(8) {
-                        lines.push(e.chars().take(90).collect());
-                    }
+                    ui.state().message = match &gpu.compiler {
+                        None => "Loading the shader compiler".into(),
+                        Some(Ok(_)) => format!("Compiling {pending} programs"),
+                        Some(Err(e)) => format!("No runtime compiler ({e})"),
+                    };
                     dev.engine = json!({"stage": "compiling", "pending": pending, "compiled": gpu.compiled, "compileMs": gpu.compile_ms,
                         "compiler": format!("{:?}", gpu.compiler), "errors": gpu.errors});
                     dev.publish(frame_no, "atlas");
-                    loading_frame(font, &title, &lines, &dev);
+                    interface_frame(ui, dev, dt);
                     serve(&mut dev, frame_no, action);
                     frame_no = frame_no.wrapping_add(1);
                     continue;
                 }
-                compiling_since = None;
+                if compiling_since.take().is_some() {
+                    let state = ui.state();
+                    state.scene = Showing::Place;
+                    state.message.clear();
+                }
                 // The programs this build uses, for packaging (`atlas.ts vpk`):
                 // rewritten after a hot reload or when a program is first needed.
                 let state = (gpu.generation, gpu.programs.len());
@@ -692,28 +653,56 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                 }
 
                 // ------------------------------------------------------ update
-                clock += dt;
+                // The interface's turn: it is shown where the tour is and what
+                // can be set here, and says what the visitor asked for.
+                if frame_no % 15 == 0 || ui.state().options.is_empty() {
+                    let (w, h) = frame::SCALES[renderer.level()];
+                    let state = ui.state();
+                    state.options = settings::list(prefs, &renderer);
+                    state.stats = if prefs.hud { format!("{fps:.0} fps · {w}×{h} · {}k triangles", renderer.stats.main.tris / 1000) } else { String::new() };
+                }
+                {
+                    let state = ui.state();
+                    state.shot = rig.shot_index() as u32;
+                    state.tour = rig.mode == Mode::Cinematic;
+                    state.paused = paused;
+                }
+                let mut leave = false;
+                for command in ui.turn(dt, buttons, &pad) {
+                    match command {
+                        Command::Leave => leave = true,
+                        Command::Shot(k) => rig.set_shot(k),
+                        Command::Tour(true) => rig.set_shot(rig.shot_index()),
+                        Command::Tour(false) => rig.release(&view),
+                        Command::Pause(on) => paused = on,
+                        Command::Hold(on) => held = on,
+                        Command::Option { key, value } => {
+                            settings::set(prefs, &mut renderer, &key, value as usize);
+                            ui.state().options.clear();
+                        }
+                        _ => {}
+                    }
+                }
+                if leave {
+                    break Next::Atlas;
+                }
+                if !paused {
+                    clock += dt;
+                }
                 let time = ctl.frozen.unwrap_or(clock);
-                // SELECT opens the settings sheet; while it is up the pad
-                // drives it, not the camera.
-                if let settings::Outcome::Leave = sheet.update(dt, pressed, prefs, &mut renderer, &mut rig) {
-                    break Next::Atlas(Some(id.to_string()));
-                }
-                let sheet_open = sheet.open;
-                if pressed & vitasdk_sys::SCE_CTRL_TRIANGLE != 0 && !sheet_open {
-                    rig.next_shot();
-                }
                 // Dead zone, then 0..1 over the remaining travel (no step at its edge).
                 let axis = |v: u8| {
                     let f = ((v as f32 - 128.0) / 127.0).clamp(-1.0, 1.0);
                     ((f.abs() - 0.18) / 0.82).max(0.0).copysign(f)
                 };
-                let lift = if buttons & vitasdk_sys::SCE_CTRL_RTRIGGER != 0 { 1.0 } else if buttons & vitasdk_sys::SCE_CTRL_LTRIGGER != 0 { -1.0 } else { 0.0 };
-                let menu_open = dev.menu.visible || sheet_open;
+                // The left stick walks, the right one looks, and the d-pad
+                // rises and sinks, unless a menu has the pad.
+                let lift = if buttons & vitasdk_sys::SCE_CTRL_UP != 0 { 1.0 } else if buttons & vitasdk_sys::SCE_CTRL_DOWN != 0 { -1.0 } else { 0.0 };
+                let menu_open = dev.menu.visible || held;
                 let (l, r) = if menu_open { ((0.0, 0.0), (0.0, 0.0)) } else { ((axis(pad.lx), axis(pad.ly)), (axis(pad.rx), axis(pad.ry))) };
                 view = match &ctl.view {
                     Some(v) => View { pos: v.pos, target: v.target, fov_y: v.fov_y },
-                    None => rig.update(dt, time, l, r, if menu_open { 0.0 } else { lift }, &view),
+                    None => rig.update(if paused { 0.0 } else { dt }, time, l, r, if menu_open { 0.0 } else { lift }, &view),
                 };
                 let weather = Weather::at(time);
                 if let Some(d) = &scene.meta.doors {
@@ -730,7 +719,7 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                 // ------------------------------------------------------ render
                 // Profiling serializes the GPU, and the settings sheet adds its
                 // own cost: neither frame time steers the governor.
-                if !renderer.timeline.on && !sheet.visible() {
+                if !renderer.timeline.on && !held {
                     renderer.feedback(frame_ms, last_gpu, raw * 1000.0);
                 }
                 let fade = if ctl.view.is_some() { 0.0 } else { rig.fade };
@@ -741,29 +730,9 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                 wait_ms = wait_ms * 0.9 + t_wait.elapsed().as_secs_f32() * 1000.0 * 0.1;
                 g::vita2d_pool_reset();
                 g::vita2d_start_drawing_advanced(core::ptr::null_mut(), 0);
-                ui.begin_frame();
                 renderer.present(&mut gpu);
                 g::sceGxmSetViewport(ctx, 480.0, 480.0, 272.0, -272.0, 0.5, 0.5);
-                if prefs.hud {
-                    let st = &renderer.stats;
-                    let line = format!(
-                        "{:.1} fps  {:.1} ms  cpu {:.1} ms  main {} draws {}k tris  refl {} draws  {}",
-                        fps,
-                        frame_ms,
-                        st.cpu_submit_us as f32 / 1000.0,
-                        st.main.draws,
-                        st.main.tris / 1000,
-                        st.reflection.draws,
-                        if rig.mode == Mode::Cinematic { rig.shot_name().to_string() } else { "free".into() }
-                    );
-                    text(font, 12, 530, 0xc0ff_ffff, 0.75, &line);
-                    if let Some(e) = gpu.errors.first().or(render_error.as_ref()) {
-                        text(font, 12, 24, 0xff60_60ff, 0.75, &e.chars().take(110).collect::<String>());
-                    }
-                }
-                let (w, h) = frame::SCALES[renderer.level()];
-                let stats = format!("{fps:.1} fps  {frame_ms:.1} ms  ·  {w}×{h}  ·  step {} of {}", renderer.governor.step + 1, renderer.profile.steps.len());
-                sheet.draw(ui, &mut gpu, prefs, &renderer, &rig, name, place.accent, &stats);
+                ui.draw();
                 dev.overlay();
                 let t_display = Instant::now();
                 g::sceGxmEndScene(ctx, core::ptr::null(), fence.signal((frame_no % 2) as usize));
@@ -834,7 +803,7 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                     "clocks": clocks,
                     "clockMhz": clocks_now(),
                     "clockResets": clock_resets,
-                    "sheet": sheet.open,
+                    "interfaceError": ui.error, "held": held, "paused": paused,
                     "view": {"pos": view.pos.to_array(), "target": view.target.to_array(), "fov": view.fov_y, "mode": if rig.mode == Mode::Cinematic { "cinematic" } else { "free" }, "shot": rig.shot_name()},
                     "settings": {"msaa": s.msaa == Msaa::X4, "reflection": s.reflection, "haze": s.haze, "bloom": s.bloom, "rain": s.rain, "cullCw": s.cull_cw, "exposure": s.exposure, "maxLights": s.max_lights, "flat": s.flat, "scale": s.scale, "level": renderer.level(), "profile": renderer.profile.name, "step": renderer.governor.step, "boost": renderer.governor.boost, "gpuMs": renderer.governor.gpu_ms, "steps": renderer.profile.steps.len(), "hold": renderer.governor.hold, "budgetMs": renderer.profile.budget_ms, "fx": s.fx, "amortize": s.amortize, "reflSize": s.reflection_size, "hazeSize": renderer.step().haze_size, "hazeLights": renderer.step().haze_lights, "bloomFull": renderer.step().bloom_full, "streaks": s.streaks, "steam": s.steam, "detailMaps": s.detail_maps, "vertexLights": s.vertex_lights, "detailM": renderer.step().detail_m, "lodPixels": renderer.step().lod_pixels},
                     "uptime": started.elapsed().as_secs(),
@@ -851,10 +820,10 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
             g::sceGxmFinish(ctx);
             renderer.release();
             scene.release();
+            prefs.save();
             app.frame_no = frame_no;
             app.manifest_state = manifest_state;
             app.clock_resets = clock_resets;
-            app.prev_buttons = prev_buttons;
             exit
     }
 }
