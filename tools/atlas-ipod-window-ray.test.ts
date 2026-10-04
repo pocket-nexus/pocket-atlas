@@ -39,7 +39,8 @@ test("window ray lowering changes only the flat frame dataflow", () => {
 test("shader selection rejects unproved, animated and reflection ray combinations", () => {
   expect(() => shader("window_f",{SGX_WINDOW_RAY_PARAMS:1})).toThrow("window parameter recipe");
   expect(() => shader("window_f",{SGX_WINDOW_RAY_PARAMS:1,SGX_WINDOW_PARAMS:1,REFLECTION:1})).toThrow("main interior-window pair");
-  for (const extra of [{}, {STATIC_WORLD:1,SKINNED:1}, {STATIC_WORLD:1,SUN:1}]) {
+  const invalid: Record<string, number>[] = [{}, {STATIC_WORLD:1,SKINNED:1}, {STATIC_WORLD:1,SUN:1}];
+  for (const extra of invalid) {
     expect(() => shader("surface_v",{COLOR:1,TANGENT:1,SGX_WINDOW_PARAMS:1,SGX_WINDOW_RAY_PARAMS:1,...extra}))
       .toThrow("static main window pair");
   }

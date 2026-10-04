@@ -2,6 +2,7 @@
   "extends": "./web/tsconfig.json",
   "compilerOptions": {
     "allowImportingTsExtensions": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable", "DOM.AsyncIterable"],
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "baseUrl": "./vendor/pocketjs",

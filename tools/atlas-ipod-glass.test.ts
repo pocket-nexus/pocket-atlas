@@ -37,7 +37,8 @@ test("display glass links with drops, Vista and fog while retaining premultiplie
   const directory = resolve(import.meta.dir, "../.pocket-build/validation/ipod-glass-tests");
   mkdirSync(directory, { recursive: true });
   const vertex = shader("surface_v", { COLOR: 1, DISPLAY_COLOR: 1, DISPLAY_NORMAL: 1, FLOAT_VERTEX: 1, STATIC_WORLD: 1, LDR_COLOR: 1 });
-  for (const mode of [{}, { FOG: 1 }, { VISTA: 1 }, { NO_DROPS: 1 }]) {
+  const modes: Record<string, number>[] = [{}, { FOG: 1 }, { VISTA: 1 }, { NO_DROPS: 1 }];
+  for (const mode of modes) {
     const key = shader("glass_f", { DISPLAY_COLOR: 1, LITE: 1, LIGHTS: 0, ATLAS_LDR: 1, ATLAS_OUTPUT_LDR: 1, ATLAS_BLEND: 3, ...mode });
     const fragment = readFileSync(join(out, key + ".glsl"), "utf8");
     expect(fragment).not.toMatch(/\blength\s*\(|\buAtlasLut\b/);

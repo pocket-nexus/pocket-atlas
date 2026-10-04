@@ -89,11 +89,12 @@ test("coverage output changes only water alpha and links all authored lighting v
     expect(linked.exitCode, linked.stdout.toString() + linked.stderr.toString()).toBe(0);
   }
   const material = "#version 100\nprecision mediump float;\nvoid main() { gl_FragData[0]=vec4(0.3,0.4,0.5,32.0); }";
-  for (const defines of [
+  const invalid: Record<string, number>[] = [
     { ATLAS_COVERAGE_TARGET: 1 },
     { ATLAS_COVERAGE_TARGET: 1, ATLAS_LDR: 1 },
     { ATLAS_COVERAGE_TARGET: 1, ATLAS_LDR: 1, ATLAS_OUTPUT_LDR: 1, ATLAS_BLEND: 3 },
-  ]) expect(() => hdrFragment(material, "water_f", defines)).toThrow("opaque display output");
+  ];
+  for (const defines of invalid) expect(() => hdrFragment(material, "water_f", defines)).toThrow("opaque display output");
 });
 
 test("bilinear response coverage removes clear-colour darkening and bounds RGBA8 colour error", () => {

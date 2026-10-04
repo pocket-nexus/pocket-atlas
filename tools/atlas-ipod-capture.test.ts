@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import { validateDrawableCapture } from "./atlas-ipod-capture";
 
-test("raw decode uses the captured surface dimensions through quality transitions", () => {
-  const capture = { source: "drawable", width: 480, height: 320, format: "rgba8", encoding: "display-srgb", origin: "bottom-left" };
+test("raw decode validates captured dimensions against the buffer size", () => {
+  const capture = { source: "drawable", width: 480, height: 320, format: "rgba8", encoding: "display-srgb", origin: "bottom-left" } as const;
   expect(validateDrawableCapture(capture, 480 * 320 * 4)).toEqual(capture);
   expect(() => validateDrawableCapture({ ...capture, width: 960, height: 640 }, 480 * 320 * 4)).toThrow();
   expect(validateDrawableCapture({ ...capture, width: 960, height: 640 }, 960 * 640 * 4).width).toBe(960);
