@@ -149,14 +149,14 @@ pub(super) fn run<'a>(a: &'a Args, source: &'a read::Source, plan: &crate::inten
                             continue;
                         }
                         if let Some((verts, tris, material)) = read_primitive(&mut cook, &prim, if is_moving {instance} else {xf}, true, ic) {
-                            prims.push(Prim { mesh_node: node.index(), world: w, verts, tris, material, moving: is_moving, skin: None, no_reflect: true, baked: false, selection, base_error: selection.representation_error });
+                            prims.push(Prim { sources: crate::provenance::node_sources(&node), mesh_node: node.index(), world: w, verts, tris, material, moving: is_moving, skin: None, no_reflect: true, baked: false, selection, base_error: selection.representation_error });
                         }
                     }
                     continue;
                 }
                 let bake = !is_moving && skin.is_none();
                 if let Some((verts, tris, material)) = read_primitive(&mut cook, &prim, w, bake, None) {
-                    prims.push(Prim { mesh_node: node.index(), world: w, verts, tris, material, moving: !bake, skin, no_reflect: false, baked: false, selection, base_error: selection.representation_error });
+                    prims.push(Prim { sources: crate::provenance::node_sources(&node), mesh_node: node.index(), world: w, verts, tris, material, moving: !bake, skin, no_reflect: false, baked: false, selection, base_error: selection.representation_error });
                 }
             }
         }

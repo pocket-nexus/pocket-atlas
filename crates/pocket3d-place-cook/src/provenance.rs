@@ -20,14 +20,14 @@ fn ids(value: &Value, fallback: String) -> BTreeSet<String> {
     }
     result
 }
+pub fn node_sources(node: &gltf::Node) -> BTreeSet<String> {
+    ids(&annotation(node.extras()), format!("gltf/node/{}", node.index()))
+}
 pub fn collect(doc: &gltf::Document, material_keys: &HashMap<usize, u32>) -> Value {
     let mut sources: BTreeMap<usize, BTreeSet<String>> = BTreeMap::new();
     let mut objects = Vec::new();
     for node in doc.nodes() {
-        let own = ids(
-            &annotation(node.extras()),
-            format!("gltf/node/{}", node.index()),
-        );
+        let own = node_sources(&node);
         if let Some(mesh) = node.mesh() {
             let materials: BTreeSet<_> = mesh
                 .primitives()

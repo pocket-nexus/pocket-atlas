@@ -70,18 +70,7 @@ pub(super) fn run(resolved: &mut resolve::Resolved<'_>) -> crate::recipe::Output
                 p.tris = triangles;
             }
         }
-        let node = resolved.cook.doc.nodes().nth(p.mesh_node);
-        let meta = node
-            .as_ref()
-            .map(|n| pc_of(n.extras()))
-            .unwrap_or(Value::Null);
-        let owners = meta.get("sources").cloned().unwrap_or_else(|| {
-            json!([meta
-                .get("sourceId")
-                .cloned()
-                .unwrap_or_else(|| json!(format!("gltf/node/{}", p.mesh_node)))])
-        });
-        costs.push(json!({"sources":owners,"node":p.mesh_node,"material":m.name,"moving":p.moving,"role":p.selection.intent.map(|i|i.role),
+        costs.push(json!({"sources":p.sources,"node":p.mesh_node,"material":m.name,"moving":p.moving,"role":p.selection.intent.map(|i|i.role),
             "inputTriangles":before,"outputTriangles":p.tris.len(),"inputVertices":vertices_before,"outputVertices":p.verts.len(),
             "baseErrorMeters":p.base_error,"budgetMeters":p.selection.budget,"protected":protected,"simplified":p.tris.len()<before}));
         before_total += before;

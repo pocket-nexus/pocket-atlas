@@ -85,7 +85,7 @@ pub(super) fn run(a: &Args, source: &read::Source, resolved: &mut resolve::Resol
                 tris.push([base, base + 2, base + 3]);
             }
         }
-        prims.push(Prim { mesh_node: usize::MAX, world: Mat4::IDENTITY, verts, tris, material: mi, moving: false, skin: None, no_reflect: false, baked: false, selection: Default::default(), base_error: 0.0 });
+        prims.push(Prim { sources: ["generated/skyline".into()].into(), mesh_node: usize::MAX, world: Mat4::IDENTITY, verts, tris, material: mi, moving: false, skin: None, no_reflect: false, baked: false, selection: Default::default(), base_error: 0.0 });
     }
 
     // ---- lights

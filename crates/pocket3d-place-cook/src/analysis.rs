@@ -346,6 +346,7 @@ struct Stock {
 }
 
 struct Prim {
+    sources: std::collections::BTreeSet<String>,
     mesh_node: usize,
     world: Mat4,
     /// Mesh-local vertices (skinned) or world-space (static).
