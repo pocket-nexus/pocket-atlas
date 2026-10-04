@@ -125,7 +125,7 @@ export class TokyoStage implements Stage {
     world.root.add(new HemisphereLight(0x2a3148, 0x0b0908, 0.12));
 
     await progress(0.7, "Batching geometry");
-    const stats = batchStatic(world.root);
+    const stats = batchStatic(world.root, { preserveObjects: this.ctx.params.exporting });
     console.info(`[tokyo] batched ${stats.before} meshes into ${stats.after}`);
     this.scene.add(world.root);
 

@@ -170,7 +170,7 @@ export class AkibaStage extends PlaceStage<AkibaWorld, AkibaAudio> {
     world.root.add(new HemisphereLight(hemiSky.multiplyScalar(1.8), new Color(0.04, 0.036, 0.036), 1.0));
 
     await progress(0.76, "Batching geometry");
-    const stats = batchStatic(world.root);
+    const stats = batchStatic(world.root, { preserveObjects: this.ctx.params.exporting });
     console.info(`[akiba] batched ${stats.before} meshes into ${stats.after}; atlas ${Math.round(atlas.fill * 100)}%, art ${Math.round(art.fill * 100)}%`);
     this.scene.add(world.root);
 

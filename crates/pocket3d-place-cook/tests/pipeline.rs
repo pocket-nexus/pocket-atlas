@@ -13,8 +13,10 @@ impl Drop for Temp {
     }
 }
 fn run(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_pocket-atlas-cook"))
-        .args(args)
+    let mut command=Command::new(env!("CARGO_BIN_EXE_pocket-atlas-cook"));
+    command.args(args);
+    if !args.contains(&"--cache") {command.args(["--cache","off"]);}
+    command
         .env("RAYON_NUM_THREADS", "2")
         .output()
         .unwrap()
@@ -218,7 +220,7 @@ fn psp_glossy_colour_preserves_source_precision_and_native_mip_layout() {
 }
 
 #[test]
-fn vita_palette_encoding_does_not_replace_native_uvs_or_material_factors() {
+fn vita_palette_encoding_does_not_replace_native_material_inputs() {
     let temp = Temp(std::env::temp_dir().join(format!("atlas-palette-targets-{}", std::process::id())));
     let export = temp.0.join("solid-materials");
     let ir = temp.0.join("place.ir");
@@ -304,7 +306,9 @@ fn vita_palette_encoding_does_not_replace_native_uvs_or_material_factors() {
                 for j in 0..word(d + 8) as usize {
                     let v = vertices + j * 24;
                     let source = usize::from(f32::from_bits(word(v)) >= 2.0);
-                    assert_eq!([word(v + 12), word(v + 16)], uv[source].map(f32::to_bits));
+                    // This material has no PICA texture unit: UVs are dead after
+                    // target shading. They must not become Vita reflectance UVs.
+                    assert_eq!([word(v + 12), word(v + 16)], [0,0]);
                     colors[source] = Some([bytes[v + 20], bytes[v + 21], bytes[v + 22]]);
                 }
             }
@@ -652,4 +656,157 @@ fn annotate_texture(root: &Path, usage: &str) {
     doc["materials"][0]["extras"] = json!({"pocketAtlas":{"textureUsage":{"albedo":usage}}});
     glb.json = Cow::Owned(serde_json::to_vec(&doc).unwrap());
     std::fs::write(root.join("scene.glb"), glb.to_vec().unwrap()).unwrap();
+}
+
+#[test]
+fn cold_warm_disabled_and_corrupt_bake_cache_have_identical_packs_and_receipts() {
+    let temp=Temp(std::env::temp_dir().join(format!("atlas-cache-{}",std::process::id())));
+    let export=temp.0.join("source"); fixture_material(&export,13,7,Some(0.7),"daytime-street");
+    let output=temp.0.join("scene.place"); let cache=temp.0.join("cache"); let telemetry=temp.0.join("timing.json");
+    let cook=|cache_arg:&str| {
+        let result=run(&["--in",export.to_str().unwrap(),"--out",output.to_str().unwrap(),"--target","3ds",
+            "--cache",cache_arg,"--telemetry",telemetry.to_str().unwrap(),"--json"]);
+        assert!(result.status.success(),"{}",String::from_utf8_lossy(&result.stderr));
+        let timing:serde_json::Value=serde_json::from_slice(&std::fs::read(&telemetry).unwrap()).unwrap();
+        let bake=timing.as_array().unwrap().iter().find(|x|x["id"]=="bake-lighting").unwrap()["details"].clone();
+        (std::fs::read(&output).unwrap(),result.stdout,bake)
+    };
+    let cold=cook(cache.to_str().unwrap()); let warm=cook(cache.to_str().unwrap()); let disabled=cook("off");
+    assert_eq!((&cold.0,&cold.1),(&warm.0,&warm.1)); assert_eq!((&cold.0,&cold.1),(&disabled.0,&disabled.1));
+    assert_eq!(cold.2["cacheMisses"],1); assert_eq!(warm.2["cacheHits"],1);
+    let entry=std::fs::read_dir(&cache).unwrap().next().unwrap().unwrap().path();
+    std::fs::write(entry,b"truncated entry").unwrap(); let repaired=cook(cache.to_str().unwrap());
+    assert_eq!((&cold.0,&cold.1),(&repaired.0,&repaired.1));assert_eq!(repaired.2["cacheMisses"],1);
+    // A changed light/occluder/source closure cannot reuse old irradiance.
+    fixture_material(&export,17,7,Some(0.9),"daytime-street");
+    let changed=cook(cache.to_str().unwrap());assert_eq!(changed.2["cacheHits"],0);
+}
+
+#[test]
+fn target_selects_source_representations_before_baking_and_respects_world_scale() {
+    let temp=Temp(std::env::temp_dir().join(format!("atlas-geometry-intent-{}",std::process::id())));
+    let export=temp.0.join("source"); fixture_material(&export,13,7,Some(0.7),"daytime-street");
+    let raw=std::fs::read(export.join("scene.glb")).unwrap();
+    let mut glb=gltf::binary::Glb::from_slice(&raw).unwrap();
+    let mut doc:serde_json::Value=serde_json::from_slice(&glb.json).unwrap();
+    doc["nodes"]=json!([
+        {"children":[1,2],"extras":{"pocketAtlas":{"sourceId":"landmark","geometry":{"role":"detail","maxErrorMeters":0.075},"lodGroup":{"version":1}}}},
+        {"mesh":0,"extras":{"pocketAtlas":{"sourceId":"reference","alternative":{"id":"reference","errorMeters":0}}}},
+        {"mesh":0,"extras":{"pocketAtlas":{"sourceId":"compact","alternative":{"id":"surface","errorMeters":0.07}}}}
+    ]);
+    let output=temp.0.join("scene.place");
+    for (target,scale,selected) in [("3ds",1.0,"surface"),("vita",1.0,"reference"),("3ds",2.0,"reference")] {
+        doc["nodes"][0]["scale"]=json!([scale,scale,scale]);
+        glb.json=Cow::Owned(serde_json::to_vec(&doc).unwrap()); std::fs::write(export.join("scene.glb"),glb.to_vec().unwrap()).unwrap();
+        let result=run(&["--in",export.to_str().unwrap(),"--out",output.to_str().unwrap(),"--target",target,"--json"]);
+        assert!(result.status.success(),"{}",String::from_utf8_lossy(&result.stderr));
+        let report:serde_json::Value=serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(report["provenance"]["sourceGraph"]["alternatives"][0]["selected"],selected);
+        assert_eq!(report["provenance"]["geometry"].as_array().unwrap().len(),1);
+        assert_eq!(report["recipe"]["passes"][1]["id"],"select-geometry");
+    }
+    // A malformed unselected alternative is still an error at import/check.
+    doc["nodes"][2]["extras"]["pocketAtlas"]["alternative"]["errorMeters"]=(-1).into();
+    glb.json=Cow::Owned(serde_json::to_vec(&doc).unwrap());std::fs::write(export.join("scene.glb"),glb.to_vec().unwrap()).unwrap();
+    assert!(!run(&["check","--in",export.to_str().unwrap(),"--target","vita"]).status.success());
+}
+
+#[test]
+fn pica_consumed_texture_uvs_survive_encoded_vertex_compaction() {
+    let temp=Temp(std::env::temp_dir().join(format!("atlas-pica-used-uv-{}",std::process::id())));
+    let export=temp.0.join("source");fixture(&export,13,7);
+    let raw=std::fs::read(export.join("scene.glb")).unwrap();
+    let mut glb=gltf::binary::Glb::from_slice(&raw).unwrap();
+    let mut doc:serde_json::Value=serde_json::from_slice(&glb.json).unwrap();
+    let mut bin=glb.bin.as_ref().unwrap().to_vec();while bin.len()%4!=0 {bin.push(0);}
+    let offset=bin.len();let uv=[0.1234567f32,0.7654321];
+    for _ in 0..3 {for x in uv {bin.extend(x.to_le_bytes());}}
+    doc["bufferViews"].as_array_mut().unwrap().push(json!({"buffer":0,"byteOffset":offset,"byteLength":24}));
+    doc["accessors"].as_array_mut().unwrap().push(json!({"bufferView":2,"componentType":5126,"count":3,"type":"VEC2"}));
+    doc["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_0"]=1.into();
+    doc["buffers"][0]["byteLength"]=bin.len().into();
+    glb.json=Cow::Owned(serde_json::to_vec(&doc).unwrap());glb.bin=Some(Cow::Owned(bin));
+    std::fs::write(export.join("scene.glb"),glb.to_vec().unwrap()).unwrap();
+    let output=temp.0.join("scene.place");ok(&["--in",export.to_str().unwrap(),"--out",output.to_str().unwrap(),"--target","3ds"]);
+    let bytes=std::fs::read(output).unwrap();let word=|at:usize|u32::from_le_bytes(bytes[at..at+4].try_into().unwrap());
+    let section=|tag:&[u8]|{let header=(0..word(8) as usize).map(|i|16+i*16).find(|&at|&bytes[at..at+4]==tag).unwrap();word(header+4) as usize};
+    let table=section(b"PICA");let geometry=section(b"GEOM");
+    let draws=table+120+word(table+4) as usize*32+word(table+8) as usize*92;
+    for i in 0..word(table+12) as usize {
+        let d=draws+i*96;let vertices=geometry+word(d+4) as usize;
+        for j in 0..word(d+8) as usize {let v=vertices+j*24;assert_eq!([word(v+12),word(v+16)],uv.map(f32::to_bits));}
+    }
+}
+
+#[test]
+fn output_aliases_are_rejected_without_clobbering_source_or_previous_pack() {
+    let temp=Temp(std::env::temp_dir().join(format!("atlas-output-alias-{}",std::process::id())));
+    let export=temp.0.join("source");fixture(&export,13,7);
+    let ir=temp.0.join("place.ir");ok(&["import","--in",export.to_str().unwrap(),"--out",ir.to_str().unwrap()]);
+    let output=temp.0.join("scene.place");std::fs::write(&output,b"previous accepted artifact").unwrap();
+    let manifest=std::fs::read(ir.join("manifest.json")).unwrap();
+    for (flag,path) in [("--telemetry",output.clone()),("--telemetry",ir.join("manifest.json")),("--report",output.clone()),("--report",ir.join("scene.bin"))] {
+        let result=run(&["--in",ir.to_str().unwrap(),"--out",output.to_str().unwrap(),flag,path.to_str().unwrap()]);
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("output path aliases"));
+        assert_eq!(std::fs::read(&output).unwrap(),b"previous accepted artifact");
+        assert_eq!(std::fs::read(ir.join("manifest.json")).unwrap(),manifest);
+    }
+    #[cfg(unix)] {
+        let link=temp.0.join("linked.json");std::os::unix::fs::symlink(&output,&link).unwrap();
+        assert!(!run(&["--in",ir.to_str().unwrap(),"--out",output.to_str().unwrap(),"--telemetry",link.to_str().unwrap()]).status.success());
+        assert_eq!(std::fs::read(&output).unwrap(),b"previous accepted artifact");
+    }
+}
+
+#[test]
+fn legacy_ir_remains_readable_but_new_semantics_require_version_two() {
+    let temp=Temp(std::env::temp_dir().join(format!("atlas-ir-version-{}",std::process::id())));
+    let export=temp.0.join("source");fixture(&export,13,7);
+    let ir=temp.0.join("place.ir");ok(&["import","--in",export.to_str().unwrap(),"--out",ir.to_str().unwrap()]);
+    let path=ir.join("manifest.json");
+    let mut manifest:serde_json::Value=serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(manifest["version"],2);
+    manifest["version"]=1.into();std::fs::write(&path,serde_json::to_vec(&manifest).unwrap()).unwrap();
+    ok(&["check","--in",ir.to_str().unwrap()]);
+    manifest["features"].as_array_mut().unwrap().push(json!("geometry-intent-v1"));
+    std::fs::write(&path,serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let result=run(&["check","--in",ir.to_str().unwrap()]);
+    assert!(String::from_utf8_lossy(&result.stderr).contains("require PlaceIR v2"));
+}
+
+#[test]
+fn preserved_instances_follow_rigid_motion_instead_of_becoming_static_copies() {
+    let temp=Temp(std::env::temp_dir().join(format!("atlas-moving-instances-{}",std::process::id())));
+    let export=temp.0.join("source");fixture(&export,13,7);
+    let raw=std::fs::read(export.join("scene.glb")).unwrap();let mut glb=gltf::binary::Glb::from_slice(&raw).unwrap();
+    let mut doc:serde_json::Value=serde_json::from_slice(&glb.json).unwrap();let mut bin=glb.bin.as_ref().unwrap().to_vec();
+    while bin.len()%4!=0 {bin.push(0);}
+    let mut attribute=|data:&[f32],kind:&str,count:usize| {
+        let offset=bin.len();bin.extend(data.iter().flat_map(|v|v.to_le_bytes()));
+        let view=doc["bufferViews"].as_array().unwrap().len();
+        doc["bufferViews"].as_array_mut().unwrap().push(json!({"buffer":0,"byteOffset":offset,"byteLength":bin.len()-offset}));
+        let id=doc["accessors"].as_array().unwrap().len();
+        doc["accessors"].as_array_mut().unwrap().push(json!({"bufferView":view,"componentType":5126,"count":count,"type":kind}));
+        id
+    };
+    let instances=attribute(&[0.,0.,0.,3.,0.,0.],"VEC3",2);
+    let times=attribute(&[0.,1.],"SCALAR",2);let translations=attribute(&[0.,0.,0.,5.,0.,0.],"VEC3",2);
+    doc["accessors"][times]["min"]=json!([0]);doc["accessors"][times]["max"]=json!([1]);
+    doc["nodes"][0]["extensions"]=json!({"EXT_mesh_gpu_instancing":{"attributes":{"TRANSLATION":instances}}});
+    doc["extensionsUsed"].as_array_mut().unwrap().push(json!("EXT_mesh_gpu_instancing"));
+    doc["animations"]=json!([{"samplers":[{"input":times,"output":translations}],"channels":[{"sampler":0,"target":{"node":0,"path":"translation"}}]}]);
+    doc["buffers"][0]["byteLength"]=bin.len().into();glb.json=Cow::Owned(serde_json::to_vec(&doc).unwrap());glb.bin=Some(Cow::Owned(bin));
+    std::fs::write(export.join("scene.glb"),glb.to_vec().unwrap()).unwrap();
+    let output=temp.0.join("scene.place");
+    let result=run(&["--in",export.to_str().unwrap(),"--out",output.to_str().unwrap(),"--target","vita","--json"]);
+    assert!(result.status.success(),"{}",String::from_utf8_lossy(&result.stderr));
+    let receipt:serde_json::Value=serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(receipt["provenance"]["sourceGraph"]["prototypeInstances"]["0"],2);
+    let bytes=std::fs::read(&output).unwrap();let pack=pocket3d_place::Pack::parse(&bytes).unwrap();let meta=pack.meta().unwrap();
+    assert_eq!(meta.draws.len(),2);
+    assert!(meta.draws.iter().all(|d|d.node==Some(0)),"instances must retain the parent animation");
+    assert!(meta.draws.iter().any(|d|d.min[0]>=3.0));
+    assert_eq!(meta.nodes.len(),1);
+    assert!(meta.nodes[0].track.is_some());
 }

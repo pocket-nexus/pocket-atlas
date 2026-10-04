@@ -103,7 +103,7 @@ export class SugaStage extends PlaceStage<SugaWorld, SugaAudio> {
     this.addLights();
 
     await progress(0.74, "Batching geometry");
-    const stats = batchStatic(world.root);
+    const stats = batchStatic(world.root, { preserveObjects: this.ctx.params.exporting });
     console.info(`[suga] batched ${stats.before} meshes into ${stats.after}`);
     this.scene.add(world.root);
 

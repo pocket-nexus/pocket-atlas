@@ -132,9 +132,31 @@ function normalizeForMerge(g: BufferGeometry, color: 0 | 3 | 4): BufferGeometry 
  * and UV, and vertex colours (RGB or RGBA, white where a mesh has none) when
  * the material uses them. Meshes under `userData.dynamic` are left alone.
  */
-export function batchStatic(root: Object3D): { before: number; after: number } {
+export function batchStatic(root: Object3D, options: { preserveObjects?: boolean } = {}): { before: number; after: number } {
   identifySources(root);
   root.updateMatrixWorld(true);
+  if (options.preserveObjects) {
+    let count = 0;
+    root.traverse(o => {
+      const m = o as Mesh;
+      if (!m.isMesh) return;
+      count++;
+      const mat = m.material;
+      // The Web batcher generates world UVs. Apply the same mapping without
+      // discarding authored object/prototype/quality boundaries in the IR.
+      let dynamic = false;
+      for (let p: Object3D | null = m; p; p = p.parent) dynamic ||= !!p.userData.dynamic;
+      if (!dynamic && !(m as unknown as { isInstancedMesh?: boolean }).isInstancedMesh && !Array.isArray(mat) && mat.userData.worldUV) {
+        const world = m.geometry.clone().applyMatrix4(m.matrixWorld);
+        worldUV(world);
+        m.geometry = m.geometry.clone();
+        m.geometry.setAttribute("uv", world.getAttribute("uv").clone());
+        world.dispose();
+      }
+    });
+    return { before: count, after: count };
+  }
+
   type Batch = { material: Material; cast: boolean; receive: boolean; layers: number; renderOrder: number; culled: boolean; color: 0 | 3 | 4; geos: BufferGeometry[]; worldUv: boolean; sources: Set<string> };
   const groups = new Map<string, Batch>();
   const remove: Mesh[] = [];

@@ -202,7 +202,7 @@ export class GriffithStage extends PlaceStage<GriffithWorld, GriffithAudio> {
     world.root.add(new HemisphereLight(hemisphereSky(BLUE_HOUR, LIGHT.desat), LIGHT.ground, LIGHT.hemisphere));
 
     await progress(0.8, "Batching geometry");
-    const stats = batchStatic(world.root);
+    const stats = batchStatic(world.root, { preserveObjects: this.ctx.params.exporting });
     console.info(`[griffith] batched ${stats.before} meshes into ${stats.after}`);
     this.scene.add(world.root);
     HAZE.apply(this.scene);

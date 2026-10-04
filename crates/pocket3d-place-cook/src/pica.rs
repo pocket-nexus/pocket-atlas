@@ -148,45 +148,99 @@ fn rows(m: Mat4) -> [f32; 12] {
     a[..12].try_into().unwrap()
 }
 
+/// Intern the *encoded* attributes, after lighting and target material decisions.
+/// No normal/UV/color approximation: all four LODs reconstruct identical triangles.
+/// Skin streams retain their vertex order because joint data lives in the table.
 fn repack_geometry(old_geom: Vec<u8>, draws: &mut [Vec<u8>]) -> Vec<u8> {
-    // Keep vertices of adjacent static draws with the same material in one
-    // contiguous, u16-addressable buffer. Indices retain per-draw LOD ranges;
-    // the host can gather only visible chunks into one material submission.
-    let mut geom = Vec::new();
     let get = |r: &[u8], o: usize| u32::from_le_bytes(r[o..o + 4].try_into().unwrap());
     let put = |r: &mut [u8], o: usize, v: u32| r[o..o + 4].copy_from_slice(&v.to_le_bytes());
-    let mut group_mat = u32::MAX;
-    let mut group_count = 65536;
+    let mut compact = Vec::new();
     for d in draws.iter_mut() {
-        let mat = get(d, 0);
-        let count = get(d, 8);
-        let is_static = get(d, 12) == u32::MAX && get(d, 16) == u32::MAX;
-        if !is_static || mat != group_mat || group_count + count > 65536 {
-            align(&mut geom, 128);
-            group_count = 0;
-        }
-        let start = get(d, 4) as usize;
-        put(d, 4, geom.len() as u32);
-        geom.extend(&old_geom[start..start + count as usize * 24]);
-        group_mat = if is_static { mat } else { u32::MAX };
-        group_count += count;
+        let start=get(d,4) as usize;
+        let count=get(d,8) as usize;
+        let skinned=get(d,12)!=u32::MAX;
+        let mut vertices=if skinned { old_geom[start..start+count*24].to_vec() } else { Vec::new() };
+        let mut unique: HashMap<[u8;24],u16>=HashMap::new();
+        let levels: [Vec<u8>;4]=std::array::from_fn(|k| {
+            let offset=get(d,48+k*12) as usize;
+            let count=get(d,52+k*12) as usize;
+            old_geom[offset..offset+count*2].chunks_exact(2).flat_map(|i| {
+                let index=u16::from_le_bytes(i.try_into().unwrap());
+                if skinned { return index.to_le_bytes(); }
+                let v=&old_geom[start+index as usize*24..start+(index as usize+1)*24];
+                let index=*unique.entry(v.try_into().unwrap()).or_insert_with(|| {
+                    let next=u16::try_from(vertices.len()/24).expect("PICA vertex overflow");
+                    vertices.extend(v);
+                    next
+                });
+                index.to_le_bytes()
+            }).collect()
+        });
+        put(d,8,(vertices.len()/24) as u32);
+        compact.push((vertices,levels));
     }
-    let mut index_ranges = HashMap::new();
-    for d in draws.iter_mut() {
-        for k in 0..4 {
-            let o = 48 + k * 12;
-            let start = get(d, o) as usize;
-            let count = get(d, o + 4) as usize;
-            let dst = *index_ranges.entry((start, count)).or_insert_with(|| {
-                align(&mut geom, 4);
-                let offset = geom.len() as u32;
-                geom.extend(&old_geom[start..start + count * 2]);
-                offset
+    // Adjacent static draws retain contiguous u16-addressable buffers for
+    // runtime material gathering. Rigid objects may share an identical buffer.
+    let mut geom=Vec::new();
+    let mut rigid_buffers:HashMap<Vec<u8>,u32>=HashMap::new();
+    let (mut group_mat,mut group_count)=(u32::MAX,65536);
+    for (d,(vertices,_)) in draws.iter_mut().zip(&compact) {
+        let mat=get(d,0); let count=get(d,8);
+        let is_static=get(d,12)==u32::MAX && get(d,16)==u32::MAX;
+        let rigid=get(d,12)==u32::MAX && !is_static;
+        if rigid {
+            if let Some(&offset)=rigid_buffers.get(vertices) {
+                put(d,4,offset); group_mat=u32::MAX; group_count=65536; continue;
+            }
+        }
+        if !is_static || mat!=group_mat || group_count+count>65536 {
+            align(&mut geom,128); group_count=0;
+        }
+        let offset=geom.len() as u32;
+        put(d,4,offset); geom.extend(vertices);
+        if rigid { rigid_buffers.insert(vertices.clone(),offset); }
+        group_mat=if is_static {mat} else {u32::MAX}; group_count+=count;
+    }
+    let mut index_ranges=HashMap::new();
+    for (d,(_,levels)) in draws.iter_mut().zip(compact) {
+        for (k,indices) in levels.into_iter().enumerate() {
+            let dst=*index_ranges.entry(indices).or_insert_with_key(|bytes| {
+                align(&mut geom,4); let offset=geom.len() as u32; geom.extend(bytes); offset
             });
-            put(d, o, dst);
+            put(d,48+k*12,dst);
         }
     }
     geom
+}
+
+/// Equal at every source sample, not merely at the rest pose. This keeps
+/// independent wheel phases and animation seams while sharing rigid materials.
+fn motion_palette(nodes: &[crate::source::Node], frames: u32, candidates: &[u32]) -> (Vec<u32>, HashMap<u32,u32>) {
+    let mut streams=vec![Vec::new();candidates.len()];
+    for frame in 0..frames.max(1) {
+        let world=sample_world(nodes,frame);
+        for (&node,stream) in candidates.iter().zip(&mut streams) {
+            for v in rows(world[node as usize]) { stream.extend(v.to_le_bytes()); }
+        }
+    }
+    let mut unique=HashMap::new(); let mut nodes=Vec::new(); let mut mapping=HashMap::new();
+    for (&node,stream) in candidates.iter().zip(streams) {
+        let index=*unique.entry(stream).or_insert_with(|| {nodes.push(node); (nodes.len()-1) as u32});
+        mapping.insert(node,index);
+    }
+    (nodes,mapping)
+}
+fn sample_world(nodes: &[crate::source::Node], frame: u32) -> Vec<Mat4> {
+    let mut world=vec![Mat4::IDENTITY;nodes.len()];
+    for (i,n) in nodes.iter().enumerate() {
+        let (t,q)=if let Some(r)=&n.track {
+            let sample=r[frame as usize % r.len()];
+            (Vec3::new(sample[0],sample[1],sample[2]),Quat::from_xyzw(sample[3],sample[4],sample[5],sample[6]).normalize())
+        } else { (Vec3::from(n.translation),Quat::from_array(n.rotation)) };
+        let local=Mat4::from_scale_rotation_translation(Vec3::from(n.scale),q,t);
+        world[i]=n.parent.map_or(local,|p|world[p as usize]*local);
+    }
+    world
 }
 
 // Principal extents make the structural-detail test independent of rotation.
@@ -812,11 +866,8 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         }
     }
     let used_nodes: Vec<u32> = used_nodes.into_iter().collect();
-    let node_map: HashMap<u32, u32> = used_nodes
-        .iter()
-        .enumerate()
-        .map(|(i, &n)| (n, i as u32))
-        .collect();
+    let source_matrices = used_nodes.len();
+    let (used_nodes, node_map) = motion_palette(&m.nodes, m.frames, &used_nodes);
     let matrices = used_nodes.len() + m.skins.iter().map(|s| s.joints.len()).sum::<usize>();
     // Long transport loops need not repeat every rigid transform at 15 Hz.
     // Reduce only if their palette would exceed the Old 3DS animation budget.
@@ -837,17 +888,7 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
     let mut world0 = Vec::new();
     for sampled in 0..frames {
         let frame = (sampled as u64 * m.frames.max(1) as u64 / frames as u64) as u32;
-        let mut world = vec![Mat4::IDENTITY; m.nodes.len()];
-        for (i, n) in m.nodes.iter().enumerate() {
-            let (t, q) = if let Some(r) = &n.track {
-                let sample = r[frame as usize % r.len()];
-                (Vec3::new(sample[0], sample[1], sample[2]), Quat::from_xyzw(sample[3], sample[4], sample[5], sample[6]).normalize())
-            } else {
-                (Vec3::from(n.translation), Quat::from_array(n.rotation))
-            };
-            let local = Mat4::from_scale_rotation_translation(Vec3::from(n.scale), q, t);
-            world[i] = n.parent.map_or(local, |p| world[p as usize] * local);
-        }
+        let world = sample_world(&m.nodes, frame);
         for &i in &used_nodes {
             fs(&mut anim, &rows(world[i as usize]));
         }
@@ -1000,6 +1041,10 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
                     grade(rgb, &m.post)
                 }
             };
+            // TEV has no texture input for this material; ordinary UV seams
+            // carry no information once material color has been baked.
+            if u32::from_le_bytes(mats[d.material as usize][0..4].try_into().unwrap()) == u32::MAX
+                && mat.kind != pc::Kind::Water { uv = [0.0;2]; }
             fs(&mut geom, &pos.to_array());
             fs(&mut geom, &uv);
             geom.extend([
@@ -1048,7 +1093,7 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
             meshopt::VertexDataAdapter::new(&geom[vo..vo + d.vertex_count() as usize * 24], 24, 0)
                 .unwrap();
         let mut error = 0.0;
-        let proxy = if count > 36 {
+        let proxy = if !d.protected && count > 36 {
             meshopt::simplify_sloppy(
                 &indices,
                 &adapter,
@@ -1225,6 +1270,7 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         put(d, 0, id);
     }
     draws.sort_by_key(|d| (get(d, 0), get(d, 16) != u32::MAX || get(d, 12) != u32::MAX));
+    let uncompact_geometry_bytes = geom.len();
     geom = repack_geometry(geom, &mut draws);
     let mut effect_lights: Vec<([f32; 3], f32, [f32; 3], f32)> = m
         .fog_lights
@@ -1376,7 +1422,7 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         fs(&mut table, &b[1]);
     }
     table.extend(&skin_data);
-    let summary = serde_json::json!({"target":"3ds","version":TABLE_VERSION,"name":m.name,"kind":m.kind,"sourceMaterials":m.materials.len(),"textures":textures.len(),"draws":draws.len(),"textureBytes":tex.len(),"geometryBytes":geom.len(),"animationBytes":anim.len(),"matrices":matrices,"frames":frames,"fps":fps,"features":features,"sourceNodes":m.nodes.len(),"camera":m.camera});
+    let summary = serde_json::json!({"target":"3ds","version":TABLE_VERSION,"name":m.name,"kind":m.kind,"sourceMaterials":m.materials.len(),"textures":textures.len(),"draws":draws.len(),"textureBytes":tex.len(),"geometryBytes":geom.len(),"animationBytes":anim.len(),"matrices":matrices,"sourceMatrices":source_matrices,"uncompactGeometryBytes":uncompact_geometry_bytes,"frames":frames,"fps":fps,"features":features,"sourceNodes":m.nodes.len(),"camera":m.camera});
     let meta = serde_json::to_vec(&summary).unwrap();
     let out = pc::write_versioned(pc::MAGIC, CONTAINER_VERSION, &[
         (pc::TAG_META, &meta, 16),
@@ -1395,6 +1441,25 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn matrix_interning_checks_the_whole_loop_and_preserves_independent_phases() {
+        use crate::source::Node;
+        let node=|parent, track| Node { name:String::new(),parent,translation:[0.0;3],rotation:[0.0,0.0,0.0,1.0],scale:[1.0;3],track };
+        let nodes=[
+            node(None,Some(vec![[0.0,0.0,0.0,0.0,0.0,0.0,1.0],[1.0,0.0,0.0,0.0,0.0,0.0,1.0]])),
+            node(Some(0),None),
+            node(None,Some(vec![[0.0,0.0,0.0,0.0,0.0,0.0,1.0],[2.0,0.0,0.0,0.0,0.0,0.0,1.0]])),
+        ];
+        let (unique,mapping)=motion_palette(&nodes,2,&[0,1,2]);
+        assert_eq!(unique,vec![0,2]);
+        assert_eq!(mapping[&0],mapping[&1]);
+        assert_ne!(mapping[&0],mapping[&2]);
+        for frame in 0..2 {
+            let world=sample_world(&nodes,frame);
+            for (&node,&slot) in &mapping {assert_eq!(rows(world[node as usize]),rows(world[unique[slot as usize] as usize]));}
+        }
+    }
+
     #[test]
     fn fine_levels_do_not_replace_coarse_handheld_slots() {
         let levels: Vec<crate::source::Lod> = [0.01, 0.025, 0.06, 0.25].into_iter().enumerate().map(|(i, error)| crate::source::Lod { indices: vec![i as u32; 3], error }).collect();
@@ -1512,27 +1577,25 @@ mod tests {
             }
             draws.push(d);
         }
+        let before = draws.clone();
         let output = repack_geometry(geometry, &mut draws);
         let get = |r: &[u8], o: usize| u32::from_le_bytes(r[o..o + 4].try_into().unwrap()) as usize;
-        assert_eq!(get(&draws[1], 4) - get(&draws[0], 4), 4 * 24);
-        for (i, d) in draws.iter().enumerate() {
-            let vertices = get(d, 4);
-            assert_eq!(
-                &output[vertices..vertices + 96],
-                &original[i * 96..i * 96 + 96]
-            );
+        let triangles = |data:&[u8],draw:&[u8],k:usize| -> Vec<u8> {
+            let base=get(draw,4); let offset=get(draw,48+k*12); let n=get(draw,52+k*12);
+            data[offset..offset+n*2].chunks_exact(2).flat_map(|v| {
+                let i=u16::from_le_bytes(v.try_into().unwrap()) as usize;
+                data[base+i*24..base+(i+1)*24].iter().copied()
+            }).collect()
+        };
+        for (old,new) in before.iter().zip(&draws) {
+            assert_eq!(get(new,8),3); // the fourth, unreferenced vertex is gone
             for k in 0..4 {
-                let offset = get(d, 48 + k * 12);
-                assert_eq!(offset % 4, 0);
-                assert_eq!(offset, get(d, 48));
-                assert_eq!(
-                    &output[offset..offset + 6],
-                    &original[192 + i * 6..198 + i * 6]
-                );
+                assert_eq!(triangles(&original,old,k),triangles(&output,new,k));
+                assert_eq!(get(new,48+k*12)%4,0);
             }
         }
-        // Eight vertices and two shared index ranges; LOD aliases aren't copied four times.
-        assert_eq!(output.len(), 206);
+        assert!(output.len()<206);
+
     }
 
     #[test]

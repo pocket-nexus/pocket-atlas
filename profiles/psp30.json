@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "psp30",
-  "revision": 2,
+  "revision": 3,
   "target": "psp",
   "host": {
     "os": "psp",
@@ -17,7 +17,7 @@
     "auxiliary": null
   },
   "recipe": {
-    "revision": 1,
+    "revision": 2,
     "textureCap": 128,
     "daylightTextureCap": 256,
     "detailTextureCap": 512,

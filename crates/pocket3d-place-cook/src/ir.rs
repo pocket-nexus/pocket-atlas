@@ -1,4 +1,4 @@
-//! PlaceIR v1: a lossless glTF structural schema plus Atlas scene semantics.
+//! PlaceIR v2: lossless glTF plus versioned Atlas geometry intent/alternatives.
 //!
 //! Import splits the GLB into a canonical JSON document and its original binary
 //! buffer. No texture compression, quantization, lighting bake or LOD selection
@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Target {
@@ -75,7 +75,13 @@ fn scene_meta(doc: &Value) -> Result<&Value, String> {
         .ok_or_else(|| "missing scene extras.pocketAtlas".into())
 }
 fn features(doc: &Value) -> Result<BTreeSet<String>, String> {
+    crate::intent::validate(doc)?;
     let mut out = BTreeSet::new();
+    for node in doc["nodes"].as_array().into_iter().flatten() {
+        let x=&node["extras"]["pocketAtlas"];
+        if x.get("geometry").is_some() {out.insert("geometry-intent-v1".into());}
+        if x.get("lodGroup").is_some() {out.insert("geometry-alternatives-v1".into());}
+    }
     for material in doc["materials"].as_array().into_iter().flatten() {
         if let Some(usages)=material["extras"]["pocketAtlas"].get("textureUsage") {
             let usages=usages.as_object().ok_or("textureUsage must map material slots to purposes")?;
@@ -145,6 +151,10 @@ fn required_files(document: &Value) -> Result<BTreeSet<String>, String> {
 impl Manifest {
     pub fn check_target(&self, target: Target) -> Result<(), String> {
         for feature in &self.features {
+            if !matches!(feature.as_str(), "geometry-intent-v1"|"geometry-alternatives-v1"|"day-sky"|"vista-haze"|
+                "material:unlit"|"material:sign"|"material:glass"|"material:interiorWindow"|"material:products"|"material:tower"|"material:water"|"material:lights") {
+                return Err(format!("unsupported PlaceIR feature {feature}"));
+            }
             if target != Target::Vita
                 && matches!(feature.as_str(), "material:lights" | "vista-haze")
             {
@@ -299,8 +309,11 @@ pub fn open(root: &Path) -> Result<Manifest, String> {
     )
     .map_err(|e| e.to_string())?;
     local_name(&manifest.name)?;
-    if manifest.version != VERSION {
+    if manifest.version != VERSION && manifest.version != 1 {
         return Err(format!("unsupported PlaceIR version {}", manifest.version));
+    }
+    if manifest.version==1 && manifest.features.iter().any(|f|f.starts_with("geometry-")) {
+        return Err("geometry intent and alternatives require PlaceIR v2".into());
     }
     let mut seen = BTreeSet::new();
     for f in &manifest.files {

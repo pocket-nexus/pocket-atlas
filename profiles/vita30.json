@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "vita30",
-  "revision": 1,
+  "revision": 2,
   "target": "vita",
   "host": {
     "os": "vita",
@@ -17,7 +17,7 @@
     "auxiliary": null
   },
   "recipe": {
-    "revision": 1,
+    "revision": 2,
     "textureCap": 1024,
     "detailTextureCap": 2048,
     "emissiveTextureCap": 1024,

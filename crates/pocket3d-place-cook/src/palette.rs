@@ -57,11 +57,11 @@ pub fn batch(
     animated: &HashSet<usize>, world: &HashMap<usize, Mat4>, material_animation: &HashSet<String>,
 ) {
     let mut palettes: HashMap<Vec<u8>, u32> = HashMap::new();
-    let mut batches: BTreeMap<(usize, u32, bool), Prim> = BTreeMap::new();
+    let mut batches: BTreeMap<(usize, u32, bool, (u8,u32,u32,u32)), Prim> = BTreeMap::new();
     let mut out = Vec::new();
     for mut p in std::mem::take(prims) {
         let m = materials[p.material as usize].clone();
-        if p.skin.is_some() || !eligible(&m) || material_animation.contains(&m.name) {
+        if p.selection.protected() || p.skin.is_some() || !eligible(&m) || material_animation.contains(&m.name) {
             out.push(p);
             continue;
         }
@@ -96,7 +96,7 @@ pub fn batch(
         }
         p.mesh_node = frame;
         p.world = frame_world;
-        let key = (frame, p.material, p.no_reflect);
+        let key = (frame, p.material, p.no_reflect, p.selection.batch_key());
         if let Some(batch) = batches.get_mut(&key) {
             let base = batch.verts.len() as u32;
             batch.verts.extend(p.verts);
@@ -135,7 +135,7 @@ mod tests {
                 uv: Vec2::new(7.0, 8.0), ..Vertex::default()
             }).collect(),
             tris: vec![[0, 1, 2]], material: mat, moving: true, skin: None,
-            no_reflect: false, baked: false,
+            no_reflect: false, baked: false, selection: Default::default(), base_error: 0.0,
         }
     }
 

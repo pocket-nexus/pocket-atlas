@@ -5,6 +5,7 @@ import { browser3dsFlags, native3dsPlaces, unsupported3dsPlaces, validate3dsBrow
 test("catalog includes every supported live place and rejects unsupported requested content", () => {
   const ids = native3dsPlaces(PLACES).map((p) => p.id);
   expect(ids).toContain("sf-lombard-street");
+  expect(ids).toContain("sangubashi-crossing");
   expect(ids).toContain("tokyo-konbini");
   expect(ids).not.toContain("griffith-observatory");
   expect(() => native3dsPlaces(PLACES, "griffith-observatory")).toThrow("dusk-vista");

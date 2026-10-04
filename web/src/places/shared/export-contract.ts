@@ -1,4 +1,5 @@
 import { Material, type MeshBasicMaterial, type MeshPhysicalMaterial, type MeshStandardMaterial, type Object3D } from "three";
+import { validateGeometryIntent } from "./geometry-intent";
 
 export function validateExportMaterial(material: Material): void {
   const pc = material.userData.pocketAtlas ?? {};
@@ -18,6 +19,8 @@ export function validateExportMaterial(material: Material): void {
 }
 
 export function validateExportObject(object: Object3D): void {
+  const geometry = object.userData.pocketAtlas?.geometry;
+  if (geometry !== undefined) validateGeometryIntent(geometry);
   const mesh = object as Object3D & { isMesh?: boolean; geometry?: { morphAttributes: Record<string, unknown[]> } };
   if (mesh.isMesh && Object.values(mesh.geometry?.morphAttributes ?? {}).some(values => values.length))
     throw new Error(`Morph targets are not supported: ${object.userData.pocketAtlas?.sourceId ?? object.name}`);

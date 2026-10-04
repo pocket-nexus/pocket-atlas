@@ -175,7 +175,7 @@ export class KamakuraStage extends PlaceStage<KamakuraWorld, KamakuraAudio> {
     this.addLights();
 
     await progress(0.76, "Batching geometry");
-    const stats = batchStatic(world.root);
+    const stats = batchStatic(world.root, { preserveObjects: this.ctx.params.exporting });
     console.info(`[kamakura] batched ${stats.before} meshes into ${stats.after}; ${lib.count} materials`);
     this.scene.add(world.root);
 

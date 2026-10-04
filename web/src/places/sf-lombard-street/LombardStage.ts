@@ -57,7 +57,7 @@ export class LombardStage extends PlaceStage<LombardWorld,LombardAudio>{
     await progress(.72,'Taking the slow way down');buildTraffic(this.world);buildPeople(this.world);
     this.sky=buildSky(this.world.root,{zenith:new Color(.015,.085,.28),horizon:HORIZON,ground:new Color(.25,.24,.20),gradientPower:.20,groundBlend:5,sun:this.sunDir,sunColor:new Color(1,.97,.89),glow:{intensity:.075,wide:[.35,6],tight:[1,48]},disc:{intensity:25}});
     this.addLights();
-    await progress(.80,'Preparing the handheld geometry');const stats=batchStatic(this.world.root);console.info(`[lombard] batched ${stats.before} meshes into ${stats.after}`);this.scene.add(this.world.root);
+    await progress(.80,'Preparing the handheld geometry');const stats=batchStatic(this.world.root, { preserveObjects: this.ctx.params.exporting });console.info(`[lombard] batched ${stats.before} meshes into ${stats.after}`);this.scene.add(this.world.root);
     await progress(.88,'Capturing the summer light');this.captureProbe(site(70,0,8),{near:.2,far:15000,intensity:.60,before:()=>this.sky.setProbe(.65),after:()=>this.sky.setProbe(0)});
     this.post=createPlacePost(renderer,this.scene,this.camera,quality,LOOK);this.startRig();
     if(this.ctx.params.exporting)this.exposeExport({seconds:LOOP,meta:c=>({version:c.version,units:c.units,up:c.up,kind:this.place.kind,geo:{...GEO,bearing:0},loopSeconds:LOOP,sun:{...SUN,direction:this.sunDir.toArray()},fog:c.fog,hemisphere:c.hemisphere,directionalLights:c.directionalLights,environment:c.environment,camera:c.camera,...c.special,tracks:c.tracks,post:this.postMeta(),bake:{skyOcclusion:{rays:32,reach:1.8,foliage:.45}}})});

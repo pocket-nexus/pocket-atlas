@@ -35,6 +35,9 @@ mod profile;
 mod vita;
 mod recipe;
 mod provenance;
+mod cache;
+mod intent;
+mod output_paths;
 
 use std::path::PathBuf;
 
@@ -44,6 +47,8 @@ struct Args {
     cell: f32,
     profile: profile::Profile,
     target: ir::Target,
+    cache: Option<PathBuf>,
+    telemetry: Option<PathBuf>,
 }
 
 fn fail(message: impl std::fmt::Display) -> ! {
@@ -115,6 +120,12 @@ fn args() -> Args {
         input,
         output,
         cell,
+        cache: match get("--cache").as_deref() {
+            Some("off") => None,
+            Some(path) => Some(PathBuf::from(path)),
+            None => Some(PathBuf::from(".pocket-build/cache/compiler")),
+        },
+        telemetry: get("--telemetry").map(PathBuf::from),
     }
 }
 
@@ -190,18 +201,25 @@ fn main() {
         };
         a.output = a.input.join(format!("{}{suffix}.place", manifest.name));
     }
+    let report_path = cli.iter().position(|s| s == "--report")
+        .and_then(|i| cli.get(i + 1)).map(PathBuf::from)
+        .unwrap_or_else(|| a.output.with_extension("compile.json"));
+    output_paths::check(&a, &root, &manifest, &report_path).unwrap_or_else(|e| fail(e));
     std::fs::create_dir_all(a.output.parent().unwrap_or(std::path::Path::new(".")))
         .expect("output directory");
     a.input = root;
     let mut pipeline = recipe::Pipeline::new(&a.profile);
     let (scene, log) = analysis::analyze(&a, &manifest.name, &mut pipeline);
+    let artifact = pipeline.run(&format!("{}-lowering",a.target.name()), || {
     let artifact = match a.target {
         ir::Target::Vita => vita::cook(&scene, &a.profile),
         ir::Target::Pica => pica::cook(&scene, &a.profile),
         ir::Target::Psp => psp::cook(&scene, &a.profile),
     }
     .unwrap_or_else(|e| fail(e));
-    pipeline.record(&format!("{}-lowering",a.target.name()), serde_json::json!({"bytes":artifact.bytes.len(),"sections":artifact.sections,"textures":artifact.textures}));
+    let decision = serde_json::json!({"bytes":artifact.bytes.len(),"sections":artifact.sections,"textures":artifact.textures});
+    recipe::Output::new(artifact,decision)
+    });
     let diagnostics:Vec<_> = scene.textures.iter().enumerate().filter(|(_,t)|matches!(t.pixels,source::Pixels::Image{..}) && t.usage.is_none()).map(|(id,t)|serde_json::json!({
         "code":"ATLAS_LEGACY_TEXTURE_USAGE","severity":"warning","resource":id,"name":t.name,
         "pass":"texture-sampling@1","sources":provenance::texture_sources(&scene,id),
@@ -214,9 +232,16 @@ fn main() {
     if a.input.join("export.json").exists() {
         report["export"]=serde_json::from_slice(&std::fs::read(a.input.join("export.json")).unwrap()).unwrap();
     }
-    let budget=a.profile.check_artifact(&artifact);
-    pipeline.record("structural-budgets",serde_json::json!({"status":if budget.is_ok(){"passed"}else{"failed"},"limits":a.profile.budgets}));
+    let budget=pipeline.run("structural-budgets", || {
+        let budget=a.profile.check_artifact(&artifact);
+        let decision=serde_json::json!({"status":if budget.is_ok(){"passed"}else{"failed"},"limits":a.profile.budgets});
+        recipe::Output::new(budget,decision)
+    });
     report["passes"]=serde_json::to_value(&pipeline.completed).unwrap();
+    if let Some(path) = &a.telemetry {
+        if let Some(parent) = path.parent() { std::fs::create_dir_all(parent).unwrap_or_else(|e| fail(e)); }
+        std::fs::write(path, serde_json::to_vec_pretty(&pipeline.telemetry).unwrap()).unwrap_or_else(|e| fail(e));
+    }
     if let Err(message)=budget {
         if cli.iter().any(|s|s=="--json") {
             report["validation"]["structuralBudgets"]="failed".into();
@@ -237,12 +262,6 @@ fn main() {
         .with_extension(format!("{}.tmp", std::process::id()));
     std::fs::write(&temporary, &artifact.bytes).unwrap_or_else(|e| fail(e));
     std::fs::rename(&temporary, &a.output).unwrap_or_else(|e| fail(e));
-    let report_path = cli
-        .iter()
-        .position(|s| s == "--report")
-        .and_then(|i| cli.get(i + 1))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| a.output.with_extension("compile.json"));
     if let Some(parent) = report_path.parent() {
         std::fs::create_dir_all(parent).unwrap_or_else(|e| fail(e));
     }

@@ -51,7 +51,12 @@ pub struct Recipe {
     pub animation_palette_bytes: u32,
     pub max_mesh_vertices: usize,
     pub max_field_points: usize,
+    #[serde(default)]
+    pub geometry_error_meters: GeometryErrors,
 }
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GeometryErrors { pub structure: f32, pub detail: f32, pub background: f32 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Budgets {
@@ -91,8 +96,12 @@ impl Profile {
     }
     pub fn validate(&self) -> Result<(), String> {
         let base = Self::builtin(self.target);
-        if self.schema_version != 1 || self.recipe.revision != 1 || self.revision == 0 {
-            return Err("unsupported profile or recipe version".into());
+        let errors = &self.recipe.geometry_error_meters;
+        if [errors.structure,errors.detail,errors.background].iter().any(|v|!v.is_finite() || !(0.0..=1.0).contains(v)) {
+            return Err("invalid geometry error policy".into());
+        }
+        if self.schema_version != 1 || self.recipe.revision != 2 || self.revision == 0 {
+            return Err("unsupported profile or recipe version (current recipe revision is 2; migrate custom profiles explicitly)".into());
         }
         if self.id.is_empty()
             || !self

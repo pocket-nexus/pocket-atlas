@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "old3ds30",
-  "revision": 1,
+  "revision": 2,
   "target": "3ds",
   "host": {
     "os": "horizon",
@@ -20,13 +20,18 @@
     ]
   },
   "recipe": {
-    "revision": 1,
+    "revision": 2,
     "textureCap": 256,
     "detailTextureCap": 1024,
     "emissiveTextureCap": 1024,
     "animationPaletteBytes": 10485760,
     "maxMeshVertices": 65535,
-    "maxFieldPoints": 16384
+    "maxFieldPoints": 16384,
+    "geometryErrorMeters": {
+      "structure": 0.006,
+      "detail": 0.075,
+      "background": 0.05
+    }
   },
   "budgets": {
     "maxPackBytes": null,

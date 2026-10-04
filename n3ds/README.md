@@ -1,8 +1,10 @@
 # Nintendo 3DS renderer
 
-Pocket Atlas opens on an interactive globe and supports five shared places on
+Pocket Atlas opens on an interactive globe and registers six shared places on
 an Old 3DS: Rainy Night Konbini, Suga Shrine Stairs, Radio Kaikan at Blue Hour,
-Kamakura-Kōkōmae Crossing and daytime San Francisco Lombard Street.
+Kamakura-Kōkōmae Crossing, daytime San Francisco Lombard Street and Sangubashi
+in Bloom. Catalog eligibility and a successful cook are separate from physical
+visual/performance acceptance; record both for each new compiled revision.
 The registry, globe maps, postcard previews,
 font, material annotations, camera shots, geometry and motion come from the
 same web exports and lossless PlaceIR as the Vita. PICA cooks independently
@@ -44,6 +46,7 @@ bun scripts/export-place.ts --place suga-shrine-stairs --seconds 1
 bun scripts/export-place.ts --place akihabara-radio-kaikan --seconds 20
 bun scripts/export-place.ts --place kamakura-koko-mae-crossing --seconds 120
 bun scripts/export-place.ts --place sf-lombard-street --seconds 120
+bun scripts/export-place.ts --place sangubashi-crossing --seconds 64
 bun scripts/preview-place.ts
 bun scripts/export-atlas.ts
 cd ..
@@ -163,7 +166,8 @@ The PLCE5 container's PICA3 section holds native materials, draws, tiled
 RGB565/RGBA4 mip chains, RGBA8 clouds, 24-byte vertices and interpolated
 animation palettes.
 The cooker applies the authored AgX/ACES grade, baked irradiance and static
-sun occlusion. It keeps only referenced animation matrices; long loops retain
+sun occlusion. It interns exact encoded geometry and full sampled matrix tracks, then keeps
+only referenced animation matrices; long loops retain
 their duration even if matrix sampling must be reduced to fit memory.
 
 Day/twilight skies use a cooked panorama and a separate drifting cloud layer.

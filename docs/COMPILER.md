@@ -10,7 +10,7 @@ require sharing a scene engine, material model or runtime ABI.
 ```mermaid
 flowchart LR
   Web[Three.js authoring] --> Export[GLB + Atlas annotations + HDR environment]
-  Export --> IR[PlaceIR v1]
+  Export --> IR[PlaceIR v2]
   IR --> Vita[Vita analysis and lowering]
   IR --> Pica[PICA analysis and lowering]
   IR --> GE[GE analysis and lowering]
@@ -50,7 +50,13 @@ PICA keeps the two coarsest analysis LODs in its limited main-view slots. Vita
 interns identical geometry/animation buffers at serialization. Unsupported skin
 sizes fail before publication; omitted inverse-bind matrices use identity.
 
-## PlaceIR v1
+## PlaceIR v2
+
+New imports use version 2, so older compilers reject source carrying geometry
+intent/alternative semantics instead of rendering both alternatives. This
+compiler also reads sealed v1 scenes without the new geometry features. Unknown
+versions/features and v1 manifests claiming v2 geometry semantics fail closed.
+Device pack versions remain unchanged.
 
 A directory contains:
 
@@ -82,7 +88,7 @@ compatibility adapter, limits and device evidence contract.
 
 ## Commands
 
-`bun tools/place.ts inspect|export|import|check|cook|build|report|recipe|profiles`
+`bun tools/place.ts inspect|export|import|check|cook|build|report|explain|recipe|profiles`
 is the Atlas creator entry point. The Rust commands below remain available for
 CI and callers that already have sealed inputs.
 
@@ -177,9 +183,51 @@ cargo run --locked --release -p pocket3d-place-cook -- \
   --out .pocket-build/validation/tokyo.3ds.place --json
 ```
 
+Recipe revision 2 executes typed functions under `analysis/`, with declared
+input/output types, pass versions and dependency order checked before execution:
+
+```text
+read-source -> select-geometry -> resolve-materials -> texture-sampling
+ -> solid-pbr-palette (Vita only) -> reduce-geometry -> sample-motion
+ -> scene-lighting -> bake-lighting -> chunk-and-lod -> scene-effects
+ -> target-lowering -> structural-budgets
+```
+
+This is an internal staged compiler, not a runtime pass/plugin registry.
+`Source`, `GeometryPlan`, `Resolved`, `Motion`, `Lighting`, `Baked`, `Geometry`
+and `Scene` keep explicit typed boundaries. Target policy remains visible.
+Custom profiles must migrate to recipe revision 2 explicitly.
+
+Geometry selection runs before instance expansion or Web batching can erase
+intent. `reduce-geometry` applies the smaller of authored and target role
+budgets, locks open borders, leaves skins/text/emission/glass topology alone and
+carries base error into later LOD errors. Authored alternative error bounds are
+reviewed declarations, not automatically certified geometry distances. See
+[the intent contract](AUTHORING.md#intents-recipes-and-diagnostics).
+
+PICA compacts exact encoded 24-byte vertices and index sequences, removes UVs
+only when no target texture unit consumes them, and interns rigid transforms
+only when their complete sampled timelines match. Static u16 batch boundaries
+and separate skin weights remain valid. No camera-specific deletion or shortened
+train loop is used. Shared commuter surface geometry is an authored source
+alternative selected by the profile, not a scene-ID branch.
+
+The expensive per-primitive lighting/refinement pass uses a disposable binary
+cache. Its SHA-256 key includes all sealed inputs, the complete effective profile,
+cell size, compiler/Rust source identity, host OS/architecture and cache/pass
+version. Checked payloads preserve float bits and reject corruption, invalid
+indices and nonfinite vertices. Writes use atomic rename. `--cache off` is the
+uncached oracle; default cache storage is `.pocket-build/cache/compiler`.
+`--telemetry PATH` writes timing/cache state separately, so cold/warm/off cooks
+produce identical packs and deterministic receipts. Cache invalidation is
+conservative across the whole source closure, rather than per edited object.
+
 Recipes expose named/versioned executed passes and GPU-specific decisions.
 Reports retain material/object contributor sets through batching and map output
-textures to source textures. These are material contributor sets, not exact
+textures to source textures. `bun tools/place.ts explain --in REPORT --top 12`
+also aggregates object contributor sets at `reduce-geometry`. It reports source
+vertex/triangle costs, not packed byte attribution or predicted milliseconds.
+These are material contributor sets, not exact
 per-triangle or TypeScript-line attribution.
 
 Every successful cook writes `<output-stem>.compile.json`; `--report` selects

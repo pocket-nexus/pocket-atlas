@@ -63,14 +63,14 @@ export class DayStage extends PlaceStage<DayWorld, DayAudio> {
     await progress(0.04, "Preparing daylight materials");
     this.baker = new Baker(renderer);
     const lib = new DayLib(this.baker, quality); lib.bakeAll();
-    this.world = new DayWorld(lib, new Atlas(1024, { pad: 2 }), quality, this.ctx.authoring?.seed ?? 20160826, this.ctx.params.geometry);
+    this.world = new DayWorld(lib, new Atlas(1024, { pad: 2 }), quality, this.ctx.authoring?.seed ?? 20160826, this.ctx.params.geometry, this.ctx.params.exporting);
     await progress(0.16, "Growing clouds");
     this.clouds = bakeClouds(this.baker, s.sunDirection);
     await s.build(this.world, progress);
     this.sky = buildSky(this.world, s.sunDirection, this.clouds);
     this.addLights();
     await progress(0.74, "Batching geometry");
-    const stats = batchStatic(this.world.root);
+    const stats = batchStatic(this.world.root, { preserveObjects: this.ctx.params.exporting });
     console.info(`[${this.place.id}] batched ${stats.before} meshes into ${stats.after}`);
     this.scene.add(this.world.root);
     await progress(0.84, "Capturing the sky");
