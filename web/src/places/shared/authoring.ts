@@ -89,6 +89,15 @@ type DayInput = Omit<DayPlace, "audio" | "loopSeconds"> & Omit<Input, "create" |
 /** Atlas daylight definition; importing it creates neither GPU nor audio resources. */
 export function defineDayPlace(input: DayInput): PlaceDefinition {
   if (!input.kind.startsWith("daytime-")) throw new Error("DayStage requires a daytime place kind");
+  return defineOutdoorPlace(input);
+}
+
+/** Day and dusk streets/coasts share PBR, sky, baking and the same runtime lifecycle. */
+export function defineOutdoorPlace(input: DayInput): PlaceDefinition {
+  const daytime = input.kind.startsWith("daytime-");
+  const dusk = input.kind === "dusk-street" || input.kind === "dusk-coast";
+  if (!daytime && !dusk) throw new Error("Outdoor stage requires a daytime or dusk street/coast kind");
+  if (dusk && !input.atmosphere) throw new Error("Dusk places require an explicit atmosphere");
   return definePlace({ ...input, cameras: input.shots, async create(ctx, place, progress) {
     const { DayStage } = await import("./daylight/DayStage");
     return DayStage.create(ctx, place, progress, { ...input, audio: ctx.params.exporting ? undefined : input.createAudio?.(ctx) });

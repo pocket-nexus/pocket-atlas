@@ -23,6 +23,25 @@ The web app exports glTF 2.0 with `extras.pocketAtlas`. The cooker seals a lossl
 | Sangubashi in Bloom | `sangubashi-crossing` | Yoyogi, Tokyo (参宮橋３号踏切) | spring foliage, animated petals, an eight-car commuter train, synchronised barriers and moving sunlight shadows; Vita picture quality accepted; recorded frame-rate limits documented |
 | Griffith Observatory at Blue Hour | `griffith-observatory` | Mount Hollywood, Los Angeles, over the basin (September 2015) | light fields of GXM point sprites (52k city lights, 5k moving), height haze with an inversion layer to a 71 km horizon, floodlit masonry baked into vertices, parallax windows, a resolution boost to 640×362 |
 | Lombard Street in Bloom | `sf-lombard-street` | Hyde to Leavenworth, Russian Hill, San Francisco | eight surveyed switchbacks, stepped footways, red brick paving, hydrangeas and bougainvillea, bay-window houses, a clear daytime sky, a Waymo I-PACE, a Tesla Cybercab and three visitors in a 120 s loop; shared daylight adaptation for PSP |
+| Fisherman's Wharf | `sf-fishermans-wharf` | Jefferson/Taylor, San Francisco, present day | OSM shoreline and pier footprints, fishing fleet, Pier 43 arch, crab wheel, SkyStar, maritime fittings and shared Fresnel water in a 120 s loop |
+| Shanghai Bund, 1920 | `shanghai-bund-1920` | The old Customs House and Huangpu landings, Shanghai | period brick and stone facades, the 1893 clocktower, pre-1923 HSBC, river traffic and shared river water; dimensions checked against the 1920 Shanghai handbook |
+| Chungking Mansions, 1990 | `hk-chungking-mansions-1990` | Nathan Road, Tsim Sha Tsui, Hong Kong | original concrete frontage, recessed windows and air conditioners, projecting signs, shopping arcade and lightwell, period traffic; shared dusk lighting and baked shop lights |
+
+**DO NOT MERGE — visual acceptance failed (2026-10-04).** The user rejected
+the Vita appearance of these three experimental additions. They are retained
+on this branch for inspection only; host tests and performance receipts do not
+override that verdict. Further tuning and packaging stopped at the user’s request.
+
+The three waterfront/historic additions target Vita. Their source notes live with
+the scenes: [Fisherman's Wharf](web/src/places/sf-fishermans-wharf/README.md),
+[the Bund](web/src/places/shanghai-bund-1920/README.md), and
+[Chungking Mansions](web/src/places/hk-chungking-mansions-1990/README.md).
+Historical reconstructions distinguish dated evidence from estimates: the Bund
+uses the early-1920 streetscape before its major replacements; Chungking's
+near-period photographs establish its old exterior, while undocumented shop
+fitouts and exact tenant identities are not asserted as a 1990 survey.
+Raw references, image attribution manifests and validation outputs stay in
+`.pocket-build/`. Host builds and web previews do not establish device acceptance.
 
 Real places fall into a finite set of kinds; the registry names them (`PlaceKind` in `web/src/core/types.ts`): `night-street`, `daytime-slope`, `dusk-street`, `daytime-coast`, `daytime-street`, `dusk-vista` for the places built so far, and `night-slope`, `dusk-coast`, `night-coast`, `interior` and `rooftop` for the places still to come. Each first-party place brings its kind's rendering to the best quality the handheld holds, and the work goes into the shared renderer and cooker so later places of the same kind reuse it. Glass (`places/shared/glass.ts`) blends premultiplied on the web as on the device. The workflow and quality bar for making a place are in the `pocket-atlas-place` skill (`.claude/skills/pocket-atlas-place/`).
 

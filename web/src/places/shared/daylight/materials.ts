@@ -3,6 +3,7 @@ import type { Quality } from "../../../core/quality";
 import type { Baker, SurfaceMaps } from "../bake";
 import * as SURF from "./surfaces";
 import { glassMaterial } from "../glass";
+import { bakeWaveNormals, createWater, type Water, type WaterSpec } from "../water";
 
 export type Tint = [number, number, number];
 
@@ -24,7 +25,7 @@ function withMaps(maps: SurfaceMaps, params: ConstructorParameters<typeof MeshSt
  * Materials for a dry daytime place. Every surface is a MeshStandardMaterial
  * with baked albedo / normal / ORM maps (R = occlusion, G = roughness,
  * B = metalness), tinted per use through `color`; cut-outs use `alphaTest`.
- * Nothing patches the shaders, so the cooker reads them as plain glTF PBR.
+ * Solid surfaces export as plain glTF PBR; water uses the shared coastal contract.
  */
 export class DayLib {
   private baker: Baker;
@@ -69,6 +70,11 @@ export class DayLib {
     this.surf("rubble", SURF.RUBBLE, 1024, 2.4, 3.5);
     this.surf("form", SURF.FORM_CONCRETE, 1024, 3.6, 1.2);
     this.surf("asphalt", SURF.ASPHALT, 1024, 4, 2);
+  }
+
+  /** The same wave/PBR contract as the native coast renderer, baked by this world's baker. */
+  water(spec: WaterSpec, options: Parameters<typeof bakeWaveNormals>[1] = {}): Water {
+    return createWater(spec, bakeWaveNormals(this.baker, options));
   }
 
   // ------------------------------------------------------------ stone
@@ -180,6 +186,16 @@ export class DayLib {
   }
 
   // -------------------------------------------------------- buildings
+
+  /** Fired wall brick with 230 × 75 mm courses and grey mortar; UVs are metres. */
+  brickWall(hex = 0x89513e): MeshStandardMaterial {
+    return this.memo(`brick-wall-${hex.toString(16)}`, () => {
+      const color = new Color(hex);
+      const maps = this.surf(`brick-wall-${hex.toString(16)}`, SURF.brickWallSurface([color.r, color.g, color.b]), 1024, 1, 0.9);
+      for (const texture of [maps.map, maps.normalMap, maps.ormMap]) texture.repeat.set(1 / 1.84, 1 / 1.8);
+      return withMaps(maps, { normalScale: new Vector2(0.8, 0.8) });
+    });
+  }
 
   siding(hex: number): MeshStandardMaterial {
     return this.memo(`siding-${hex.toString(16)}`, () => withMaps(this.surf("siding", SURF.SIDING, 512, 1, 2), { color: new Color(hex).multiplyScalar(0.92) }));

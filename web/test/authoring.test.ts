@@ -1,10 +1,12 @@
 import { expect, test } from "bun:test";
-import { BoxGeometry, Group, Mesh, MeshStandardMaterial, Vector3 } from "three";
-import { createDefinedStage, defineDayPlace, definePlace, describePlace, resolveAuthoring, validateSampling } from "../src/places/shared/authoring";
+import { BoxGeometry, Color, Group, Mesh, MeshStandardMaterial, Vector3 } from "three";
+import { createDefinedStage, defineDayPlace, defineOutdoorPlace, definePlace, describePlace, resolveAuthoring, validateSampling } from "../src/places/shared/authoring";
 import { identifySources, source, sourceIds } from "../src/places/shared/provenance";
 import { batchStatic } from "../src/places/shared/geo";
 import { PLACES } from "../src/places/registry";
 import type { PlaceDef, Stage, StageContext } from "../src/core/types";
+import { definition as outdoorExample } from "../examples/day-place";
+import type { OutdoorAtmosphere } from "../src/places/shared/daylight/DayStage";
 
 const sampling = { startSeconds: 0, durationSeconds: 64, fps: 15 };
 const make = () => definePlace({ id: "test-place", kind: "night-street", seed: 10, sampling,
@@ -78,4 +80,27 @@ test("batching keeps semantic contributors and stable IDs independent of Three o
   expect(build()).toBe(first);
   const root = new Group(); root.add(source("same", new Group()), source("same", new Group()));
   expect(() => identifySources(root)).toThrow("Duplicate");
+});
+
+test("outdoor family requires an authored dusk atmosphere and does not accept unsupported night or vista effects", () => {
+  // The example definition retains its authored data but constructs no browser resources.
+  const base = outdoorExample as unknown as Parameters<typeof defineOutdoorPlace>[0];
+  const atmosphere: OutdoorAtmosphere = {
+    sky: { zenith: new Color(0.01, 0.02, 0.06), horizon: new Color(0.1, 0.1, 0.2), ground: new Color(0.02, 0.02, 0.02),
+      gradientPower: 0.5, groundBlend: 6, sun: new Vector3(1, -0.1, 0).normalize(), sunColor: new Color(1, 0.4, 0.1),
+      glow: { intensity: 0.2, wide: [0.3, 8], tight: [1, 36] } },
+    hemisphere: { sky: new Color(0.1, 0.15, 0.2), ground: new Color(0.05, 0.04, 0.03), intensity: 0.5 },
+    post: { tone: "agx", ao: { radius: 1, intensity: 2, color: [0, 0, 0] },
+      bloom: { threshold: 1, smoothing: 0.4, intensity: 0.7, radius: 0.7, levels: 7 },
+      grade: { grain: 0, vignette: 0.2, lift: [0, 0, 0], gain: [1, 1, 1], saturation: 1, contrast: 1 } },
+  };
+  for (const kind of ["dusk-street", "dusk-coast"] as const) {
+    expect(() => defineOutdoorPlace({ ...base, kind })).toThrow("explicit atmosphere");
+    const place = defineOutdoorPlace({ ...base, kind, atmosphere, sunIntensity: 0 });
+    expect(describePlace(place).kind).toBe(kind);
+    expect(describePlace(place).cameras?.length).toBe(1);
+    expect(() => defineDayPlace({ ...base, kind, atmosphere })).toThrow("daytime");
+  }
+  for (const kind of ["night-street", "dusk-vista", "interior"] as const)
+    expect(() => defineOutdoorPlace({ ...base, kind, atmosphere })).toThrow("daytime or dusk");
 });

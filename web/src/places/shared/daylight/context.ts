@@ -6,6 +6,7 @@ import type { Atlas, AtlasRect } from "../atlas";
 import type { Ctx } from "../canvas";
 import type { ExportFogLight } from "../export";
 import type { DayLib } from "./materials";
+import type { Water, WaterSpec, bakeWaveNormals } from "../water";
 
 export type Updater = (dt: number, t: number) => void;
 
@@ -62,5 +63,12 @@ export class DayWorld {
 
   update(fn: Updater): void {
     this.updaters.push(fn);
+  }
+
+  /** Shared coastal water; its clock is sampled with the rest of the place. */
+  water(spec: WaterSpec, options?: Parameters<typeof bakeWaveNormals>[1]): Water {
+    const water = this.lib.water(spec, options);
+    this.update((_dt, time) => water.update(time));
+    return water;
   }
 }

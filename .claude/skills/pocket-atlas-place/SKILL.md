@@ -26,6 +26,20 @@ A place is one real spot, recreated faithfully enough that someone who has stood
 
 ## Quality bar
 
+Reuse `defineDayPlace`/`defineOutdoorPlace` and the shared stage for day and dusk
+streets/coasts instead of adding a local stage subclass. Dusk supplies an
+explicit `atmosphere` (sky, hemisphere, post); a sun below the horizon does not
+create a shadow pass. `world.water()` uses the shared coastal model and
+registers its clock. Each UV layer must advance whole texture periods per loop.
+Use `shared/geo.ts` metre-UV boxes/planes for physical surface density.
+See `docs/AUTHORING.md`.
+
+For a dated reconstruction, distinguish exact-year evidence from nearby years
+and contested archive dates. Maintain an inclusion/exclusion chronology in the
+scene's source notes; a modern OSM footprint does not establish an old facade
+or tenant roster. Keep the source bibliography with the scene and the raw
+photos/manifests under `.pocket-build/research/<id>`.
+
 - **Surfaces**: procedural PBR baked on the GPU (`shared/bake.ts`; the konbini's `gfx/surfaces.ts` asphalt is the reference: aggregate, binder, patches, sealed cracks, grime, wear) with normal and ORM maps; colours sampled from the photos and checked numerically (lit and shaded asphalt, walls, paint, sea, sky).
 - **Relief where the camera is**: on the Vita, normal and ORM maps only apply within the detail distance (4–8 m), so window reveals, sills, balconies, railings and equipment near viewpoints are geometry; texel density per storey, not one texture stretched over a wall.
 - **Planting**: alpha-tested leaf cards with leaf textures in clusters (cycads, palms, shrubs, hedges, grass) — never single blobs.
