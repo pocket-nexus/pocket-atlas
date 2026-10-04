@@ -12,18 +12,23 @@ bun tools/atlas-psp.ts package --place sf-lombard-street
 ```
 
 The standalone package contains `EBOOT.PBP` and `scene.place`. The latter is
-**PLPS version 3**, separate from the Vita and PICA formats. Older packs
-must be re-cooked with this checkout. The 144-byte header and camera-table
-offset are retained. Each texture record now declares RGBA4444 or RGBA8888;
-validation checks every mip span using its actual bytes per pixel. All sky pointers, texture references, GE counts,
+**PLPS version 4**, separate from the Vita and PICA formats. Older packs
+must be re-cooked with this checkout. The header is 164 bytes; its camera-table
+span remains at byte 48. It combines the bounded `sky_vertices` span with
+separate sky/cloud textures, cloud drift, LOD tolerance and an optional audio
+record. Each texture record declares RGBA4444 or RGBA8888; validation checks
+every mip span using its actual bytes per pixel. All sky pointers, texture references, GE counts,
 finite coordinates, unit directions and UV bounds are validated before use.
 
 ## Daylight adaptation
 
-- The authored sky, sun disc/glow, cloud panorama, exposure and colour grade
-  become one 512 × 256 swizzled RGBA8888 panorama. A unit dome follows camera
-  position, retaining its world orientation. Eight-bit colour avoids the
-  magnified checkerboard caused by ordered four-bit dither. Sky is drawn once, before scene depth, and is included in telemetry.
+- The authored sky, sun disc/glow, exposure and colour grade become a
+  512 × 256 swizzled RGBA8888 panorama. An optional second panorama stores
+  premultiplied clouds and drifts with the authored scene clock. A cooked
+  32 × 16 unit dome follows camera position at a 100 m radius, retaining its
+  world orientation. Eight-bit colour avoids the magnified checkerboard caused
+  by ordered four-bit dither. Both layers draw before scene depth and are
+  included in telemetry.
 - Directional sunlight joins the ambient/sky-occlusion bake **before** adaptive
   refinement and LOD selection, so the simplifier sees its lighting boundaries.
   A BVH tests static opaque casters; cutout foliage uses partial occlusion.
@@ -54,15 +59,49 @@ finite coordinates, unit directions and UV bounds are validated before use.
   limit remains enforced. The full authored grade is baked into daylight
   colours; GE still multiplies texture and vertex colours in display space.
 - Daytime kinds disable rain, rain audio, lamp halos and planar wet-road
-  reflections. Controls and telemetry reflect the effects actually present.
-  The night-street effect set and legacy grade remain available.
+  reflections. A scene's optional procedural audio recipe remains active.
+  Controls and telemetry reflect the effects actually present. The night-street
+  effect set and legacy grade remain available.
 
-Clouds are fixed at their authored phase; cloud drift, HDR/PBR, normal maps,
-dynamic per-pixel lighting and bloom remain outside this GE adaptation.
-Sky costs 1,024 triangles, one draw and roughly 584 KiB of pack storage.
+HDR/PBR, normal maps, dynamic per-pixel lighting and bloom remain outside this
+GE adaptation. Sky costs 1,024 triangles per layer, one draw per layer and
+72 KiB of shared mesh storage; each sky/cloud panorama adds 512 KiB, excluding
+record/alignment overhead.
 Vehicle glazing uses shared open-frame geometry; no closed painted cabin face
 sits behind a pane. This removes depth competition at the source for every
 backend rather than depending on a PSP-only depth bias.
+
+## Motion, depth and audio
+
+Native tracks retain every sample in the authored interval, including
+Sangubashi's 960 samples over 64 seconds. Compact translation/quaternion tracks
+share constant and identical data; normalized shortest-arc quaternion
+interpolation preserves rigid shape. Source node scales and skeletal joint
+tracks remain intact. Skinned vertices retain float positions; rigid batches
+use packed 16-bit positions only when they meet the recipe's error bound.
+Camera-distance LOD and shared vertex/index buffers retain nearby equipment
+while limiting distant submission. Unused UVs in untextured batches are
+canonicalized before welding; sampled texture coordinates are preserved.
+
+GE drops a whole triangle when a projected corner is outside its 0–4096
+viewport range, even after near-plane clipping. The renderer clips risky
+triangles before submission in their original 3D frame, interpolating colour
+and UVs while preserving winding and draw order. Safe triangles keep resident
+indices. Local 16-triangle block bounds skip safe ranges; the cache is bounded
+at 256 KiB and falls back to scanning when full. Scratch vertices remain alive
+until GE completion. This handles long roofs and other near-camera surfaces
+without a scene-specific branch, two-sided material workaround or near-plane
+change.
+
+Shared house/vehicle geometry cuts actual window openings so panes have no
+hidden opaque backing. Intentional signs and labels use explicit polygon-offset
+decals; the runtime does not apply a global depth bias to conceal intersections.
+
+The optional 128-byte audio record describes procedural wind, birds and railway
+warning/train sounds. Synthesis follows the scene clock and camera position,
+handles seek, pause and Circle mute, and stops when leaving the scene. It uses
+no sampled film soundtrack. `audioReady` reports mixer initialization, not a
+listening check. Night-street rain and door sounds retain their own behavior.
 
 ## Validation
 
@@ -81,3 +120,12 @@ every authored camera through `bun tools/atlas-psp.ts shots --place <id>`;
 keep capture/transfer windows outside timing samples. `gpuWaitMs` is the GE
 wait remaining after CPU submission, not serialized GPU timing. Host tests
 and cross-compilation do not establish on-device fidelity or frame budgets.
+
+Existing hardware captures and timings, including Sangubashi's documented
+roof/window fixes, belong to their recorded pre-integration build and pack.
+They do not establish fidelity or frame budgets for the merged PLPS v4
+application; fresh export/cook and physical checks are required for that claim.
+
+Use `package --no-build` after validating a running release to package the exact
+staged PRX/EBOOT identity. Without it, packaging creates a fresh runtime build.
+The tool verifies the selected place, pack and EBOOT against the build receipt.

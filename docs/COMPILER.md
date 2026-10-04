@@ -35,9 +35,12 @@ It contains no device version, byte ranges or GPU vertex layouts.
 readers re-export those types for compatibility. `analysis.rs` applies scene
 passes, while `vita.rs`, `pica.rs` and `psp.rs` own their encodings. `main.rs`
 handles the CLI. The analysis representation is not a serialized interchange
-format or a shared scene language for OpenStrike. Vita uses PLCE/ATLS v7 and META v7. PICA pins its PLCE envelope to v5 and
-its binary table to v3 independently. PSP uses PLPS v3 with explicit texture
-precision; all packs require their matching target readers.
+format or a shared scene language for OpenStrike. Vita uses PLCE/ATLS v7 and
+META v7. PICA independently pins its PLCE envelope to v5 and its binary table
+to v4. PSP uses PLPS v4, combining explicit texture precision, a bounded sky
+mesh, compact full-loop animation, LOD selection and optional audio. Native
+runtimes reject older layouts; re-cook each affected target when updating the
+application. All packs require their matching target readers.
 Previously a Vita version bump leaked into PICA output and the C reader rejected
 it; the integration test now checks cooked output using the runtime's C format
 header and header validator.
@@ -125,14 +128,14 @@ need device headroom measurements.
 
 `check --target` rejects known missing lowerings before cooking. Currently
 PICA/GE reject city-light fields and vista height haze. GE also rejects water
-and kinds outside night streets and dry daytime
-streets/slopes. Its shared daytime lowering bakes the sky and sun from the IR.
-The GE analysis includes static sunlight before refinement/LOD, with an explicit
-transient `baked_sun` marker to avoid applying it twice. Its contact guard and
-intact source-window overlays are native sampling policies; the authored IR and
-Vita/PICA sunlight paths remain independent (see `psp/README.md`).
-PLPS v3 records per-texture precision (RGBA8888 gradients/glossy maps, compact
-RGBA4444 for other surfaces) and a bounded sky mesh. It does not
+and kinds outside night streets and dry daytime streets/slopes. Its shared
+daytime lowering bakes the sky and sun from the IR, with a separate drifting
+cloud layer. GE analysis includes static sunlight before refinement/LOD, with
+an explicit transient `baked_sun` marker to avoid applying it twice. Its
+contact guard and intact source-window overlays are native sampling policies;
+the authored IR and Vita/PICA sunlight paths remain independent (see
+`psp/README.md`). PLPS v4 records per-texture precision: RGBA8888 for sky/cloud
+gradients and glossy daytime maps, RGBA4444 for compact surface maps. It does not
 silently treat light-field point records as triangle records. Unsupported
 material annotations fail rather than falling back to a standard material.
 This is an initial capability gate, not an exhaustive Three.js feature checker.
@@ -147,9 +150,9 @@ A successful cook establishes asset construction and structural checks. A host
 build establishes binding/link compatibility. Console launch, SceShaccCg
 compilation, scene switching, visual fidelity and measured frame budgets are
 separate checks. The earlier PlaceIR migration changed PICA/GE output to retain source precision
-and avoid the BC round trip. This typed-analysis refactor preserves the current
-pack bytes for sealed regression inputs. Measurements still belong to the exact
-asset and runtime identities tested.
+and avoid the BC round trip. Format and recipe changes require fresh target
+cooks and validation. Measurements still belong to the exact asset and runtime
+identities tested; pre-integration results do not certify merged builds.
 
 The regression test `tests/pipeline.rs` imports a small textured scene, deletes
 the web export, compiles PSP and PICA before Vita, validates the PSP payload,
@@ -198,6 +201,37 @@ the installed runtime build, device, camera/quality settings, measured frame
 windows and captures. A section-size check does not prove combined allocation
 headroom, visual fidelity or a frame-time bound. No device certificate is
 inferred from a successful compile.
+
+Native animation formats retain full authored loop samples while deduplicating
+constant and identical tracks. PICA v4 stores compact TRS tracks with quaternion
+interpolation and an affine fallback. PLPS v4 uses its own compact tracks and GE
+vertex layouts, with measured position error recorded in compile receipts.
+These encodings are chosen from source floats by each backend, never from Vita
+vertices or animation bytes.
+
+`psp30` revision 2 makes its geometry recipe explicit: dry daytime streets/slopes use
+8 m static cells, a 1 pixel LOD error, at most 5 mm packed vertex position
+error, 0.25 texel UV error and 6 mm packed translation error. An explicit
+`--cell` overrides the cell recipe; other targets and night streets retain
+their own existing policy. These are acceptance limits for an encoding, not
+promises that every batch is quantized: oversized or stricter inputs retain
+source float data. Empty LODs with a positive error intentionally omit
+subpixel parts; they must not fall back to full geometry.
+
+PSP runtime clipping handles triangles whose projected vertices leave the
+GE's 0–4096 guard range, including faces crossing the near plane. It preserves
+winding, attributes and draw order; safe geometry keeps its resident indices.
+Bounded local block caches accelerate the test without changing the compiled
+mesh or depending on a particular camera. Source window openings remove
+hidden competing faces across all targets, while explicit polygon-offset
+decals preserve intentional overlays. Neither is a global depth-bias workaround.
+
+Optional `extras.pocketAtlas.audio` v1 describes procedural wind, birds and a
+railway pass. Typed analysis validates its timing and gains; native lowerings
+store a small parameter record, not sampled PCM. The native mixers follow the
+scene clock and camera, silence paused or muted playback, and restart envelopes
+on seeks. Audio initialization and a person's listening check remain distinct
+from a successful cook or host synthesis test.
 
 Backends return complete artifacts to the CLI. Profile and reader checks run
 before publication; a rejected budget leaves an existing output pack and its

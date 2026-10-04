@@ -2,6 +2,10 @@
 #include <pocket_pica.h>
 #include "devserver.h"
 #include "navigation.h"
+#include "animation.h"
+#include "skin_bounds.h"
+#include "frustum.h"
+#include "audio.h"
 #include "scene_shbin.h"
 #include "water_shbin.h"
 #include "wet_shbin.h"
@@ -41,6 +45,8 @@ static uint8_t *table, *geometry;
 static float *animation, *matrices;
 static C3D_Tex *textures, white, glow;
 static AtlasVertex **skin_vertices, **skin_back;
+static AtlasJointBound *skin_boxes[4096];
+static unsigned skin_box_count[4096];
 static DVLB_s *dvlb;
 static shaderProgram_s shader;
 static DVLB_s *wet_dvlb;
@@ -55,6 +61,7 @@ static shaderProgram_s water_shader;
 static int uv_loc, wet_uv_loc, water_eye_loc, water_sky_loc, water_params_loc,
     waves0_loc, waves1_loc;
 static bool glow_enabled = true, hud_enabled = true;
+static bool audio_muted;
 static float exposure_ev, exposure_gain = 1;
 static bool hud_first = true, hud_last_connected;
 static int hud_previous_shot = -1;
@@ -193,13 +200,20 @@ bool scene_load(const char *path, const char *expected_sha256, char *error, size
     return false;
   }
   // Verify the opened content-addressed asset, not just its filename and size.
+  send_progress("Verifying place SHA-256");
   mbedtls_sha256_context hash;
   mbedtls_sha256_init(&hash);
   bool valid = mbedtls_sha256_starts_ret(&hash, 0) == 0;
   unsigned char buffer[4096], digest[32];
-  size_t n;
-  while (valid && (n = fread(buffer, 1, sizeof buffer, file)) != 0)
+  size_t n, since_poll = 0;
+  while (valid && (n = fread(buffer, 1, sizeof buffer, file)) != 0) {
     valid = mbedtls_sha256_update_ret(&hash, buffer, n) == 0;
+    since_poll += n;
+    if (since_poll >= 64 * 1024) {
+      devserver_poll();
+      since_poll = 0;
+    }
+  }
   valid = valid && !ferror(file) && mbedtls_sha256_finish_ret(&hash, digest) == 0;
   mbedtls_sha256_free(&hash);
   char actual[65];
@@ -210,42 +224,65 @@ bool scene_load(const char *path, const char *expected_sha256, char *error, size
     return false;
   }
   rewind(file);
-  uint32_t header[4], sect[5][4];
+  uint32_t header[4], sect[6][4];
   long length;
   fseek(file, 0, SEEK_END);
   length = ftell(file);
   if (!read_at(file, 0, header, sizeof header) || !atlas_pack_header_valid(header) ||
-      !read_at(file, 16, sect, sizeof sect)) {
+      !read_at(file, 16, sect, header[2] * sizeof sect[0])) {
     snprintf(error, capacity, "invalid PLCE header");
     fclose(file);
     return false;
   }
-  uint32_t po = 0, ps = 0, to = 0, ts = 0, go = 0, gs = 0, ao = 0, as = 0;
-  for (unsigned i = 0; i < 5; i++) {
-    if (!range(sect[i][1], sect[i][2], length)) {
+  uint32_t po = 0, ps = 0, to = 0, ts = 0, go = 0, gs = 0, ao = 0, as = 0,
+           sound_offset = 0, sound_size = 0, seen_sections = 0;
+  float sound[32];
+  for (unsigned i = 0; i < header[2]; i++) {
+    if (sect[i][1] < 16 + header[2] * 16 || !range(sect[i][1], sect[i][2], length)) {
       snprintf(error, capacity, "section beyond file");
       fclose(file);
       return false;
     }
+    unsigned section_bit;
     switch (sect[i][0]) {
+    case 0x4154454d:
+      section_bit = 1;
+      break;
     case 0x41434950:
+      section_bit = 2;
       po = sect[i][1];
       ps = sect[i][2];
       break;
     case 0x44584554:
+      section_bit = 4;
       to = sect[i][1];
       ts = sect[i][2];
       break;
     case 0x4d4f4547:
+      section_bit = 8;
       go = sect[i][1];
       gs = sect[i][2];
       break;
     case 0x4d494e41:
+      section_bit = 16;
       ao = sect[i][1];
       as = sect[i][2];
       break;
+    case 0x49445541:
+      section_bit = 32;
+      sound_offset = sect[i][1];
+      sound_size = sect[i][2];
+      if (sound_size != sizeof sound) goto invalid;
+      break;
+    default:
+      goto invalid;
     }
+    if (seen_sections & section_bit) goto invalid;
+    seen_sections |= section_bit;
   }
+  if (seen_sections != (header[2] == 6 ? 63u : 31u) ||
+      (sound_size && !read_at(file, sound_offset, sound, sizeof sound)))
+    goto invalid;
   if (ps < sizeof(AtlasHeader) || ps > 4 * 1024 * 1024 ||
       gs > 24 * 1024 * 1024 || ts > 12 * 1024 * 1024 || as > 16 * 1024 * 1024)
     goto invalid;
@@ -264,7 +301,8 @@ bool scene_load(const char *path, const char *expected_sha256, char *error, size
       candidate->textures > 512 || candidate->shots == 0 ||
       candidate->shots > 32 || candidate->matrices > 2048 ||
       !candidate->frames ||
-      (uint64_t)candidate->matrices * candidate->frames * 48 > as)
+      !isfinite(candidate->fps) || candidate->fps <= 0 ||
+      (uint64_t)candidate->matrices * sizeof(AtlasAnimation) > as)
     goto invalid;
   head = candidate;
   apply_lod_floor();
@@ -286,8 +324,10 @@ bool scene_load(const char *path, const char *expected_sha256, char *error, size
       !textures || !read_at(file, go, geometry, gs) ||
       !read_at(file, ao, animation, as))
     goto invalid;
-  if (head->matrices)
-    memcpy(matrices, animation, head->matrices * 48);
+  if (!atlas_animation_valid(animation, as, head->matrices, head->frames))
+    goto invalid;
+  for (unsigned i = 0; i < head->matrices; ++i)
+    atlas_animation_sample(animation, i, 0, 0, 0, matrices + i * 12);
   for (unsigned i = 0; i < head->draws; i++) {
     AtlasDraw *d = &draws[i];
     if (d->count > 65536 || d->material >= head->materials ||
@@ -331,6 +371,9 @@ bool scene_load(const char *path, const char *expected_sha256, char *error, size
         for (unsigned k = 0; k < 4; k++)
           if (w[j].joint[k] >= head->matrices)
             goto invalid;
+      if (!atlas_skin_bounds_build(verts, w, d->count, head->matrices,
+                                   &skin_boxes[i], &skin_box_count[i]))
+        goto invalid;
       skin_vertices[i] = linearAlloc(d->count * sizeof(AtlasVertex));
       skin_back[i] = linearAlloc(d->count * sizeof(AtlasVertex));
       if (!skin_vertices[i] || !skin_back[i])
@@ -529,6 +572,8 @@ bool scene_load(const char *path, const char *expected_sha256, char *error, size
     atlas.cinematic = true;
     free_camera();
   }
+  if (!atlas_audio_load(sound_size ? sound : NULL, sound_size ? 32 : 0))
+    goto invalid;
   return true;
 invalid:
   snprintf(error, capacity,
@@ -571,6 +616,7 @@ void scene_settings_get(AtlasSettings *s) {
                        .cinematic = atlas.cinematic,
                        .hud = hud_enabled,
                        .hold = atlas.hold,
+                       .muted = audio_muted,
                        .step = atlas.step,
                        .lod_floor = configured_lod_floor,
                        .exposure = exposure_ev};
@@ -581,6 +627,7 @@ void scene_settings_set(const AtlasSettings *s) {
   atlas.haze = s->haze;
   glow_enabled = s->glow;
   hud_enabled = s->hud;
+  audio_muted = s->muted;
   atlas.hold = s->hold;
   atlas.step = s->step > 4 ? 4 : s->step;
   configured_lod_floor = s->lod_floor > 3 ? 3 : s->lod_floor;
@@ -602,6 +649,7 @@ void scene_settings_reset(void) {
                      .cinematic = true,
                      .hud = true,
                      .hold = false,
+                     .muted = false,
                      .step = 4,
                      .lod_floor = 3,
                      .exposure = 0};
@@ -706,9 +754,16 @@ void scene_update(float dt, uint32_t down, uint32_t held) {
   float f = fmodf(atlas.time * head->fps, (float)head->frames);
   unsigned a = (unsigned)f, b = (a + 1) % head->frames;
   float k = f - a;
-  for (unsigned i = 0; i < head->matrices * 12; i++)
-    matrices[i] = animation[a * head->matrices * 12 + i] * (1 - k) +
-                  animation[b * head->matrices * 12 + i] * k;
+  for (unsigned i = 0; i < head->matrices; i++)
+    atlas_animation_sample(animation, i, a, b, k, matrices + i * 12);
+  float right[3] = {atlas.position[2] - atlas.target[2], 0,
+                    atlas.target[0] - atlas.position[0]};
+  float right_length = sqrtf(dot3(right, right));
+  if (right_length > 0.0001f) {
+    right[0] /= right_length;
+    right[2] /= right_length;
+  } else right[0] = 1;
+  atlas_audio_update(atlas.time, atlas.position, right, audio_muted, freeze_time >= 0);
   smooth_frame += (atlas.frame_ms - smooth_frame) * 0.05f;
   if (!atlas.hold && atlas.frame > 90) {
     float cost = fmaxf(atlas.gpu_ms, atlas.update_ms + atlas.prepare_ms) +
@@ -764,25 +819,16 @@ static float bounds(unsigned i, float *center) {
   float *extent = world_bounds[i] + 4;
   memcpy(extent, local_half[i], 12);
   if (d->skin != UINT32_MAX) {
-    const float *m = matrices + d->root * 12;
-    center[0] = m[3];
-    center[1] = m[7] + 0.9f;
-    center[2] = m[11];
-    radius = 2.3f;
-    extent[0] = extent[2] = 1.0f;
-    extent[1] = 1.3f;
+    radius = atlas_skin_bounds(skin_boxes[i], skin_box_count[i], matrices,
+                                center, extent);
   } else if (d->node != UINT32_MAX) {
     const float *m = matrices + d->node * 12;
     point(center, m, d->center);
-    float scale = 0;
-    for (int k = 0; k < 3; k++)
-      scale = fmaxf(scale, sqrtf(m[k] * m[k] + m[k + 4] * m[k + 4] +
-                                 m[k + 8] * m[k + 8]));
-    radius *= scale;
     for (int k = 0; k < 3; k++)
       extent[k] = fabsf(m[4 * k]) * local_half[i][0] +
                   fabsf(m[4 * k + 1]) * local_half[i][1] +
                   fabsf(m[4 * k + 2]) * local_half[i][2];
+    radius = sqrtf(dot3(extent, extent));
   } else
     memcpy(center, d->center, 12);
   return radius;
@@ -793,12 +839,11 @@ static bool visible(unsigned i, bool mirror, float *distance) {
   float r = world_bounds[i][3];
   if (mirror)
     c[1] = -c[1];
-  for (int p = 0; p < 6; p++)
-    if (dot3(planes[p], c) + planes[p][3] < -r)
-      return false;
+  const float *extent = world_bounds[i] + 4;
+  if (!atlas_aabb_visible(planes, c, extent))
+    return false;
   // Sphere distance becomes zero beside large street chunks. Nearest AABB
   // distance keeps their 6 cm / 25 cm LOD errors meaningful at screen scale.
-  const float *extent = world_bounds[i] + 4;
   float x = fmaxf(0, fabsf(c[0] - atlas.position[0]) - extent[0]);
   float y = fmaxf(0, fabsf(c[1] - atlas.position[1]) - extent[1]);
   float z = fmaxf(0, fabsf(c[2] - atlas.position[2]) - extent[2]);
@@ -1428,6 +1473,7 @@ void scene_control(const char *json) {
   boolean(json, "glow", &glow_enabled);
   boolean(json, "bloom", &glow_enabled);
   boolean(json, "hud", &hud_enabled);
+  boolean(json, "muted", &audio_muted);
   if ((s = field(json, "exposure"))) {
     float n = strtof(s, NULL);
     if (isfinite(n)) {
@@ -1460,7 +1506,8 @@ void scene_status(char *out, size_t capacity) {
       "\"culled\":%lu,\"reflection\":%s,\"rain\":%s,\"haze\":%s,\"position\":[%"
       ".3f,%.3f,%.3f],"
       "\"textureBytes\":%lu,\"geometryBytes\":%lu,\"animationBytes\":%lu,"
-      "\"linearFree\":%lu,"
+      "\"audioReady\":%s,\"audioStage\":\"%s\",\"audioResult\":%lu,\"audioErrno\":%d,"
+      "\"muted\":%s,\"linearFree\":%lu,"
       "\"vramFree\":%lu,\"measuredFrames\":%u,\"frameMean\":%.3f,\"frameP95\":%"
       ".3f,\"frameMax\":%.3f,\"workMax\":%.3f,\"inputLock\":%s,\"stick\":[%d,%"
       "d]}",
@@ -1477,6 +1524,9 @@ void scene_status(char *out, size_t capacity) {
       atlas.haze ? "true" : "false", atlas.position[0], atlas.position[1],
       atlas.position[2], (unsigned long)atlas.texture_bytes,
       (unsigned long)atlas.geom_bytes, (unsigned long)atlas.animation_bytes,
+      atlas_audio_ready() ? "true" : "false",
+      atlas_audio_stage(), (unsigned long)atlas_audio_result(), atlas_audio_errno(),
+      audio_muted ? "true" : "false",
       (unsigned long)linearSpaceFree(), (unsigned long)vramSpaceFree(),
       measured_frames, measured_frames ? measured_ms / measured_frames : 0,
       frame_percentile(.95f), measured_max, work_max,
@@ -1541,6 +1591,7 @@ void scene_hud(void) {
   hud_first = false;
 }
 void scene_free(void) {
+  atlas_audio_stop();
   // main parks the program and binds resident textures before releasing a
   // drawn scene. Citro3D's public TexBind API does not accept NULL.
   AtlasSettings saved;
@@ -1594,6 +1645,11 @@ void scene_free(void) {
   free(textures);
   free(skin_vertices);
   free(skin_back);
+  for (unsigned i = 0; i < 4096; ++i) {
+    free(skin_boxes[i]);
+    skin_boxes[i] = NULL;
+    skin_box_count[i] = 0;
+  }
   free(matrices);
   free(animation);
   free(table);

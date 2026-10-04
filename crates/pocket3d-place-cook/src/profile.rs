@@ -51,6 +51,29 @@ pub struct Recipe {
     pub animation_palette_bytes: u32,
     pub max_mesh_vertices: usize,
     pub max_field_points: usize,
+    /// PSP GE lowering limits; other targets never consume these settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub psp_geometry: Option<PspGeometry>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PspGeometry {
+    pub daytime_cell_meters: f32,
+    pub lod_pixels: f32,
+    pub vertex_position_error_meters: f32,
+    pub vertex_uv_error_texels: f32,
+    pub track_position_error_meters: f32,
+}
+impl Default for PspGeometry {
+    fn default() -> Self {
+        Self {
+            daytime_cell_meters: 8.0,
+            lod_pixels: 1.0,
+            vertex_position_error_meters: 0.005,
+            vertex_uv_error_texels: 0.25,
+            track_position_error_meters: 0.006,
+        }
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -101,6 +124,22 @@ impl Profile {
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-')
         {
             return Err("invalid profile id".into());
+        }
+        if let Some(p) = &self.recipe.psp_geometry {
+            if self.target != Target::Psp
+                || !p.lod_pixels.is_finite()
+                || !(0.0..=4.0).contains(&p.lod_pixels)
+                || !p.daytime_cell_meters.is_finite()
+                || !(4.0..=64.0).contains(&p.daytime_cell_meters)
+                || !p.vertex_position_error_meters.is_finite()
+                || !(0.0..=0.01).contains(&p.vertex_position_error_meters)
+                || !p.vertex_uv_error_texels.is_finite()
+                || !(0.0..=0.5).contains(&p.vertex_uv_error_texels)
+                || !p.track_position_error_meters.is_finite()
+                || !(0.0..=0.01).contains(&p.track_position_error_meters)
+            {
+                return Err("invalid PSP geometry error limits or target".into());
+            }
         }
         if self.host.os != base.host.os || self.host.abi != base.host.abi || self.gpu != base.gpu {
             return Err("profile cannot change a backend's host ABI or GPU implementation".into());
@@ -250,6 +289,22 @@ impl Profile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn psp_geometry_limits_cannot_leak_to_other_targets_or_accept_invalid_errors() {
+        let p = Profile::builtin(Target::Psp);
+        for value in [-0.001, f32::NAN, f32::INFINITY, 1.0] {
+            let mut bad = p.clone();
+            bad.recipe
+                .psp_geometry
+                .as_mut()
+                .unwrap()
+                .track_position_error_meters = value;
+            assert!(bad.validate().is_err());
+        }
+        let mut other = Profile::builtin(Target::Pica);
+        other.recipe.psp_geometry = p.recipe.psp_geometry;
+        assert!(other.validate().is_err());
+    }
     #[test]
     fn ge_surface_caps_follow_daylight_and_explicit_texture_intent() {
         use crate::source::TextureUsage as U;

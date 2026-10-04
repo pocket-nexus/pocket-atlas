@@ -44,6 +44,10 @@ function ring(width: number, height: number, radius: number, thickness: number, 
   return new ShapeGeometry(outer, segments);
 }
 
+function rectangleShape(x0: number, y0: number, x1: number, y1: number): Shape {
+  const s = new Shape(); s.moveTo(x0, y0); s.lineTo(x1, y0); s.lineTo(x1, y1); s.lineTo(x0, y1); s.closePath(); return s;
+}
+
 /** Parts are merged inside each car; articulated nodes and wheelsets stay separately animated. */
 export function commuter(w: DayWorld, spec: CommuterSpec) {
   const handheld = w.geometry === "handheld";
@@ -75,6 +79,13 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
   const cylinder = (r0: number, r1: number, height: number, sides: number) =>
     new CylinderGeometry(r0, r1, height, handheld ? Math.max(4, Math.min(12, Math.ceil(sides * 0.43))) : sides);
   const roundedRing = (width: number, height: number, radius: number, thickness: number) => ring(width, height, radius, thickness, curves);
+  const shell = (shape: Shape, depth: number) => {
+    const g = new ExtrudeGeometry(shape, { depth, steps: 1, bevelEnabled: false, curveSegments: curves });
+    // As for thin boxes, handheld keeps both broad faces. Millimetre reveal
+    // edges do not affect the aperture silhouette at its native resolution.
+    if (handheld) g.setIndex(Array.from({ length: g.groups[0].count }, (_, i) => i));
+    return g;
+  };
   const hose = (pts: Vector3[], radius: number) => tube(pts, radius, handheld ? 3 : 6, handheld ? 4 : 16);
   const hoop = (radius: number, thickness: number, radial: number, sides: number) => {
     if (!handheld) return new TorusGeometry(radius, thickness, radial, sides);
@@ -182,26 +193,32 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
 
     for (const s of [-1, 1]) {
       const z = SIDE * s;
+      const windows: [number, number][] = [[-8.52, 1.91], [-4.3, 2.33], [0, 2.14], [4.3, 2.33], [8.52, car.cab ? 1.65 : 1.91]];
+      // One pierced side skin replaces overlapping low/upper/post boxes.
+      // The old boxes shared 30 mm and 10 mm strips of exactly the same plane.
+      // Door notches include their separate headers and jambs; window holes
+      // follow the metal surrounds, so no backing surface competes with them.
+      const side = new Shape(); side.moveTo(-HALF, 1.28);
+      for (const x of [-6.5, -2.1, 2.1, 6.5]) {
+        side.lineTo(x - 0.78, 1.28); side.lineTo(x - 0.78, 3.295);
+        side.lineTo(x + 0.78, 3.295); side.lineTo(x + 0.78, 1.28);
+      }
+      side.lineTo(HALF, 1.28); side.lineTo(HALF, 3.35); side.lineTo(-HALF, 3.35); side.closePath();
+      for (const [x, width] of windows) {
+        side.holes.push(new Path(rounded(width + 0.085, 1.1, 0.09).getPoints(curves).map(p => p.add({ x, y: 2.595 }))));
+      }
+      p.add(steel, shell(side, 0.065).translate(0, 0, z - 0.0325));
       // The low shell and waist band stop at the door pockets too, leaving their leaves recessed.
       const lowPanels: [number, number][] = [[-HALF, -7.25], [-5.75, -2.85], [-1.35, 1.35], [2.85, 5.75], [7.25, HALF]];
       for (const [a, end] of lowPanels) {
-        b(steel, [end - a, 0.8, 0.065], [(a + end) / 2, 1.68, z]);
         b(blue, [end - a, 0.28, 0.012], [(a + end) / 2, 1.85, z + s * 0.042], s);
         for (const [y, h] of [[1.32, 0.025], [1.5, 0.018], [2.025, 0.022]] as const)
           b(edge, [end - a, h, 0.034], [(a + end) / 2, y, z + s * 0.04], s);
       }
-      b(steel, [19.42, 0.23, 0.065], [0, 3.235, z]);
       // Formed waist seam, sill extrusion, shoulder rain gutter and lower panel ribs.
       for (const [y, h] of [[3.14, 0.018], [3.37, 0.04]] as const)
         b(edge, [19.45, h, 0.034], [0, y, z + s * 0.04], s);
       for (let x = -9.5; x <= 9.5; x += 1.14) b(dust, [0.009, 0.19, 0.005], [x, 1.43, z + s * 0.036]);
-      const windows: [number, number][] = [[-8.52, 1.91], [-4.3, 2.33], [0, 2.14], [4.3, 2.33], [8.52, car.cab ? 1.65 : 1.91]];
-      const openings = [...windows.map(([x, width]) => [x - width / 2, x + width / 2]), ...[-6.5, -2.1, 2.1, 6.5].map(x => [x - 0.75, x + 0.75])].sort((a, b) => a[0] - b[0]);
-      let panelStart = -HALF;
-      for (const [a, end] of [...openings, [HALF, HALF]]) {
-        if (a > panelStart) b(steel, [a - panelStart, 1.08, 0.065], [(a + panelStart) / 2, 2.59, z]);
-        panelStart = end;
-      }
       for (const [x, width] of windows) {
         // Three layers: metal reveal, black EPDM gasket, inset clear pane.
         sideGeo(edge, roundedRing(width + 0.085, 1.1, 0.09, 0.039), x, 2.595, z + s * 0.04, s);
@@ -230,19 +247,21 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
         const dz = z - s * 0.018;
         b(rubber, [1.54, 0.035, 0.085], [x, 1.32, z + s * 0.015]);
         for (const dx of [-0.747, 0.747]) {
-          b(steel, [0.038, 1.98, 0.08], [x + dx, 2.29, z]);
+          b(steel, [0.038, 1.885, 0.08], [x + dx, 2.2425, z]);
           b(blue, [0.038, 0.28, 0.014], [x + dx, 1.85, z + s * 0.049], s);
         }
         b(steel, [1.56, 0.11, 0.1], [x, 3.24, z]);
         for (const dx of [-0.367, 0.367]) {
           const xx = x + dx;
-          b(steel, [0.717, 0.93, 0.045], [xx, 1.8, dz]);
+          // A single leaf with a real rounded opening also removes the
+          // coplanar overlaps between its former four rectangular pieces.
+          const leaf = rectangleShape(-0.3585, 1.335, 0.3585, 3.205);
+          leaf.holes.push(new Path(rounded(0.51, 0.87, 0.075).getPoints(curves).map(p => p.add({ x: 0, y: 2.655 }))));
+          p.add(steel, shell(leaf, 0.045).translate(xx, 0, dz - 0.0225));
           b(blue, [0.717, 0.28, 0.012], [xx, 1.85, dz + s * 0.03], s);
-          b(steel, [0.717, 0.15, 0.045], [xx, 3.13, dz]);
-          for (const wx of [-0.299, 0.299]) b(steel, [0.119, 0.86, 0.045], [xx + wx, 2.665, dz]);
           sideGeo(rubber, roundedRing(0.51, 0.87, 0.075, 0.027), xx, 2.655, dz + s * 0.03, s);
           sideGeo(glass, new ShapeGeometry(rounded(0.455, 0.813, 0.053), curves), xx, 2.655, dz + s * 0.018, s, false);
-          sideGeo(w.printed, atlasPlane(0.11, 0.15, notice), xx, 2.4, dz + s * 0.042, s, false);
+          sideGeo(w.decal, atlasPlane(0.11, 0.15, notice), xx, 2.4, dz + s * 0.042, s, false);
           b(edge, [0.019, 0.1, 0.018], [xx + Math.sign(dx) * 0.27, 2.17, dz + s * 0.035]);
         }
         b(rubber, [0.02, 1.88, 0.017], [x, 2.26, z + s * 0.014]);
@@ -252,7 +271,7 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
         b(chassis, [0.085, 0.045, 0.03], [x + 0.84, 3.26, z + s * 0.05]);
         b(lens, [0.051, 0.018, 0.01], [x + 0.84, 3.26, z + s * 0.069]);
       }
-      sideGeo(w.printed, atlasPlane(0.46, 0.11, label), -4.3, 1.56, z + s * 0.048, s, false);
+      sideGeo(w.decal, atlasPlane(0.46, 0.11, label), -4.3, 1.56, z + s * 0.048, s, false);
       sideGeo(w.lit, atlasPlane(0.73, 0.17, destination), 0, 3.24, z + s * 0.046, s, false);
       // Interior rails, mesh luggage racks, hanging straps and advertising frames.
       bar(edge, [-9.25, 3.05, s * 0.7], [car.cab ? 7.55 : 9.25, 3.05, s * 0.7], 0.018);
@@ -409,7 +428,7 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
       b(face, [0.075, 0.14, 0.77], [x + 0.055, 2.995, 0]);
       for (const z of [-0.94, 0.94]) b(w.lib.plain(0x253d45, 0.2), [0.015, 0.24, 0.79], [x + 0.063, 3.055, z]);
       p.add(w.lit, atlasPlane(0.75, 0.23, destination).rotateY(Math.PI / 2).translate(x + 0.10, 3.16, 0), false);
-      p.add(w.printed, atlasPlane(0.38, 0.11, label).rotateY(Math.PI / 2).translate(x + 0.106, 1.55, 0), false);
+      p.add(w.decal, atlasPlane(0.38, 0.11, label).rotateY(Math.PI / 2).translate(x + 0.106, 1.55, 0), false);
       for (const z of [-0.94, 0.94]) {
         bar(rubber, [x + 0.12, 2.04, z - 0.11], [x + 0.13, 2.46, z + 0.14], 0.017);
         bar(rubber, [x + 0.14, 2.31, z + 0.06], [x + 0.14, 2.77, z + 0.29], 0.014);

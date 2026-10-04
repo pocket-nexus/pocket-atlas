@@ -171,6 +171,7 @@ pub struct Scene {
     pub day_sky: Option<DaySky>,
     pub post: Post,
     pub vista_haze: Option<VistaHaze>,
+    pub audio: Option<AudioRecipe>,
     pub stats: serde_json::Value,
 }
 impl Scene {

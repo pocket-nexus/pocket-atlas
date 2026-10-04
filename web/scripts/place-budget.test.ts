@@ -73,7 +73,7 @@ describe('place readback rejects unusable GPU inputs', () => {
     const pica = await Bun.file(new URL('../../n3ds/src/format.h', import.meta.url)).text();
     expect(Number(rust.match(/pub const VERSION: u32 = (\d+);/)![1])).toBe(PLACE_VERSION);
     expect(Number(pica.match(/#define ATLAS_PICA_CONTAINER_VERSION (\d+)/)![1])).toBe(5);
-    expect(pica).toContain('#define ATLAS_PICA_TABLE_VERSION 3');
+    expect(pica).toContain('#define ATLAS_PICA_TABLE_VERSION 4');
   });
 
   test('v6 light records remain readable without counting points as triangles', () => {

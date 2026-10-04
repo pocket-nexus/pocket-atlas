@@ -157,11 +157,15 @@ use Atlas annotations. The existing indoor wardrobe emission approximation is
 retained: its web-only normal/height modulation is not automatically translated
 to native shaders. A source annotation is a reviewed contract, not a way to
 certify an arbitrary `onBeforeCompile` hook. Capability checks still reject
-missing device effects: PSP currently has the night-street effect set, while
-PICA/GE do not implement the vista light-field/haze combination.
-The default full-geometry Sangubashi export exceeds the current PICA geometry
-budget; defining a daytime place does not by itself certify it for 3DS. Preserve
-the authored train period when reducing geometry or extending a target recipe.
+missing device effects: PSP supports night streets and dry daytime
+streets/slopes; PICA/GE do not implement the vista light-field/haze combination.
+Sangubashi is eligible for Vita, 3DS and PSP using its `handheld` authoring
+geometry profile for native budgets. The default `full` export exceeds the
+current PICA geometry budget. The profile changes geometry density separately
+from lighting quality; it retains the eight cars, window openings, equipment,
+skinned petals and complete 64-second cycle at 15 Hz. Preserve that period
+when adjusting geometry or extending a target recipe. Eligibility and a passing
+cook do not certify a new native build on hardware.
 
 Budget failure emits a structured report with executed passes and the failing
 budget; it leaves the previous good pack/receipt intact. The compiler does not

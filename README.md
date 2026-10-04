@@ -8,7 +8,7 @@ Places share their assets across the reference and handheld renderers:
 
 - **`web/`** is the reference renderer: a standalone three.js + Vite app with no PocketJS dependency, with a night-side globe to pick a place. Every asset is generated at load time.
 - **`vita/`** renders the same place on a PS Vita with its own GXM pipeline: Cg programs compiled on the device by SceShaccCg, 4× MSAA HDR targets and the effect set the place needs.
-- **`n3ds/`** renders the shared globe, place browser and five supported scenes on an Old 3DS, using a PICA200 cook of the same assets, native 400 × 240 output and a 30fps quality budget. Unsupported kinds remain visible with an unavailable label. See [the 3DS build and debug workflow](n3ds/README.md).
+- **`n3ds/`** renders the shared globe, place browser and six supported scenes on an Old 3DS, using a PICA200 cook of the same assets, native 400 × 240 output and a 30fps quality budget. Unsupported kinds remain visible with an unavailable label. See [the 3DS build and debug workflow](n3ds/README.md).
 
 The web app exports glTF 2.0 with `extras.pocketAtlas`. The cooker seals a lossless PlaceIR, then independently lowers it into Vita, PICA or GE assets. See [the compiler boundaries, commands and migration plan](docs/COMPILER.md).
 
@@ -35,8 +35,8 @@ Real places fall into a finite set of kinds; the registry names them (`PlaceKind
 | `crates/pocket3d-place-cook` | glTF → pack: BC1/BC3/BC5 textures with mips, quantized vertices, baked vertex lighting and sky occlusion, low-poly shelf stock, octahedral environment, effect textures; the atlas pack and its baked font (`atlas.rs`, `uifont.rs`); annotation readers (`extras.rs`) |
 | `vendor/pocketjs/devices/vita/pocket-vita-gxm` | Shared GXM memory/program/target/texture mechanisms, optional runtime SceShaccCg; no scene or material policy |
 | `vita/` | Vita app: place loader (`scene.rs`), frame renderer (`frame.rs`), atlas globe (`atlas.rs`), place browser (`browser.rs`), settings sheet (`settings.rs`), interface drawing and text (`ui.rs`), file locations (`paths.rs`), Cg programs (`vita/shaders`), LiveArea art |
-| `psp/` | Native PSP place viewer: GE rendering, animated nodes and skinning, camera controls, procedural rain audio, PSPLINK telemetry |
-| `crates/pocket3d-place-psp` | Validated `PLPS` payload: shared GE vertex buffers, spatial index chunks, swizzled RGBA4444/RGBA8888 mip chains, animation and camera data; no JSON on the device |
+| `psp/` | Native PSP place viewer: GE rendering, animated nodes and skinning, camera controls, procedural environmental audio, PSPLINK telemetry |
+| `crates/pocket3d-place-psp` | Validated `PLPS v4` payload: shared GE vertex buffers, spatial index chunks, swizzled RGBA4444/RGBA8888 mip chains, animation and camera data; no JSON on the device |
 | `n3ds/`, `tools/atlas-3ds.ts` | PICA renderer, native cooker, paired wireless deployment, capture and performance measurement |
 | `tools/atlas.ts` | cook (places and the atlas with its font), build, deploy over USB, status/capture/profile/sweep/shots, shader lint, standalone VPK |
 | `tools/atlas-psp.ts` | PSP cook/build, PSPLINK serve/run/control/capture/shot measurements, standalone EBOOT package |
@@ -53,6 +53,13 @@ bun run dev          # http://127.0.0.1:5173
 Controls and URL switches are listed in `web/README.md`.
 
 ## PSP
+
+Sangubashi adds a cooked daytime sky and drifting clouds, baked sunlight,
+the eight-car train and gates, independently animated petals, and procedural
+wind, birds, railway warning and wheel noise. Its complete loop is 64 seconds;
+use `--place sangubashi-crossing` for cook/build/package and `shots --time 19.73`
+for a fixed train-pass comparison. See [the scene
+notes](web/src/places/sangubashi-crossing/README.md) for native results.
 
 Lombard Street uses the same viewer and controls, with a graded sky panorama, baked directional light and static shadows. Rain and wet-road reflections are disabled by the pack's features. Export its full 120-second loop, then pass `--place sf-lombard-street` to `cook`, `build` and `package`; see [the PSP daylight details and limitations](psp/README.md). Runtime and frame budgets for Lombard still require physical hardware measurement.
 
@@ -81,11 +88,13 @@ bun tools/atlas-psp.ts ctl '{}'                  # live clock
 bun tools/atlas-psp.ts package                  # dist/PSP/GAME/PocketAtlas/{EBOOT.PBP,scene.place}
 ```
 
-The PSP cook starts from the same PlaceIR as Vita and 3DS, and writes `<id>.psp.place` with separate `PLPS` magic/version. It rejects unsupported place kinds and packs above 18 MiB. It preserves rigid and skeletal tracks, uses the shared cooker's coarse geometry, bakes the Products material onto world-space shelf cards, shares static vertex buffers across spatial chunks, and combines only visible chunks at draw time. GPU pointers, indices, texture layouts and animation ranges are validated before upload. The current 20-second export follows the existing Vita workflow; it does not contain the web traffic simulation's full, longer schedule.
+The PSP cook starts from the same PlaceIR as Vita and 3DS, and writes `<id>.psp.place` with separate `PLPS v4` magic/version. It rejects unsupported place kinds and packs above 18 MiB. It preserves rigid and skeletal tracks, selects geometric detail by camera distance, bakes the Products material onto world-space shelf cards, shares static vertex buffers across spatial chunks, and combines only visible chunks at draw time. GPU pointers, indices, texture layouts and animation ranges are validated before upload. The Konbini command above explicitly requests a 20-second excerpt of its longer traffic schedule. Without overrides, exports use each authoring definition's sampling interval: Sangubashi retains 64 seconds and Lombard retains 120 seconds.
 
 This is a fixed-function adaptation: it does not reproduce Vita's HDR/PBR shaders, normal maps, volumetric haze, per-pixel wet ripples, dynamic per-pixel lights or bloom. The PSP's 16-bit depth and reduced texture sizes also limit fine facade detail and lettering. Reflection geometry is limited to lit surfaces and moving objects. The atlas globe and multi-place browser are not part of the PSP viewer. PSP `workMs` includes CPU submission and waiting for the GE; `gpuWaitMs` is only the wait after submission, **not** serialized GPU pass timing. Captures and USB transfers must be kept outside measurement windows. Host build, physical runtime, installed-file readback, manual control feel and listening to the sound are separate evidence.
 
-On the connected PSP (333 MHz CPU, 166 MHz bus, PSPLINK, 2026-10-01), five 30-frame windows per fixed halfway camera at t=10 with rain and reflections enabled measured: Konbini 19.9 fps, Puddles 15.0, Vending 15.0, Crossing 20.0, Inside 20.0, Wires 30.0. These are fixed-view measurements, not a claim that the live sequence or every free-camera position sustains 30 fps. The pack is 15.38 MiB with 68,206 triangles across the whole place, 38 textures, 111 animated nodes and 16 skinned chunks. PSP support remains a first port with performance and visual quality below the Vita renderer.
+On the PSP build measured before this integration (333 MHz CPU, 166 MHz bus, PSPLINK, 2026-10-01), five 30-frame windows per fixed halfway camera at t=10 with rain and reflections enabled measured: Konbini 19.9 fps, Puddles 15.0, Vending 15.0, Crossing 20.0, Inside 20.0, Wires 30.0. These are fixed-view measurements, not a claim that the live sequence or every free-camera position sustains 30 fps. The pack is 15.38 MiB with 68,206 triangles across the whole place, 38 textures, 111 animated nodes and 16 skinned chunks. These historical figures describe that build and pack, not the current merged sources. PSP support has performance and visual quality limits compared with the Vita renderer.
+
+The renderer clips triangles that cross the GE's 0–4096 viewport guard range before submission, preserving winding, UVs, colours and draw order. Safe triangles retain their resident indices; bounded block caches skip safe geometry and scratch vertices remain alive until GE completion. Shared house and vehicle builders use actual window openings instead of hidden opaque backing faces. Authored decals keep explicit depth bias, and LOD selection preserves nearby geometry. These changes address missing roofs and competing surfaces without a scene-ID branch.
 
 PSPLINK control and status live in an optional mailbox module. Standalone startup probes the control file once; without a host it performs no per-frame host0 I/O. Control writes are atomic and commands are acknowledged by nonce before measurement. The runtime validates camera bases, finite transforms, skin weights, texture grids and GE draw counts before submitting geometry.
 
@@ -172,7 +181,7 @@ Rigid moving draws also receive LODs, with additional 1 cm and 2.5 cm candidates
 
 Opaque solid standard materials without maps or special surface effects can share a `vertex_pbr` palette: sRGB vertex colour carries the albedo and UV carries each surface's roughness/metalness. Static geometry keeps its spatial chunks; fixed siblings in an animated hierarchy can share their parent's frame, keeping independent wheel or gate tracks intact. Sidedness, environment strength, depth state and other retained material fields remain batch boundaries. Static palettes separate rough non-metal surfaces from those requiring a sun highlight; moving assemblies keep one palette. The renderer reads these PBR constants in full, distant and reflection variants.
 
-This Vita encoding requires PLCE/ATLS container version 7 (version 6 introduced light fields and vista haze). Readers reject other container versions before interpreting the payload; re-cook every Vita place and the atlas when updating the renderer. Vita Place META uses version 7, while AtlasMeta remains version 1. PICA independently keeps its PLCE v5 envelope and v3 table; PSP keeps PLPS v1. Native lowerings consume source data from PlaceIR, not the Vita palette or pack.
+This Vita encoding requires PLCE/ATLS container version 7 (version 6 introduced light fields and vista haze). Readers reject other container versions before interpreting the payload; re-cook every Vita place and the atlas when updating the renderer. Vita Place META uses version 7, while AtlasMeta remains version 1. PICA independently keeps its PLCE v5 envelope with a v4 table; PSP uses PLPS v4. Native lowerings consume source data from PlaceIR, not the Vita palette or pack.
 
 `bun web/scripts/place-budget.ts --in PACK.place --out REPORT.json` validates a cooked pack and estimates `vita30` step-0 main-pass geometry over the full animation loop at each shot's start, middle and end camera positions. Its draw and triangle counts are CPU planning evidence, not a GPU measurement or frame-rate claim.
 

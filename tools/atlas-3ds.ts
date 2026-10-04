@@ -212,9 +212,10 @@ async function connect() {
 async function status(
   c: PocketRuntimeClient,
   ctl: Record<string, unknown> = {},
+  timeoutMs = 20000,
 ) {
   lease?.assertHeld();
-  const p = c.waitForCtrl((m) => m.t === "atlas.status");
+  const p = c.waitForCtrl((m) => m.t === "atlas.status", timeoutMs);
   await c.sendCtrl({ t: "atlas.control", ...ctl });
   return await p;
 }
@@ -223,7 +224,8 @@ async function enterPlace(c: PocketRuntimeClient, id: string) {
   const deadline = Date.now() + 90000;
   while (Date.now() < deadline) {
     await Bun.sleep(400);
-    const state = await status(c);
+    // Full asset verification and native loading can exceed an ordinary control window.
+    const state = await status(c, {}, 90000);
     if (state.place === id && state.phase === "running") return state;
     if (state.error) throw new Error(String(state.error));
   }
@@ -305,6 +307,7 @@ else if (command === "install") {
       }
     } catch (error) {
       lastError = error;
+      console.warn(`3DS verification attempt ${attempt + 1}: ${String(error)}`);
     }
     await Bun.sleep(1000);
   }

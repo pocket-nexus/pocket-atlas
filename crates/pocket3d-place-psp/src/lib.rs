@@ -4,9 +4,13 @@
 use bytemuck::{Pod, Zeroable};
 
 pub const MAGIC: u32 = u32::from_le_bytes(*b"PLPS");
-pub const VERSION: u32 = 3;
+/// v4 combines packed geometry/TRS tracks, audio and moving sky layers with
+/// the v3 compiler-authored sky dome and explicit texture precision.
+pub const VERSION: u32 = 4;
 pub const MAX_BYTES: usize = 18 * 1024 * 1024;
 pub const NONE: u32 = u32::MAX;
+pub const RGBA4444: u32 = 0;
+pub const RGBA8888: u32 = 1;
 pub const ALPHA: u32 = 1;
 pub const DOUBLE_SIDED: u32 = 2;
 pub const WET: u32 = 4;
@@ -46,9 +50,13 @@ pub struct Header {
     pub door_trigger: [f32; 3],
     pub door_radius: f32,
     pub door_travel: f32,
-    /// Camera-centered, unindexed sky dome; empty for the night clear colour.
+    /// Camera-centered sky dome; empty when no authored daytime sky.
     pub sky_vertices: Span,
     pub sky_texture: u32,
+    pub cloud_texture: u32,
+    pub cloud_drift: f32,
+    pub lod_pixels: f32,
+    pub audio: Span,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Default, Pod, Zeroable)]
@@ -61,8 +69,6 @@ pub struct Texture {
     /// Explicit target encoding; sky gradients need more precision than cutouts.
     pub format: u32,
 }
-pub const RGBA4444: u32 = 0;
-pub const RGBA8888: u32 = 1;
 impl Texture {
     pub fn bytes_per_pixel(&self) -> Option<u32> {
         match self.format {
@@ -92,6 +98,15 @@ pub struct Vertex {
     pub color: u32,
     pub pos: [f32; 3],
 }
+/// GE normalized unsigned UV, RGBA8888, signed position (16-byte stride).
+#[repr(C)]
+#[derive(Clone, Copy, Default, Pod, Zeroable)]
+pub struct PackedVertex {
+    pub uv: [u16; 2],
+    pub color: u32,
+    pub pos: [i16; 3],
+    pub padding: i16,
+}
 #[repr(C)]
 #[derive(Clone, Copy, Default, Pod, Zeroable)]
 pub struct Weights {
@@ -106,6 +121,12 @@ pub struct Joint {
 }
 #[repr(C)]
 #[derive(Clone, Copy, Default, Pod, Zeroable)]
+pub struct Lod {
+    pub indices: Span,
+    pub error: f32,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Default, Pod, Zeroable)]
 pub struct Draw {
     pub vertices: Span,
     pub indices: Span,
@@ -117,6 +138,19 @@ pub struct Draw {
     pub reserved: u32,
     pub min: [f32; 3],
     pub max: [f32; 3],
+    pub lods: [Lod; 4],
+    pub vertex_format: u32,
+    pub pos_offset: [f32; 3],
+    pub pos_scale: [f32; 3],
+    pub uv_offset: [f32; 2],
+    pub uv_scale: [f32; 2],
+}
+#[repr(C)]
+#[derive(Clone, Copy, Default, Pod, Zeroable)]
+pub struct PackedTrs {
+    pub translation: [i16; 3],
+    pub rotation: [i16; 4],
+    pub padding: i16,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Default, Pod, Zeroable)]
@@ -126,6 +160,9 @@ pub struct Node {
     pub translation: [f32; 3],
     pub rotation: [f32; 4],
     pub scale: [f32; 3],
+    pub track_encoding: u32,
+    pub track_offset: [f32; 3],
+    pub track_scale: [f32; 3],
 }
 #[repr(C)]
 #[derive(Clone, Copy, Default, Pod, Zeroable)]
@@ -143,6 +180,50 @@ pub struct Light {
     pub radius: f32,
     pub track: Span,
     pub reserved: u32,
+}
+
+/// Select by the same conservative world-space error used by the cooker.
+/// Zero disables LODs; invalid inputs fail closed to full detail.
+pub fn select_lod(draw: &Draw, error: f32) -> Span {
+    let mut selected = draw.indices;
+    if error.is_finite() && error > 0.0 {
+        for lod in &draw.lods {
+            // An empty positive-error level means all components are below
+            // the declared screen error. Only all-zero slots are absent.
+            if (lod.indices.count > 0 || lod.error > 0.0) && lod.error <= error {
+                selected = lod.indices;
+            }
+        }
+    }
+    selected
+}
+
+pub fn decode_vertex(draw: &Draw, vertex: &PackedVertex) -> Vertex {
+    Vertex {
+        pos: core::array::from_fn(|i| {
+            draw.pos_offset[i] + draw.pos_scale[i] * vertex.pos[i] as f32 / 32768.0
+        }),
+        uv: core::array::from_fn(|i| {
+            draw.uv_offset[i] + draw.uv_scale[i] * vertex.uv[i] as f32 / 32768.0
+        }),
+        color: vertex.color,
+    }
+}
+
+pub fn decode_trs(node: &Node, key: &PackedTrs) -> [f32; 7] {
+    core::array::from_fn(|i| {
+        if i < 3 {
+            node.track_offset[i] + node.track_scale[i] * key.translation[i] as f32 / 32767.0
+        } else {
+            key.rotation[i - 3] as f32 / 32767.0
+        }
+    })
+}
+
+pub fn fingerprint(bytes: &[u8]) -> u32 {
+    bytes.iter().fold(2166136261u32, |hash, &byte| {
+        (hash ^ byte as u32).wrapping_mul(16777619)
+    })
 }
 
 pub fn slice<T: Pod>(bytes: &[u8], span: Span) -> Result<&[T], &'static str> {
@@ -209,6 +290,23 @@ pub fn validate(bytes: &[u8]) -> Result<&Header, &'static str> {
         }
         slice::<u8>(bytes, t.pixels)?;
     }
+    for id in [h.sky_texture, h.cloud_texture] {
+        if id != NONE && id as usize >= ts.len() {
+            return Err("sky texture");
+        }
+    }
+    if !h.cloud_drift.is_finite() || !h.lod_pixels.is_finite() || h.lod_pixels < 0.0 {
+        return Err("sky or LOD values");
+    }
+    let audio = slice::<f32>(bytes, h.audio)?;
+    if !audio.is_empty()
+        && (audio.len() != 32
+            || audio[0] != 1.0
+            || audio[1] <= 0.0
+            || audio.iter().any(|v| !v.is_finite()))
+    {
+        return Err("audio recipe");
+    }
     if h.rain > 1 {
         return Err("rain flag");
     }
@@ -257,10 +355,33 @@ pub fn validate(bytes: &[u8]) -> Result<&Header, &'static str> {
         if n.parent != NONE && n.parent as usize >= i {
             return Err("node hierarchy");
         }
-        if n.track.count != 0 && Some(n.track.count) != h.frames.checked_mul(7) {
-            return Err("node track");
-        }
-        if slice::<f32>(bytes, n.track)?
+        let values = if n.track_encoding == 0 {
+            if n.track.count != 0 && Some(n.track.count) != h.frames.checked_mul(7) {
+                return Err("node track");
+            }
+            slice::<f32>(bytes, n.track)?
+        } else if n.track_encoding == 1 {
+            if n.track.count != h.frames || n.track.offset % 16 != 0 {
+                return Err("node track");
+            }
+            if n.track_offset
+                .iter()
+                .chain(n.track_scale.iter())
+                .any(|v| !v.is_finite())
+                || n.track_scale.iter().any(|&v| v < 0.0)
+            {
+                return Err("node track bounds");
+            }
+            for key in slice::<PackedTrs>(bytes, n.track)? {
+                if !valid_rotation(&key.rotation.map(|v| v as f32 / 32767.0)) {
+                    return Err("node rotation");
+                }
+            }
+            &[][..]
+        } else {
+            return Err("node track encoding");
+        };
+        if values
             .iter()
             .chain(n.translation.iter())
             .chain(n.rotation.iter())
@@ -270,7 +391,7 @@ pub fn validate(bytes: &[u8]) -> Result<&Header, &'static str> {
             return Err("node values");
         }
         if !valid_rotation(&n.rotation)
-            || slice::<f32>(bytes, n.track)?
+            || values
                 .chunks_exact(7)
                 .any(|key| !valid_rotation(&key[3..7]))
         {
@@ -281,29 +402,68 @@ pub fn validate(bytes: &[u8]) -> Result<&Header, &'static str> {
         if d.material as usize >= ms.len() || (d.node != NONE && d.node as usize >= ns.len()) {
             return Err("draw reference");
         }
-        let vs = slice::<Vertex>(bytes, d.vertices)?;
-        if vs
-            .iter()
-            .any(|v| v.pos.iter().chain(v.uv.iter()).any(|v| !v.is_finite()))
-        {
-            return Err("vertex values");
+        let vertex_count = d.vertices.count as usize;
+        match d.vertex_format {
+            0 => {
+                if slice::<Vertex>(bytes, d.vertices)?
+                    .iter()
+                    .any(|v| v.pos.iter().chain(v.uv.iter()).any(|v| !v.is_finite()))
+                {
+                    return Err("vertex values");
+                }
+            }
+            1 => {
+                slice::<PackedVertex>(bytes, d.vertices)?;
+                if d.weights.count != 0
+                    || d.pos_offset
+                        .iter()
+                        .chain(d.pos_scale.iter())
+                        .chain(d.uv_offset.iter())
+                        .chain(d.uv_scale.iter())
+                        .any(|v| !v.is_finite())
+                    || d.pos_scale
+                        .iter()
+                        .chain(d.uv_scale.iter())
+                        .any(|&v| v < 0.0)
+                {
+                    return Err("packed vertex decode");
+                }
+            }
+            _ => return Err("vertex format"),
         }
         let is = slice::<u16>(bytes, d.indices)?;
         if d.vertices.offset % 16 != 0
             || d.indices.offset % 16 != 0
             || is.len() % 3 != 0
             || is.len() > MAX_INDICES
-            || vs.len() > 65535
-            || is.iter().any(|&i| i as usize >= vs.len())
+            || vertex_count > 65535
+            || is.iter().any(|&i| i as usize >= vertex_count)
         {
             return Err("GE geometry");
+        }
+        let mut error = 0.0;
+        for lod in &d.lods {
+            if lod.indices.count == 0 && lod.error == 0.0 {
+                continue;
+            }
+            let indices = slice::<u16>(bytes, lod.indices)?;
+            if lod.indices.offset % 16 != 0
+                || indices.len() % 3 != 0
+                || indices.len() > MAX_INDICES
+                || indices.iter().any(|&i| i as usize >= vertex_count)
+                || !lod.error.is_finite()
+                || lod.error < error
+            {
+                return Err("GE LOD");
+            }
+            error = lod.error;
         }
         if !valid_bounds(&d.min, &d.max) {
             return Err("draw bounds");
         }
         let ws = slice::<Weights>(bytes, d.weights)?;
         let js = slice::<Joint>(bytes, d.joints)?;
-        if !ws.is_empty() && (ws.len() != vs.len() || js.is_empty()) {
+        if !ws.is_empty() && (ws.len() != vertex_count || js.is_empty()) {
             return Err("skin layout");
         }
         if js.len() > 64
@@ -384,6 +544,38 @@ mod tests {
     extern crate std;
     use super::*;
     use std::vec;
+    #[test]
+    fn lod_selection_keeps_near_detail_and_honors_empty_subpixel_levels() {
+        let draw = Draw {
+            indices: Span {
+                offset: 160,
+                count: 300,
+            },
+            lods: [
+                Lod {
+                    indices: Span {
+                        offset: 1024,
+                        count: 120,
+                    },
+                    error: 0.06,
+                },
+                Lod {
+                    indices: Span::default(),
+                    error: 0.25,
+                },
+                Lod::default(),
+                Lod::default(),
+            ],
+            ..Default::default()
+        };
+        for error in [0.0, -1.0, f32::NAN, f32::INFINITY, 0.059] {
+            assert_eq!(select_lod(&draw, error).count, 300);
+        }
+        assert_eq!(select_lod(&draw, 0.06).count, 120);
+        assert_eq!(select_lod(&draw, 0.249).count, 120);
+        assert_eq!(select_lod(&draw, 0.25).count, 0);
+        assert_eq!(select_lod(&draw, 100.0).count, 0);
+    }
     fn fixture() -> std::vec::Vec<u32> {
         let n = core::mem::size_of::<Header>() + core::mem::size_of::<Shot>();
         let mut data = vec![0u32; n / 4];
@@ -397,6 +589,7 @@ mod tests {
         h.fog_far = 100.0;
         h.doors = [NONE; 2];
         h.sky_texture = NONE;
+        h.cloud_texture = NONE;
         h.shots = Span {
             offset: core::mem::size_of::<Header>() as u32,
             count: 1,
@@ -413,10 +606,19 @@ mod tests {
     fn accepts_minimal_pack_and_rejects_truncation_version_and_bad_camera() {
         let mut data = fixture();
         assert!(validate(bytemuck::cast_slice(&data)).is_ok());
-        assert!(validate(&bytemuck::cast_slice::<_, u8>(&data)[..20]).is_err());
-        data[1] = 99;
-        assert!(validate(bytemuck::cast_slice(&data)).is_err());
+        // Older headers can also be large enough to look like a v4 header;
+        // reject their layout before interpreting any dependent spans.
+        for version in [1, 2, 3, 99] {
+            data[1] = version;
+            assert_eq!(validate(bytemuck::cast_slice(&data)).err(), Some("PSP pack version"));
+        }
         data[1] = VERSION;
+        assert_eq!(core::mem::size_of::<Header>(), 164);
+        assert_eq!(core::mem::offset_of!(Header, sky_vertices), 132);
+        assert_eq!(core::mem::offset_of!(Header, audio), 156);
+        for len in 0..core::mem::size_of::<Header>() {
+            assert_eq!(validate(&bytemuck::cast_slice::<_, u8>(&data)[..len]).err(), Some("header"));
+        }
         *data.last_mut().unwrap() = f32::NAN.to_bits();
         assert!(validate(bytemuck::cast_slice(&data)).is_err());
     }
@@ -523,6 +725,36 @@ mod tests {
         h.nodes = node;
         h.draws = draws;
         assert!(validate(bytemuck::cast_slice(&data)).is_ok());
+        for error in [f32::NAN, -0.1, 0.05] {
+            let mut bad = data.clone();
+            let d = bytemuck::from_bytes_mut::<Draw>(
+                &mut bytemuck::cast_slice_mut::<_, u8>(&mut bad)
+                    [draws.offset as usize..draws.offset as usize + core::mem::size_of::<Draw>()],
+            );
+            d.lods[0] = Lod {
+                indices: d.indices,
+                error: 0.1,
+            };
+            d.lods[1] = Lod {
+                indices: Span::default(),
+                error,
+            };
+            assert_eq!(validate(bytemuck::cast_slice(&bad)).err(), Some("GE LOD"));
+        }
+        let mut empty_lod = data.clone();
+        let d = bytemuck::from_bytes_mut::<Draw>(
+            &mut bytemuck::cast_slice_mut::<_, u8>(&mut empty_lod)
+                [draws.offset as usize..draws.offset as usize + core::mem::size_of::<Draw>()],
+        );
+        d.lods[0] = Lod {
+            indices: d.indices,
+            error: 0.1,
+        };
+        d.lods[1] = Lod {
+            indices: Span::default(),
+            error: 0.2,
+        };
+        assert!(validate(bytemuck::cast_slice(&empty_lod)).is_ok());
         let mut bad = data.clone();
         bad[draw.joints.offset as usize / 4 + 1] = f32::NAN.to_bits();
         assert_eq!(

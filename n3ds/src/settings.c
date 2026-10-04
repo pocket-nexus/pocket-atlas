@@ -13,7 +13,7 @@ static const char *file = "sdmc:/pocket-atlas/settings.json";
 static const char *labels[] = {"Frame rate",   "Quality",      "Reflections",
                                "Rain",         "Lit haze",     "Glow",
                                "Exposure",     "Camera",       "Performance",
-                               "4x antialias", "Back to atlas"};
+                               "4x antialias", "Sound",        "Back to atlas"};
 static void save(void) {
   FILE *f = fopen("sdmc:/pocket-atlas/settings.json.tmp", "w");
   if (!f)
@@ -21,12 +21,12 @@ static void save(void) {
   fprintf(
       f,
       "{\"antialias\":%s,\"fps\":%u,\"step\":%u,\"hold\":%s,\"reflection\":%s,"
-      "\"rain\":%s,\"haze\":%s,\"glow\":%s,\"exposure\":%.2f,\"hud\":%s}\n",
+      "\"rain\":%s,\"haze\":%s,\"glow\":%s,\"exposure\":%.2f,\"hud\":%s,\"muted\":%s}\n",
       antialias ? "true" : "false", fps, prefs.step,
       prefs.hold ? "true" : "false", prefs.reflection ? "true" : "false",
       prefs.rain ? "true" : "false", prefs.haze ? "true" : "false",
       prefs.glow ? "true" : "false", prefs.exposure,
-      prefs.hud ? "true" : "false");
+      prefs.hud ? "true" : "false", prefs.muted ? "true" : "false");
   bool failed = ferror(f) != 0;
   if (fclose(f) || failed)
     return;
@@ -58,6 +58,7 @@ static void read_prefs(const char *s) {
   control_bool(s, "haze", &prefs.haze);
   control_bool(s, "glow", &prefs.glow);
   control_bool(s, "hud", &prefs.hud);
+  control_bool(s, "muted", &prefs.muted);
   const char *p = control_field(s, "exposure");
   if (p) {
     float v = strtof(p, NULL);
@@ -214,6 +215,9 @@ bool settings_update(uint32_t down) {
     antialias = !antialias;
     break;
   case 10:
+    prefs.muted = !prefs.muted;
+    break;
+  case 11:
     settings_close();
     return true;
   }
@@ -232,9 +236,9 @@ void settings_draw(void) {
   browser_ui_text(12, 25, "A / left / right: change    X: reset", 0x91a6bc);
   unsigned features = scene_features();
   for (unsigned i = 0; i < sizeof labels / sizeof *labels; i++) {
-    int y = 42 + i * 16;
+    int y = 40 + i * 15;
     if (row == i)
-      browser_ui_rect(7, y - 1, 306, 17, 0x254154);
+      browser_ui_rect(7, y - 1, 306, 16, 0x254154);
     char v[72] = "";
     switch (i) {
     case 0:
@@ -269,9 +273,12 @@ void settings_draw(void) {
     case 9:
       snprintf(v, sizeof v, "%s", antialias ? "800 x 480" : "400 x 240");
       break;
+    case 10:
+      snprintf(v, sizeof v, "%s", prefs.muted ? "Muted" : "On");
+      break;
     }
     browser_ui_text(13, y, labels[i], 0xf0f4f8);
     browser_ui_text(141, y, v, 0xadc5d5);
   }
-  browser_ui_text(12, 222, "B / SELECT: close    START: atlas", 0x91a6bc);
+  browser_ui_text(12, 224, "B / SELECT: close    START: atlas", 0x91a6bc);
 }

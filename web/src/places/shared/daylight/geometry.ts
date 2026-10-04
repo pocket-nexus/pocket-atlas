@@ -6,6 +6,40 @@ export interface SolidBox {
   max: [number, number, number];
 }
 
+/** Face-local rectangle, in metres. */
+export interface FaceRect { x0: number; x1: number; y0: number; y1: number }
+
+/** Partition a face around real openings, without drawing hidden backing
+ * triangles behind opaque panes. Overlapping cuts form their geometric union. */
+export function cutRectangles(face: FaceRect, openings: readonly FaceRect[]): FaceRect[] {
+  let pieces = [face];
+  for (const cut of openings) {
+    const next: FaceRect[] = [];
+    for (const r of pieces) {
+      const x0 = Math.max(r.x0, cut.x0), x1 = Math.min(r.x1, cut.x1);
+      const y0 = Math.max(r.y0, cut.y0), y1 = Math.min(r.y1, cut.y1);
+      if (x0 >= x1 || y0 >= y1) { next.push(r); continue; }
+      if (r.x0 < x0) next.push({ x0: r.x0, x1: x0, y0: r.y0, y1: r.y1 });
+      if (x1 < r.x1) next.push({ x0: x1, x1: r.x1, y0: r.y0, y1: r.y1 });
+      if (r.y0 < y0) next.push({ x0, x1, y0: r.y0, y1: y0 });
+      if (y1 < r.y1) next.push({ x0, x1, y0: y1, y1: r.y1 });
+    }
+    pieces = next;
+  }
+  return pieces;
+}
+
+/** +Z wall with metre UVs and actual apertures. UV origin stays at the original
+ * face's lower-left corner, so cutting a window does not restart wall textures. */
+export function openedFace(face: FaceRect, openings: readonly FaceRect[], z = 0): BufferGeometry {
+  const q = new QuadBuilder(), n = new Vector3(0, 0, 1);
+  for (const r of cutRectangles(face, openings)) {
+    const xy = [[r.x0, r.y0], [r.x1, r.y0], [r.x1, r.y1], [r.x0, r.y1]] as const;
+    q.quad(xy.map(([x, y]) => new Vector3(x, y, z)), n, xy.map(([x, y]) => [x - face.x0, y - face.y0]));
+  }
+  return q.build();
+}
+
 /**
  * Remove only triangles wholly inside a solid, opaque box. A box is convex,
  * so containing all three vertices contains the entire triangle. The small

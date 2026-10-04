@@ -16,14 +16,21 @@ pub fn cook(
     draws: &mut Vec<pp::Draw>,
 ) {
     let meta = scene;
-    let ids = draw.lods().last().map(|l| l.indices.as_slice()).unwrap_or(draw.indices());
+    let ids = draw
+        .lods()
+        .last()
+        .map(|l| l.indices.as_slice())
+        .unwrap_or(draw.indices());
     let mut planes: BTreeMap<(usize, i32), Vec<([f32; 3], [f32; 3], [u8; 4])>> = BTreeMap::new();
     // A product_card has four triangles, front and back. Each side's two
     // triangles share the same normal; process only its positive side.
     let mut cards: BTreeMap<(usize, i32, [i32; 4]), ([f32; 3], [f32; 3], [u8; 4])> =
         BTreeMap::new();
     for tri in ids.chunks_exact(3) {
-        let verts: Vec<&crate::geometry::Vertex> = tri.iter().map(|&i| scene.vertex(draw, i as usize)).collect();
+        let verts: Vec<&crate::geometry::Vertex> = tri
+            .iter()
+            .map(|&i| scene.vertex(draw, i as usize))
+            .collect();
         let axis = if verts[0].normal.x.abs() > verts[0].normal.z.abs() {
             0
         } else {
@@ -207,6 +214,7 @@ fn emit(
 ) {
     let texid = textures.len() as u32;
     textures.push(pp::Texture {
+        format: pp::RGBA4444,
         pixels: w.push(&swizzle(
             bytemuck::cast_slice(&pixels[..512 * height]),
             1024,
@@ -216,7 +224,6 @@ fn emit(
         height: height as u32,
         wrap: 3,
         mips: 1,
-        format: pp::RGBA4444,
     });
     let matid = materials.len() as u32;
     materials.push(pp::Material {
@@ -243,6 +250,12 @@ fn emit(
         }
     }
     draws.push(pp::Draw {
+        lods: Default::default(),
+        vertex_format: 0,
+        pos_offset: [0.0; 3],
+        pos_scale: [0.0; 3],
+        uv_offset: [0.0; 2],
+        uv_scale: [0.0; 2],
         vertices: w.push(&vertices),
         indices: w.push(indices),
         weights: w.push::<pp::Weights>(&[]),

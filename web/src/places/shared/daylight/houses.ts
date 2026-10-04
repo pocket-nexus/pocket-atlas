@@ -4,7 +4,7 @@ import { canvas, toTexture } from "../canvas";
 import { box } from "../geo";
 import { merge, rod, v3 } from "../shapes";
 import type { DayWorld } from "./context";
-import { QuadBuilder } from "./geometry";
+import { openedFace, QuadBuilder, type FaceRect } from "./geometry";
 
 type Side = "-x" | "+x" | "-z" | "+z";
 export type RoofKind = "gable" | "hip" | "shed" | "flat";
@@ -126,11 +126,12 @@ const WIN: Record<WinKind, { w: number; h: number; sill: number }> = {
 };
 
 /** A window with its aluminium frame, glass, and optional shutter box or bars. */
-function windowAt(p: Pieces, k: HouseKit, r: Rng, m: Matrix4, cx: number, y0: number, kind: WinKind, near: boolean): void {
+function windowAt(p: Pieces, k: HouseKit, r: Rng, m: Matrix4, cx: number, y0: number, kind: WinKind, near: boolean, openings: FaceRect[], base: number): void {
   const { w, h } = WIN[kind];
   const x0 = cx - w / 2;
   const x1 = cx + w / 2;
   const y1 = y0 + h;
+  openings.push({ x0, x1, y0: base + y0, y1: base + y1 });
   const glass = kind === "small" ? k.glassFrosted : r.chance(0.45) ? k.glassCurtain : k.glassDark;
   if (!near) {
     p.add(glass, lplane(x0, x1, y0, y1, 0.02), m);
@@ -139,7 +140,11 @@ function windowAt(p: Pieces, k: HouseKit, r: Rng, m: Matrix4, cx: number, y0: nu
   const frame = r.chance(0.6) ? k.frameBronze : k.frameSilver;
   const t = 0.045;
   const closed = (kind === "sash" || kind === "door") && r.chance(0.14);
-  p.add(closed ? k.shutter : glass, lplane(x0 + t, x1 - t, y0 + t, y1 - t, 0.012, closed), m);
+  // The meeting stiles occupy the middle strip: do not leave another opaque
+  // pane behind them for a 16-bit depth buffer to resolve at street distances.
+  const split = kind !== "small" && kind !== "tall";
+  const panes = split ? [[x0 + t, cx - 0.035], [cx + 0.035, x1 - t]] : [[x0 + t, x1 - t]];
+  for (const [a, b] of panes) p.add(closed ? k.shutter : glass, lplane(a, b, y0 + t, y1 - t, 0.012, closed), m);
   p.add(frame, lbox(x0, x1, y0, y0 + t, 0, 0.06), m);
   p.add(frame, lbox(x0, x1, y1 - t, y1, 0, 0.06), m);
   p.add(frame, lbox(x0, x0 + t, y0, y1, 0, 0.06), m);
@@ -182,6 +187,7 @@ export function house(w: DayWorld, k: HouseKit, s: HouseSpec): void {
   const wallY0 = s.base + fnd;
   const top = wallY0 + s.floors * fh;
   const p = new Pieces();
+  const openings: Record<Side, FaceRect[]> = { "-x": [], "+x": [], "-z": [], "+z": [] };
   const W = s.x1 - s.x0;
   const D = s.z1 - s.z0;
   const cx = (s.x0 + s.x1) / 2;
@@ -196,6 +202,9 @@ export function house(w: DayWorld, k: HouseKit, s: HouseSpec): void {
   }
   const bodyY0 = near ? wallY0 : foot;
   const body = box(W, top - bodyY0, D);
+  // Keep the roof/floor of the shell. Its four walls are emitted below after
+  // window/door placement, with real holes instead of near-coplanar overlays.
+  body.setIndex(Array.from(body.index!.array).filter(i => Math.floor(i / 4) === 2 || Math.floor(i / 4) === 3));
   body.translate(cx, (bodyY0 + top) / 2, cz);
   p.add(s.wall, body);
   if (near) {
@@ -219,7 +228,7 @@ export function house(w: DayWorld, k: HouseKit, s: HouseSpec): void {
       const y0 = wallY0 - s.base + fl * fh;
       const balcony = spec.balcony === fl && near;
       if (balcony) {
-        buildBalcony(p, k, r, m, 0.4, len - 0.4, s.base + y0, near);
+        buildBalcony(p, k, r, m, 0.4, len - 0.4, s.base + y0, near, openings[side]);
         continue;
       }
       if (spec.balcony === fl && !near) {
@@ -246,12 +255,16 @@ export function house(w: DayWorld, k: HouseKit, s: HouseSpec): void {
       let x = gap;
       for (const kind of kinds) {
         const c = x + WIN[kind].w / 2;
-        if (kind === "door" && fl === 0) doorAt(p, k, m, c, s.base + y0, near);
-        else windowAt(p, k, r, mb, c, y0 + WIN[kind].sill, kind, near);
+        if (kind === "door" && fl === 0) doorAt(p, k, m, c, s.base + y0, near, openings[side]);
+        else windowAt(p, k, r, mb, c, y0 + WIN[kind].sill, kind, near, openings[side], s.base);
         x += WIN[kind].w + gap;
       }
       if (near && fl === 0 && gap > 1.1 && r.chance(0.55)) acUnit(p, k, mb, gap / 2, 0.05);
     }
+  }
+
+  for (const side of Object.keys(FACE) as Side[]) {
+    p.add(s.wall, openedFace({ x0: 0, x1: faceLength(s, side), y0: bodyY0, y1: top }, openings[side]), faceMatrix(s, side));
   }
 
   if (near) {
@@ -292,9 +305,16 @@ export function house(w: DayWorld, k: HouseKit, s: HouseSpec): void {
   p.emit(w);
 }
 
-function doorAt(p: Pieces, k: HouseKit, m: Matrix4, c: number, yBase: number, near: boolean): void {
+function doorAt(p: Pieces, k: HouseKit, m: Matrix4, c: number, yBase: number, near: boolean, openings: FaceRect[]): void {
   const mm = m.clone().setPosition(new Vector3().setFromMatrixPosition(m).setY(yBase));
-  p.add(k.door, lbox(c - 0.45, c + 0.45, 0, 2.05, 0, 0.04), mm);
+  openings.push({ x0: c - 0.45, x1: c + 0.45, y0: yBase, y1: yBase + 2.05 });
+  const leaf = lbox(c - 0.45, c + 0.45, 0, 2.05, 0, 0.04);
+  if (near) {
+    // The frosted insert is an opening in the door, not glass over solid wood.
+    leaf.setIndex(Array.from(leaf.index!.array).filter(i => Math.floor(i / 4) !== 4));
+    p.add(k.door, openedFace({ x0: c - 0.45, x1: c + 0.45, y0: 0, y1: 2.05 }, [{ x0: c - 0.12, x1: c + 0.12, y0: 0.9, y1: 1.9 }], 0.04), mm);
+  }
+  p.add(k.door, leaf, mm);
   if (!near) return;
   p.add(k.frameBronze, lbox(c - 0.5, c + 0.5, 2.05, 2.1, 0, 0.07), mm);
   p.add(k.glassFrosted, lplane(c - 0.12, c + 0.12, 0.9, 1.9, 0.045), mm);
@@ -304,7 +324,7 @@ function doorAt(p: Pieces, k: HouseKit, m: Matrix4, c: number, yBase: number, ne
 }
 
 /** Balcony on a floor: slab, aluminium rail with bar infill, a sliding door, often laundry. */
-function buildBalcony(p: Pieces, k: HouseKit, r: Rng, m: Matrix4, a: number, b: number, yFloor: number, near: boolean): void {
+function buildBalcony(p: Pieces, k: HouseKit, r: Rng, m: Matrix4, a: number, b: number, yFloor: number, near: boolean, openings: FaceRect[]): void {
   const mm = m.clone().setPosition(new Vector3().setFromMatrixPosition(m).setY(yFloor));
   const depth = 0.95;
   p.add(k.slab, lbox(a, b, -0.14, 0, 0, depth), mm);
@@ -312,7 +332,7 @@ function buildBalcony(p: Pieces, k: HouseKit, r: Rng, m: Matrix4, a: number, b: 
   const n = Math.max(1, Math.floor((b - a) / 2.6));
   for (let i = 0; i < n; i++) {
     const c = a + ((i + 0.5) * (b - a)) / n;
-    windowAt(p, k, r, mm, c, 0.02, "door", near);
+    windowAt(p, k, r, mm, c, 0.02, "door", near, openings, yFloor);
   }
   const H = 1.1;
   const barsLike = r.chance(0.6);

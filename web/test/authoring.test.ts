@@ -1,10 +1,12 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { BoxGeometry, Group, Mesh, MeshStandardMaterial, Vector3 } from "three";
 import { createDefinedStage, defineDayPlace, definePlace, describePlace, resolveAuthoring, validateSampling } from "../src/places/shared/authoring";
 import { identifySources, source, sourceIds } from "../src/places/shared/provenance";
 import { batchStatic } from "../src/places/shared/geo";
 import { PLACES } from "../src/places/registry";
 import type { PlaceDef, Stage, StageContext } from "../src/core/types";
+import { DayStage, type DayPlace } from "../src/places/shared/daylight/DayStage";
+import { AUDIO_RECIPE, SpringAudio } from "../src/places/sangubashi-crossing/sound";
 
 const sampling = { startSeconds: 0, durationSeconds: 64, fps: 15 };
 const make = () => definePlace({ id: "test-place", kind: "night-street", seed: 10, sampling,
@@ -19,6 +21,30 @@ test("all published places can be inspected without DOM, renderer or audio; rail
     expect(metadata.kind).toBe(place.kind);
     expect(JSON.stringify(metadata)).not.toContain("create");
     if (place.id === "sangubashi-crossing") expect(metadata.sampling.durationSeconds).toBe(64);
+  }
+});
+
+test("day authoring retains native railway audio while export skips live audio resources", async () => {
+  const place = PLACES.find(p => p.id === "sangubashi-crossing")!;
+  const { createStage } = await place.load!();
+  const specs: DayPlace[] = [], contexts: StageContext[] = [];
+  const create = spyOn(DayStage, "create").mockImplementation(async (ctx, _place, _progress, spec) => {
+    contexts.push(ctx); specs.push(spec); return {} as DayStage;
+  });
+  try {
+    for (const exporting of [true, false]) {
+      const ctx = { params: { geometry: "handheld", exporting }, audio: {} } as StageContext;
+      await createStage(ctx, place, async () => {});
+    }
+    for (let i = 0; i < specs.length; i++) {
+      expect(specs[i].audioRecipe).toEqual(AUDIO_RECIPE);
+      expect(contexts[i].authoring?.sampling).toEqual({ startSeconds: 0, durationSeconds: AUDIO_RECIPE.loopSeconds, fps: 15 });
+      expect(contexts[i].authoring?.geometry).toBe("handheld");
+    }
+    expect(specs[0].audio).toBeUndefined();
+    expect(specs[1].audio).toBeInstanceOf(SpringAudio);
+  } finally {
+    create.mockRestore();
   }
 });
 

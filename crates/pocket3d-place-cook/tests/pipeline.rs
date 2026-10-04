@@ -33,9 +33,12 @@ fn fixture(root: &Path, width: u32, height: u32) {
 }
 fn fixture_material(root: &Path, width: u32, height: u32, roughness: Option<f32>, kind: &str) {
     std::fs::create_dir_all(root).unwrap();
-    // A non-power-of-two source texture ensures native targets apply their own fit.
+    // A non-power-of-two, nonconstant source verifies target sizing rather
+    // than the lossless minimum-size encoding for constant GE textures.
     let mut png = std::io::Cursor::new(Vec::new());
-    image::RgbaImage::from_pixel(width, height, image::Rgba([170, 120, 70, 255]))
+    image::RgbaImage::from_fn(width, height, |x, _| {
+        image::Rgba(if x < width / 2 { [170, 120, 70, 255] } else { [204, 154, 104, 255] })
+    })
         .write_to(&mut png, image::ImageFormat::Png)
         .unwrap();
     let pos = [0.1234567f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
@@ -72,6 +75,107 @@ fn fixture_material(root: &Path, width: u32, height: u32, roughness: Option<f32>
     };
     std::fs::write(root.join("scene.glb"), glb.to_vec().unwrap()).unwrap();
 }
+
+#[test]
+fn psp_welds_dead_uv_seams_but_preserves_textured_uv_seams() {
+    use pocket3d_place_psp as pp;
+    let temp = Temp(std::env::temp_dir().join(format!("atlas-psp-dead-uv-{}", std::process::id())));
+    let export = temp.0.join("uv-seams");
+    // Two adjacent triangles share positions but use independent UV islands.
+    let positions = [
+        [0.0f32, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0],
+    ];
+    let uvs = [
+        [0.0f32, 0.0],
+        [1.0, 0.0],
+        [0.0, 1.0],
+        [0.0, 0.0],
+        [1.0, 0.0],
+        [1.0, 1.0],
+    ];
+    let mut reference_colors = Vec::new();
+    for textured in [false, true] {
+        fixture(&export, 8, 8);
+        let source = std::fs::read(export.join("scene.glb")).unwrap();
+        let glb = gltf::binary::Glb::from_slice(&source).unwrap();
+        let mut doc: serde_json::Value = serde_json::from_slice(&glb.json).unwrap();
+        let mut bin = glb.bin.unwrap().into_owned();
+        while bin.len() % 4 != 0 {
+            bin.push(0);
+        }
+        let pos_offset = bin.len();
+        bin.extend(positions.iter().flatten().flat_map(|v| v.to_le_bytes()));
+        let uv_offset = bin.len();
+        bin.extend(uvs.iter().flatten().flat_map(|v| v.to_le_bytes()));
+        doc["buffers"][0]["byteLength"] = json!(bin.len());
+        doc["bufferViews"].as_array_mut().unwrap().extend([
+            json!({"buffer":0,"byteOffset":pos_offset,"byteLength":72}),
+            json!({"buffer":0,"byteOffset":uv_offset,"byteLength":48}),
+        ]);
+        doc["accessors"][0] = json!({"bufferView":2,"componentType":5126,"count":6,"type":"VEC3","min":[0,0,0],"max":[1,1,0]});
+        doc["accessors"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"bufferView":3,"componentType":5126,"count":6,"type":"VEC2"}));
+        doc["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_0"] = json!(1);
+        if !textured {
+            doc["materials"][0]["pbrMetallicRoughness"]
+                .as_object_mut()
+                .unwrap()
+                .remove("baseColorTexture");
+        }
+        let changed = gltf::binary::Glb {
+            header: glb.header,
+            json: Cow::Owned(serde_json::to_vec(&doc).unwrap()),
+            bin: Some(Cow::Owned(bin)),
+        };
+        std::fs::write(export.join("scene.glb"), changed.to_vec().unwrap()).unwrap();
+        let output = temp.0.join("target.place");
+        ok(&[
+            "--target",
+            "psp",
+            "--in",
+            export.to_str().unwrap(),
+            "--out",
+            output.to_str().unwrap(),
+        ]);
+        let bytes = std::fs::read(output).unwrap();
+        let header = pp::validate(&bytes).unwrap();
+        let draws = pp::slice::<pp::Draw>(&bytes, header.draws).unwrap();
+        let materials = pp::slice::<pp::Material>(&bytes, header.materials).unwrap();
+        assert_eq!(draws.len(), 1);
+        assert_eq!(
+            materials[draws[0].material as usize].texture == pp::NONE,
+            !textured
+        );
+        let vertices = pp::slice::<pp::Vertex>(&bytes, draws[0].vertices).unwrap();
+        let indices = pp::slice::<u16>(&bytes, draws[0].indices).unwrap();
+        assert_eq!(vertices.len(), if textured { 6 } else { 4 });
+        assert_eq!(indices.len(), 6);
+        for (corner, &index) in indices.iter().enumerate() {
+            let vertex = &vertices[index as usize];
+            assert_eq!(
+                vertex.pos, positions[corner],
+                "position and winding stay exact"
+            );
+            if textured {
+                assert_eq!(
+                    vertex.color, reference_colors[corner],
+                    "baked colour stays exact"
+                );
+            } else {
+                reference_colors.push(vertex.color);
+            }
+            assert_eq!(vertex.uv, if textured { uvs[corner] } else { [0.0; 2] });
+        }
+    }
+}
+
 #[test]
 fn one_ir_builds_three_repeatable_packs_without_web_export_or_vita_intermediate() {
     let temp = Temp(std::env::temp_dir().join(format!("atlas-pipeline-{}", std::process::id())));
@@ -146,6 +250,21 @@ fn one_ir_builds_three_repeatable_packs_without_web_export_or_vita_intermediate(
                 .status()
                 .unwrap()
                 .success());
+            let word = |at: usize| u32::from_le_bytes(first[at..at + 4].try_into().unwrap());
+            let pica = (0..word(8) as usize).map(|i| 16 + i * 16)
+                .find(|&at| &first[at..at + 4] == b"PICA").unwrap();
+            let table = word(pica + 4) as usize;
+            for old in [2u32, 3] {
+                let mut legacy = first.clone();
+                legacy[table..table + 4].copy_from_slice(&old.to_le_bytes());
+                std::fs::write(&output, legacy).unwrap();
+                assert!(!Command::new(&reader).arg(&output).status().unwrap().success(),
+                        "PICA v4 must reject old frame-major matrix tables");
+            }
+            for length in [0, 4, 15, 16, table + 119] {
+                std::fs::write(&output, &first[..length]).unwrap();
+                assert!(!Command::new(&reader).arg(&output).status().unwrap().success());
+            }
         } else {
             let pack = pocket3d_place::Pack::parse(&first).unwrap();
             assert!(pack.section(*b"PICA").is_err());
@@ -272,13 +391,19 @@ fn vita_palette_encoding_does_not_replace_native_uvs_or_material_factors() {
             let h = pocket3d_place_psp::validate(&bytes).unwrap();
             assert_eq!(h.materials.count, 2, "GE must receive authored materials");
             let draws = pocket3d_place_psp::slice::<pocket3d_place_psp::Draw>(&bytes, h.draws).unwrap();
+            let mut colors = [None; 2];
             for d in draws {
                 let vertices = pocket3d_place_psp::slice::<pocket3d_place_psp::Vertex>(&bytes, d.vertices).unwrap();
                 for v in vertices {
                     let source = usize::from(v.pos[0] >= 2.0);
-                    assert_eq!(v.uv.map(f32::to_bits), uv[source].map(f32::to_bits));
+                    // These materials have no texture: GE drops dead UVs,
+                    // while Vita uses that space for roughness/metalness.
+                    assert_eq!(v.uv, [0.0; 2]);
+                    colors[source] = Some(v.color);
                 }
             }
+            assert!(colors.iter().all(Option::is_some));
+            assert_ne!(colors[0], colors[1], "authored tints reach the GE bake");
         } else if target == "3ds" {
             let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
             let section = |tag: &[u8]| (0..word(8) as usize).map(|i| 16 + i * 16)
@@ -286,7 +411,7 @@ fn vita_palette_encoding_does_not_replace_native_uvs_or_material_factors() {
             assert_eq!(word(4), 5);
             let table = section(b"PICA");
             let geom = section(b"GEOM");
-            assert_eq!(word(table), 3);
+            assert_eq!(word(table), 4);
             let meta_section = (0..word(8) as usize).map(|i| 16 + i * 16)
                 .find(|&at| &bytes[at..at + 4] == b"META").unwrap();
             let meta_at = word(meta_section + 4) as usize;
@@ -419,7 +544,7 @@ fn skin_with_25_joints_lowers_independently_for_native_targets() {
             let (table, table_size) = section(b"PICA");
             let (anim, _) = section(b"ANIM");
             assert_eq!(word(4), 5);
-            assert_eq!(word(table), 3);
+            assert_eq!(word(table), 4);
             assert_eq!(word(table + 12), 1, "one skinned draw");
             assert_eq!(word(table + 20), 26, "one root transform plus all 25 joints");
             assert_eq!(word(table + 36), 36, "three 12-byte skin records");
@@ -430,8 +555,12 @@ fn skin_with_25_joints_lowers_independently_for_native_targets() {
                 assert_eq!(&bytes[at + 8..at + 12], &[255, 0, 0, 0]);
             }
             // The last referenced joint retains its transform, not a
-            // truncated/clamped palette entry. Matrices use float 3x4 rows.
-            assert_eq!(f32::from_bits(word(anim + 25 * 48 + 12)), 0.25);
+            // truncated/clamped palette entry. PICA v4 stores a typed track.
+            let track = anim + 25 * 12;
+            assert_eq!(word(track + 4), 1);
+            assert_eq!(word(track + 8), 1);
+            let sample = anim + word(track) as usize;
+            assert_eq!(f32::from_bits(word(sample)), 0.25);
         }
     }
 }
@@ -451,6 +580,22 @@ fn skin_without_joints_is_rejected_for_every_target() {
         let error = String::from_utf8_lossy(&result.stderr);
         assert!(error.contains("has no joints"), "{target}: {error}");
         assert!(!output.exists());
+    }
+}
+
+#[test]
+fn pica_runtime_animation_and_skin_bounds_contracts() {
+    let temp = Temp(std::env::temp_dir().join(format!("atlas-pica-motion-{}", std::process::id())));
+    std::fs::create_dir_all(&temp.0).unwrap();
+    let cooker = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for name in ["animation", "skin_bounds", "frustum"] {
+        let executable = temp.0.join(name);
+        let compile = Command::new("cc")
+            .args(["-std=c11", "-Wall", "-Wextra", "-Werror"])
+            .arg(cooker.join(format!("../../n3ds/tests/{name}.c")))
+            .args(["-lm", "-o"]).arg(&executable).output().unwrap();
+        assert!(compile.status.success(), "{name}: {}", String::from_utf8_lossy(&compile.stderr));
+        assert!(Command::new(executable).status().unwrap().success(), "{name}");
     }
 }
 
@@ -497,7 +642,12 @@ fn psp_sun_is_refined_before_lods_and_not_added_twice() {
         let mut floor = Vec::new();
         let mut count = 0;
         for d in draws {
-            let vertices = pp::slice::<pp::Vertex>(&bytes,d.vertices).unwrap();
+            let vertices: Vec<pp::Vertex> = match d.vertex_format {
+                0 => pp::slice::<pp::Vertex>(&bytes, d.vertices).unwrap().to_vec(),
+                1 => pp::slice::<pp::PackedVertex>(&bytes, d.vertices).unwrap()
+                    .iter().map(|v| pp::decode_vertex(d, v)).collect(),
+                other => panic!("unexpected vertex format {other}"),
+            };
             let indices = pp::slice::<u16>(&bytes,d.indices).unwrap();
             count += indices.len()/3;
             for &i in indices {

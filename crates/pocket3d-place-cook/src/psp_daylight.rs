@@ -1,5 +1,6 @@
-//! Shared fixed-function daylight: authored sky/grade baked into one panorama,
-//! directional diffuse light baked at vertices, static world-space shadows.
+//! Fixed-function daylight: a compiler-authored sky dome, graded vertex
+//! lighting, and static world-space sunlight. The shared panorama and moving
+//! cloud overlay are emitted separately by the PSP backend.
 use glam::{Mat4, Quat, Vec3};
 use pocket_atlas_model as pc;
 use pocket3d_place_psp as pp;
@@ -66,60 +67,7 @@ pub(super) fn sun_light(
         * (normal.dot(direction).max(0.0) * visible * std::f32::consts::FRAC_1_PI)
 }
 
-fn sky_sample(sky: &pc::DaySky, d: Vec3, clouds: Option<&crate::textures::Rgba>) -> Vec3 {
-    let base = crate::pica::sky_radiance(sky, d);
-    let Some(clouds) = clouds else {
-        return base;
-    };
-    let turn = (d.x.atan2(-d.z) / std::f32::consts::TAU).rem_euclid(1.0);
-    let u = (turn * 2.0).fract();
-    let elevation = (d.y.clamp(0.0, 1.0).asin() / std::f32::consts::FRAC_PI_2).sqrt();
-    let v = ((turn * 2.0).floor() + elevation.clamp(0.5 / 512.0, 1.0 - 0.5 / 512.0)) * 0.5;
-    let p = crate::pica::bilinear(clouds, u, v);
-    let f = (d.y / sky.fade_elevation.max(1e-5)).clamp(0.0, 1.0);
-    let f = f * f * (3.0 - 2.0 * f);
-    base * (1.0 - p[0] * f)
-        + (Vec3::from(sky.cloud_sun) * p[1] + Vec3::from(sky.cloud_ambient) * p[2]) * f
-}
-
-pub(super) fn sky(
-    m: &crate::source::Scene,
-    w: &mut super::Writer,
-    textures: &mut Vec<pp::Texture>,
-) -> (pp::Span, u32) {
-    let Some(sky) = &m.day_sky else {
-        return (pp::Span::default(), pp::NONE);
-    };
-    let clouds = sky
-        .clouds
-        .map(|i| m.textures[i as usize].image());
-    // Smooth gradients use native RGBA8888. Ordered 4-bit dither becomes a
-    // visible world-locked checkerboard when a panorama texel spans the screen.
-    // Other textures keep their independent compact encoding.
-    let (width, height) = (512u32, 256u32);
-    let mut pixels = Vec::with_capacity((width * height * 4) as usize);
-    for y in 0..height {
-        for x in 0..width {
-            let az = (x as f32 + 0.5) / width as f32 * std::f32::consts::TAU;
-            let el = ((y as f32 + 0.5) / height as f32 - 0.5) * std::f32::consts::PI;
-            let d = Vec3::new(az.sin() * el.cos(), el.sin(), -az.cos() * el.cos());
-            let c = graded(sky_sample(sky, d, clouds.as_ref()), 1.0, &m.post).to_le_bytes();
-            pixels.extend(c);
-        }
-    }
-    let texture = textures.len() as u32;
-    textures.push(pp::Texture {
-        pixels: w.push(&super::swizzle(
-            &pixels,
-            width as usize * 4,
-            height as usize,
-        )),
-        width,
-        height,
-        wrap: 2,
-        mips: 1,
-        format: pp::RGBA8888,
-    });
+pub(super) fn sky_vertices(w: &mut super::Writer) -> pp::Span {
     let mut vertices = Vec::new();
     // The display resolves the panorama, not dome tessellation. Match the
     // native fixed-function sky budget and retain continuous UV seams.
@@ -147,7 +95,7 @@ pub(super) fn sky(
             ]);
         }
     }
-    (w.push(&vertices), texture)
+    w.push(&vertices)
 }
 
 #[cfg(test)]

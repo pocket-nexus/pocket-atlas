@@ -2,6 +2,8 @@
 //! This crate defines no GPU API, byte offsets, device formats or BSP types.
 use serde::{Deserialize, Serialize};
 pub mod color;
+pub mod audio;
+pub use audio::{AudioRecipe, BirdAudio, RailwayAudio};
 
 pub type Vec3 = [f32; 3];
 

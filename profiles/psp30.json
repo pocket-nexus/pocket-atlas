@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "psp30",
-  "revision": 2,
+  "revision": 3,
   "target": "psp",
   "host": {
     "os": "psp",
@@ -24,7 +24,14 @@
     "emissiveTextureCap": 512,
     "animationPaletteBytes": 10485760,
     "maxMeshVertices": 65535,
-    "maxFieldPoints": 16384
+    "maxFieldPoints": 16384,
+    "pspGeometry": {
+      "daytimeCellMeters": 8.0,
+      "lodPixels": 1.0,
+      "vertexPositionErrorMeters": 0.005,
+      "vertexUvErrorTexels": 0.25,
+      "trackPositionErrorMeters": 0.006
+    }
   },
   "budgets": {
     "maxPackBytes": 18874368,

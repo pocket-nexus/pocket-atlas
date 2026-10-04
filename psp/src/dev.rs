@@ -10,6 +10,7 @@ pub struct Command {
     pub pause: bool,
     pub rain: bool,
     pub reflection: bool,
+    pub muted: bool,
     nonce: u32,
 }
 impl Command {
@@ -27,6 +28,7 @@ impl Command {
             rain: flag(fields.next()?)?,
             reflection: flag(fields.next()?)?,
             nonce: fields.next()?.parse().ok()?,
+            muted: flag(fields.next()?)?,
         };
         (fields.next().is_none()
             && command.shot >= -1
@@ -48,10 +50,22 @@ pub struct Status<'a> {
     pub draws: u32,
     pub triangles: u32,
     pub pack_bytes: usize,
+    pub pack_hash: u32,
+    pub pack_version: u32,
+    pub audio_ready: bool,
+    pub muted: bool,
     pub rain: bool,
     pub reflection: bool,
     pub paused: bool,
     pub free_camera: bool,
+    pub stage_ms: [f32; 11],
+    pub clip_scan_triangles: u32,
+    pub clip_input_triangles: u32,
+    pub clip_vertices: u32,
+    pub clip_extra_draws: u32,
+    pub clip_scratch_bytes: u32,
+    pub clip_block_bytes: u32,
+    pub clip_block_skipped: u32,
 }
 pub struct Session {
     enabled: bool,
@@ -112,7 +126,11 @@ impl Session {
                 "\"time\":{:.2},\"fps\":{:.2},\"frameMs\":{:.2},\"workMs\":{:.2},",
                 "\"gpuWaitMs\":{:.2},\"maxWorkMs\":{:.2},\"draws\":{},\"triangles\":{},",
                 "\"packBytes\":{},\"rain\":{},\"reflection\":{},\"paused\":{},",
-                "\"freeCamera\":{},\"controlNonce\":{},\"packSha256\":\"{}\",\"runtimeBuild\":\"{}\"}}\n"
+                "\"freeCamera\":{},\"controlNonce\":{},\"packHash\":{},\"packVersion\":{},\"audioReady\":{},\"muted\":{},\"build\":\"{}\",",
+                "\"packSha256\":\"{}\",\"runtimeBuild\":\"{}\",",
+                "\"controlMs\":{:.3},\"poseMs\":{:.3},\"boundsSkinMs\":{:.3},\"audioMs\":{:.3},",
+                "\"prepareMs\":{:.3},\"lodMs\":{:.3},\"passMs\":{:.3},\"indexCopyMs\":{:.3},\"drawSubmitMs\":{:.3},\"effectsMs\":{:.3},\"clipMs\":{:.3},",
+                "\"clipScanTriangles\":{},\"clipInputTriangles\":{},\"clipVertices\":{},\"clipExtraDraws\":{},\"clipScratchBytes\":{},\"clipBlockBytes\":{},\"clipBlockSkippedTriangles\":{}}}\n"
             ),
             s.frame,
             shot,
@@ -131,8 +149,16 @@ impl Session {
             s.paused,
             s.free_camera,
             self.nonce.unwrap_or(0),
+            s.pack_hash,
+            s.pack_version,
+            s.audio_ready,
+            s.muted,
+            option_env!("ATLAS_SOURCE_ID").unwrap_or("unknown"),
             self.pack_sha256,
-            option_env!("ATLAS_BUILD_ID").unwrap_or("unidentified")
+            option_env!("ATLAS_BUILD_ID").unwrap_or("unidentified"),
+            s.stage_ms[0], s.stage_ms[1], s.stage_ms[2], s.stage_ms[3], s.stage_ms[4],
+            s.stage_ms[5], s.stage_ms[6], s.stage_ms[7], s.stage_ms[8], s.stage_ms[9], s.stage_ms[10],
+            s.clip_scan_triangles, s.clip_input_triangles, s.clip_vertices, s.clip_extra_draws, s.clip_scratch_bytes, s.clip_block_bytes, s.clip_block_skipped
         );
         let fd = sceIoOpen(
             b"host0:/status.json\0".as_ptr(),

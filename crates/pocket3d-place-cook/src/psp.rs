@@ -1,14 +1,14 @@
 //! Fixed-function lowering from shared scene analysis to a PSP device pack. Static irradiance is
 //! already baked by the common cooker. PSP stores compact indexed GE vertices,
 //! RGBA4444 swizzled textures and the original rigid/skeletal animation.
-use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Vec3};
 #[path = "psp_daylight.rs"]
 mod daylight;
-use pocket_atlas_model as pc;
-use pocket3d_place_psp as pp;
-use std::collections::HashMap;
 use crate::{artifact::Artifact, profile::Profile};
+use bytemuck::{Pod, Zeroable};
+use glam::{Mat4, Quat, Vec3};
+use pocket3d_place_psp as pp;
+use pocket_atlas_model as pc;
+use std::collections::HashMap;
 
 pub(super) struct Writer(Vec<u8>);
 impl Writer {
@@ -43,6 +43,23 @@ pub(super) fn swizzle(pixels: &[u8], row: usize, height: usize) -> Vec<u8> {
     pocket_psp_ge::swizzle::swizzle_rows(pixels, row, height).expect("valid GE texture rows")
 }
 
+/// A constant encoded mip chain samples identically at every UV and LOD.
+/// Check all channels of every level after quantization, then retain the GE
+/// reader's minimum 8x8 image. Different constant colours at different mip
+/// levels must keep their chain, as mip filtering can expose the difference.
+fn compact_constant_texture(texture: &mut pp::Texture, pixels: &mut Vec<u8>) {
+    let bpp = texture.bytes_per_pixel().expect("encoded GE texture") as usize;
+    if pixels.len() >= 64 * bpp
+        && pixels.len() % bpp == 0
+        && pixels.chunks_exact(bpp).all(|p| p == &pixels[..bpp])
+    {
+        pixels.truncate(64 * bpp);
+        texture.width = 8;
+        texture.height = 8;
+        texture.mips = 1;
+    }
+}
+
 /// Native GE sampling policy: one-metre lighting refinement with a half-
 /// metre contact guard. AO retains fine trim/reveal contact; directional rays
 /// must not magnify those unresolved occluders over whole facade triangles.
@@ -55,10 +72,15 @@ pub(super) fn static_sun_light(sun: Option<&pc::Sun>, occluder: Option<&crate::o
     daylight::sun_light(sun, shadows, pos + normal.normalize_or(Vec3::Y) * 0.5, normal, true)
 }
 
-pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,String> {
+pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact, String> {
     let m = scene;
-    assert!(m.materials.iter().all(|m| !m.vertex_pbr), "PSP lowering requires source materials, not Vita PBR palettes");
+    assert!(
+        m.materials.iter().all(|m| !m.vertex_pbr),
+        "PSP lowering requires source materials, not Vita PBR palettes"
+    );
     let daytime = daylight::enabled(&m.kind);
+    let daylight = daytime;
+    let geometry_recipe = profile.recipe.psp_geometry.clone().unwrap_or_default();
     let mut w = Writer(vec![0; core::mem::size_of::<pp::Header>()]);
     let mut textures = Vec::new();
     let mut tex_map = HashMap::new();
@@ -113,17 +135,19 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
                     image::imageops::FilterType::Triangle,
                 );
             }
-            let pixels = w.push(&chain);
-            tex_map.insert(id, textures.len() as u32);
-            textures.push(pp::Texture {
-                pixels,
+            let mut texture = pp::Texture {
+                pixels: pp::Span::default(),
                 width,
                 height,
                 wrap: (t.wrap_s != pc::Wrap::Repeat) as u32
                     | ((t.wrap_t != pc::Wrap::Repeat) as u32) << 1,
                 mips,
                 format,
-            });
+            };
+            compact_constant_texture(&mut texture, &mut chain);
+            texture.pixels = w.push(&chain);
+            tex_map.insert(id, textures.len() as u32);
+            textures.push(texture);
         }
     }
     let mut materials: Vec<_> = m
@@ -180,7 +204,7 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         None,
     );
     let occluder = if daytime && !scene.baked_sun {
-        crate::pica::sun_occluder(scene)
+        crate::native_sky::sun_occluder(scene)
     } else {
         None
     };
@@ -208,18 +232,42 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         }
         // Coarse lists retain outlines and the bake's lighting boundaries.
         // No camera-specific scene copies: all six shots share these draws.
-        // Keep the visible aperture of overlay panes intact.
-        let indices = if daytime && mat.polygon_offset.is_some() {
+        let indices = if daylight {
             draw.indices()
         } else {
-            draw.lods().last().map(|l| l.indices.as_slice()).unwrap_or(draw.indices())
+            draw.lods()
+                .last()
+                .map(|l| l.indices.as_slice())
+                .unwrap_or(draw.indices())
         };
+        // Fixed children share their animated ancestor's model frame. This is
+        // final GE-state batching; original PBR factors were already shaded.
+        let mut node = draw.node;
+        let mut rebase = Mat4::IDENTITY;
+        if daylight && draw.skin.is_none() {
+            while let Some(id) = node {
+                let n = &m.nodes[id as usize];
+                if n.track.is_some() || n.parent.is_none() {
+                    break;
+                }
+                let local = Mat4::from_scale_rotation_translation(
+                    Vec3::from(n.scale),
+                    Quat::from_array(n.rotation),
+                    Vec3::from(n.translation),
+                );
+                rebase = local * rebase;
+                node = n.parent;
+            }
+        }
         let mut remap = HashMap::<u16, u16>::new();
         let mut vertices = Vec::new();
         let mut weights = Vec::new();
         let mut out_indices = Vec::new();
-        let mut selected: Vec<u16> = indices.iter().map(|&i| u16::try_from(i).expect("GE index overflow")).collect();
-        if draw.node.is_some() || draw.skin.is_some() {
+        let mut selected: Vec<u16> = indices
+            .iter()
+            .map(|&i| u16::try_from(i).expect("GE index overflow"))
+            .collect();
+        if !daylight && draw.node.is_some() && draw.skin.is_none() {
             let verts: Vec<_> = (0..draw.vertex_count() as usize)
                 .map(|i| *scene.vertex(draw, i))
                 .collect();
@@ -231,19 +279,37 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
             // each garment/prop while retaining the original bone weights.
             let locks: Vec<bool> = (0..verts.len())
                 .map(|i| {
-                    draw.skin.is_some() && scene.vertex(draw, i).weights.iter().filter(|&&w| w > 0).count() > 1
+                    draw.skin.is_some()
+                        && scene
+                            .vertex(draw, i)
+                            .weights
+                            .iter()
+                            .filter(|&&w| w > 0)
+                            .count()
+                            > 1
                 })
                 .collect();
-            if let Some((tris, _)) = crate::geometry::simplify(&verts, &tris, 0.15, 0.025, &locks, 0.02) {
+            if let Some((tris, _)) =
+                crate::geometry::simplify(&verts, &tris, 0.15, 0.025, &locks, 0.02)
+            {
                 selected = tris.iter().flatten().map(|&i| i as u16).collect();
             }
         }
         for old in selected {
             let index = *remap.entry(old).or_insert_with(|| {
                 let v = scene.vertex(draw, old as usize);
-                let pos = v.pos.to_array();
-                let uv = v.uv.to_array();
-                let vc = core::array::from_fn::<_, 3, _>(|i| pc::color::decode(v.color[i] as f32 / 255.0));
+                let pos = rebase.transform_point3(v.pos).to_array();
+                // The GE renderer disables Texture2D for this final material.
+                // Canonicalize its dead UVs before exact vertex welding so
+                // authoring seams do not duplicate otherwise identical data.
+                let uv = if materials[draw.material as usize].texture == pp::NONE {
+                    [0.0; 2]
+                } else {
+                    v.uv.to_array()
+                };
+                let vc = core::array::from_fn::<_, 3, _>(|i| {
+                    pc::color::decode(v.color[i] as f32 / 255.0)
+                });
                 let normal = v.normal.normalize_or(Vec3::Y);
                 let world_pos = model.transform_point3(v.pos);
                 let world_normal = normal_matrix.transform_vector3(normal).normalize_or(normal);
@@ -302,6 +368,53 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
             });
             out_indices.push(index);
         }
+        // PBR normals/tangents have now become GE vertex colours. Their
+        // original seams may be byte-identical in the final GE stream;
+        // merge only complete records (including deformation weights).
+        let mut unique = HashMap::<Vec<u8>, u16>::new();
+        let mut compact_vertices = Vec::new();
+        let mut compact_weights = Vec::new();
+        let mut vertex_remap = Vec::new();
+        for (i, vertex) in vertices.iter().enumerate() {
+            let mut key = bytemuck::bytes_of(vertex).to_vec();
+            if let Some(weight) = weights.get(i) {
+                key.extend(bytemuck::bytes_of(weight));
+            }
+            let new = *unique.entry(key).or_insert_with(|| {
+                let index = compact_vertices.len() as u16;
+                compact_vertices.push(*vertex);
+                if let Some(weight) = weights.get(i) {
+                    compact_weights.push(*weight);
+                }
+                index
+            });
+            vertex_remap.push(new);
+        }
+        for index in &mut out_indices {
+            *index = vertex_remap[*index as usize];
+        }
+        for index in remap.values_mut() {
+            *index = vertex_remap[*index as usize];
+        }
+        vertices = compact_vertices;
+        weights = compact_weights;
+        let mut lods = [pp::Lod::default(); 4];
+        if daylight && draw.skin.is_none() {
+            for (out, source) in lods.iter_mut().zip(draw.lods()) {
+                let indices: Vec<u16> =
+                    source.indices.iter().map(|&i| remap[&(i as u16)]).collect();
+                *out = pp::Lod {
+                    indices: w.push(&indices),
+                    error: source.error,
+                };
+            }
+        }
+        let lo = vertices
+            .iter()
+            .fold(Vec3::splat(f32::MAX), |v, p| v.min(Vec3::from(p.pos)));
+        let hi = vertices
+            .iter()
+            .fold(Vec3::splat(f32::MIN), |v, p| v.max(Vec3::from(p.pos)));
         let joints: Vec<_> = draw
             .skin
             .map(|s| {
@@ -322,7 +435,7 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
             weights: w.push(&weights),
             joints: w.push(&joints),
             material: draw.material,
-            node: draw.node.unwrap_or(pp::NONE),
+            node: node.unwrap_or(pp::NONE),
             flags: if draw.no_reflect
                 || (draw.node.is_none()
                     && draw.skin.is_none()
@@ -334,19 +447,86 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
                 0
             },
             reserved: 0,
-            min: draw.min,
-            max: draw.max,
+            min: lo.to_array(),
+            max: hi.to_array(),
+            lods,
+            ..Default::default()
         });
     }
+    let mut tracks = HashMap::<Vec<u32>, pp::Span>::new();
+    let mut packed_tracks = HashMap::<Vec<u8>, pp::Span>::new();
+    let mut max_track_error = 0.0f32;
     let mut nodes: Vec<_> = m
         .nodes
         .iter()
-        .map(|n| pp::Node {
-            parent: n.parent.unwrap_or(pp::NONE),
-            track: w.push(&n.track.as_ref().map(|t| t.iter().flatten().copied().collect::<Vec<f32>>()).unwrap_or_default()),
-            translation: n.translation,
-            rotation: n.rotation,
-            scale: n.scale,
+        .map(|n| {
+            let mut out = pp::Node {
+                parent: n.parent.unwrap_or(pp::NONE),
+                translation: n.translation,
+                rotation: n.rotation,
+                scale: n.scale,
+                ..Default::default()
+            };
+            if let Some(keys) = n.track.as_ref().filter(|v| !v.is_empty()) {
+                if keys.iter().all(|key| key == &keys[0]) {
+                    out.translation.copy_from_slice(&keys[0][..3]);
+                    out.rotation.copy_from_slice(&keys[0][3..]);
+                } else if daylight {
+                    let lo: [f32; 3] = core::array::from_fn(|i| {
+                        keys.iter().map(|v| v[i]).fold(f32::MAX, f32::min)
+                    });
+                    let hi: [f32; 3] = core::array::from_fn(|i| {
+                        keys.iter().map(|v| v[i]).fold(f32::MIN, f32::max)
+                    });
+                    out.track_offset = core::array::from_fn(|i| (lo[i] + hi[i]) * 0.5);
+                    out.track_scale = core::array::from_fn(|i| (hi[i] - lo[i]) * 0.5);
+                    let quant = |v: f32| (v.clamp(-1.0, 1.0) * 32767.0).round() as i16;
+                    let packed: Vec<pp::PackedTrs> = keys
+                        .iter()
+                        .map(|key| pp::PackedTrs {
+                            translation: core::array::from_fn(|i| {
+                                quant(if out.track_scale[i] > 0.0 {
+                                    (key[i] - out.track_offset[i]) / out.track_scale[i]
+                                } else {
+                                    0.0
+                                })
+                            }),
+                            rotation: core::array::from_fn(|i| quant(key[i + 3])),
+                            padding: 0,
+                        })
+                        .collect();
+                    let mut track_error = 0.0f32;
+                    for (original, encoded) in keys.iter().zip(&packed) {
+                        let decoded = pp::decode_trs(&out, encoded);
+                        track_error = track_error.max(
+                            (Vec3::from_slice(&decoded[..3]) - Vec3::from_slice(&original[..3]))
+                                .length(),
+                        );
+                    }
+                    if track_error <= geometry_recipe.track_position_error_meters {
+                        max_track_error = max_track_error.max(track_error);
+                        out.track_encoding = 1;
+                        out.track = *packed_tracks
+                            .entry(bytemuck::cast_slice(&packed).to_vec())
+                            .or_insert_with(|| w.push(&packed));
+                    } else {
+                        // Wide motion retains every original float sample when
+                        // the fixed-rate compact format cannot meet its bound.
+                        out.track_offset = [0.0; 3];
+                        out.track_scale = [0.0; 3];
+                        let data: Vec<f32> = keys.iter().flatten().copied().collect();
+                        out.track = *tracks
+                            .entry(data.iter().map(|v| v.to_bits()).collect())
+                            .or_insert_with(|| w.push(&data));
+                    }
+                } else {
+                    let data: Vec<f32> = keys.iter().flatten().copied().collect();
+                    out.track = *tracks
+                        .entry(data.iter().map(|v| v.to_bits()).collect())
+                        .or_insert_with(|| w.push(&data));
+                }
+            }
+            out
         })
         .collect();
     let mut lights: Vec<_> = m
@@ -357,7 +537,18 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
             pos: l.position,
             color: color(l.color, 1.0),
             radius: l.radius,
-            track: w.push(&l.track.map(|t| m.fog_tracks[t as usize].samples.iter().flatten().copied().collect::<Vec<f32>>()).unwrap_or_default()),
+            track: w.push(
+                &l.track
+                    .map(|t| {
+                        m.fog_tracks[t as usize]
+                            .samples
+                            .iter()
+                            .flatten()
+                            .copied()
+                            .collect::<Vec<f32>>()
+                    })
+                    .unwrap_or_default(),
+            ),
             reserved: 0,
         })
         .collect();
@@ -398,19 +589,69 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         .map(|b| [b[0][0], b[0][1], b[0][2], b[1][0], b[1][1], b[1][2]])
         .collect();
     draws.retain(|d| d.indices.count > 0);
+    if daylight {
+        let mut merged = Vec::new();
+        let mut keys = HashMap::new();
+        let map: Vec<u32> = materials
+            .iter()
+            .map(|mat| {
+                *keys
+                    .entry(bytemuck::bytes_of(mat).to_vec())
+                    .or_insert_with(|| {
+                        let id = merged.len() as u32;
+                        merged.push(*mat);
+                        id
+                    })
+            })
+            .collect();
+        for d in &mut draws {
+            d.material = map[d.material as usize];
+        }
+        materials = merged;
+    }
+    let mut sky_texture = pp::NONE;
+    let mut cloud_texture = pp::NONE;
+    let mut cloud_drift = 0.0;
+    if let Some(sky) = m.day_sky.as_ref().filter(|_| daytime) {
+        sky_texture = sky_texture_push(
+            &crate::native_sky::panorama(sky, &m.post, None),
+            &mut w,
+            &mut textures,
+        );
+        if let Some(id) = sky.clouds {
+            cloud_texture = sky_texture_push(
+                &crate::native_sky::panorama(sky, &m.post, Some(&m.textures[id as usize].image())),
+                &mut w,
+                &mut textures,
+            );
+            cloud_drift = sky.drift;
+        }
+    }
     batch_geometry(&mut w, &mut draws, &materials);
+    let max_vertex_error = if daylight {
+        pack_vertices(&mut w, &mut draws, &materials, &textures, &geometry_recipe)
+    } else {
+        0.0
+    };
     compact(&mut w, &mut textures, &mut draws, &mut nodes, &mut lights);
     let mut h = pp::Header::zeroed();
     h.magic = pp::MAGIC;
     h.version = pp::VERSION;
     h.rain = (!daytime && m.rain.active) as u32;
-    let (sky_vertices, sky_texture) = if daytime {
-        daylight::sky(m, &mut w, &mut textures)
-    } else {
-        (pp::Span::default(), pp::NONE)
-    };
-    h.sky_vertices = sky_vertices;
+    h.sky_vertices = if sky_texture != pp::NONE { daylight::sky_vertices(&mut w) } else { pp::Span::default() };
     h.sky_texture = sky_texture;
+    h.cloud_texture = cloud_texture;
+    h.cloud_drift = cloud_drift;
+    h.lod_pixels = if daylight {
+        geometry_recipe.lod_pixels
+    } else {
+        0.0
+    };
+    h.audio = w.push(
+        &crate::analysis::audio::native_record(m.audio.as_ref())
+            .map(|v| v.to_vec())
+            .unwrap_or_default(),
+    );
     h.textures = w.push(&textures);
     h.materials = w.push(&materials);
     h.draws = w.push(&draws);
@@ -448,7 +689,26 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         textures.len(),
         draws.len()
     );
-    pp::validate(&w.0).map_err(|e|format!("PSP pack: {e}"))?;
+    let texture_bytes: u32 = textures.iter().map(|t| t.pixels.count).sum();
+    let animation_bytes: u32 = nodes
+        .iter()
+        .map(|n| {
+            (
+                n.track.offset,
+                n.track.count,
+                if n.track_encoding == 1 { 16 } else { 4 },
+            )
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .iter()
+        .map(|v| v.1 * v.2)
+        .sum();
+    pp::validate(&w.0).map_err(|e| {
+        format!(
+            "PSP pack: {e}; {} bytes (textures {texture_bytes}, animation {animation_bytes})",
+            w.0.len()
+        )
+    })?;
     let triangles: u32 = draws.iter().map(|d| d.indices.count / 3).sum();
     let vertices_total: u32 = draws
         .iter()
@@ -457,23 +717,54 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         .iter()
         .map(|v| v.1)
         .sum();
-    let report = serde_json::json!({"target":"psp","kind":m.kind,"skyTriangles":h.sky_vertices.count / 3,"sunBake":daytime && m.sun.is_some(),"rain":h.rain != 0,"draws":draws.len(),"triangles":triangles,"vertices":vertices_total,"textures":textures.len(),"bytes":w.0.len(),"animatedNodes":nodes.iter().filter(|n|n.track.count>0).count(),"skinnedDraws":draws.iter().filter(|d|d.weights.count>0).count(),"shots":shots.len()});
+    let report = serde_json::json!({"target":"psp","kind":m.kind,"skyTriangles":h.sky_vertices.count/3,"sunBake":daytime && m.sun.is_some(),"rain":h.rain != 0,"frames":h.frames,"fps":h.fps,"daySky":daylight,"textureBytes":texture_bytes,"animationBytes":animation_bytes,"maxTrackPositionError":max_track_error,"maxVertexPositionError":max_vertex_error,"clouds":cloud_texture!=pp::NONE,"draws":draws.len(),"triangles":triangles,"vertices":vertices_total,"textures":textures.len(),"bytes":w.0.len(),"animatedNodes":nodes.iter().filter(|n|n.track.count>0).count(),"skinnedDraws":draws.iter().filter(|d|d.weights.count>0).count(),"shots":shots.len()});
     Ok(Artifact {
         bytes: w.0, summary: report, sections: Default::default(),
         textures: textures.iter().enumerate().map(|(id,t)|serde_json::json!({"id":id,"sourceTextures":tex_map.iter().filter_map(|(source,output)|(*output as usize==id).then_some(*source)).collect::<std::collections::BTreeSet<_>>(),"sources":tex_map.iter().filter(|(_,output)|**output as usize==id).flat_map(|(source,_)|crate::provenance::texture_sources(scene,*source as usize)).collect::<std::collections::BTreeSet<_>>(),"width":t.width,"height":t.height,"levels":t.mips,"bytes":t.pixels.count})).collect(),
     })
 }
 
+fn sky_texture_push(
+    image: &crate::textures::Rgba,
+    w: &mut Writer,
+    textures: &mut Vec<pp::Texture>,
+) -> u32 {
+    let image = crate::textures::resize(image, 512, 256);
+    let rgba: Vec<u8> = image
+        .px
+        .iter()
+        .flat_map(|p| {
+            [
+                pc::color::encode8(p[0]),
+                pc::color::encode8(p[1]),
+                pc::color::encode8(p[2]),
+                (p[3].clamp(0.0, 1.0) * 255.0).round() as u8,
+            ]
+        })
+        .collect();
+    let pixels = w.push(&swizzle(&rgba, 512 * 4, 256));
+    let id = textures.len() as u32;
+    textures.push(pp::Texture {
+        pixels,
+        width: 512,
+        height: 256,
+        wrap: 2,
+        mips: 1,
+        format: pp::RGBA8888,
+    });
+    id
+}
+
 /// Share one vertex buffer across spatial chunks of the same material. The
 /// runtime can concatenate only the visible chunks' indices into one GE draw.
 fn batch_geometry(w: &mut Writer, draws: &mut [pp::Draw], materials: &[pp::Material]) {
-    let mut groups = std::collections::BTreeMap::<(u32, u32), Vec<usize>>::new();
+    let mut groups = std::collections::BTreeMap::<(u32, u32, u32), Vec<usize>>::new();
     for (i, d) in draws.iter().enumerate() {
-        if d.node == pp::NONE
-            && d.weights.count == 0
-            && materials[d.material as usize].flags & pp::ALPHA == 0
-        {
-            groups.entry((d.material, d.flags)).or_default().push(i);
+        if d.weights.count == 0 && materials[d.material as usize].flags & pp::ALPHA == 0 {
+            groups
+                .entry((d.material, d.flags, d.node))
+                .or_default()
+                .push(i);
         }
     }
     for group in groups.values() {
@@ -499,16 +790,38 @@ fn batch_geometry(w: &mut Writer, draws: &mut [pp::Draw], materials: &[pp::Mater
             }
             let mut verts = Vec::new();
             let mut indices = Vec::new();
+            let mut unique = HashMap::<[u32; 6], u16>::new();
             for &i in &group[start..end] {
+                // Adjacent spatial chunks repeat boundary vertices. Their
+                // final GE bytes may share storage without weakening culling.
+                let remap: Vec<u16> = pp::slice::<pp::Vertex>(&w.0, draws[i].vertices)
+                    .unwrap()
+                    .iter()
+                    .map(|v| {
+                        let key = *bytemuck::from_bytes::<[u32; 6]>(bytemuck::bytes_of(v));
+                        *unique.entry(key).or_insert_with(|| {
+                            let id = verts.len() as u16;
+                            verts.push(*v);
+                            id
+                        })
+                    })
+                    .collect();
+                for lod in &mut draws[i].lods {
+                    if lod.indices.count > 0 {
+                        let rebased: Vec<u16> = pp::slice::<u16>(&w.0, lod.indices)
+                            .unwrap()
+                            .iter()
+                            .map(|&v| remap[v as usize])
+                            .collect();
+                        lod.indices = w.push(&rebased);
+                    }
+                }
                 let d = &draws[i];
-                let base = verts.len() as u16;
-                let source = pp::slice::<pp::Vertex>(&w.0, d.vertices).unwrap();
-                verts.extend_from_slice(source);
                 indices.push(
                     pp::slice::<u16>(&w.0, d.indices)
                         .unwrap()
                         .iter()
-                        .map(|&v| v + base)
+                        .map(|&v| remap[v as usize])
                         .collect::<Vec<_>>(),
                 );
             }
@@ -522,6 +835,100 @@ fn batch_geometry(w: &mut Writer, draws: &mut [pp::Draw], materials: &[pp::Mater
     }
 }
 
+/// Lower directly from float GE attributes, not another device's packed
+/// vertices. Every shared buffer gets one decode; oversized spans retain
+/// floats if quantization exceeds 5 mm or a quarter of a material texel.
+fn pack_vertices(
+    w: &mut Writer,
+    draws: &mut [pp::Draw],
+    materials: &[pp::Material],
+    textures: &[pp::Texture],
+    recipe: &crate::profile::PspGeometry,
+) -> f32 {
+    let mut groups = std::collections::BTreeMap::<(u32, u32), Vec<usize>>::new();
+    for (i, d) in draws.iter().enumerate() {
+        if d.weights.count == 0 {
+            groups
+                .entry((d.vertices.offset, d.vertices.count))
+                .or_default()
+                .push(i);
+        }
+    }
+    let mut max_error = 0.0f32;
+    for ids in groups.values() {
+        let source = pp::slice::<pp::Vertex>(&w.0, draws[ids[0]].vertices).unwrap();
+        let lo = source
+            .iter()
+            .fold(Vec3::splat(f32::MAX), |a, v| a.min(Vec3::from(v.pos)));
+        let hi = source
+            .iter()
+            .fold(Vec3::splat(f32::MIN), |a, v| a.max(Vec3::from(v.pos)));
+        let uvlo: [f32; 2] =
+            core::array::from_fn(|i| source.iter().map(|v| v.uv[i]).fold(f32::MAX, f32::min));
+        let uvhi: [f32; 2] =
+            core::array::from_fn(|i| source.iter().map(|v| v.uv[i]).fold(f32::MIN, f32::max));
+        let error = (hi - lo).length() / (4.0 * 32767.0);
+        let mat = &materials[draws[ids[0]].material as usize];
+        let texel = if mat.texture == pp::NONE {
+            [1.0; 2]
+        } else {
+            let t = &textures[mat.texture as usize];
+            [t.width as f32, t.height as f32]
+        };
+        if error > recipe.vertex_position_error_meters
+            || (0..2)
+                .any(|i| (uvhi[i] - uvlo[i]) * texel[i] / 131070.0 > recipe.vertex_uv_error_texels)
+        {
+            continue;
+        }
+        let center = (lo + hi) * 0.5;
+        let extent = (hi - lo) * 0.5;
+        let packed: Vec<pp::PackedVertex> = source
+            .iter()
+            .map(|v| pp::PackedVertex {
+                pos: core::array::from_fn(|i| {
+                    (if extent[i] > 0.0 {
+                        (v.pos[i] - center[i]) / extent[i]
+                    } else {
+                        0.0
+                    })
+                    .clamp(-1.0, 1.0)
+                    .mul_add(32767.0, 0.0)
+                    .round() as i16
+                }),
+                uv: core::array::from_fn(|i| {
+                    (if uvhi[i] > uvlo[i] {
+                        (v.uv[i] - uvlo[i]) / (uvhi[i] - uvlo[i])
+                    } else {
+                        0.0
+                    })
+                    .clamp(0.0, 1.0)
+                    .mul_add(65535.0, 0.0)
+                    .round() as u16
+                }),
+                color: v.color,
+                padding: 0,
+            })
+            .collect();
+        let vertices = w.push(&packed);
+        max_error = max_error.max(error);
+        for &i in ids {
+            let d = &mut draws[i];
+            d.vertices = vertices;
+            d.vertex_format = 1;
+            d.pos_offset = center.to_array();
+            d.pos_scale = (extent * (32768.0 / 32767.0)).to_array();
+            d.uv_offset = uvlo;
+            d.uv_scale = core::array::from_fn(|i| (uvhi[i] - uvlo[i]) * (32768.0 / 65535.0));
+            for k in 0..3 {
+                d.min[k] -= error;
+                d.max[k] += error;
+            }
+        }
+    }
+    max_error
+}
+
 /// Discard superseded geometry and retain shared ranges exactly once.
 fn compact(
     w: &mut Writer,
@@ -531,16 +938,17 @@ fn compact(
     lights: &mut [pp::Light],
 ) {
     let mut out = Writer(vec![0; core::mem::size_of::<pp::Header>()]);
-    let mut copied = HashMap::<(u32, u32, usize), pp::Span>::new();
+    let mut copied = HashMap::<(Vec<u8>, usize), pp::Span>::new();
     let mut copy = |span: &mut pp::Span, stride: usize| {
         if span.count == 0 {
             *span = pp::Span::default();
             return;
         }
-        let key = (span.offset, span.count, stride);
+        let start = span.offset as usize;
+        let data = &w.0[start..start + span.count as usize * stride];
+        let key = (data.to_vec(), stride);
         *span = *copied.entry(key).or_insert_with(|| {
-            let start = span.offset as usize;
-            let s = out.push(&w.0[start..start + span.count as usize * stride]);
+            let s = out.push(data);
             pp::Span {
                 offset: s.offset,
                 count: span.count,
@@ -551,13 +959,30 @@ fn compact(
         copy(&mut t.pixels, 1);
     }
     for d in draws {
-        copy(&mut d.vertices, core::mem::size_of::<pp::Vertex>());
+        copy(
+            &mut d.vertices,
+            if d.vertex_format == 1 {
+                core::mem::size_of::<pp::PackedVertex>()
+            } else {
+                core::mem::size_of::<pp::Vertex>()
+            },
+        );
         copy(&mut d.indices, 2);
+        for lod in &mut d.lods {
+            copy(&mut lod.indices, 2);
+        }
         copy(&mut d.weights, 8);
         copy(&mut d.joints, core::mem::size_of::<pp::Joint>());
     }
     for n in nodes {
-        copy(&mut n.track, 4);
+        copy(
+            &mut n.track,
+            if n.track_encoding == 1 {
+                core::mem::size_of::<pp::PackedTrs>()
+            } else {
+                4
+            },
+        );
     }
     for l in lights {
         copy(&mut l.track, 4);
@@ -569,6 +994,49 @@ fn compact(
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn constant_ge_textures_preserve_encoded_colour_alpha_format_and_wrap() {
+        for (format, pixel) in [
+            (pp::RGBA4444, vec![0x21, 0xfa]),
+            (pp::RGBA8888, vec![91, 137, 221, 17]),
+        ] {
+            for wrap in 0..4 {
+                let mut texture = pp::Texture {
+                    width: 128, height: 64, mips: 4, wrap, format,
+                    ..Default::default()
+                };
+                let texels = (0..4).map(|m| (128 >> m) * (64 >> m)).sum();
+                let mut pixels = pixel.repeat(texels);
+                compact_constant_texture(&mut texture, &mut pixels);
+                assert_eq!((texture.width, texture.height, texture.mips), (8, 8, 1));
+                assert_eq!((texture.format, texture.wrap), (format, wrap));
+                assert_eq!(pixels, pixel.repeat(64));
+                assert_eq!(pixels.len(), 64 * texture.bytes_per_pixel().unwrap() as usize);
+            }
+        }
+    }
+
+    #[test]
+    fn varying_texels_or_mip_colours_keep_the_original_ge_chain() {
+        for format in [pp::RGBA4444, pp::RGBA8888] {
+            let original = pp::Texture {
+                width: 16, height: 16, mips: 2, wrap: 3, format,
+                ..Default::default()
+            };
+            let bpp = original.bytes_per_pixel().unwrap() as usize;
+            for changed in [0..bpp, 256 * bpp..320 * bpp] {
+                let mut pixels = vec![0xab; 320 * bpp];
+                pixels[changed].fill(0xcd);
+                let expected = pixels.clone();
+                let mut texture = original;
+                compact_constant_texture(&mut texture, &mut pixels);
+                assert_eq!(pixels, expected);
+                assert_eq!(bytemuck::bytes_of(&texture), bytemuck::bytes_of(&original));
+            }
+        }
+    }
+
     #[test]
     fn coarse_sun_rejects_unresolved_contacts_but_retains_building_shadows() {
         for normal in [Vec3::Y, Vec3::Z] {
@@ -632,13 +1100,13 @@ mod tests {
                 day_sky: serde_json::from_value(meta["day_sky"].clone()).unwrap(),
                 doors: None, beacons: vec![], effects: Default::default(), sun: None,
                 post: Default::default(), vista_haze: None, stats: serde_json::json!({}),
-                baked_sun: false,
+                baked_sun: false, audio: None,
             };
             let artifact = cook(&scene, &Profile::builtin(crate::ir::Target::Psp)).unwrap();
             std::fs::write(&output, &artifact.bytes).unwrap();
             let bytes = artifact.bytes;
             let h = pp::validate(&bytes).unwrap();
-            assert_eq!(core::mem::size_of::<pp::Header>(), 144);
+            assert_eq!(core::mem::size_of::<pp::Header>(), 164);
             if kind == "night-street" {
                 assert_eq!(h.rain, 1);
                 assert_eq!(h.lights.count, 1);
@@ -686,9 +1154,9 @@ mod tests {
                     .copy_from_slice(&f32::NAN.to_le_bytes());
                 assert_eq!(pp::validate(&bad).err(), Some("sky vertex"));
                 let mut bad = bytes.clone();
-                let head = bytemuck::from_bytes_mut::<pp::Header>(&mut bad[..144]);
+                let head = bytemuck::from_bytes_mut::<pp::Header>(&mut bad[..core::mem::size_of::<pp::Header>()]);
                 head.sky_texture = head.textures.count;
-                assert_eq!(pp::validate(&bad).err(), Some("sky geometry"));
+                assert_eq!(pp::validate(&bad).err(), Some("sky texture"));
                 let mut bad = bytes.clone();
                 let at = h.textures.offset as usize
                     + h.sky_texture as usize * core::mem::size_of::<pp::Texture>() + 24;
@@ -699,6 +1167,166 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn packed_ge_attributes_preserve_texture_coordinates_and_fall_back_for_wide_spans() {
+        let mut w = Writer(vec![0; core::mem::size_of::<pp::Header>()]);
+        let source = [
+            pp::Vertex {
+                pos: [-4.5, 0.125, 20.0],
+                uv: [-1.25, 3.0],
+                color: 0x12345678,
+            },
+            pp::Vertex {
+                pos: [12.3, 7.75, 20.0],
+                uv: [7.125, 0.25],
+                color: 0xabcdef12,
+            },
+            pp::Vertex {
+                pos: [1.2345, 3.5678, 20.0],
+                uv: [0.98765, 2.71828],
+                color: 0xffeeddcc,
+            },
+        ];
+        let mut draws = [pp::Draw {
+            vertices: w.push(&source),
+            node: pp::NONE,
+            min: [-4.5, 0.125, 20.0],
+            max: [12.3, 7.75, 20.0],
+            ..Default::default()
+        }];
+        let mats = [pp::Material {
+            texture: 0,
+            ..Default::default()
+        }];
+        let textures = [pp::Texture {
+            width: 512,
+            height: 256,
+            ..Default::default()
+        }];
+        let error = pack_vertices(&mut w, &mut draws, &mats, &textures, &Default::default());
+        assert_eq!(draws[0].vertex_format, 1);
+        for (input, packed) in source
+            .iter()
+            .zip(pp::slice::<pp::PackedVertex>(&w.0, draws[0].vertices).unwrap())
+        {
+            let output = pp::decode_vertex(&draws[0], packed);
+            assert!((Vec3::from(input.pos) - Vec3::from(output.pos)).length() <= error + 1e-6);
+            assert_eq!(input.color, output.color);
+            for k in 0..2 {
+                assert!((input.uv[k] - output.uv[k]).abs() * [512.0, 256.0][k] < 0.25);
+            }
+            for k in 0..3 {
+                assert!((draws[0].min[k]..=draws[0].max[k]).contains(&output.pos[k]));
+            }
+        }
+        // A large shared vertex buffer must retain floats, even if each draw is small.
+        let mut wide = source;
+        wide[1].pos[0] = 10000.0;
+        let original = w.push(&wide);
+        let mut d = [pp::Draw {
+            vertices: original,
+            ..Default::default()
+        }];
+        assert_eq!(
+            pack_vertices(&mut w, &mut d, &mats, &textures, &Default::default()),
+            0.0
+        );
+        assert_eq!(d[0].vertex_format, 0);
+        assert_eq!(d[0].vertices.offset, original.offset);
+        // A small object with thousands of UV repeats must also retain floats.
+        wide = source;
+        wide[1].uv[0] = 10000.0;
+        let mut d = [pp::Draw {
+            vertices: w.push(&wide),
+            ..Default::default()
+        }];
+        assert_eq!(
+            pack_vertices(&mut w, &mut d, &mats, &textures, &Default::default()),
+            0.0
+        );
+        assert_eq!(d[0].vertex_format, 0);
+    }
+
+    #[test]
+    fn byte_interning_preserves_distinct_packed_decode_and_lod_ranges() {
+        let mut w = Writer(vec![0; core::mem::size_of::<pp::Header>()]);
+        let packed = [pp::PackedVertex::default(); 3];
+        let mut draws: Vec<_> = [0.0, 10.0]
+            .into_iter()
+            .map(|x| pp::Draw {
+                vertices: w.push(&packed),
+                indices: w.push(&[0u16, 1, 2]),
+                vertex_format: 1,
+                pos_offset: [x, 0.0, 0.0],
+                lods: [pp::Lod {
+                    indices: w.push(&[0u16, 2, 1]),
+                    error: 0.1,
+                }; 4],
+                ..Default::default()
+            })
+            .collect();
+        compact(&mut w, &mut [], &mut draws, &mut [], &mut []);
+        assert_eq!(draws[0].vertices.offset, draws[1].vertices.offset);
+        assert_eq!(draws[0].indices.offset, draws[1].indices.offset);
+        assert_ne!(draws[0].indices.offset, draws[0].lods[0].indices.offset);
+        assert_eq!(pp::decode_vertex(&draws[0], &packed[0]).pos, [0.0; 3]);
+        assert_eq!(
+            pp::decode_vertex(&draws[1], &packed[0]).pos,
+            [10.0, 0.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn spatial_batch_weld_shares_only_identical_ge_boundary_vertices() {
+        let mut w = Writer(vec![0; core::mem::size_of::<pp::Header>()]);
+        let a = pp::Vertex {
+            pos: [0.0, 0.0, 0.0],
+            color: 0xff112233,
+            ..Default::default()
+        };
+        let b = pp::Vertex {
+            pos: [1.0, 0.0, 0.0],
+            ..a
+        };
+        let c = pp::Vertex {
+            pos: [0.0, 1.0, 0.0],
+            ..a
+        };
+        let d = pp::Vertex {
+            pos: [1.0, 1.0, 0.0],
+            ..a
+        };
+        let mut draws: Vec<_> = [[a, b, c], [b, d, c]]
+            .iter()
+            .enumerate()
+            .map(|(i, v)| pp::Draw {
+                vertices: w.push(v),
+                indices: w.push(&[0u16, 1, 2]),
+                node: pp::NONE,
+                min: [i as f32, 0.0, 0.0],
+                max: [i as f32 + 1.0, 1.0, 0.0],
+                lods: [pp::Lod {
+                    indices: w.push(&[2u16, 1, 0]),
+                    error: 0.1,
+                }; 4],
+                ..Default::default()
+            })
+            .collect();
+        batch_geometry(&mut w, &mut draws, &[pp::Material::default()]);
+        assert_eq!(draws[0].vertices.count, 4);
+        assert_eq!(draws[0].vertices.offset, draws[1].vertices.offset);
+        assert_eq!(pp::slice::<u16>(&w.0, draws[1].indices).unwrap(), [1, 3, 2]);
+        assert_eq!(
+            pp::slice::<u16>(&w.0, draws[1].lods[0].indices).unwrap(),
+            [2, 3, 1]
+        );
+        assert_eq!(
+            draws[1].min,
+            [1.0, 0.0, 0.0],
+            "spatial culling remains per chunk"
+        );
+    }
+
     #[test]
     fn batching_rebases_indices_without_losing_spatial_chunks() {
         let mut w = Writer(vec![0; core::mem::size_of::<pp::Header>()]);

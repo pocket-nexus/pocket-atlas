@@ -41,7 +41,7 @@ export function crossingSignal(w: DayWorld, x: number, z: number, yaw = 0, motio
     c.strokeStyle = "#b7bfae"; c.lineWidth = width * 0.01; c.strokeRect(width * 0.04, height * 0.04, width * 0.92, height * 0.92);
     c.fillStyle = "#b7bfae"; c.font = `${height * 0.8}px ${JP_SANS}`; c.textAlign = "center"; c.textBaseline = "middle"; c.fillText(motion ? "→" : "←", width / 2, height * 0.49);
   });
-  w.mesh(atlasPlane(0.43, 0.37, arrow), w.printed, 0, 2.15, 0.24, g);
+  w.mesh(atlasPlane(0.43, 0.37, arrow), w.decal, 0, 2.15, 0.24, g);
   w.mesh(box(0.34, 0.38, 0.3), steel, 0.05, 1.55, -0.08, g);
   w.mesh(rod(v3(0.12, 0.35, -0.08), v3(0.12, 2.9, -0.08), 0.012), dark, 0, 0, 0, g);
   for (const xx of [0.17, 0.46]) w.mesh(rod(v3(xx, 0.25, -0.16), v3(xx, 3.98, -0.16), 0.018), steel, 0, 0, 0, g);
@@ -73,7 +73,7 @@ export function crossingSignal(w: DayWorld, x: number, z: number, yaw = 0, motio
     c.fillStyle = "#32392d"; c.font = `bold ${height * 0.67}px ${JP_SANS}`; c.textAlign = "center"; c.textBaseline = "middle"; c.fillText("踏切注意", width / 2, height * 0.51);
   });
   w.mesh(box(0.93, 0.3, 0.075), dark, 0, 1.03, 0.03, g);
-  w.mesh(atlasPlane(0.88, 0.25, notice), w.printed, 0, 1.03, 0.072, g);
+  w.mesh(atlasPlane(0.88, 0.25, notice), w.decal, 0, 1.03, 0.072, g);
 }
 
 export function safetyRail(w: DayWorld, points: Vector3[]): void {
@@ -167,5 +167,5 @@ export function sign(w: DayWorld, text: string, width: number, height: number, m
     lines.forEach((line, i) => c.fillText(line, cw / 2, ch / 2 + (i - (lines.length - 1) / 2) * size * 1.12));
   });
   w.mesh(box(width + 0.04, height + 0.04, 0.04), material, at.x, at.y, at.z);
-  w.mesh(atlasPlane(width, height, rect), w.printed, at.x, at.y, at.z + 0.025);
+  w.mesh(atlasPlane(width, height, rect), w.decal, at.x, at.y, at.z + 0.025);
 }

@@ -25,6 +25,7 @@ export class DayWorld {
   readonly rng: Rng;
   /** Shared atlas materials: printed plates and signs, and backlit displays. */
   readonly printed: Material;
+  readonly decal: Material;
   readonly lit: Material;
 
   constructor(lib: DayLib, atlas: Atlas, quality: Quality, seed: number, readonly geometry: GeometryProfile = "full") {
@@ -34,6 +35,7 @@ export class DayWorld {
     this.rng = new Rng(seed);
     this.root.name = "world";
     this.printed = lib.printed("atlas", atlas.texture, 0.5);
+    this.decal = lib.decal("atlas", atlas.texture, 0.5);
     this.lit = lib.printed("atlas-lit", atlas.texture, 0.3, 0.55);
   }
 
