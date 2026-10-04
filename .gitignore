@@ -10,3 +10,6 @@ node_modules/
 /.pocket-build/
 
 .DS_Store
+/ui/app/generated/
+/ui/.pocket/
+/ui/app/images.json
