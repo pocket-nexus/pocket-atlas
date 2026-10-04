@@ -345,7 +345,7 @@ export function PlaceMenu(props: { visit: Visit; open: Accessor<boolean>; onClos
 export function TitleCard(props: { visit: Visit; shown: boolean }) {
   return (
     <View class={props.shown ? "flex-col opacity-100 transition-opacity duration-300" : "flex-col opacity-0 transition-opacity duration-300"}>
-      <Text class="text-xl font-bold text-white">{props.visit.place()?.name ?? ""}</Text>
+      <Text class="text-lg font-bold text-white">{props.visit.place()?.name ?? ""}</Text>
       <Text class="text-xs" style={{ textColor: DIM }}>{props.visit.place() ? `${props.visit.place()!.locality} · ${props.visit.place()!.country} · ${props.visit.place()!.weather}` : ""}</Text>
     </View>
   );

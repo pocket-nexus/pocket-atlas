@@ -231,6 +231,9 @@ struct App {
     frame_no: u32,
     manifest_state: (u32, usize),
     interface: interface::Ui,
+    /// Where the interface last had the globe face (latitude, longitude,
+    /// pin lit): a visit frees the globe, and it faces there again after.
+    faced: Option<(f32, f32, bool)>,
     /// The player's render settings, kept across places.
     prefs: settings::Prefs,
 }
@@ -242,9 +245,14 @@ enum Next {
     Place(String, Option<Value>),
 }
 
-/// Buttons a control message presses on the interface: `{"press": ["down", "circle"]}`.
+/// What a control message does to the interface: `{"press": ["down",
+/// "circle"]}` presses its buttons, `{"interface": false}` leaves it out of
+/// the frame (to measure a place without it).
 fn press(ui: &mut interface::Ui, v: &Value) {
     use vitasdk_sys::*;
+    if let Some(shown) = v["interface"].as_bool() {
+        ui.show(shown);
+    }
     for name in v["press"].as_array().into_iter().flatten().filter_map(Value::as_str) {
         ui.press(match name {
             "up" => SCE_CTRL_UP,
@@ -318,6 +326,9 @@ unsafe fn run_atlas(app: &mut App) -> Next {
         state.options.clear();
         state.stats.clear();
     }
+    if let Some((lat, lon, lit)) = app.faced {
+        atlas.face(lat, lon, lit);
+    }
     let mut last = Instant::now();
     let mut frame_ms = 33.3f32;
     let mut last_vcount = sceDisplayGetVcount();
@@ -358,7 +369,10 @@ unsafe fn run_atlas(app: &mut App) -> Next {
         // The interface's turn: the globe faces what it has in focus.
         for command in app.interface.turn(raw.min(0.1), buttons, &pad) {
             match command {
-                Command::Globe { lat, lon, pin, .. } => atlas.face(lat, lon, pin.is_some()),
+                Command::Globe { lat, lon, pin, .. } => {
+                    app.faced = Some((lat, lon, pin.is_some()));
+                    atlas.face(lat, lon, pin.is_some());
+                }
                 Command::Enter(id) => go = Some(Next::Place(id, None)),
                 Command::Prefs(text) => {
                     crate::paths::write_text(INTERFACE_FILE, &text);
@@ -482,6 +496,7 @@ fn main() {
             frame_no: 0,
             manifest_state: (u32::MAX, 0),
             interface,
+            faced: None,
             prefs: settings::Prefs::load(live),
         };
         let mut next = Next::Atlas;
@@ -658,6 +673,10 @@ unsafe fn run_place(app: &mut App, id: String, first: Option<Value>) -> Next {
                 if frame_no % 15 == 0 || ui.state().options.is_empty() {
                     let (w, h) = frame::SCALES[renderer.level()];
                     let state = ui.state();
+                    // The renderer gave up a resolution that does not fit.
+                    if renderer.settings.scale as usize >= frame::SCALES.len() {
+                        prefs.scale = None;
+                    }
                     state.options = settings::list(prefs, &renderer);
                     state.stats = if prefs.hud { format!("{fps:.0} fps · {w}×{h} · {}k triangles", renderer.stats.main.tris / 1000) } else { String::new() };
                 }
@@ -803,7 +822,7 @@ unsafe fn run_place(app: &mut App, id: String, first: Option<Value>) -> Next {
                     "clocks": clocks,
                     "clockMhz": clocks_now(),
                     "clockResets": clock_resets,
-                    "interfaceError": ui.error, "held": held, "paused": paused,
+                    "interfaceError": ui.error, "interface": ui.shown(), "held": held, "paused": paused,
                     "view": {"pos": view.pos.to_array(), "target": view.target.to_array(), "fov": view.fov_y, "mode": if rig.mode == Mode::Cinematic { "cinematic" } else { "free" }, "shot": rig.shot_name()},
                     "settings": {"msaa": s.msaa == Msaa::X4, "reflection": s.reflection, "haze": s.haze, "bloom": s.bloom, "rain": s.rain, "cullCw": s.cull_cw, "exposure": s.exposure, "maxLights": s.max_lights, "flat": s.flat, "scale": s.scale, "level": renderer.level(), "profile": renderer.profile.name, "step": renderer.governor.step, "boost": renderer.governor.boost, "gpuMs": renderer.governor.gpu_ms, "steps": renderer.profile.steps.len(), "hold": renderer.governor.hold, "budgetMs": renderer.profile.budget_ms, "fx": s.fx, "amortize": s.amortize, "reflSize": s.reflection_size, "hazeSize": renderer.step().haze_size, "hazeLights": renderer.step().haze_lights, "bloomFull": renderer.step().bloom_full, "streaks": s.streaks, "steam": s.steam, "detailMaps": s.detail_maps, "vertexLights": s.vertex_lights, "detailM": renderer.step().detail_m, "lodPixels": renderer.step().lod_pixels},
                     "uptime": started.elapsed().as_secs(),

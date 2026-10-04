@@ -172,7 +172,7 @@ function PlaceLow(props: { host: Host; visit: Visit }) {
   return (
     <View class="relative" style={{ width: LOW.w, height: LOW.h }}>
       <View class="absolute" style={{ insetL: 0, insetT: 0, width: LOW.w, height: BAR, bgColor: "#161a24" }}>
-        <Text class="absolute text-sm font-bold text-white" style={{ insetL: 10, insetT: 9 }}>{fit(visit.place()?.name ?? "", 14, true, 150)}</Text>
+        <Text class="absolute text-sm font-bold text-white" style={{ insetL: 10, insetT: 9 }}>{fit(visit.place()?.name ?? "", 14, true, 134)}</Text>
         <View class="absolute" style={{ insetR: 116, insetT: 5 }}><Button label={visit.playLabel() === "pause" ? "Pause" : visit.playLabel() === "play" ? "Play" : "Tour"} width={52} height={26} surface="auxiliary" onPress={visit.play} /></View>
         <View class="absolute" style={{ insetR: 60, insetT: 5 }}><Button label="Menu" width={52} height={26} surface="auxiliary" onPress={() => setMenu(true)} /></View>
         <View class="absolute" style={{ insetR: 4, insetT: 5 }}><Button label="Atlas" width={52} height={26} surface="auxiliary" onPress={visit.leave} /></View>

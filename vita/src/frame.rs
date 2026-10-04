@@ -563,9 +563,22 @@ impl VistaConsts {
     }
 }
 
+/// The static casters' raw depth and the memory it alone occupies: twice
+/// 16 MiB for a 2048² map, needed for the one frame that fills
+/// `SunPass::pair` and given back after it. Both halves are main memory:
+/// in video memory the map and its pair together did not fit beside a
+/// large place, and nothing samples this one more than once.
+struct RawDepth {
+    target: Target,
+    color: Arena,
+    mem: Arena,
+}
+
 /// Orthographic sunlight depth: cached static geometry and moving casters.
 struct SunPass {
-    target: Target,
+    raw: Option<RawDepth>,
+    /// Frames since the static map was drawn (its raw depth goes after two).
+    aged: u32,
     /// Two neighbouring depth texels per RG16_UNORM pixel. The material
     /// performs four comparisons from two point samples.
     pair: Target,
@@ -591,10 +604,20 @@ impl SunPass {
         let l = Vec3::from(sun.direction).normalize_or(Vec3::Y);
         let sh = sun.shadow.clone().unwrap_or(pc::SunShadow { position: (l * 80.0).to_array(), ortho: [-40.0, 40.0, -40.0, 40.0, 1.0, 160.0], map_size: 2048, bias: 0.0, normal_bias: 0.02, radius: 1.0 });
         let size = sh.map_size.clamp(512, 2048);
-        let mut target = Target::new(vram, mem, size, size, ColorFormat::R32f, Msaa::None, Depth::Transient)?;
+        let pair = Target::new(vram, mem, size, size, ColorFormat::Rg16Unorm, Msaa::None, Depth::None)?;
+        // Blocks of its own, sized to it, so that they can be freed alone.
+        let (mut raw_color, mut raw_mem) = (Arena::new(Kind::Main, 4096), Arena::new(Kind::Main, 4096));
+        let mut target = match Target::new(&mut raw_color, &mut raw_mem, size, size, ColorFormat::R32f, Msaa::None, Depth::Transient) {
+            Ok(target) => target,
+            Err(e) => {
+                raw_color.free();
+                raw_mem.free();
+                pair.destroy();
+                return Err(e);
+            }
+        };
         g::sceGxmTextureSetMinFilter(&mut target.texture, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_POINT);
         g::sceGxmTextureSetMagFilter(&mut target.texture, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_POINT);
-        let pair = Target::new(vram, mem, size, size, ColorFormat::Rg16Unorm, Msaa::None, Depth::None)?;
         let mut map = pair.texture;
         g::sceGxmTextureSetMinFilter(&mut map, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_POINT);
         g::sceGxmTextureSetMagFilter(&mut map, g::SceGxmTextureFilter_SCE_GXM_TEXTURE_FILTER_POINT);
@@ -626,7 +649,8 @@ impl SunPass {
             Some((target, pair, map))
         } else { None };
         Ok(Self {
-            target,
+            raw: Some(RawDepth { target, color: raw_color, mem: raw_mem }),
+            aged: 0,
             pair,
             map,
             vp: rows4x4(&vp),
@@ -873,7 +897,11 @@ impl Renderer {
     pub unsafe fn release(self) {
         let Self { refls, mains, hazes, prefilters, finals, down, up, _vram, _mem, sun, .. } = self;
         if let Some(s) = sun {
-            s.target.destroy();
+            if let Some(raw) = s.raw {
+                raw.target.destroy();
+                raw.color.free();
+                raw.mem.free();
+            }
             s.pair.destroy();
             if let Some((moving, pair, _)) = s.moving { moving.destroy(); pair.destroy(); }
         }
@@ -1062,7 +1090,12 @@ impl Renderer {
                 None => return Ok(()),
             }
         }
-        let target = if moving { &mut (*sp).moving.as_mut().unwrap().0 } else { &mut (*sp).target } as *mut Target;
+        let target = if moving {
+            &mut (*sp).moving.as_mut().unwrap().0
+        } else {
+            let Some(raw) = (*sp).raw.as_mut() else { return Ok(()) };
+            &mut raw.target
+        } as *mut Target;
         let size = (*target).width;
         (*target).begin(ctx, 1.0)?;
         Self::viewport(ctx, size, size);
@@ -1291,6 +1324,17 @@ impl Renderer {
         // ---------------------------------------------------- sun shadow
         if self.sun.as_ref().is_some_and(|s| !s.ready) {
             self.shadow_pass(ctx, gpu, scene, false)?;
+        } else if let Some(sun) = self.sun.as_mut().filter(|s| s.raw.is_some()) {
+            // The static map is cached in `pair` for good: once the frame
+            // that read the raw depth has left the GPU, its memory goes.
+            sun.aged += 1;
+            if sun.aged > 2 {
+                g::sceGxmFinish(ctx);
+                let raw = sun.raw.take().unwrap();
+                raw.target.destroy();
+                raw.color.free();
+                raw.mem.free();
+            }
         }
         if self.sun.as_ref().is_some_and(|s| s.moving.is_some()) {
             self.shadow_pass(ctx, gpu, scene, true)?;
@@ -1320,6 +1364,12 @@ impl Renderer {
         }
 
         // ---------------------------------------------------- main
+        // A fixed resolution whose targets do not fit in video memory (it
+        // was chosen in a lighter place, or by an older build) gives way to
+        // the profile's own rather than to a black screen.
+        if self.ensure_level(self.level()).is_err() && (self.settings.scale as usize) < SCALES.len() {
+            self.settings.scale = SCALES.len() as u32;
+        }
         self.ensure_level(self.level())?;
         let mi = self.mi();
         self.mains[mi].as_mut().expect("scene target").begin(ctx, 0.0)?;
