@@ -481,9 +481,15 @@ else if (command === "install") {
         complete = true;
       } finally {
         writeFileSync(evidencePath, JSON.stringify({ ...evidence.receipt(), compilation, complete, allCameras: names.length === available.length && new Set(names).size === available.length, budgetMs: compilation.budgetMs }, null, 2));
-        const ending = await status(c);
-        if (ending.build === expected.buildId && ending.packSha256 === pack.sha256)
-          await status(c, { hold: false, inputLock: false, cameraHold: false, play: true });
+        try {
+          const ending = await status(c);
+          if (ending.build === expected.buildId && ending.packSha256 === pack.sha256)
+            await status(c, { hold: false, inputLock: false, cameraHold: false, play: true });
+        } catch (error) {
+          // Keep the original measurement/capture failure when the wire has
+          // already disconnected; cleanup must not replace its diagnostic.
+          console.error(`Profile controls could not be restored: ${String(error)}`);
+        }
       }
     } else if (command === "tour") {
       let previous = await status(c, {

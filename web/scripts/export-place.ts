@@ -112,7 +112,14 @@ export async function exportPlaceSource(options: ExportOptions) {
     return receipt;
   } finally {
     for (const fd of files.values()) closeSync(fd);
-    try { await browser?.close(); }
+    try {
+      if (browser?.isConnected()) {
+        // Bun/Playwright can leave close() pending after Chrome disconnected.
+        // Both are public completion signals; do not publish a timeout as success.
+        const disconnected = new Promise<void>(resolve => browser!.once("disconnected", () => resolve()));
+        await Promise.race([browser.close(), disconnected]);
+      }
+    }
     finally { rmSync(temporary, { recursive: true, force: true }); }
   }
 }
@@ -127,5 +134,8 @@ if (import.meta.main) {
     sampling: { ...(opt("seconds") !== undefined ? { durationSeconds: Number(opt("seconds")) } : {}),
       ...(opt("fps") !== undefined ? { fps: Number(opt("fps")) } : {}),
       ...(opt("start") !== undefined ? { startSeconds: Number(opt("start")) } : {}) } });
-  console.log(JSON.stringify(receipt, null, 2));
+  await Bun.write(Bun.stdout, JSON.stringify(receipt, null, 2) + "\n");
+  // This is a one-shot CLI. Chrome is disconnected and all files are closed;
+  // do not let residual Playwright driver handles keep the Bun process alive.
+  process.exit(0);
 }

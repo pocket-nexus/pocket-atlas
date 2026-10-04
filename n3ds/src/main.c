@@ -93,13 +93,15 @@ static const PlaceAsset *find_place(const char *id) {
 }
 static void report_status(void) {
   char detail[3072], response[4096], escaped[512];
-  if (in_place)
+  if (!loaded)
+    snprintf(detail, sizeof detail, "{}");
+  else if (in_place)
     scene_status(detail, sizeof detail);
   else
     browser_status(detail, sizeof detail);
   control_escape(escaped, sizeof escaped, app_error);
   // Preserve the scene's flat telemetry for existing profiling tools.
-  if (in_place && detail[0] == '{') {
+  if (in_place && loaded && detail[0] == '{') {
     size_t n = strlen(detail);
     if (n && detail[n - 1] == '}')
       detail[n - 1] = 0;
@@ -142,11 +144,37 @@ static void controls(const char *json) {
     else
       snprintf(app_error, sizeof app_error, "Asset request too large");
   }
-  if (in_place) {
+  if (in_place && loaded) {
     settings_control(json);
     scene_control(json);
-  } else
+  } else if (loaded)
     browser_control(json);
+}
+static void poll_controls(bool apply) {
+  char control[16384];
+  size_t n;
+  while ((n = devserver_recv_ctrl(control, sizeof control - 1)) > 0) {
+    control[n] = 0;
+    char *save = NULL;
+    for (char *line = strtok_r(control, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+      if (apply) {
+        if (strstr(line, "\"screenshot\"")) {
+          capture_reflection = in_place && strstr(line, "\"reflection\"");
+          devserver_request_screenshot();
+        }
+        controls(line);
+      }
+      report_status();
+    }
+  }
+}
+void atlas_loading_poll(void) {
+  devserver_poll();
+  // Reply to status requests as well as wire heartbeats. Controls sent while
+  // loading must be retried after running; never touch partial scene state or
+  // overwrite the pending place ID that this load is about to publish.
+  poll_controls(false);
 }
 static void release_view(void) {
   atlas_gpu_park();
@@ -315,21 +343,7 @@ int main(void) {
       }
       devserver_report_native("launch-error", launch, error);
     }
-    char control[16384];
-    size_t n;
-    while ((n = devserver_recv_ctrl(control, sizeof control - 1)) > 0) {
-      control[n] = 0;
-      char *save = NULL;
-      for (char *line = strtok_r(control, "\n", &save); line;
-           line = strtok_r(NULL, "\n", &save)) {
-        if (strstr(line, "\"screenshot\"")) {
-          capture_reflection = in_place && strstr(line, "\"reflection\"");
-          devserver_request_screenshot();
-        }
-        controls(line);
-        report_status();
-      }
-    }
+    poll_controls(true);
     if (native_receiving() || gpu_stalled || !gpu_ok || !top ||
         (!loaded && !asset_request[0] && !pending_place[0] && !pending_atlas)) {
       svcSleepThread(1000000);

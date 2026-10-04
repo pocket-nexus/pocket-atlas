@@ -126,6 +126,9 @@ pub fn palette_locks(verts: &[Vertex]) -> Vec<bool> {
 /// shared with a neighbouring chunk, so chunks stay sealed); open borders of
 /// the mesh itself (tube ends, rails) may simplify. None if nothing goes.
 pub fn simplify(verts: &[Vertex], tris: &[[u32; 3]], keep: f32, max_error: f32, locked: &[bool], uv_weight: f32) -> Option<(Vec<[u32; 3]>, f32)> {
+    simplify_with_borders(verts,tris,keep,max_error,locked,uv_weight,false)
+}
+pub fn simplify_with_borders(verts: &[Vertex], tris: &[[u32; 3]], keep: f32, max_error: f32, locked: &[bool], uv_weight: f32, lock_borders: bool) -> Option<(Vec<[u32; 3]>, f32)> {
     if tris.len() < 64 {
         return None;
     }
@@ -154,7 +157,7 @@ pub fn simplify(verts: &[Vertex], tris: &[[u32; 3]], keep: f32, max_error: f32, 
         locked,
         ((flat.len() as f32 * keep) as usize / 3) * 3,
         max_error,
-        meshopt::SimplifyOptions::ErrorAbsolute,
+        meshopt::SimplifyOptions::ErrorAbsolute | if lock_borders {meshopt::SimplifyOptions::LockBorder} else {meshopt::SimplifyOptions::empty()},
         Some(&mut err),
     );
     if out.len() >= flat.len() || out.is_empty() {

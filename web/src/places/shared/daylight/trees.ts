@@ -1,3 +1,4 @@
+import { geometryIntent } from "../geometry-intent";
 import { BufferGeometry, CatmullRomCurve3, Color, DoubleSide, Float32BufferAttribute, InstancedMesh, MeshStandardMaterial, Object3D, Vector3 } from "three";
 import { Rng } from "../../../core/random";
 import { canvas, toTexture } from "../canvas";
@@ -113,7 +114,7 @@ export function tree(w: DayWorld, spec: TreeSpec): void {
     const at = crown.clone().add(new Vector3(Math.cos(a) * d, h * 0.1 - d * 0.18 + r.range(-0.65, 0.7), Math.sin(a) * d));
     cluster(cards, r, at, crown, cr, radius * 0.16, density + 5, spec.bloom ? r.pick([0, 2, 3]) : r.pick([0, 1, 2]), spec.bloom ? 0.7 : 0.84, handheld);
   }
-  w.mesh(merge(woods), w.lib.bark(0x9a8279));
+  geometryIntent(w.mesh(merge(woods), w.lib.bark(0x9a8279)), { role: "detail", maxErrorMeters: 0.025 });
   w.mesh(cardsGeometry(cards), material);
 }
 

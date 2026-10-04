@@ -1,3 +1,4 @@
+import { geometryIntent } from "../geometry-intent";
 import { Group, Mesh, Vector3, type BufferGeometry, type Material, type Object3D } from "three";
 import type { Quality } from "../../../core/quality";
 import type { GeometryProfile } from "../../../core/params";
@@ -27,12 +28,13 @@ export class DayWorld {
   readonly printed: Material;
   readonly lit: Material;
 
-  constructor(lib: DayLib, atlas: Atlas, quality: Quality, seed: number, readonly geometry: GeometryProfile = "full") {
+  constructor(lib: DayLib, atlas: Atlas, quality: Quality, seed: number, readonly geometry: GeometryProfile = "full", readonly compilerSource = false) {
     this.lib = lib;
     this.atlas = atlas;
     this.quality = quality;
     this.rng = new Rng(seed);
     this.root.name = "world";
+    geometryIntent(this.root, { role: "structure", maxErrorMeters: 0.01 });
     this.printed = lib.printed("atlas", atlas.texture, 0.5);
     this.lit = lib.printed("atlas-lit", atlas.texture, 0.3, 0.55);
   }
@@ -43,6 +45,7 @@ export class DayWorld {
     if (opts.ry) m.rotation.y = opts.ry;
     m.castShadow = opts.cast ?? true;
     m.receiveShadow = opts.receive ?? true;
+    if (mat === this.printed || mat === this.lit) geometryIntent(m, { role: "protected", maxErrorMeters: 0 });
     parent.add(m);
     return m;
   }

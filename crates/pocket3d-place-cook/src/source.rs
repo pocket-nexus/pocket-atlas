@@ -26,6 +26,8 @@ pub enum Geometry {
     LightField(Vec<LightPoint>),
 }
 pub struct Draw {
+    /// Compiler-only: no lossy reflection or distance LOD lowering.
+    pub protected: bool,
     pub material: u32,
     pub class: VertexClass,
     pub geometry: Geometry,

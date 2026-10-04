@@ -5,8 +5,9 @@ import { FORMATION } from "../src/places/sangubashi-crossing/rail";
 import { commuter } from "../src/places/shared/daylight/commuter";
 import type { DayWorld } from "../src/places/shared/daylight/context";
 import { Parts } from "../src/places/shared/shapes";
+import { record } from "../src/places/shared/export";
 
-function rollingStock(profile: GeometryProfile) {
+function rollingStock(profile: GeometryProfile, compilerSource = false) {
   const materials = new Map<string, MeshStandardMaterial>();
   const material = (name: string) => {
     if (!materials.has(name)) {
@@ -16,7 +17,7 @@ function rollingStock(profile: GeometryProfile) {
   };
   // Geometry verification does not require a WebGL renderer or painted atlases.
   const world = {
-    geometry: profile,
+    geometry: profile, compilerSource,
     lib: new Proxy({}, { get: (_, name) => (...args: unknown[]) => material(`${String(name)}:${args.join(",")}`) }),
     printed: material("printed"), lit: material("lit"), draw: () => ({ u0: 0, v0: 0, u1: 1, v1: 1 }),
   } as unknown as DayWorld;
@@ -47,6 +48,35 @@ describe("handheld authoring geometry", () => {
     expect(p.geometry).toBe("handheld");
     expect(p.quality).toBe("ultra");
     expect(p.exporting).toBe(true);
+  });
+  test("one compiler source retains both train representations with matching labels and wheel articulation", () => {
+    const source = rollingStock("full", true);
+    expect(source.root.children.map(c => c.name)).toEqual(["reference", "surface"]);
+    expect(source.wheels).toHaveLength(64);
+    const [reference, compact] = source.root.children;
+    expect(reference.visible).toBe(true); expect(compact.visible).toBe(false);
+    expect(reference.children.map(c => c.name)).toEqual(compact.children.map(c => c.name));
+    const labels = (root: typeof reference) => {
+      const result: number[][] = [];
+      root.traverse(o => {
+        if (o instanceof Mesh && !Array.isArray(o.material) && ["printed", "lit"].includes(o.material.name))
+          result.push(Array.from(o.geometry.getAttribute("position").array));
+      });
+      return result;
+    };
+    expect(labels(compact)).toEqual(labels(reference));
+    for (let i = 0; i < 32; i++) {
+      const a = source.wheels[i], b = source.wheels[i + 32];
+      expect(b.name).toBe(a.name); expect(b.position.toArray()).toEqual(a.position.toArray());
+      expect(b.parent!.rotation.y).toBe(a.parent!.rotation.y);
+    }
+    const motion = record({ root: source.root, fogLights: [], updaters: [(_dt, t) => {
+      source.root.position.x = t * 2;
+      for (const wheel of source.wheels) wheel.rotation.z = t;
+    }] }, 1, 4, 0);
+    expect(motion.tracks.find(t => t.node === source.root)?.pos).toEqual([0, 0, 0, 0.5, 0, 0, 1, 0, 0, 1.5, 0, 0]);
+    expect(motion.tracks.filter(t => source.wheels.includes(t.node as typeof source.wheels[number]))).toHaveLength(64);
+    source.root.traverse(o => { if (o instanceof Mesh) o.geometry.dispose(); });
   });
   test("the full train stays unchanged; handheld retains every piece and all 32 wheelsets", () => {
     const full = rollingStock("full"), handheld = rollingStock("handheld");

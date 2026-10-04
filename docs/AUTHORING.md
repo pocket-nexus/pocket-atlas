@@ -69,7 +69,10 @@ compiler paths/settings; `--geometry full|handheld`, `--seed`, `--start`,
 `--seconds` and `--fps` are explicit export overrides. Sampling defaults come
 from the definition, including Sangubashi's complete 64-second train cycle.
 Use a fresh browser export for every override; an export hook can be consumed
-only once. `report --asset PATH` also verifies the pack's hash.
+only once. `report --asset PATH` and `explain --asset PATH` also verify the pack's
+hash. `explain --top 12` shows the largest source contributor sets at the
+`reduce-geometry` pass, selected representations and final section sizes.
+Those source counts are not per-object packed bytes or estimated GPU time.
 
 The files form this chain:
 
@@ -77,7 +80,7 @@ The files form this chain:
 definition + layout + locked local resources
   -> fresh Three construction / fixed-step sampling / GPU material bake
   -> canonical scene.glb + environment + referenced images + export.json
-  -> PlaceIR directory: manifest.json, scene.gltf, scene.bin, resource hashes
+  -> PlaceIR v2 directory: manifest.json, scene.gltf, scene.bin, resource hashes
   -> selected recipe + target profile
   -> Vita PLCE / 3DS PICA / PSP PLPS pack + deterministic compile.json
   -> native runtime deployment -> device.json + captures + human visual review
@@ -145,23 +148,67 @@ encoding and layout. Compile reports map output textures back to source texture
 IDs and material/object contributors. These sets describe contributors to a
 material, not per-triangle ownership or TypeScript line locations.
 
-Named/versioned passes expose the executed order and decisions: material
-resolution, texture policy, Vita-only solid PBR palette, motion, lighting bake,
-chunk/LOD, effects, native lowering and structural budgets. The GPU remains an
-explicit recipe input. Passes currently instrument and control the established
-analysis pipeline; this is not a plugin ABI for arbitrary pass code.
+The compiler preserves object, prototype and instance boundaries during export;
+Web-only static batching still serves interactive browser rendering. Target
+recipes choose representations before expanding instances, resolving materials
+and baking. Use stable `source()` IDs for report anchors.
 
-Unsupported material classes, unannotated shader patches, displacement/light
-maps and unsupported physical extensions fail at export. Known shared patches
-use Atlas annotations. The existing indoor wardrobe emission approximation is
-retained: its web-only normal/height modulation is not automatically translated
-to native shaders. A source annotation is a reviewed contract, not a way to
-certify an arbitrary `onBeforeCompile` hook. Capability checks still reject
-missing device effects: PSP currently has the night-street effect set, while
-PICA/GE do not implement the vista light-field/haze combination.
-The default full-geometry Sangubashi export exceeds the current PICA geometry
-budget; defining a daytime place does not by itself certify it for 3DS. Preserve
-the authored train period when reducing geometry or extending a target recipe.
+```ts
+import { geometryIntent, geometryAlternatives } from "../shared/geometry-intent";
+
+geometryIntent(shopSign, { role: "protected", maxErrorMeters: 0 });
+geometryIntent(building, { role: "structure", maxErrorMeters: 0.01 });
+const railing = geometryAlternatives("railing", {
+  role: "detail", maxErrorMeters: 0.01,
+}, [
+  { id: "reference", errorMeters: 0, object: detailedRail },
+  { id: "surface", errorMeters: 0.004, object: compactRail },
+]);
+world.root.add(railing);
+```
+
+`maxErrorMeters` limits permanent/base geometry changes in world metres. The
+profile caps each role; an author cannot raise that cap. A parent's intent is
+inherited unless a child supplies its own. `protected` prevents geometry
+simplification, component removal and coarse reflection proxies. It does not
+promise identical lighting, texture resolution or target vertex quantization.
+Ordinary distance LODs retain their separate projected-error policy. Text atlases
+and emissive strips also protect their geometry during reduction/LOD.
+
+An alternative's `errorMeters` is an **author-declared** representation bound in
+the group's local space, scaled conservatively into world space. It is not a
+compiler-certified mesh distance. The first alternative is the zero-error Web
+reference; the compiler selects the largest admissible error, falling back when
+a descendant's stricter intent forbids it. Review alternate silhouettes, labels,
+parts and articulation against the reference. Alternatives v1 accept static and
+rigid hierarchies; skin/joint subtrees are rejected. Keep shared explicitly
+protected details outside a lossy alternative group: a protected descendant
+forces the zero-error reference even when duplicated. Static alternatives retain
+their visibility/UV boundaries without a motion marker. If an updater moves the
+group itself, mark that animated root with `userData.dynamic = true`, as for any
+other moving object. Atlas's shared commuter builder exports both full and surface
+representations with identical formation, label geometry and wheel articulation;
+PICA selects the surface recipe and preserves the complete 64-second motion.
+
+Typed passes execute source reading, representation selection, material/texture
+policy, Vita palette batching, bounded geometry reduction, motion, lighting,
+chunk/LOD, effects, native lowering and structural budgets. Each pass declares
+its dependencies, inputs, outputs and version. These are internal compiler
+contracts; an arbitrary plugin ABI has not been introduced.
+
+Lighting refinement is cached by sealed source, complete profile, compiler and
+host ABI. Default storage is `.pocket-build/cache/compiler`; use `--cache off`
+to verify uncached output, or `--cache PATH` to isolate a run. Corrupt entries are
+recomputed. `--telemetry PATH` records wall time and hit/miss counts separately
+from deterministic `compile.json`. The conservative key invalidates the bake
+when any sealed source input changes; it is not object-local incremental editing.
+
+Unsupported material classes, shader patches, displacement/light maps and
+physical extensions still fail explicitly. Known shared patches use Atlas
+annotations; this does not certify arbitrary `onBeforeCompile` code. PSP supports
+night streets and dry daytime streets/slopes, while PICA/GE do not implement the
+vista light-field/haze combination. Passing structural budgets does not establish
+frame rate, combined memory headroom or visual acceptance on a device.
 
 Budget failure emits a structured report with executed passes and the failing
 budget; it leaves the previous good pack/receipt intact. The compiler does not

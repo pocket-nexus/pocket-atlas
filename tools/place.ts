@@ -1,3 +1,4 @@
+import { explainCompile } from "./compile-report";
 /** Atlas authoring -> sealed PlaceIR -> target recipe. No device SDK or physical device required. */
 import { existsSync, readFileSync } from "node:fs";
 import { resolve, join } from "node:path";
@@ -8,12 +9,12 @@ import { exportPlaceSource, type ExportOptions } from "../web/scripts/export-pla
 import { sha256 } from "../web/scripts/export-source";
 
 const root = resolve(import.meta.dir, "..");
-const commands = ["inspect", "export", "import", "check", "cook", "build", "report", "recipe", "profiles"];
+const commands = ["inspect", "export", "import", "check", "cook", "build", "report", "explain", "recipe", "profiles"];
 export function parseOptions(args: string[]) {
   const command = args[0];
   if (!commands.includes(command)) throw new Error(`usage: bun tools/place.ts <${commands.join("|")}> [--place ID] [--profile ID] [--in PATH] [--out PATH]`);
   const options: Record<string, string> = {};
-  const allowed = new Set(["place", "profile", "in", "out", "base", "geometry", "seed", "seconds", "fps", "start", "tex", "cell", "report", "asset"]);
+  const allowed = new Set(["place", "profile", "in", "out", "base", "geometry", "seed", "seconds", "fps", "start", "tex", "cell", "report", "asset", "cache", "telemetry", "top"]);
   for (let i = 1; i < args.length; i += 2) {
     const key = args[i].replace(/^--/, "");
     if (!args[i].startsWith("--") || !allowed.has(key) || key in options || !args[i + 1] || args[i + 1].startsWith("--"))
@@ -57,19 +58,19 @@ export async function run(args: string[]) {
   const directory = join(root, ".pocket-build/places", id);
   const input = resolve(o.in ?? join(directory, "place.ir"));
   const profile = o.profile ?? "vita30";
-  const flags = ["--profile", profile, ...["tex", "cell", "report"].flatMap(k => o[k] ? [`--${k}`, resolveIfReport(k, o[k])] : [])];
+  const flags = ["--profile", profile, ...["tex", "cell", "report", "cache", "telemetry"].flatMap(k => o[k] ? [`--${k}`, resolveIfReport(k, o[k])] : [])];
   if (command === "inspect") {
     const catalog = placeById(id);
     const definition = (await catalog?.load?.())?.definition;
     if (!definition) throw new Error(`No authored definition: ${id}`);
     return { authoring: describePlace(definition), releaseTargets: catalog!.targets, capabilityCheckRequired: true };
   }
-  if (command === "report") {
+  if (command === "report" || command === "explain") {
     if (!o.in) throw new Error("report requires --in <compile.json>");
     const report = JSON.parse(readFileSync(input, "utf8"));
     if (report.schemaVersion !== 1 || !report.artifact?.sha256) throw new Error("Not an Atlas compile receipt");
     if (o.asset && sha256(readFileSync(resolve(o.asset))) !== report.artifact.sha256) throw new Error("Asset disagrees with compile receipt");
-    return report;
+    return command === "explain" ? explainCompile(report, Number(o.top ?? 12)) : report;
   }
   if (command === "profiles" || command === "recipe") return compiler([command, ...flags]);
   if (command === "export" || command === "build") {
@@ -86,8 +87,13 @@ export async function run(args: string[]) {
   if (command === "check") return compiler(["check", "--in", input, ...flags]);
   return compiler(["--in", input, "--out", resolve(o.out ?? join(directory, `${id}.${profile}.place`)), ...flags]);
 }
-function resolveIfReport(key: string, value: string) { return key === "report" ? resolve(value) : value; }
+function resolveIfReport(key: string, value: string) { return ["report", "telemetry"].includes(key) || (key === "cache" && value !== "off") ? resolve(value) : value; }
 if (import.meta.main) {
-  try { console.log(JSON.stringify(await run(Bun.argv.slice(2)), null, 2)); }
-  catch (error) { console.error(String(error)); process.exitCode = 1; }
+  try {
+    await Bun.write(Bun.stdout, JSON.stringify(await run(Bun.argv.slice(2)), null, 2) + "\n");
+    process.exit(0);
+  } catch (error) {
+    await Bun.write(Bun.stderr, String(error) + "\n");
+    process.exit(1);
+  }
 }

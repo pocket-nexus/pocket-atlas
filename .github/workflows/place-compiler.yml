@@ -30,6 +30,10 @@ jobs:
           mkdir -p .pocket-build/validation/ci
           rustc --edition=2021 --test vita/src/sun_bounds.rs -o .pocket-build/validation/ci/sun-bounds
           .pocket-build/validation/ci/sun-bounds
+      - name: Native visibility bounds
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -In3ds/src n3ds/tests/visibility.c -lm -o .pocket-build/validation/ci/visibility
+          .pocket-build/validation/ci/visibility
       - run: bun test test/*.test.ts
         working-directory: web
       - run: bun run build

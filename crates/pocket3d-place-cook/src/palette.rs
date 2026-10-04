@@ -57,11 +57,11 @@ pub fn batch(
     animated: &HashSet<usize>, world: &HashMap<usize, Mat4>, material_animation: &HashSet<String>,
 ) {
     let mut palettes: HashMap<Vec<u8>, u32> = HashMap::new();
-    let mut batches: BTreeMap<(usize, u32, bool), Prim> = BTreeMap::new();
+    let mut batches: BTreeMap<(usize, u32, bool, (u8,u32,u32,u32)), Prim> = BTreeMap::new();
     let mut out = Vec::new();
     for mut p in std::mem::take(prims) {
         let m = materials[p.material as usize].clone();
-        if p.skin.is_some() || !eligible(&m) || material_animation.contains(&m.name) {
+        if p.selection.protected() || p.skin.is_some() || !eligible(&m) || material_animation.contains(&m.name) {
             out.push(p);
             continue;
         }
@@ -96,8 +96,9 @@ pub fn batch(
         }
         p.mesh_node = frame;
         p.world = frame_world;
-        let key = (frame, p.material, p.no_reflect);
+        let key = (frame, p.material, p.no_reflect, p.selection.batch_key());
         if let Some(batch) = batches.get_mut(&key) {
+            batch.sources.extend(p.sources);
             let base = batch.verts.len() as u32;
             batch.verts.extend(p.verts);
             batch.tris.extend(p.tris.into_iter().map(|tri| tri.map(|i| i + base)));
@@ -129,13 +130,14 @@ mod tests {
 
     fn triangle(node: usize, world: Mat4, mat: u32) -> Prim {
         Prim {
+            sources: [format!("source/{node}")].into(),
             mesh_node: node, world,
             verts: [Vec3::ZERO, Vec3::X, Vec3::Y].into_iter().map(|pos| Vertex {
                 pos, normal: Vec3::new(1.0, 0.0, 1.0).normalize(), color: [128, 64, 200, 255],
                 uv: Vec2::new(7.0, 8.0), ..Vertex::default()
             }).collect(),
             tris: vec![[0, 1, 2]], material: mat, moving: true, skin: None,
-            no_reflect: false, baked: false,
+            no_reflect: false, baked: false, selection: Default::default(), base_error: 0.0,
         }
     }
 
@@ -270,6 +272,7 @@ mod tests {
         batch(&mut prims, &mut mats, &HashMap::from([(1, 0), (2, 0)]), &HashSet::from([0]), &HashMap::from([(0, root)]), &HashSet::new());
         assert_eq!(prims.len(), 1);
         assert_eq!(prims[0].mesh_node, 0);
+        assert_eq!(prims[0].sources, ["source/1".into(), "source/2".into()].into());
         for (v, (position, normal)) in prims[0].verts.iter().zip(expected) {
             assert!(root.transform_point3(v.pos).distance(position) < 1e-5);
             assert!((Mat3::from_mat4(root) * v.normal).normalize().distance(normal) < 1e-5);

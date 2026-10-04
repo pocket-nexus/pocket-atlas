@@ -1,3 +1,4 @@
+import { geometryAlternatives, geometryIntent } from "../geometry-intent";
 import {
   CircleGeometry, CylinderGeometry, DoubleSide, ExtrudeGeometry, Group, Path, RingGeometry,
   Shape, ShapeGeometry, TorusGeometry, type BufferGeometry, type Material, type Vector3,
@@ -46,7 +47,23 @@ function ring(width: number, height: number, radius: number, thickness: number, 
 
 /** Parts are merged inside each car; articulated nodes and wheelsets stay separately animated. */
 export function commuter(w: DayWorld, spec: CommuterSpec) {
-  const handheld = w.geometry === "handheld";
+  if (!w.compilerSource) return buildCommuter(w, spec, w.geometry === "handheld");
+  const full = buildCommuter(w, spec, false), compact = buildCommuter(w, spec, true);
+  // Both carry the same livery, labels, car formation and articulated wheels.
+  // The existing compact surface recipe becomes source data; the compiler,
+  // rather than a per-device Web export switch, chooses its representation.
+  for (const variant of [full, compact]) delete variant.root.userData.pocketAtlas.geometry;
+  const root = geometryAlternatives("commuter-train", { role: "detail", maxErrorMeters: 0.075 }, [
+    { id: "reference", errorMeters: 0, object: full.root },
+    { id: "surface", errorMeters: 0.075, object: compact.root },
+  ]);
+  // The place moves this formation root; alternatives themselves need no
+  // motion marker when used for static authored objects.
+  root.userData.dynamic = true;
+  return { root, wheels: [...full.wheels, ...compact.wheels] };
+}
+
+function buildCommuter(w: DayWorld, spec: CommuterSpec, handheld: boolean) {
   const curves = handheld ? 1 : 5;
   const sheets = new Map<Material, Material>();
   const parts = () => {
@@ -85,7 +102,7 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
     g.userData.thinBand = true;
     return g;
   };
-  const root = new Group(); root.name = "commuter-train"; root.userData.dynamic = true;
+  const root = geometryIntent(new Group(), { role: "detail", maxErrorMeters: 0.015 }); root.name = "commuter-train"; root.userData.dynamic = true;
   const steel = w.lib.stainless(), edge = w.lib.plain(0xb8c0be, 0.29, 0.78);
   const rubber = w.lib.plain(0x242b2c, 0.91), chassis = w.lib.plain(0x424a4c, 0.78, 0.45);
   const dust = w.lib.plain(0x68665e, 0.88, 0.3), blue = w.lib.paint(spec.stripe, 0.34);
