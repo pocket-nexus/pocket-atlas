@@ -333,7 +333,6 @@ triangle-constant window parameters and the clock-driven TV flicker to the
 vertex stage. Parallax, spatial room/TV illumination, local curtain detail and
 reflections remain in the fragment stage. Missing
 recipes retain the original fragment implementation, including on older packs.
-Reference always retains that implementation.
 
 The cooker and loader share `pc::ipod::window_params::eligible`. It reads original
 PLIP float UV and RGBA8 records, applies the draw UV decode, rejects animated UV
@@ -352,8 +351,7 @@ an incompatible shader.
 `ipod_recipes.skin_lods` is an optional version-1 SGX index recipe. Each draw
 entry contains `draw`, `sourceHash`, `payloadHash`, `affineBound` and `levels`
 (`DrawLod` records). New u16 source-local indices are appended to GEOM; the
-original vertices, full indices and `draw.lods` are unchanged. Only Optimized
-uses these additional levels. Reference retains the original topology.
+original vertices, full indices and `draw.lods` are unchanged. The SGX renderer selects from these additional levels and the original tiers.
 
 The pass currently accepts only opaque, depth-writing Standard skins without
 cutout, wet shading or animated emission. Standard interior and analytic
@@ -384,8 +382,7 @@ shared simplifier's measured geometry/attribute errors; this is not a new
 Hausdorff or strict pixel-error claim, nor a pose-sampling substitute for the
 animation bound.
 
-The shared validator recomputes the animation bound and structural proof in
-both profiles. Source identity binds the original draw descriptor, vertex/full
+The shared validator recomputes the animation bound and structural proof. Source identity binds the original draw descriptor, vertex/full
 index bytes and one pack-wide identity of node/skin descriptors, loop timing,
 doors and all ANIM bytes. Payload identity binds the ordered new index ranges.
 It rejects changed mixed-influence triangles, missing seam vertices/edges,
@@ -397,7 +394,7 @@ surfaces without cutout, wet/interior or emission-map/track/shade semantics.
 Its display shader does not consume tangents, so only bytes 24–40 of the source
 vertex are omitted from canonicalization. Position, normal, UV, RGBA and baked
 light retain their original bits. Additional u16 source-local indices live in
-the GEOM tail; original full/LOD indices, Reference and shadow inputs stay intact.
+the GEOM tail; original full/LOD indices and shadow inputs stay intact.
 Source identity includes the draw/material descriptors and original full/LOD
 bytes. Shared validation checks canonical representatives, component ownership,
 unchanged edges shared with all static neighboring materials and nonoverlapping
@@ -414,7 +411,7 @@ attribute-weighted simplifier contract, not a Hausdorff or pixel guarantee.
 first, then proposes source-local index tiers using posed positions at up to
 eight representative poses, final UVs, and graded RGBA as simplifier attributes.
 The original source vertices, four joint/weight slots, full indices, original
-LODs, animation and Reference path are retained. Only ordinary prelit Standard
+LODs and animation are retained. Only ordinary prelit Standard
 skin draws with supported TRS/nlerp animation and byte weights summing to 255
 are eligible; user-operated door descendants and unsupported material/layout
 contracts retain their existing tiers.
@@ -440,10 +437,9 @@ locks. Approximate interpolation of color, UV and mixed influences is explicit.
 
 Typed receipts bind the original draw/material/lighting descriptors, original
 vertex/full/LOD bytes, complete ANIM identity, exact final graded colors and
-appended index payload. Both profiles validate source identity, topology,
-measurement schedule and nonoverlapping tail ranges. Optimized also checks the
-validated color sidecar's exact per-draw bytes before selecting these tiers;
-Reference does not load display colors or consume their derived indices.
+appended index payload. The loader validates source identity, topology,
+measurement schedule and nonoverlapping tail ranges, then checks the
+validated color sidecar's exact per-draw bytes before selecting these tiers.
 `EffectiveLods` merges non-dominated source, strict and sampled tiers without
 rewriting shared analysis or the original metadata's draw LODs. The offline
 surface audit is not repeated during device loading.
@@ -459,8 +455,7 @@ GPU, presentation contract or relax a reader's hard limits. Backend feature
 support is checked independently. Unknown schema/recipe versions fail.
 
 `ipod30` describes the SGX scene and EAGL drawable at 480×320. Its 960×640
-display dimensions describe the physical panel/UI; the separate Reference
-profile may explicitly render at that size. Default surface/detail/emissive
+display dimensions describe the physical panel and independent native UI. Default surface/detail/emissive
 caps are all 512, with explicit usage selecting its corresponding profile cap.
 PLIP and every supplemental color/cluster/encoder file are returned in the
 common `Artifact`; the compile receipt hashes each published sidecar. Validation

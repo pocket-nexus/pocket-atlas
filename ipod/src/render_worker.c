@@ -17,18 +17,14 @@ extern void *objc_msgSend(void);
 extern void glBindFramebuffer(unsigned, unsigned), glBindRenderbuffer(unsigned, unsigned);
 extern void glReadPixels(int, int, int, int, unsigned, unsigned, void *), glFinish(void);
 extern unsigned glGetError(void);
-extern void glGetRenderbufferParameteriv(unsigned, unsigned, int *);
-extern void glRenderbufferStorage(unsigned, unsigned, int, int);
-extern unsigned glCheckFramebufferStatus(unsigned);
 extern int atlas_init(const char *), atlas_value(int);
 extern void atlas_frame(float, int, int, unsigned), atlas_action(int);
 extern void atlas_touch(int, float, float, int), atlas_command(const char *), atlas_shutdown(void);
 extern void atlas_suspend(void);
 extern void atlas_memory_warning(void);
 extern void atlas_frame_completed(float render_ms, float present_ms, float interval_ms);
-/* Target result: 0 absent, 1 sqrt-encoded HDR, 2 display-sRGB prelit color. */
+/* Target result: 0 absent, 2 display-sRGB prelit color. */
 extern int atlas_hdr_target(unsigned *, int *, int *);
-extern void atlas_drawable_changed(void);
 extern const char *atlas_text(int, int), *atlas_status(void);
 extern double atlas_seconds(void);
 
@@ -45,7 +41,7 @@ typedef struct { char text[ATLAS_UI_TEXT_COUNT][ATLAS_UI_TEXT_BYTES]; } CatalogP
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t changed = PTHREAD_COND_INITIALIZER;
 static pthread_t thread;
-static int started, stop_requested, frame_requested, parked, background_parked;
+static int started, stop_requested, frame_requested, parked;
 static int clear_contacts_requested, worker_ready;
 /* Memory pressure must not depend on allocating an Event while out of memory.
  * Keep one independent notification until the owner can safely consume it. */
@@ -53,9 +49,6 @@ static int memory_warning_requested;
 /* A reserved priority message in the same mailbox: background suspension must
  * not depend on heap allocation or wait behind a burst of touch moves. */
 static int lifecycle_message = -1, desired_active = 1;
-static id surface_layer;
-static unsigned surface_depth;
-static int surface_result;
 static Event *head, *tail;
 static unsigned pending_events;
 static unsigned long next_sequence, applied_sequence, snapshot_generation;
@@ -192,7 +185,7 @@ static int capture_framebuffer(void) {
         unsigned target = 0;
         int w = 0, h = 0;
         int profile = atlas_hdr_target(&target, &w, &h);
-        if (profile != 1 && profile != 2) {
+        if (profile != 2) {
             write_text("capture-hdr-error.txt", "No supported scene color target is available.");
         } else if (!capture_pixels("frame-hdr.rgba", target, w, h)) {
             write_text("capture-hdr-error.txt", "Could not read or save the HDR capture.");
@@ -200,10 +193,8 @@ static int capture_framebuffer(void) {
             char metadata[256];
             snprintf(metadata, sizeof metadata,
                      "{\"width\":%d,\"height\":%d,\"format\":\"rgba8\","
-                     "\"renderingProfile\":\"%s\",\"encoding\":\"%s\",\"depth\":\"%s\",\"origin\":\"bottom-left\"}",
-                     w, h, profile == 2 ? "display-prelit" : "full-hdr",
-                     profile == 2 ? "display-srgb" : "sqrt(c/(1+c))",
-                     profile == 2 ? "inverse-distance-when-used/zero-when-unused" : "log");
+                     "\"renderingProfile\":\"display-prelit\",\"encoding\":\"display-srgb\","
+                     "\"depth\":\"inverse-distance-when-used/zero-when-unused\",\"origin\":\"bottom-left\"}", w, h);
             if (!write_text("frame-hdr.json", metadata))
                 write_text("capture-hdr-error.txt", "Could not save HDR capture metadata.");
         }
@@ -234,8 +225,6 @@ static void *render_main(void *unused) {
             break;
         }
         int lifecycle = lifecycle_message;
-        id resize_layer = surface_layer;
-        unsigned resize_depth = surface_depth;
         lifecycle_message = -1;
         int clear_contacts = clear_contacts_requested;
         if (lifecycle == 0 || clear_contacts) {
@@ -270,7 +259,6 @@ static void *render_main(void *unused) {
             }
             pthread_mutex_lock(&mutex);
             parked = 1;
-            background_parked = 1;
             pthread_cond_broadcast(&changed);
             pthread_mutex_unlock(&mutex);
         } else if (lifecycle == 1) {
@@ -285,54 +273,8 @@ static void *render_main(void *unused) {
             last_present = 0;
             pthread_mutex_lock(&mutex);
             parked = !bound;
-            background_parked = !bound;
             if (!bound) desired_active = 0;
             frame_requested = bound;
-            pthread_cond_broadcast(&changed);
-            pthread_mutex_unlock(&mutex);
-        } else if (lifecycle == 2) {
-            /* Unlike backgrounding, a scale transition keeps the complete
-             * scene and its EAGL ownership. UIKit changes the layer only after
-             * this acknowledgement, while no GPU work references it. */
-            if (bound) glFinish();
-            pthread_mutex_lock(&mutex);
-            parked = 1;
-            pthread_cond_broadcast(&changed);
-            pthread_mutex_unlock(&mutex);
-        } else if (lifecycle == 3) {
-            int new_width = 0, new_height = 0;
-            int ready = 0;
-            if (bound) {
-                glBindRenderbuffer(0x8d41, colorbuffer);
-                BOOL allocated = ((BOOL (*)(id, SEL, unsigned, id))objc_msgSend)(
-                    context, sel("renderbufferStorage:fromDrawable:"), 0x8d41, resize_layer);
-                if (allocated) {
-                    glGetRenderbufferParameteriv(0x8d41, 0x8d42, &new_width);
-                    glGetRenderbufferParameteriv(0x8d41, 0x8d43, &new_height);
-                    if (new_width > 0 && new_height > 0) {
-                        glBindRenderbuffer(0x8d41, resize_depth);
-                        glRenderbufferStorage(0x8d41, 0x81a5, new_width, new_height);
-                        glBindFramebuffer(0x8d40, framebuffer);
-                        ready = glCheckFramebufferStatus(0x8d40) == 0x8cd5;
-                    }
-                }
-                glFinish();
-                /* Even a failed storage call can leave GL_OUT_OF_MEMORY.
-                 * Consume this attempt's errors before UIKit asks the owner
-                 * to rebuild the previous surface as a rollback. */
-                unsigned error;
-                while ((error = glGetError()) != 0) ready = 0;
-            }
-            if (ready) {
-                atlas_drawable_changed();
-                last_frame = atlas_seconds();
-                last_present = 0;
-            } else write_text("error.txt", "Could not resize the EAGL drawable.");
-            pthread_mutex_lock(&mutex);
-            if (ready) { width = new_width; height = new_height; }
-            surface_result = ready ? 1 : -1;
-            parked = !ready;
-            frame_requested = ready;
             pthread_cond_broadcast(&changed);
             pthread_mutex_unlock(&mutex);
         } else if (bound && render) {
@@ -357,7 +299,7 @@ static void *render_main(void *unused) {
             if (!can_draw && memory_warning && !stop_requested) memory_warning_requested = 1;
             pthread_mutex_unlock(&mutex);
             if (can_draw) {
-                /* Apply after ordinary input so an already queued Full command
+                /* Apply after ordinary input so already queued scene navigation
                  * cannot immediately undo this emergency memory fallback. */
                 if (memory_warning) atlas_memory_warning();
                 double time = atlas_seconds();
@@ -404,13 +346,10 @@ int atlas_worker_start(void *eagl, unsigned fbo, unsigned color,
                        const char *bundle, const char *tmp) {
     pthread_mutex_lock(&mutex);
     if (started) { pthread_mutex_unlock(&mutex); return 0; }
-    stop_requested = frame_requested = parked = background_parked = 0;
+    stop_requested = frame_requested = parked = 0;
     clear_contacts_requested = worker_ready = 0;
     memory_warning_requested = 0;
     lifecycle_message = -1;
-    surface_layer = NULL;
-    surface_depth = 0;
-    surface_result = 0;
     desired_active = 1;
     next_sequence = applied_sequence = 0;
     pending_events = 0;
@@ -540,7 +479,7 @@ void atlas_worker_memory_warning(void) {
     if (started && !stop_requested) {
         memory_warning_requested = 1;
         /* A background warning must not resume EAGL or start another frame.
-         * Resume/resize signals will release a notification held while parked. */
+         * Resume signals will release a notification held while parked. */
         if (desired_active && !parked) pthread_cond_signal(&changed);
     }
     pthread_mutex_unlock(&mutex);
@@ -566,47 +505,11 @@ void atlas_worker_active(int active) {
         lifecycle_message = desired_active;
         pthread_cond_signal(&changed);
         if (!desired_active) {
-            /* A failed drawable resize is also parked, but still owns live
-             * GL resources. Only background suspension is an adequate ack. */
-            while (!background_parked && !stop_requested)
+            while (!parked && !stop_requested)
                 pthread_cond_wait(&changed, &mutex);
         }
     }
     pthread_mutex_unlock(&mutex);
-}
-int atlas_worker_surface_pause(void) {
-    pthread_mutex_lock(&mutex);
-    /* Resume is asynchronous. Do not overwrite its lifecycle message with a
-     * surface transition before the context has been rebound by the owner. */
-    while (started && desired_active && background_parked && !stop_requested)
-        pthread_cond_wait(&changed, &mutex);
-    if (!started || stop_requested || !desired_active) {
-        pthread_mutex_unlock(&mutex);
-        return 0;
-    }
-    lifecycle_message = 2;
-    pthread_cond_signal(&changed);
-    while (!parked && !stop_requested) pthread_cond_wait(&changed, &mutex);
-    int ready = parked && !stop_requested;
-    pthread_mutex_unlock(&mutex);
-    return ready;
-}
-int atlas_worker_surface_resize(void *layer, unsigned depth, int *out_width, int *out_height) {
-    pthread_mutex_lock(&mutex);
-    if (!started || stop_requested || !desired_active || !parked) {
-        pthread_mutex_unlock(&mutex);
-        return 0;
-    }
-    surface_layer = layer;
-    surface_depth = depth;
-    surface_result = 0;
-    lifecycle_message = 3;
-    pthread_cond_signal(&changed);
-    while (!surface_result && !stop_requested) pthread_cond_wait(&changed, &mutex);
-    int ready = surface_result > 0 && !stop_requested;
-    if (ready) { *out_width = width; *out_height = height; }
-    pthread_mutex_unlock(&mutex);
-    return ready;
 }
 void atlas_worker_stop(void) {
     pthread_mutex_lock(&mutex);

@@ -25,14 +25,14 @@ const fragments: Record<string, string> = {
   water: "water_f",
   lights: "lights_f",
 };
-function pair(scene: any, d: any, mirror: boolean, tier: number, output: "scene" | "coverage" = "scene", windowVertexParams = false, windowRayParams = false) {
+function pair(scene: any, d: any, mirror: boolean, output: "scene" | "coverage" = "scene", windowVertexParams = false, windowRayParams = false) {
   const m = scene.materials[d.material];
   const f: Record<string, number> = {
     LIGHTS: ["standard", "glass"].includes(m.kind) ? 2 : 0,
   };
   const v: Record<string, number> = {};
   if (windowVertexParams) {
-    if (m.kind !== "interior_window" || tier !== 3 || mirror || output !== "scene")
+    if (m.kind !== "interior_window" || mirror || output !== "scene")
       throw new Error("Window vertex parameters require the display main window pair");
     v.SGX_WINDOW_PARAMS = f.SGX_WINDOW_PARAMS = 1;
   }
@@ -42,7 +42,7 @@ function pair(scene: any, d: any, mirror: boolean, tier: number, output: "scene"
     v.SGX_WINDOW_RAY_PARAMS = f.SGX_WINDOW_RAY_PARAMS = 1;
   }
   if (output === "coverage") {
-    if (m.kind !== "water" || tier !== 3 || mirror || m.blend !== "opaque" || !m.depth_write)
+    if (m.kind !== "water" || mirror || m.blend !== "opaque" || !m.depth_write)
       throw new Error("Coverage response requires opaque display water");
     f.ATLAS_COVERAGE_TARGET = 1;
   }
@@ -57,8 +57,8 @@ function pair(scene: any, d: any, mirror: boolean, tier: number, output: "scene"
               number
             >
           )[m.blend];
-  if (["standard", "glass"].includes(m.kind) && tier > 0) {
-    f[tier === 1 ? "LITE" : "FAR"] = 1;
+  if (["standard", "glass"].includes(m.kind)) {
+    f.FAR = 1;
     if (d.layout === "baked" && !m.wet) f.LIGHTS = 0;
   }
   if (d.layout === "baked" && f.LIGHTS > 0) f.LIGHTS = 1;
@@ -110,9 +110,6 @@ function pair(scene: any, d: any, mirror: boolean, tier: number, output: "scene"
       ],
     ] as const)
       if (on) f[name] = 1;
-    if (tier === 1) f.LITE = 1;
-    if (tier === 2) f.FAR = 1;
-    if (m.normal != null && tier === 0 && !mirror) v.TANGENT = 1;
     if (m.wet?.planar && !mirror) v.SCREEN = 1;
   }
   if (
@@ -126,37 +123,35 @@ function pair(scene: any, d: any, mirror: boolean, tier: number, output: "scene"
     if (scene.sun) f.SUN = 1;
     if (m.water?.shallow && m.vertex_color) f.SHALLOW = 1;
   }
-  if (tier === 3) {
-    if (m.kind === "products" && d.layout === "static") v.PRODUCTS_CACHED = 1;
-    if (d.layout === "skinned") v.SKIP_ZERO_WEIGHTS = 1;
-    f.ATLAS_LDR = 1;
-    if (d.node == null && d.skin == null) v.STATIC_WORLD = 1;
-    if (m.kind === "glass") {
-      f.LIGHTS = 0;
-      f.LITE = 1;
+  if (m.kind === "products" && d.layout === "static") v.PRODUCTS_CACHED = 1;
+  if (d.layout === "skinned") v.SKIP_ZERO_WEIGHTS = 1;
+  f.ATLAS_LDR = 1;
+  if (d.node == null && d.skin == null) v.STATIC_WORLD = 1;
+  if (m.kind === "glass") {
+    f.LIGHTS = 0;
+    f.LITE = 1;
+  }
+  if (m.kind === "water") {
+    f.LITE = 1;
+    f.DISPLAY_COLOR = 1;
+    f.ATLAS_OUTPUT_LDR = 1;
+    delete v.VISTA;
+  }
+  if (v.VERTEX_LIGHTS) {
+    v.OBJECT_LIGHTS = v.VERTEX_LIGHTS;
+    delete v.VERTEX_LIGHTS;
+  }
+  // Keep baked diffuse, material color, emission and wet reflections. The
+  // throughput profile uses the shared far/lite equations at all distances.
+  if (m.kind === "standard") {
+    f[m.wet ? "LITE" : "FAR"] = 1;
+    if (d.layout === "baked") f.LIGHTS = 0;
+    if (m.fog && !m.interior && !scene.vista_haze) {
+      v.VERTEX_FOG = 1;
+      f.VERTEX_FOG = 1;
     }
-    if (m.kind === "water") {
-      f.LITE = 1;
-      f.DISPLAY_COLOR = 1;
-      f.ATLAS_OUTPUT_LDR = 1;
-      delete v.VISTA;
-    }
-    if (v.VERTEX_LIGHTS) {
-      v.OBJECT_LIGHTS = v.VERTEX_LIGHTS;
-      delete v.VERTEX_LIGHTS;
-    }
-    // Keep baked diffuse, material color, emission and wet reflections. The
-    // throughput profile uses the shared far/lite equations at all distances.
-    if (m.kind === "standard") {
-      f[m.wet ? "LITE" : "FAR"] = 1;
-      if (d.layout === "baked") f.LIGHTS = 0;
-      if (m.fog && !m.interior && !scene.vista_haze) {
-        v.VERTEX_FOG = 1;
-        f.VERTEX_FOG = 1;
-      }
-      if (!scene.rain.active && !scene.fog_lights?.length && !scene.atmosphere.haze_ambient?.some((x: number) => x > 0))
-        f.DEPTH_UNUSED = 1;
-    }
+    if (!scene.rain.active && !scene.fog_lights?.length && !scene.atmosphere.haze_ambient?.some((x: number) => x > 0))
+      f.DEPTH_UNUSED = 1;
   }
   return [
     shader(m.kind === "lights" ? "lights_v" : "surface_v", v),
@@ -218,12 +213,12 @@ export function colorPair(scene: any, d: any, color: DisplayColor, pass: ColorPa
  * Alpha-tested coverage still runs. Wet/glass have separate response/blend
  * contracts, and transparent RGB blending needs its original source alpha.
  * Raw interior windows retain their authored cheap display-domain mirror. */
-export function performanceReflectionPair(scene: any, draw: any, color?: DisplayColor, compile = pair): string[] | null {
+export function reflectionPair(scene: any, draw: any, color?: DisplayColor, compile = pair): string[] | null {
   const material = scene.materials[draw.material];
   if (color && material.blend === "opaque" && !(color.flags & (16 | 32)) &&
       ["standard", "unlit", "products"].includes(material.kind))
     return colorPair(scene, draw, color, "reflection");
-  return material.kind === "interior_window" ? compile(scene, draw, true, 3) : null;
+  return material.kind === "interior_window" ? compile(scene, draw, true) : null;
 }
 
 /** The compiler and runtime both prove all full/LOD triangles. This reader
@@ -263,8 +258,8 @@ export function windowRayDraws(scene: any): Set<number> {
   return new Set(recipe.draws);
 }
 
-export function performanceMainPair(scene: any, draw: any, enabled: boolean, rays = false, compile = pair): string[] {
-  return compile(scene, draw, false, 3, "scene", enabled, rays);
+export function mainPair(scene: any, draw: any, enabled: boolean, rays = false, compile = pair): string[] {
+  return compile(scene, draw, false, "scene", enabled, rays);
 }
 
 if (import.meta.main) {
@@ -292,41 +287,26 @@ for (const place of selectIPodPlaces(PLACES)) {
           display_flags: colors.get(i)?.flags ?? 0,
           window_vertex_params: windowParameters.has(i),
           window_ray_params: windowRays.has(i),
-          detail: pair(m, d, false, 0),
-          far: pair(m, d, false, m.materials[d.material].wet ? 1 : 2),
-          reflection: pair(m, d, true, 2),
-          ...waterPrograms(m, d, colors.has(i) ? colorPair(m, d, colors.get(i)!) : performanceMainPair(m, d, windowParameters.has(i), windowRays.has(i)),
-            () => pair(m, d, false, 3, "coverage")),
-          performance_reflection: performanceReflectionPair(m, d, colors.get(i)),
+          ...waterPrograms(m, d, colors.has(i) ? colorPair(m, d, colors.get(i)!) : mainPair(m, d, windowParameters.has(i), windowRays.has(i)),
+            () => pair(m, d, false, "coverage")),
+          reflection: reflectionPair(m, d, colors.get(i)),
           wet_response: (colors.get(i)?.flags ?? 0) & 16 ? colorPair(m, d, colors.get(i)!, "wet-response") : null,
         },
   );
   const fixed = {
     sky: [
       shader("sky_v"),
-      shader(
-        m.day_sky ? "sky_day_f" : "sky_f",
-        m.day_sky?.twilight ? { TWILIGHT: 1 } : {},
-      ),
-    ],
-    sky_performance: [
-      shader("sky_v"),
       shader(m.day_sky ? "sky_day_f" : "sky_f",
         { ATLAS_LDR: 1, ...(m.day_sky?.twilight ? { TWILIGHT: 1 } : {}) }),
     ],
-    post: [
-      shader("post_v", { GRAIN: 1 }),
-      shader("composite_f", { BLOOM: 1, HAZE: 1 }),
-    ],
-    post_performance: [shader("post_v", { GRAIN: 1 }), ldrPostShader({ bloom: true, haze: !!m.rain.active || !!m.fog_lights?.length || !!m.atmosphere.haze_ambient?.some((x: number) => x > 0) })],
+    post: [shader("post_v", { GRAIN: 1 }), ldrPostShader({ bloom: true, haze: !!m.rain.active || !!m.fog_lights?.length || !!m.atmosphere.haze_ambient?.some((x: number) => x > 0) })],
     blit: [shader("post_v"), shader("blit_f")],
     copy: [shader("post_v"), shader("blit_f", { PRESERVE_ALPHA: 1 })],
-    down: [shader("post_v"), shader("down_f")],
   };
   writeFileSync(
     join(root, `.pocket-build/ipod/assets/${place.id}.pipelines.json`),
     JSON.stringify({ draws: pairs, ...fixed, texture_usage: textureUsage(
-      pairs, fixed.sky_performance,
+      pairs, fixed.sky,
       name => readFileSync(join(root, `.pocket-build/ipod/assets/shaders/${name}.glsl`), "utf8"),
     ) }),
   );
@@ -350,7 +330,7 @@ writeFileSync(
     marker: [shader("marker_v"), shader("marker_f", { ATLAS_BLEND: 2 })],
     globe: [shader("globe_v"), shader("globe_f")],
     post: [shader("post_v", { GRAIN: 1 }), shader("composite_f")],
-    post_performance: [shader("post_v", { GRAIN: 1 }), globeGradeShader()],
+    post_bounded: [shader("post_v", { GRAIN: 1 }), globeGradeShader()],
     background: [shader("post_v"), background + "-globe"],
     blit: [shader("post_v"), shader("blit_f")],
   }),

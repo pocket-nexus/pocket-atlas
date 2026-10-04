@@ -241,31 +241,7 @@ impl FrameTimings {
     }
 }
 
-/// Stable user settings: legacy Adaptive (0) and Performance (2) both select
-/// the dedicated device profile. Reference (1) remains an explicit comparison.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum QualityProfile {
-    Optimized,
-    Reference,
-}
-
-impl QualityProfile {
-    pub fn from_setting(setting: i32) -> Self {
-        if setting == 1 {
-            Self::Reference
-        } else {
-            Self::Optimized
-        }
-    }
-
-    pub fn scene_width(self) -> i32 {
-        match self {
-            Self::Optimized => 480,
-            Self::Reference => 960,
-        }
-    }
-}
+pub const SCENE_WIDTH: i32 = 480;
 
 #[cfg(test)]
 mod tests {
@@ -345,18 +321,4 @@ mod tests {
         assert_eq!(timings.report().work_ms.max, 21.0);
     }
 
-    #[test]
-    fn legacy_device_settings_share_the_fixed_480_profile() {
-        for setting in [0, 2] {
-            let profile = QualityProfile::from_setting(setting);
-            assert_eq!(profile, QualityProfile::Optimized);
-            assert_eq!(profile.scene_width(), 480);
-        }
-        assert_eq!(QualityProfile::from_setting(1), QualityProfile::Reference);
-        assert_eq!(QualityProfile::Reference.scene_width(), 960);
-        // Invalid persisted settings must not reintroduce an old low-res tier.
-        for setting in [-1, 3, i32::MIN, i32::MAX] {
-            assert_eq!(QualityProfile::from_setting(setting).scene_width(), 480);
-        }
-    }
 }

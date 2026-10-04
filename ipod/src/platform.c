@@ -77,13 +77,13 @@ extern const unsigned char *glGetString(unsigned);
 enum {
     VALUE_PLACE_COUNT, VALUE_MODE, VALUE_SELECTED, VALUE_PAUSED,
     VALUE_CINEMATIC, VALUE_RAIN, VALUE_REFLECTION, VALUE_BLOOM,
-    VALUE_SOUND, VALUE_QUALITY, VALUE_SHOT, VALUE_SHOT_COUNT,
+    VALUE_SOUND, VALUE_RESERVED, VALUE_SHOT, VALUE_SHOT_COUNT,
     VALUE_SOUND_AVAILABLE, VALUE_COUNT
 };
 enum { PAGE_ATLAS, PAGE_PLACE, PAGE_SETTINGS, PAGE_ABOUT };
 enum { ACTION_BACK = 0, ACTION_SETTINGS = 2, ACTION_PREVIOUS = 3,
        ACTION_PAUSE = 4, ACTION_WALK = 5, ACTION_NEXT = 6,
-       ACTION_RESUME = 7, ACTION_QUALITY = 8, ACTION_RAIN = 9,
+       ACTION_RESUME = 7, ACTION_RAIN = 9,
        ACTION_REFLECTION = 10, ACTION_BLOOM = 11, ACTION_SOUND = 12,
        ACTION_RESTART = 13, ACTION_ABOUT = 14, ACTION_PLACE = 100 };
 
@@ -95,7 +95,7 @@ static id settings_scroll;
 static id page_scroll;
 static unsigned fbo, color, depth;
 static int width, height, active = 1;
-static int drawable_scale = 2, rejected_scale;
+static const int drawable_scale = 1;
 static int page = PAGE_ATLAS, return_page = PAGE_ATLAS;
 static int last_values[VALUE_COUNT];
 static int requested_place = -1;
@@ -330,13 +330,6 @@ static float wrapped_label(id parent, float x, float y, float w,
     return measured.height;
 }
 
-static const char *quality_name(int quality) {
-    switch (quality) {
-        case 1: return "Retina · Reference";
-        default: return "SGX · 480×320";
-    }
-}
-
 static void clear_contacts(void) { atlas_worker_touch(-1, 0, 0, -1); }
 
 static int place_preview(id parent, Rect frame, int index) {
@@ -490,9 +483,6 @@ static void draw_settings(float w, float h) {
     page_scroll = settings_scroll;
     float row_width = w - 32;
     float y = 0;
-    y = setting_row(settings_scroll, y, row_width, "Image quality",
-                    quality_name(ui_value(VALUE_QUALITY)),
-                    "SGX uses fixed 480×320; Reference uses Retina detail.", ACTION_QUALITY);
     y = setting_row(settings_scroll, y, row_width, "Rain",
                     ui_value(VALUE_RAIN) ? "On" : "Off",
                     "Rainfall in wet-weather places.", ACTION_RAIN);
@@ -825,7 +815,7 @@ static void refresh_ui(void) {
     } else if (page == PAGE_ATLAS && count != last_values[VALUE_PLACE_COUNT]) {
         show_ui();
     } else if (page == PAGE_SETTINGS) {
-        for (int i = VALUE_PAUSED; i <= VALUE_QUALITY; ++i) {
+        for (int i = VALUE_PAUSED; i <= VALUE_SOUND; ++i) {
             if (ui_value(i) != last_values[i]) {
                 show_ui();
                 break;
@@ -844,33 +834,6 @@ static void refresh_ui(void) {
         }
     }
     for (int i = 0; i < VALUE_COUNT; ++i) last_values[i] = ui_value(i);
-}
-
-static void update_drawable_scale(void) {
-    int desired = ui_value(VALUE_QUALITY) == 1 ? 2 : 1;
-    if (desired == drawable_scale) { rejected_scale = 0; return; }
-    if (desired == rejected_scale || !atlas_worker_surface_pause()) return;
-    id layer = send(view, "layer");
-    send_float(view, "setContentScaleFactor:", (float)desired);
-    send_float(layer, "setContentsScale:", (float)desired);
-    if (!atlas_worker_surface_resize(layer, depth, &width, &height)) {
-        /* Keep the old drawable usable if allocation fails. The worker stays
-         * parked until this rollback has rebuilt matching color/depth storage. */
-        send_float(view, "setContentScaleFactor:", (float)drawable_scale);
-        send_float(layer, "setContentsScale:", (float)drawable_scale);
-        rejected_scale = desired;
-        if (!atlas_worker_surface_resize(layer, depth, &width, &height))
-            atomic_text("error.txt", "EAGL drawable resize and rollback failed.");
-        return;
-    }
-    drawable_scale = desired;
-    rejected_scale = 0;
-    char status[1024], metrics[768];
-    display_metrics(metrics, sizeof metrics);
-    snprintf(status, sizeof status,
-             "{\"scale\":%d,\"width\":%d,\"height\":%d,\"display\":%s}",
-             drawable_scale, width, height, metrics);
-    atomic_text("surface.json", status);
 }
 
 static void tick(id self, SEL command, id timer) {
@@ -895,7 +858,6 @@ static void tick(id self, SEL command, id timer) {
         interface_command(data);
     }
     refresh_ui();
-    update_drawable_scale();
     double display_time = ((double (*)(id, SEL))objc_msgSend)(timer, selector("timestamp"));
     if (pacing_due(&render_pacing, display_time)) atlas_worker_request_frame();
     if (consume_request("capture-ui")) capture_interface();
@@ -926,7 +888,7 @@ static BOOL launch(id self, SEL command, id application, id options) {
     Rect screen = bounds(main_screen);
     screen_scale = get_float(main_screen, "scale");
     window = make("UIWindow", screen);
-    /* UIKit and the adjustable EAGL drawable are siblings. Reducing the GL
+    /* UIKit and the fixed EAGL drawable are siblings. Reducing the GL
      * backing never reduces the backing of an ancestor of the native UI. */
     root_view = make("UIView", rectangle(0, 0, 480, 320));
     Transform rotation = {0, 1, -1, 0, 0, 0};
@@ -935,7 +897,7 @@ static BOOL launch(id self, SEL command, id application, id options) {
     add(window, root_view);
     view = make("AtlasView", bounds(root_view));
     send_int(view, "setMultipleTouchEnabled:", 1);
-    send_float(view, "setContentScaleFactor:", 2);
+    send_float(view, "setContentScaleFactor:", drawable_scale);
     add(root_view, view);
     send(window, "makeKeyAndVisible");
     send_int(application, "setIdleTimerDisabled:", 1);
@@ -950,7 +912,7 @@ static BOOL launch(id self, SEL command, id application, id options) {
     send_object(klass("EAGLContext"), "setCurrentContext:", context);
     id layer = send(view, "layer");
     send_int(layer, "setOpaque:", 1);
-    send_float(layer, "setContentsScale:", 2);
+    send_float(layer, "setContentsScale:", drawable_scale);
     glGenFramebuffers(1, &fbo);
     glBindFramebuffer(0x8d40, fbo);
     glGenRenderbuffers(1, &color);
@@ -971,13 +933,18 @@ static BOOL launch(id self, SEL command, id application, id options) {
              glGetString(0x1f01), glGetString(0x1f02), glGetString(0x1f03),
              width, height, glCheckFramebufferStatus(0x8d40), glGetError());
     atomic_text("gpu.json", info);
+    char surface[1024], metrics[768];
+    display_metrics(metrics, sizeof metrics);
+    snprintf(surface, sizeof surface,
+             "{\"scale\":%d,\"width\":%d,\"height\":%d,\"display\":%s}",
+             drawable_scale, width, height, metrics);
+    atomic_text("surface.json", surface);
     atomic_text("startup.txt", "GPU ready; initializing places");
     if (!atlas_worker_start(context, fbo, color, width, height, bundle, tmp)) {
         atomic_text("status.json", "{\"state\":\"error\",\"error\":\"Rendering thread initialization failed\"}");
         return 1;
     }
     atlas_worker_snapshot(&ui_snapshot);
-    update_drawable_scale();
     atomic_text("startup.txt", "Places ready; constructing native interface");
     show_ui();
     atomic_text("startup.txt", "Interface ready; scheduling display link");

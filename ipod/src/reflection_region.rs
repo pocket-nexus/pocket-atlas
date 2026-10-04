@@ -7,7 +7,7 @@
 //! the shader selects one. Targets must use GL_LINEAR/CLAMP_TO_EDGE, no mipmaps;
 //! down_f must have its current centre/four-diagonal taps at +/-1/source texel.
 //! Bounds must enclose the vertices in world space (including animation/LOD).
-//! Reference and other wet shader recipes have different offsets: use `Full`.
+//! Other wet shader recipes have different offsets: use `Full`.
 //!
 //! Clear the whole mirror first, then scissor sky/meshes to `mirror` and down_f
 //! to `down`. Keep the original full target sizes and UV mapping. Disable the

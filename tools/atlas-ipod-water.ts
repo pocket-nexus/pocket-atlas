@@ -59,9 +59,9 @@ function waterResolveShader(): string {
 }
 
 export function waterPrograms(scene: WaterScene, draw: WaterDraw, original: string[], compileResponse: () => string[]) {
-  if (!usesWaterResponse(scene, draw)) return { performance: original, water_response: null };
+  if (!usesWaterResponse(scene, draw)) return { main: original, water_response: null };
   return {
-    performance: [shader("surface_v", waterResolveDefines(scene, draw)), waterResolveShader()],
+    main: [shader("surface_v", waterResolveDefines(scene, draw)), waterResolveShader()],
     // The original RGB equations write opaque coverage into an otherwise
     // transparent target. Normalizing the filtered coverage prevents dark
     // fringes against clear texels. A water sliver with no response sample

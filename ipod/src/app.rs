@@ -1,6 +1,6 @@
 use crate::{
     gl::*,
-    performance::{FrameTimings, PassKind, QualityProfile, WORK_TARGET_MS},
+    performance::{FrameTimings, PassKind, SCENE_WIDTH, WORK_TARGET_MS},
     read,
     renderer::Renderer,
     scene::Scene,
@@ -63,7 +63,6 @@ pub struct App {
     pending: Option<usize>,
     scene: Option<Scene>,
     renderer: Option<Renderer>,
-    renderer_dirty: bool,
     failed_render_width: Option<i32>,
     pub status: CString,
     status_dirty: bool,
@@ -86,7 +85,6 @@ pub struct App {
     drawable: [i32; 2],
     audio_playing: bool,
     gl_error: u32,
-    quality: i32,
     render_override: Option<i32>,
     shot_name: CString,
     error_text: CString,
@@ -181,7 +179,6 @@ impl App {
             pending: None,
             scene: None,
             renderer: None,
-            renderer_dirty: false,
             failed_render_width: None,
             status: CString::new("{}").unwrap(),
             status_dirty: false,
@@ -204,7 +201,6 @@ impl App {
             drawable: [0, 0],
             audio_playing: false,
             gl_error: 0,
-            quality: 0,
             render_override: None,
             shot_name: CString::new("").unwrap(),
             error_text: CString::new("").unwrap(),
@@ -251,7 +247,6 @@ impl App {
         self.rain = state.rain;
         self.reflection = state.reflection;
         self.bloom = state.bloom;
-        self.quality = state.quality;
         self.state_restored = true;
     }
 
@@ -285,7 +280,7 @@ impl App {
             rain: self.rain,
             reflection: self.reflection,
             bloom: self.bloom,
-            quality: self.quality,
+            quality: 0,
         };
         match store.save(&state) {
             Ok(()) => {
@@ -319,7 +314,7 @@ impl App {
             6 => self.reflection as i32,
             7 => self.bloom as i32,
             8 => self.sound as i32,
-            9 => self.quality,
+            9 => 0,
             10 => self.shot as i32,
             11 => self
                 .scene
@@ -383,7 +378,6 @@ impl App {
                 self.pending = None;
                 self.reload = false;
                 self.renderer = None;
-                self.renderer_dirty = false;
                 self.failed_render_width = None;
                 self.scene = None;
                 self.selected = None;
@@ -419,11 +413,6 @@ impl App {
             }
             4 => self.paused = !self.paused,
             5 => self.cinematic = !self.cinematic,
-            8 => {
-                // Settings 0 and 2 are legacy aliases of the same device
-                // profile; offer only the two distinct choices in native UI.
-                self.set_quality(if self.quality == 1 { 0 } else { 1 });
-            }
             9 => self.rain = !self.rain,
             10 => self.reflection = !self.reflection,
             11 => self.bloom = !self.bloom,
@@ -439,29 +428,11 @@ impl App {
             _ => {}
         }
     }
-    fn set_quality(&mut self, quality: i32) {
-        self.clear_resize_error();
-        let rebuild = self.selected.is_some()
-            && (self.scene.is_none()
-                || self
-                    .renderer
-                    .as_ref()
-                    .is_none_or(|r| r.performance != (quality != 1)));
-        if self.quality != quality || rebuild {
-            self.quality = quality;
-            self.renderer_dirty = rebuild;
-            self.timings.reset_window();
-        }
-    }
-
-    /// The worker coalesces UIKit notifications and calls this only while it
-    /// owns a foreground context. The next frame releases incompatible HDR
-    /// resources before loading the display profile; camera/clock survive.
-    /// Memory pressure never lowers the device profile below 480x320.
+    /// Memory pressure clears diagnostic sizing without lowering the device profile.
     pub fn memory_warning(&mut self) {
         self.memory_warning_batches = self.memory_warning_batches.saturating_add(1);
         self.render_override = None;
-        self.set_quality(0);
+        self.clear_resize_error();
         self.timings.reset_window();
         self.reset_dt = true;
         self.status_dirty = true;
@@ -538,9 +509,6 @@ impl App {
                     Some((n as i32).clamp(160, 960))
                 };
             }
-            if let Some(n) = v["quality"].as_i64() {
-                self.set_quality((n as i32).clamp(0, 2));
-            }
             if let Some(p) = v["rain"].as_bool() {
                 self.rain = p;
             }
@@ -614,7 +582,6 @@ impl App {
         // it before dropping the renderer, including while the app backgrounds.
         glUseProgram(0);
         self.renderer = None;
-        self.renderer_dirty = false;
         self.failed_render_width = None;
         self.scene = None;
         self.globe = None;
@@ -656,7 +623,6 @@ impl App {
             self.pending = self.selected;
         }
         if let Some(i) = self.pending.take() {
-            self.renderer_dirty = false;
             self.selected = Some(i);
             if !resuming {
                 self.saved_door = 0.0;
@@ -676,78 +642,36 @@ impl App {
             self.error.clear();
             let id = &self.places[i].id;
             let assets = format!("{}/assets", self.root);
-            match Scene::load_for_profile(&format!("{assets}/{id}.place"), self.quality != 1) {
-                Ok(mut scene) => {
+            let loaded = (|| -> Result<(Scene, Renderer), String> {
+                let mut scene = Scene::load(&format!("{assets}/{id}.place"))?;
+                if resuming { scene.door = self.saved_door; }
+                let renderer = Renderer::new(&assets, id, &scene)?;
+                Ok((scene, renderer))
+            })();
+            match loaded {
+                Ok((scene, renderer)) => {
                     if resuming {
-                        scene.door = self.saved_door;
                         self.shot %= scene.meta.camera.shots.len();
                         self.shot_time = self
                             .shot_time
                             .clamp(0.0, scene.meta.camera.shots[self.shot].duration);
                     }
                     self.scene = Some(scene);
+                    self.renderer = Some(renderer);
                     self.selected = Some(i);
-                    self.renderer_dirty = true;
                     self.touches.clear();
                     if !resuming {
                         self.time = 0.0;
                     }
                 }
-                Err(error) => self.error = error,
+                Err(error) => {
+                    glUseProgram(0);
+                    self.error = error;
+                },
             }
             self.error_text = CString::new(self.error.as_str()).unwrap();
             if !self.error.is_empty() {
                 crate::atlas_log(self.error_text.as_ptr());
-            }
-        }
-        if self.renderer_dirty {
-            self.renderer_dirty = false;
-            self.failed_render_width = None;
-            self.sample_excluded = true;
-            self.reset_dt = true;
-            self.timings.reset_window();
-            self.error.clear();
-            if let Some(selected) = self.selected {
-                let assets = format!("{}/assets", self.root);
-                let id = &self.places[selected].id;
-                let performance = self.quality != 1;
-                // Drain and unbind before releasing the previous working set.
-                // Full HDR must not keep the display-only pages and caches:
-                // that overlap caused jetsam on the 256 MB physical device.
-                glFinish();
-                glUseProgram(0);
-                if self.renderer.is_some() {
-                    if let Some(scene) = &self.scene {
-                        scene.reset_index_bindings();
-                    }
-                }
-                self.renderer = None;
-                let result = (|| -> Result<Renderer, String> {
-                    if self
-                        .scene
-                        .as_ref()
-                        .is_none_or(|s| s.performance != performance)
-                    {
-                        if let Some(scene) = &self.scene {
-                            self.saved_door = scene.door;
-                        }
-                        self.scene = None;
-                        glFinish();
-                        let mut scene =
-                            Scene::load_for_profile(&format!("{assets}/{id}.place"), performance)?;
-                        scene.door = self.saved_door;
-                        self.scene = Some(scene);
-                    }
-                    Renderer::new(&assets, id, self.scene.as_ref().unwrap(), performance)
-                })();
-                match result {
-                    Ok(renderer) => self.renderer = Some(renderer),
-                    Err(error) => self.error = error,
-                }
-                self.error_text = CString::new(self.error.as_str()).unwrap();
-                if !self.error.is_empty() {
-                    crate::atlas_log(self.error_text.as_ptr());
-                }
             }
         }
         let measured_dt = dt;
@@ -811,14 +735,14 @@ impl App {
             }
             let width = self
                 .render_override
-                .unwrap_or(QualityProfile::from_setting(self.quality).scene_width());
+                .unwrap_or(SCENE_WIDTH);
             if r.width != width && self.failed_render_width.is_none() {
                 self.sample_excluded = true;
                 self.timings.reset_window();
                 if let Err(e) = r.resize(width, width * 2 / 3) {
                     // Renderer::resize is transactional: keep presenting the
                     // old target, but do not churn allocations each frame.
-                    // An explicit quality/width command or reload can retry.
+                    // An explicit width command or reload can retry.
                     self.failed_render_width = Some(width);
                     self.error = e;
                     self.error_text = CString::new(self.error.as_str()).unwrap();
@@ -845,7 +769,7 @@ impl App {
             }
         } else if self.selected.is_none() {
             // The atlas keeps its authored 480x272 framing, independently of
-            // the place renderer's fixed 480x320 and reference 960x640 targets.
+            // the place renderer's fixed 480x320 target.
             let width = self.render_override.unwrap_or(480);
             if !self.globe_tried {
                 self.sample_excluded = true;
@@ -854,7 +778,6 @@ impl App {
                 match crate::globe::Globe::new(
                     &format!("{}/assets", self.root),
                     width,
-                    self.quality != 1,
                 ) {
                     Ok(g) => self.globe = Some(g),
                     Err(e) => {
@@ -864,12 +787,12 @@ impl App {
                 }
             }
             if let Some(g) = &mut self.globe {
-                if (g.dimensions().0 != width || g.performance != (self.quality != 1))
+                if g.dimensions().0 != width
                     && self.failed_render_width.is_none()
                 {
                     self.sample_excluded = true;
                     self.timings.reset_window();
-                    if let Err(error) = g.resize(width, self.quality != 1) {
+                    if let Err(error) = g.resize(width) {
                         self.failed_render_width = Some(width);
                         self.error = error;
                         self.error_text = CString::new(self.error.as_str()).unwrap();
@@ -914,20 +837,15 @@ impl App {
         }
     }
 
-    pub fn hdr_target(&self) -> Option<(u32, i32, i32, bool)> {
+    pub fn hdr_target(&self) -> Option<(u32, i32, i32)> {
         self.renderer.as_ref().map(|renderer| {
             let (target, width, height) = renderer.hdr_target();
-            (target, width, height, renderer.performance)
+            (target, width, height)
         })
     }
 
-    pub fn drawable_changed(&mut self) {
-        self.timings.reset_window();
-        self.reset_dt = true;
-    }
-
-    /// Called by the GL owner only after successful presentation. UIKit's
-    /// callback frequency is unrelated to these completed 3D frame samples.
+    /// Called by the GL owner after successful presentation, independently
+    /// of UIKit's callback cadence.
     pub unsafe fn frame_completed(&mut self, render_ms: f32, present_ms: f32, interval_ms: f32) {
         let valid_sample =
             self.timings
@@ -994,7 +912,7 @@ impl App {
             "rain": self.rain,
             "reflection": self.reflection,
             "bloom": self.bloom,
-            "quality": self.quality,
+            "quality": 0,
             "memoryWarningBatches": self.memory_warning_batches,
             "profile": self.profile,
             "profileDrawClass": self.profile_draw_class,
@@ -1014,7 +932,7 @@ impl App {
             "targetFps": 30,
             "targetWorkMs": WORK_TARGET_MS,
             // Deprecated receipt compatibility; no automatic resolution tiers.
-            "adaptiveWidth": QualityProfile::Optimized.scene_width(),
+            "adaptiveWidth": SCENE_WIDTH,
             "timingKind": if self.profile { "synchronized-pass" } else { "cpu-submission" },
             "skyMs": self.renderer.as_ref().map(|r| r.sky_ms),
             "meshMs": self.renderer.as_ref().map(|r| r.mesh_ms),
@@ -1039,7 +957,7 @@ impl App {
             "cpuIndexBytes": self.scene.as_ref().map(|s| s.cpu_index_bytes).unwrap_or(0)
                 + self.renderer.as_ref().map(|r| r.cpu_index_bytes()).unwrap_or(0),
             "ldrColorBytes": self.scene.as_ref().map(|s| s.ldr_color_bytes).unwrap_or(0),
-            "renderingProfile": self.renderer.as_ref().map(|r| if r.performance { "display-prelit" } else { "full-hdr" })
+            "renderingProfile": self.renderer.as_ref().map(|_| "display-prelit")
                 .or_else(|| self.globe.as_ref().map(|_| "globe-hdr")),
             "residentBytes": atlas_resident_bytes(),
             "glError": self.gl_error,
@@ -1050,9 +968,9 @@ impl App {
             status.as_object_mut().unwrap().extend(rendering);
         }
         status["qualityProfile"] =
-            serde_json::to_value(QualityProfile::from_setting(self.quality)).unwrap();
+            serde_json::json!("optimized");
         status["defaultRenderWidth"] = if self.selected.is_some() {
-            QualityProfile::from_setting(self.quality).scene_width()
+            SCENE_WIDTH
         } else {
             480
         }

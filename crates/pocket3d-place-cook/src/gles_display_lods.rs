@@ -1,7 +1,7 @@
 //! Index-only display LODs derived during the same source lowering. The SGX
 //! display vertex ABI does not contain a tangent: removing only those seams
 //! before the existing bounded simplifier restores useful static LODs without
-//! changing the original vertices, full indices or Reference metadata.
+//! changing the original vertices, full indices or source metadata.
 use super::{pc, Result};
 use crate::{geometry, source::VertexClass};
 use glam::{Vec2, Vec3};

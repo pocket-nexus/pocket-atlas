@@ -29,7 +29,7 @@ fn saved_view() -> UserState {
         rain: false,
         reflection: true,
         bloom: false,
-        quality: 2,
+        quality: 0,
     }
 }
 
@@ -67,22 +67,22 @@ fn catalog_reordering_uses_stable_ids_and_removed_places_fall_back() {
 #[test]
 fn legacy_retina_default_migrates_once_without_losing_user_view() {
     let (directory, store) = fixture("quality-migration");
-    let mut legacy = saved_view();
-    legacy.version = 1;
-    legacy.quality = 1;
-    fs::write(
-        directory.join("pocket-atlas-state.json"),
-        serde_json::to_vec(&legacy).unwrap(),
-    )
-    .unwrap();
-    let migrated = store.load().unwrap().unwrap();
-    legacy.version = UserState::VERSION;
-    legacy.quality = 0;
-    assert_eq!(migrated, legacy);
-    let mut explicit_retina = migrated;
-    explicit_retina.quality = 1;
-    store.save(&explicit_retina).unwrap();
-    assert_eq!(store.load().unwrap().unwrap(), explicit_retina);
+    for version in [1, 2] {
+        for quality in [0, 1, 2] {
+            let mut legacy = saved_view();
+            legacy.version = version;
+            legacy.quality = quality;
+            fs::write(directory.join("pocket-atlas-state.json"), serde_json::to_vec(&legacy).unwrap()).unwrap();
+            assert_eq!(store.load().unwrap().unwrap(), saved_view());
+        }
+    }
+    // Migration accepts old choices, not arbitrary corrupt setting values.
+    for quality in [-1, 3] {
+        let mut invalid = saved_view();
+        invalid.quality = quality;
+        fs::write(directory.join("pocket-atlas-state.json"), serde_json::to_vec(&invalid).unwrap()).unwrap();
+        assert!(store.load().is_err());
+    }
 }
 
 #[test]

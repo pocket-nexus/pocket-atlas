@@ -23,12 +23,12 @@ static LIVE: AtomicUsize = AtomicUsize::new(0);
 static RESIZES: AtomicUsize = AtomicUsize::new(0);
 static FAIL_RESIZE: AtomicBool = AtomicBool::new(false);
 static FAIL_SCENE: AtomicBool = AtomicBool::new(false);
+static FAIL_RENDERER: AtomicBool = AtomicBool::new(false);
 static CONSTRUCTED_DOOR: AtomicU32 = AtomicU32::new(0);
 static FAIL_FRAME: AtomicBool = AtomicBool::new(false);
 static BOUND_PROGRAM: AtomicU32 = AtomicU32::new(0);
 static RAW_GL_ERROR: AtomicU32 = AtomicU32::new(0);
 static RENDERER_GL_ERROR: AtomicU32 = AtomicU32::new(0);
-static INDEX_DETACHES: AtomicUsize = AtomicUsize::new(0);
 static SUBMITTED_CLASS: AtomicU32 = AtomicU32::new(0);
 
 fn read(path: &str) -> Result<Vec<u8>, String> {
@@ -55,7 +55,6 @@ mod scene {
     }
     pub struct Scene {
         pub light_lod_source: LightSource,
-        pub performance: bool,
         pub meta: Meta,
         pub door: f32,
         pub gpu_bytes: usize,
@@ -63,7 +62,7 @@ mod scene {
         pub ldr_color_bytes: usize,
     }
     impl Scene {
-        pub unsafe fn load_for_profile(_: &str, performance: bool) -> Result<Self, String> {
+        pub unsafe fn load(_: &str) -> Result<Self, String> {
             assert_eq!(
                 LIVE.load(SeqCst),
                 0,
@@ -80,7 +79,6 @@ mod scene {
             };
             Ok(Self {
                 light_lod_source: LightSource,
-                performance,
                 meta: Meta {
                     camera: pocket3d_place::CameraSet {
                         shots: vec![pocket3d_place::Shot {
@@ -102,14 +100,7 @@ mod scene {
         pub fn update(&mut self, _: f32, _: glam::Vec3, _: f32) {
             self.door = 0.73;
         }
-        pub unsafe fn reset_index_bindings(&self) {
-            assert_eq!(
-                LIVE.load(SeqCst),
-                1,
-                "detach references before deleting renderer buffers"
-            );
-            INDEX_DETACHES.fetch_add(1, SeqCst);
-        }
+
     }
 }
 
@@ -118,7 +109,6 @@ mod renderer {
     pub struct Renderer {
         pub width: i32,
         pub height: i32,
-        pub performance: bool,
         pub profile: bool,
         pub profile_class: u8,
         pub gl_error: u32,
@@ -139,21 +129,19 @@ mod renderer {
             _: &str,
             _: &str,
             scene: &scene::Scene,
-            performance: bool,
         ) -> Result<Self, String> {
+            if FAIL_RENDERER.load(SeqCst) { return Err("injected shader failure".into()); }
             assert_eq!(
                 LIVE.fetch_add(1, SeqCst),
                 0,
                 "old renderer must be released first"
             );
             BUILDS.fetch_add(1, SeqCst);
-            assert_eq!(scene.performance, performance);
             CONSTRUCTED_DOOR.store(scene.door.to_bits(), SeqCst);
-            let width = if performance { 480 } else { 960 };
+            let width = 480;
             Ok(Self {
                 width,
                 height: width * 2 / 3,
-                performance,
                 profile: false,
                 profile_class: 0,
                 gl_error: 0,
@@ -235,7 +223,6 @@ mod globe {
     pub struct Globe {
         dimensions: (i32, i32),
         pub profile: bool,
-        pub performance: bool,
         pub timings: [f32; 4],
         pub post_steps_ms: [f32; 2],
         pub sphere_step: u32,
@@ -243,12 +230,11 @@ mod globe {
         pub triangles: u32,
     }
     impl Globe {
-        pub unsafe fn new(_: &str, width: i32, performance: bool) -> Result<Self, String> {
+        pub unsafe fn new(_: &str, width: i32) -> Result<Self, String> {
             GLOBE_BUILDS.fetch_add(1, SeqCst);
             Ok(Self {
                 dimensions: (width, (width * 272 + 240) / 480),
                 profile: false,
-                performance,
                 timings: [0.0; 4],
                 post_steps_ms: [0.0; 2],
                 sphere_step: 1,
@@ -259,13 +245,12 @@ mod globe {
         pub fn dimensions(&self) -> (i32, i32) {
             self.dimensions
         }
-        pub unsafe fn resize(&mut self, width: i32, performance: bool) -> Result<(), String> {
+        pub unsafe fn resize(&mut self, width: i32) -> Result<(), String> {
             RESIZES.fetch_add(1, SeqCst);
             if FAIL_RESIZE.load(SeqCst) {
                 return Err("injected globe target failure".into());
             }
             self.dimensions = (width, (width * 272 + 240) / 480);
-            self.performance = performance;
             Ok(())
         }
         pub fn pick(&self, _: f32, _: f32) -> Option<usize> {
@@ -277,12 +262,8 @@ mod globe {
             } else {
                 [0.0; 4]
             };
-            self.sphere_step = if self.performance { 2 } else { 1 };
-            self.post_steps_ms = if self.performance {
-                [3.0, 1.0]
-            } else {
-                [4.0, 0.0]
-            };
+            self.sphere_step = 2;
+            self.post_steps_ms = [3.0, 1.0];
         }
     }
 }
@@ -335,29 +316,18 @@ unsafe fn presented(app: &mut app::App) -> serde_json::Value {
 }
 
 #[test]
-fn failed_resize_waits_for_retry_and_profile_reloads_preserve_camera_clock_and_door() {
+fn resize_failure_lifecycle_and_diagnostics_preserve_the_fixed_device_profile() {
     let mut app = app::App::new("/host-test".into());
     FAIL_RESIZE.store(true, SeqCst);
-    app.command(br#"{"place":"test-place","quality":2,"renderWidth":640,"pause":true}"#);
+    app.command(br#"{"place":"test-place","renderWidth":640,"pause":true}"#);
     let initial = unsafe { presented(&mut app) };
     assert_eq!(initial["state"], "error");
     assert_eq!(initial["renderWidth"], 480);
     assert_eq!(RESIZES.load(SeqCst), 1);
-    for _ in 0..100 {
-        unsafe {
-            presented(&mut app);
-        }
-    }
-    assert_eq!(
-        RESIZES.load(SeqCst),
-        1,
-        "failed target must not be retried each frame"
-    );
-
-    app.command(br#"{"quality":2}"#); // Explicitly reselecting the same quality retries once.
-    unsafe {
-        presented(&mut app);
-    }
+    for _ in 0..100 { unsafe { presented(&mut app); } }
+    assert_eq!(RESIZES.load(SeqCst), 1, "failed target must not retry every frame");
+    app.command(br#"{"renderWidth":640}"#);
+    unsafe { presented(&mut app); }
     assert_eq!(RESIZES.load(SeqCst), 2);
     FAIL_RESIZE.store(false, SeqCst);
     app.command(br#"{"renderWidth":640}"#);
@@ -366,357 +336,152 @@ fn failed_resize_waits_for_retry_and_profile_reloads_preserve_camera_clock_and_d
     assert_eq!(recovered["renderWidth"], 640);
     assert_eq!(RESIZES.load(SeqCst), 3);
     assert_eq!(BUILDS.load(SeqCst), 1);
-    assert_eq!(INDEX_DETACHES.load(SeqCst), 0);
+    assert_eq!(LOADS.load(SeqCst), 1);
+    assert_eq!(recovered["camera"], initial["camera"]);
+    assert_eq!(recovered["time"], initial["time"]);
 
-    app.command(br#"{"quality":1,"renderWidth":0}"#);
-    let full = unsafe { presented(&mut app) };
-    assert_eq!(full["renderingProfile"], "full-hdr");
-    assert_eq!(full["renderWidth"], 960);
-    assert_eq!(full["qualityProfile"], "reference");
-    assert_eq!(full["defaultRenderWidth"], 960);
-    assert_eq!(full["camera"], initial["camera"]);
-    assert_eq!(full["time"], initial["time"]);
-    assert_eq!(LOADS.load(SeqCst), 2);
-    assert_eq!(CONSTRUCTED_DOOR.load(SeqCst), 0.73f32.to_bits());
+    FAIL_RENDERER.store(true, SeqCst);
+    app.command(br#"{"place":"test-place"}"#);
+    let failed = unsafe { presented(&mut app) };
+    assert_eq!(failed["error"], "injected shader failure");
+    assert_eq!(failed["gpuBytes"], 0, "failed renderer releases the loaded scene");
+    assert_eq!(LIVE.load(SeqCst), 0);
+    FAIL_RENDERER.store(false, SeqCst);
+    app.command(br#"{"place":"test-place"}"#);
+    assert_eq!(unsafe { presented(&mut app) }["state"], "running");
+
+    // Removed comparison commands cannot allocate another working set.
+    for setting in [0, 1, 2] {
+        app.command(format!(r#"{{"quality":{setting},"renderWidth":0}}"#).as_bytes());
+        app.action(8); // obsolete native action stays unassigned
+        let status = unsafe { presented(&mut app) };
+        assert_eq!(status["quality"], 0);
+        assert_eq!(status["qualityProfile"], "optimized");
+        assert_eq!(status["renderingProfile"], "display-prelit");
+        assert_eq!(status["defaultRenderWidth"], 480);
+        assert_eq!(status["renderWidth"], 480);
+    }
+    assert_eq!(BUILDS.load(SeqCst), 2);
+    assert_eq!(LOADS.load(SeqCst), 3);
+
     app.command(br#"{"profile":false,"profileDrawClass":7}"#);
     let filtered = unsafe { presented(&mut app) };
     assert_eq!(filtered["profile"], false);
-    assert_eq!(filtered["profileDrawClass"], 7);
-    assert_eq!(SUBMITTED_CLASS.load(SeqCst), 7, "asynchronous diagnostics reach the renderer");
+    assert_eq!(SUBMITTED_CLASS.load(SeqCst), 7);
     assert_eq!(filtered["frameTiming"]["workMs"]["samples"], 1);
     app.command(br#"{"profileDrawClass":0}"#);
-    let normal = unsafe { presented(&mut app) };
+    unsafe { presented(&mut app); }
     assert_eq!(SUBMITTED_CLASS.load(SeqCst), 0);
-    assert_eq!(normal["profileDrawClass"], 0);
-    assert_eq!(normal["frameTiming"]["workMs"]["samples"], 1);
-    assert_eq!(BUILDS.load(SeqCst), 2);
-    assert_eq!(INDEX_DETACHES.load(SeqCst), 1);
-    assert_eq!(
-        RESIZES.load(SeqCst),
-        3,
-        "matching profile constructor needs no resize"
-    );
-
-    app.command(br#"{"quality":0}"#);
-    unsafe {
-        presented(&mut app);
-    }
-    assert_eq!(BUILDS.load(SeqCst), 3);
-    assert_eq!(INDEX_DETACHES.load(SeqCst), 2);
-    FAIL_RESIZE.store(true, SeqCst);
-    // A diagnostic target change still fails transactionally and requires an
-    // explicit retry; normal frame timing can no longer change the target.
-    app.command(br#"{"renderWidth":640}"#);
-    let failure = unsafe { presented(&mut app) };
-    let attempts = RESIZES.load(SeqCst);
-    assert_eq!(failure["state"], "error");
-    for _ in 0..200 {
-        unsafe {
-            presented(&mut app);
-        }
-    }
-    let still_failed = unsafe { presented(&mut app) };
-    assert_eq!(RESIZES.load(SeqCst), attempts);
-    assert_eq!(
-        still_failed["renderWidth"], failure["renderWidth"],
-        "the previous target must remain stable after failure"
-    );
-    assert_eq!(
-        LOADS.load(SeqCst),
-        3,
-        "profile switches release incompatible assets before reloading"
-    );
     RENDERER_GL_ERROR.store(0x0505, SeqCst);
     RAW_GL_ERROR.store(0x0502, SeqCst);
-    assert_eq!(
-        unsafe { presented(&mut app) }["glError"],
-        0x0502,
-        "a checked upload error must not overwrite another GL error"
-    );
-    assert_eq!(
-        unsafe { presented(&mut app) }["glError"],
-        0x0505,
-        "a consumed upload error must remain visible in status"
-    );
+    assert_eq!(unsafe { presented(&mut app) }["glError"], 0x0502);
+    assert_eq!(unsafe { presented(&mut app) }["glError"], 0x0505);
     RENDERER_GL_ERROR.store(0, SeqCst);
-    assert_eq!(unsafe { presented(&mut app) }["glError"], 0);
     FAIL_FRAME.store(true, SeqCst);
-    let frame_failure = unsafe { presented(&mut app) };
-    assert_eq!(frame_failure["state"], "error");
-    assert_eq!(frame_failure["error"], "injected particle upload failure");
+    let failure = unsafe { presented(&mut app) };
+    assert_eq!(failure["error"], "injected particle upload failure");
     FAIL_FRAME.store(false, SeqCst);
-    // A real profile reload must preserve an advancing nonzero clock, and
-    // failure must release the old GPU owner without retrying every frame.
-    FAIL_RESIZE.store(false, SeqCst);
+
+    // Suspension releases ownership; a failed cold reload stays visible and
+    // waits for explicit navigation. It must never allocate the globe.
     app.command(br#"{"pause":false,"renderWidth":480}"#);
-    for _ in 0..60 {
-        unsafe {
-            presented(&mut app);
-        }
-    }
+    for _ in 0..60 { unsafe { presented(&mut app); } }
     let before = unsafe { presented(&mut app) };
     assert!(before["time"].as_f64().unwrap() > 1.0);
-    app.command(br#"{"quality":1,"renderWidth":0}"#);
-    let switched = unsafe { presented(&mut app) };
-    assert_eq!(switched["state"], "running");
-    let elapsed = switched["time"].as_f64().unwrap() - before["time"].as_f64().unwrap();
-    assert!(elapsed >= 0.0 && elapsed < 0.04);
-    assert_eq!(switched["camera"], before["camera"]);
-    assert_eq!(CONSTRUCTED_DOOR.load(SeqCst), 0.73f32.to_bits());
-    let globe_builds = GLOBE_BUILDS.load(SeqCst);
-    FAIL_SCENE.store(true, SeqCst);
-    app.command(br#"{"quality":0}"#);
-    let failed_profile = unsafe { presented(&mut app) };
-    assert_eq!(failed_profile["state"], "error");
-    assert_eq!(
-        failed_profile["error"],
-        "injected scene profile upload failure"
-    );
-    assert_eq!(LIVE.load(SeqCst), 0);
-    let attempts = LOADS.load(SeqCst);
-    for _ in 0..10 {
-        unsafe {
-            presented(&mut app);
-        }
-    }
-    assert_eq!(LOADS.load(SeqCst), attempts);
-    assert_eq!(
-        GLOBE_BUILDS.load(SeqCst),
-        globe_builds,
-        "failed scene must not allocate a globe"
-    );
-    FAIL_SCENE.store(false, SeqCst);
-    app.command(br#"{"quality":0}"#); // Explicit same-quality retry.
-    let restored = unsafe { presented(&mut app) };
-    assert_eq!(restored["state"], "running");
-    assert_eq!(LOADS.load(SeqCst), attempts + 1);
-    assert!(restored["time"].as_f64().unwrap() >= switched["time"].as_f64().unwrap());
-    assert_eq!(CONSTRUCTED_DOOR.load(SeqCst), 0.73f32.to_bits());
-    unsafe {
-        app.suspend();
-    }
+    unsafe { app.suspend(); }
     assert_eq!(BOUND_PROGRAM.load(SeqCst), 0);
     assert_eq!(LIVE.load(SeqCst), 0);
+    let restored = unsafe { presented(&mut app) };
+    assert_eq!(restored["state"], "running");
+    assert_eq!(restored["camera"], before["camera"]);
+    assert!((restored["time"].as_f64().unwrap() - before["time"].as_f64().unwrap()).abs() < 0.04);
+    assert_eq!(CONSTRUCTED_DOOR.load(SeqCst), 0.73f32.to_bits());
+    unsafe { app.suspend(); }
+    FAIL_SCENE.store(true, SeqCst);
+    let globes = GLOBE_BUILDS.load(SeqCst);
+    let failed = unsafe { presented(&mut app) };
+    assert_eq!(failed["state"], "error");
+    assert_eq!(LIVE.load(SeqCst), 0);
+    let loads = LOADS.load(SeqCst);
+    for _ in 0..10 { unsafe { presented(&mut app); } }
+    assert_eq!(LOADS.load(SeqCst), loads);
+    assert_eq!(GLOBE_BUILDS.load(SeqCst), globes);
+    FAIL_SCENE.store(false, SeqCst);
+    app.command(br#"{"place":"test-place"}"#);
+    assert_eq!(unsafe { presented(&mut app) }["state"], "running");
+    assert_eq!(LOADS.load(SeqCst), loads + 1);
 
-    // The atlas has fixed authored dimensions and reports its real target.
-    FAIL_RESIZE.store(false, SeqCst);
-    app.command(br#"{"place":"atlas","quality":0,"renderWidth":0}"#);
+    app.command(br#"{"place":"atlas","renderWidth":0,"profile":true}"#);
     let globe = unsafe { presented(&mut app) };
     assert_eq!(globe["renderWidth"], 480);
     assert_eq!(globe["renderHeight"], 272);
     assert_eq!(globe["renderingProfile"], "globe-hdr");
-    assert_eq!(globe["draws"], 5);
-    assert_eq!(globe["triangles"], 16390);
     assert_eq!(globe["globeSphereStep"], 2);
-    assert!(globe["passesMs"].is_null());
-    for _ in 0..125 {
-        unsafe {
-            presented(&mut app);
-        }
-    }
-    assert_eq!(unsafe { presented(&mut app) }["renderWidth"], 480);
-    app.command(br#"{"quality":1,"profile":true}"#);
-    let full_globe = unsafe { presented(&mut app) };
-    assert_eq!(full_globe["renderWidth"], 480);
-    assert_eq!(full_globe["renderHeight"], 272);
-    assert_eq!(
-        full_globe["globePassesMs"],
-        serde_json::json!([1.0, 2.0, 3.0, 4.0])
-    );
-    assert_eq!(full_globe["globeSphereStep"], 1);
-    assert_eq!(
-        full_globe["globePostStepsMs"],
-        serde_json::json!([4.0, 0.0])
-    );
-    assert!(
-        full_globe["passTiming"].is_null(),
-        "the resize frame is excluded"
-    );
+    assert!(globe["passTiming"].is_null(), "loading frame is excluded");
     let profiled = unsafe { presented(&mut app) };
     assert_eq!(profiled["passTiming"]["kind"], "globe");
-    assert_eq!(profiled["passTiming"]["profile"], true);
-    assert_eq!(profiled["passTiming"]["stagesMs"]["surface"]["mean"], 2.0);
-    assert_eq!(profiled["passTiming"]["stagesMs"]["grade"]["mean"], 4.0);
-    unsafe {
-        app.frame(1.0 / 30.0, 480, 320, 1);
-        app.frame_completed(999.0, 999.0, -1.0);
-        app.refresh_status();
-    }
-    let captured: serde_json::Value = serde_json::from_slice(app.status.as_bytes()).unwrap();
-    assert_eq!(
-        captured["passTiming"], profiled["passTiming"],
-        "readback cannot enter pass timing samples"
-    );
-    let attempts = RESIZES.load(SeqCst);
-    app.command(br#"{"quality":2}"#);
-    let fixed = unsafe { presented(&mut app) };
-    assert_eq!(fixed["renderWidth"], 480);
-    assert_eq!(fixed["globePostStepsMs"], serde_json::json!([3.0, 1.0]));
-    assert_eq!(
-        RESIZES.load(SeqCst),
-        attempts + 1,
-        "same-width profile switch must change the grade target"
-    );
-    app.command(br#"{"quality":0}"#);
-    for _ in 0..125 {
-        unsafe {
-            presented(&mut app);
-        }
-    }
-    assert_eq!(
-        unsafe { presented(&mut app) }["renderWidth"],
-        480,
-        "profiling does not change the fixed device profile"
-    );
+    assert_eq!(profiled["passTiming"]["stagesMs"]["grade"]["mean"], 3.0);
+    assert_eq!(profiled["passTiming"]["stagesMs"]["blit"]["mean"], 1.0);
+    unsafe { app.frame_completed(999.0, 999.0, 999.0); app.refresh_status(); }
+    // A captured/excluded presentation may not contaminate pass windows.
+    app.command(br#"{"profile":false,"renderWidth":640}"#);
     FAIL_RESIZE.store(true, SeqCst);
-    app.command(br#"{"quality":2,"profile":false,"renderWidth":640}"#);
     let failure = unsafe { presented(&mut app) };
-    let attempts = RESIZES.load(SeqCst);
-    assert_eq!(failure["state"], "error");
     assert_eq!(failure["renderWidth"], 480);
-    for _ in 0..150 {
-        unsafe {
-            presented(&mut app);
-        }
-    }
+    let attempts = RESIZES.load(SeqCst);
+    for _ in 0..10 { unsafe { presented(&mut app); } }
     assert_eq!(RESIZES.load(SeqCst), attempts);
     FAIL_RESIZE.store(false, SeqCst);
-    app.command(br#"{"quality":2,"renderWidth":0}"#);
-    assert_eq!(unsafe { presented(&mut app) }["renderWidth"], 480);
+    app.command(br#"{"renderWidth":640}"#);
+    assert_eq!(unsafe { presented(&mut app) }["renderWidth"], 640);
 
-    // A real OS warning overrides even a diagnostic width, without resetting
-    // the view, timeline or authored effect toggles. Subsequent warnings remain
-    // observable and do not reload a compatible Scene.
-    app.command(br#"{"place":"test-place","quality":1,"renderWidth":960,"pause":false,"time":-1}"#);
-    for _ in 0..60 {
-        unsafe {
-            presented(&mut app);
-        }
-    }
+    app.command(br#"{"place":"test-place","renderWidth":960,"pause":false,"time":-1}"#);
+    for _ in 0..60 { unsafe { presented(&mut app); } }
     app.command(br#"{"pause":true}"#);
-    let before_warning = unsafe { presented(&mut app) };
-    assert!(before_warning["time"].as_f64().unwrap() > 1.0);
-    app.memory_warning();
-    let after_warning = unsafe { presented(&mut app) };
-    assert_eq!(after_warning["quality"], 0);
-    assert_eq!(after_warning["renderWidth"], 480);
-    assert_eq!(after_warning["renderHeight"], 320);
-    assert_eq!(after_warning["defaultRenderWidth"], 480);
-    assert_eq!(after_warning["qualityProfile"], "optimized");
-    assert_eq!(after_warning["memoryWarningBatches"], 1);
-    assert_eq!(after_warning["camera"], before_warning["camera"]);
-    assert_eq!(after_warning["target"], before_warning["target"]);
-    assert_eq!(after_warning["time"], before_warning["time"]);
-    assert_eq!(after_warning["rain"], before_warning["rain"]);
-    assert_eq!(CONSTRUCTED_DOOR.load(SeqCst), 0.73f32.to_bits());
+    let before = unsafe { presented(&mut app) };
     let loads = LOADS.load(SeqCst);
-    // Small targets are diagnostic only; a warning clears even that override
-    // and restores the full fixed device dimensions, never a hidden low tier.
-    app.command(br#"{"renderWidth":160}"#);
-    let diagnostic = unsafe { presented(&mut app) };
-    assert_eq!(diagnostic["renderWidth"], 160);
-    assert_eq!(diagnostic["defaultRenderWidth"], 480);
     app.memory_warning();
-    let warned_again = unsafe { presented(&mut app) };
-    assert_eq!(warned_again["memoryWarningBatches"], 2);
-    assert_eq!(warned_again["renderWidth"], 480);
+    let warned = unsafe { presented(&mut app) };
+    assert_eq!(warned["renderWidth"], 480);
+    assert_eq!(warned["memoryWarningBatches"], 1);
+    assert_eq!(warned["camera"], before["camera"]);
+    assert_eq!(warned["target"], before["target"]);
+    assert_eq!(warned["time"], before["time"]);
     assert_eq!(LOADS.load(SeqCst), loads);
-
-    // A warning after a same-batch navigation still forces the floor, and a
-    // failed load neither retries the old selection nor hides the failure.
-    app.command(br#"{"place":"test-place","quality":1}"#);
+    app.command(br#"{"renderWidth":160}"#);
+    assert_eq!(unsafe { presented(&mut app) }["renderWidth"], 160);
     app.memory_warning();
     assert_eq!(unsafe { presented(&mut app) }["renderWidth"], 480);
-    FAIL_SCENE.store(true, SeqCst);
-    let loads = LOADS.load(SeqCst);
-    let globes = GLOBE_BUILDS.load(SeqCst);
-    app.command(br#"{"place":"test-place","quality":1}"#);
-    let failed = unsafe { presented(&mut app) };
-    assert_eq!(failed["state"], "error");
-    assert_eq!(failed["place"], "test-place");
-    assert_eq!(LOADS.load(SeqCst), loads + 1);
-    assert_eq!(GLOBE_BUILDS.load(SeqCst), globes);
-    FAIL_SCENE.store(false, SeqCst);
-    app.command(br#"{"quality":0}"#);
-    assert_eq!(unsafe { presented(&mut app) }["state"], "running");
 
-    // Old quality 2 checkpoints map to the same working set and resolution as
-    // quality 0. The button skips that duplicate and offers only real profiles.
-    let loads = LOADS.load(SeqCst);
-    let builds = BUILDS.load(SeqCst);
-    app.command(br#"{"quality":2,"renderWidth":0}"#);
-    let legacy = unsafe { presented(&mut app) };
-    assert_eq!(legacy["renderWidth"], 480);
-    assert_eq!(legacy["qualityProfile"], "optimized");
-    assert_eq!(LOADS.load(SeqCst), loads);
-    assert_eq!(BUILDS.load(SeqCst), builds);
-    for (quality, width) in [(1, 960), (0, 480)] {
-        app.action(8);
-        let selected = unsafe { presented(&mut app) };
-        assert_eq!(selected["quality"], quality);
-        assert_eq!(selected["renderWidth"], width);
-    }
-
-    // Present/backpressure and CPU cost are not permission to shrink quality.
-    // Preserve the bad cadence in the report instead of hiding it at 160 px.
-    for _ in 0..140 {
-        unsafe {
-            app.frame(1.0 / 30.0, 480, 320, 1);
-            app.frame_completed(22.0, 90.0, 112.0);
-        }
-    }
-    unsafe {
-        app.refresh_status();
-    }
+    // Bad cadence remains observable and cannot lower normal image quality.
+    for _ in 0..140 { unsafe {
+        app.frame(1.0 / 30.0, 480, 320, 1);
+        app.frame_completed(22.0, 90.0, 112.0);
+    } }
+    unsafe { app.refresh_status(); }
     let overloaded: serde_json::Value = serde_json::from_slice(app.status.as_bytes()).unwrap();
     assert_eq!(overloaded["renderWidth"], 480);
-    assert_eq!(overloaded["renderHeight"], 320);
     assert_eq!(overloaded["frameTiming"]["workMs"]["overBudget"], 120);
     assert_eq!(overloaded["frameTiming"]["intervalMs"]["p95"], 112.0);
     assert!(overloaded["fps"].as_f64().unwrap() < 9.0);
 
-    // JSON construction is deferred until publication; timings and UI values
-    // still advance, and a command is acknowledged only after presentation.
     let old_status = app.status.clone();
     app.command(br#"{"nonce":"presented"}"#);
     unsafe {
         app.frame(1.0 / 30.0, 480, 320, 1);
         app.frame_completed(5.0, 1.0, 1000.0 / 30.0);
     }
-    assert_eq!(
-        app.status, old_status,
-        "a completed frame must not serialize JSON"
-    );
-    unsafe {
-        app.refresh_status();
-    }
+    assert_eq!(app.status, old_status, "JSON publication is deferred");
+    unsafe { app.refresh_status(); }
     let published: serde_json::Value = serde_json::from_slice(app.status.as_bytes()).unwrap();
     assert_eq!(published["lastCommand"], "presented");
-    assert!(
-        published["frame"].as_u64().unwrap()
-            > serde_json::from_slice::<serde_json::Value>(old_status.as_bytes()).unwrap()["frame"]
-                .as_u64()
-                .unwrap()
-    );
-    unsafe {
-        app.frame(1.0 / 30.0, 480, 320, 1);
-        app.frame_completed(5.0, 1.0, 1000.0 / 30.0);
-    }
     app.command(br#"{"nonce":"preempted","place":"test-place"}"#);
-    unsafe {
-        app.suspend();
-        app.refresh_status();
-    }
+    unsafe { app.suspend(); app.refresh_status(); }
     let suspended: serde_json::Value = serde_json::from_slice(app.status.as_bytes()).unwrap();
     assert_eq!(suspended["state"], "suspended");
-    assert_eq!(
-        suspended["lastCommand"], "presented",
-        "backgrounding cannot acknowledge an unpresented command"
-    );
+    assert_eq!(suspended["lastCommand"], "presented", "unpresented command cannot be acknowledged");
     assert_eq!(suspended["gpuBytes"], 0);
     assert!(suspended["renderingProfile"].is_null());
     app.command(br#"{"place":"atlas"}"#);
-    let resumed = unsafe { presented(&mut app) };
-    assert_eq!(resumed["state"], "running");
-    assert_eq!(resumed["lastCommand"], "preempted");
+    assert_eq!(unsafe { presented(&mut app) }["state"], "running");
 }

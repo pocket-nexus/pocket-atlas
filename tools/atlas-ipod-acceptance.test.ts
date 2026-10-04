@@ -12,7 +12,8 @@ function timing(presentedFrames = 240, samples = 120, ms = 1000 / 30) {
 describe("iPod physical acceptance evidence", () => {
   test("default acceptance uses the fixed profile without a diagnostic override", () => {
     expect(parseOptions([])).toMatchObject({ quality: 0, width: 0, warmup: 2, seconds: 90 });
-    expect(parseOptions(["--quality", "2", "--width", "160"])).toMatchObject({ quality: 2, width: 160 });
+    expect(parseOptions(["--width", "160"])).toMatchObject({ quality: 0, width: 160 });
+    expect(() => parseOptions(["--quality", "1"])).toThrow("Quality selection was removed");
     expect(() => parseOptions(["--width", "80"])).toThrow();
     expect(() => parseOptions(["--seconds", "NaN"])).toThrow();
     expect(() => parseOptions(["--quality", "3"])).toThrow();

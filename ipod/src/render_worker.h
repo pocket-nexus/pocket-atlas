@@ -30,11 +30,6 @@ unsigned atlas_worker_pending_events(void);
 /* Pausing waits until the current frame ends and GL has finished/unbound.
  * Resuming is asynchronous; both audio and EAGL changes happen on the owner. */
 void atlas_worker_active(int active);
-/* Stop at a GL-complete frame boundary without unloading App. The main thread
- * may then change only the drawable layer's scale. Storage is rebuilt by the
- * GL owner; logical UIKit coordinates and all scene resources are preserved. */
-int atlas_worker_surface_pause(void);
-int atlas_worker_surface_resize(void *layer, unsigned depth, int *width, int *height);
 /* Join first, then temporarily reacquire the context to destroy Rust/GL state. */
 void atlas_worker_stop(void);
 

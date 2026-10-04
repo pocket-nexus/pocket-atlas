@@ -2,7 +2,6 @@
 extern crate alloc;
 mod app;
 mod effects;
-mod display_environment;
 mod gl;
 mod geometry_usage;
 mod globe;
@@ -118,17 +117,11 @@ pub unsafe extern "C" fn atlas_frame_completed(render_ms: f32, present_ms: f32, 
     }
 }
 #[no_mangle]
-pub unsafe extern "C" fn atlas_drawable_changed() {
-    if let Some(a) = &mut *APP.0.get() {
-        a.drawable_changed();
-    }
-}
-#[no_mangle]
 pub unsafe extern "C" fn atlas_hdr_target(fbo: *mut u32, width: *mut i32, height: *mut i32) -> i32 {
     if fbo.is_null() || width.is_null() || height.is_null() { return 0; }
-    if let Some((target,w,h,performance)) = (*APP.0.get()).as_ref().and_then(|a|a.hdr_target()) {
-        // Preserve the C signature: 0 absent, 1 full HDR, 2 display-prelit.
-        *fbo=target; *width=w; *height=h; if performance {2} else {1}
+    if let Some((target,w,h)) = (*APP.0.get()).as_ref().and_then(|a|a.hdr_target()) {
+        // Capture encoding tag: 0 absent, 2 display-prelit.
+        *fbo=target; *width=w; *height=h; 2
     } else {0}
 }
 #[no_mangle]

@@ -101,7 +101,7 @@ pub fn payload_hash(payload: &[u8]) -> String {
     format!("{:016x}", crate::content_hash::hash(payload))
 }
 
-/// Validate even in Reference mode. Hashes bind identity; byte comparison
+/// Validate before using the recipe. Hashes bind identity; byte comparison
 /// independently proves that grouping did not alter any source point.
 pub fn validate(
     meta: &Meta,

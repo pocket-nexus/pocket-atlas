@@ -222,6 +222,8 @@ async function build() {
       join(root, "vita/assets/sce_sys/icon0.png"),
       "-resize",
       size,
+      "-define",
+      "png:exclude-chunk=date,time",
       join(bundle, name),
     ]);
   }
@@ -580,7 +582,6 @@ else if (command === "capture-hdr")
     scp(remote + "frame-hdr.json", prefix + ".json", true);
     const metadata = JSON.parse(readFileSync(prefix + ".json", "utf8"));
     const knownEncoding =
-      (metadata.renderingProfile === "full-hdr" && metadata.encoding === "sqrt(c/(1+c))" && metadata.depth === "log") ||
       (metadata.renderingProfile === "display-prelit" && metadata.encoding === "display-srgb" && metadata.depth === "inverse-distance-when-used/zero-when-unused");
     if (!Number.isInteger(metadata.width) || metadata.width <= 0 || metadata.width > 4096 ||
         !Number.isInteger(metadata.height) || metadata.height <= 0 || metadata.height > 4096 ||

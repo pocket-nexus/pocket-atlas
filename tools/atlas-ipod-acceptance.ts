@@ -50,15 +50,16 @@ export function parseOptions(args: string[]) {
     const index = args.indexOf(name);
     return index < 0 ? fallback : (args[index + 1] ?? fallback);
   };
-  const quality = Number(option("--quality", "0"));
+  const quality = 0;
+  if (args.includes("--quality")) throw new Error("Quality selection was removed; the SGX renderer uses 480x320");
   const width = Number(option("--width", "0"));
   const seconds = Number(option("--seconds", "90"));
   const warmup = Number(option("--warmup", "2"));
-  if (![0, 1, 2].includes(quality) || !Number.isInteger(width) ||
+  if (!Number.isInteger(width) ||
       (width !== 0 && (width < 160 || width > 960)) ||
       !Number.isFinite(seconds) || seconds < 4 || seconds > 600 ||
       !Number.isFinite(warmup) || warmup < 1 || warmup > 60)
-    throw new Error("Use --quality 0|1|2, --width 0 or 160..960, --seconds 4..600 and --warmup 1..60");
+    throw new Error("Use --width 0 or 160..960, --seconds 4..600 and --warmup 1..60");
   return {
     quality, width, seconds, warmup,
     selected: option("--place", ""),
@@ -239,7 +240,7 @@ async function main() {
       try {
         const expected: Expected = {
           buildId: receipt.buildId, place: place.id, shot, quality: options.quality, profile: options.profile,
-          renderWidth: options.width || (options.quality === 1 ? 960 : 480),
+          renderWidth: options.width || 480,
           memoryWarningBatches: baseline.memoryWarningBatches,
           camera: shots[shot].from.pos.map((value: number, index: number) => (value + shots[shot].to.pos[index]) / 2),
         };
@@ -287,8 +288,8 @@ async function main() {
           JSON.parse(readFileSync(uiCapture + ".json", "utf8")));
         if (drawable.width !== captured.width || drawable.height !== captured.height)
           throw new Error("Captured drawable dimensions do not match the current presented surface");
-        if (captured.width !== (options.quality === 1 ? 960 : 480) || captured.height !== (options.quality === 1 ? 640 : 320))
-          throw new Error("Quality selection has not reached its expected drawable size");
+        if (captured.width !== 480 || captured.height !== 320)
+          throw new Error("Unexpected SGX drawable size");
         row.drawable = { ...drawable, internalWidth: captured.renderWidth, internalHeight: captured.renderHeight };
         row.nativeUI = nativeUI;
         row.ui = ui;

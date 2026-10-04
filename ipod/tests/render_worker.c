@@ -22,14 +22,12 @@ static atomic_int memory_warnings, frame_memory_warnings;
 static atomic_int presented_frames, timed_frames, captured_samples;
 static unsigned bound_framebuffer;
 static atomic_int hdr_reads;
-static atomic_int surface_paused, surface_changes, fail_surface;
 static atomic_size_t capture_allocation;
 static atomic_int capture_reads, inspect_capture;
 static atomic_int fail_read_y = -1, fail_write_after = -1;
 static int capture_read_x, capture_read_y, capture_read_width, capture_read_height;
 static char atomic_capture_path[1200];
 static unsigned pending_gl_error;
-static int surface_size = 2;
 static char place_text[128] = "initial", command[128], status_text[256] = "{}";
 
 static void sleep_ms(unsigned milliseconds) {
@@ -80,6 +78,7 @@ void *sel_registerName(const char *name) { return (void *)name; }
 /* Objective-C dispatch uses fixed method ABIs, including on arm64 hosts where
  * C variadic arguments would be read from different locations. */
 void *objc_msgSend(void *object, const char *selector, uintptr_t first, void *second) {
+    (void)second;
     void *result = object;
     if (!strcmp(selector, "setCurrentContext:")) {
         void *context = (void *)first;
@@ -95,13 +94,7 @@ void *objc_msgSend(void *object, const char *selector, uintptr_t first, void *se
         atomic_fetch_add(&presented_frames, 1);
         atomic_fetch_add(&gl_calls, 1);
         result = (void *)1;
-    } else if (!strcmp(selector, "renderbufferStorage:fromDrawable:")) {
-        render_owner(); assert(context_bound); assert(!atomic_load(&drawing));
-        void *layer = second;
-        int failed = atomic_exchange(&fail_surface, 0);
-        if (!failed) surface_size = (int)(uintptr_t)layer;
-        else pending_gl_error = 0x0505; /* GL_OUT_OF_MEMORY survives the failed call. */
-        result = (void *)(uintptr_t)!failed;
+
     }
     return result;
 }
@@ -152,30 +145,6 @@ unsigned glGetError(void) {
     pending_gl_error = 0;
     return error;
 }
-void glGetRenderbufferParameteriv(unsigned target, unsigned parameter, int *value) {
-    (void)target; (void)parameter;
-    render_owner(); assert(context_bound); *value = surface_size;
-}
-void glRenderbufferStorage(unsigned target, unsigned format, int width, int height) {
-    (void)target; (void)format;
-    render_owner(); assert(context_bound); assert(!atomic_load(&drawing));
-    assert(width == surface_size && height == surface_size);
-}
-unsigned glCheckFramebufferStatus(unsigned target) {
-    (void)target; render_owner(); assert(context_bound); return 0x8cd5;
-}
-void atlas_drawable_changed(void) {
-    render_owner(); assert(context_bound); assert(!atomic_load(&drawing));
-    atomic_fetch_add(&surface_changes, 1);
-}
-
-static void *pause_surface(void *unused) {
-    (void)unused;
-    assert(atlas_worker_surface_pause());
-    atomic_store(&surface_paused, 1);
-    return NULL;
-}
-
 double atlas_seconds(void) {
     struct timeval time;
     gettimeofday(&time, NULL);
@@ -205,7 +174,7 @@ int atlas_hdr_target(unsigned *target, int *width, int *height) {
     render_owner(); assert(context_bound); assert(!atomic_load(&drawing));
     if (selected < 0) return 0;
     *target = 7; *width = 3; *height = 2;
-    return selected == 105 ? 2 : 1;
+    return 2;
 }
 void atlas_action(int action) { render_owner(); selected = action; }
 void atlas_touch(int phase, float x, float y, int contact) {
@@ -331,59 +300,7 @@ int main(int argc, char **argv) {
     assert(atomic_load(&memory_warnings) == 1);
     assert(atomic_load(&frame_memory_warnings) == 1);
 
-    /* A drawable transition waits for the in-flight frame, without releasing
-     * Scene/audio as backgrounding does. Only the owner changes GL storage. */
-    atomic_store(&hold_frame, 1);
-    atlas_worker_request_frame(); wait_drawing();
-    pthread_t transition;
-    assert(pthread_create(&transition, NULL, pause_surface, NULL) == 0);
-    sleep_ms(20);
-    assert(!atomic_load(&surface_paused));
-    atomic_store(&hold_frame, 0);
-    pthread_join(transition, NULL);
-    assert(atomic_load(&surface_paused));
-    assert(atomic_load(&suspended) == 0);
-    int parked_gl_calls = atomic_load(&gl_calls);
-    sequence = atlas_worker_action(103);
-    sleep_ms(20);
-    assert(atomic_load(&gl_calls) == parked_gl_calls);
-    char transition_capture[1200];
-    snprintf(transition_capture, sizeof transition_capture, "%s/capture", directory);
-    FILE *transition_file = fopen(transition_capture, "w"); assert(transition_file); fclose(transition_file);
-    int resized_width = 0, resized_height = 0;
-    assert(atlas_worker_surface_resize((void *)4, 3, &resized_width, &resized_height));
-    assert(resized_width == 4 && resized_height == 4);
-    wait_ack(&snapshot, sequence);
-    assert(snapshot.values[2] == 103);
-    snprintf(transition_capture, sizeof transition_capture, "%s/frame.json", directory);
-    transition_file = fopen(transition_capture, "r"); assert(transition_file);
     char transition_metadata[256] = {0};
-    assert(fread(transition_metadata, 1, sizeof transition_metadata - 1, transition_file) > 0);
-    fclose(transition_file);
-    assert(strstr(transition_metadata, "\"source\":\"drawable\""));
-    assert(strstr(transition_metadata, "\"width\":4,\"height\":4"));
-    assert(atlas_worker_surface_pause());
-    atomic_store(&fail_surface, 1);
-    assert(!atlas_worker_surface_resize((void *)2, 3, &resized_width, &resized_height));
-    assert(atlas_worker_surface_resize((void *)4, 3, &resized_width, &resized_height));
-    assert(atlas_worker_surface_pause());
-    assert(atlas_worker_surface_resize((void *)2, 3, &resized_width, &resized_height));
-    assert(resized_width == 2 && resized_height == 2);
-    assert(atomic_load(&surface_changes) == 3);
-    assert(atomic_load(&suspended) == 0);
-
-    /* A failed resize leaves the owner parked with a live context. Background
-     * must still await suspend; immediate resume+resize must not overwrite the
-     * asynchronous context reacquisition message. */
-    assert(atlas_worker_surface_pause());
-    atomic_store(&fail_surface, 1);
-    assert(!atlas_worker_surface_resize((void *)4, 3, &resized_width, &resized_height));
-    atlas_worker_active(0);
-    assert(atomic_load(&suspended) == 1);
-    atlas_worker_active(1);
-    assert(atlas_worker_surface_pause());
-    assert(atlas_worker_surface_resize((void *)2, 3, &resized_width, &resized_height));
-
     char path[1200];
     snprintf(path, sizeof path, "%s/capture", directory);
     FILE *file = fopen(path, "w"); assert(file); fclose(file);
@@ -394,7 +311,7 @@ int main(int argc, char **argv) {
     atlas_worker_touch(1, 90, 100, 99);
     atlas_worker_active(0);
     assert(!atomic_load(&drawing));
-    assert(atomic_load(&suspended) == 2);
+    assert(atomic_load(&suspended) == 1);
     int calls = atomic_load(&gl_calls);
     int background_frames = atomic_load(&frame_number);
     for (int i = 0; i < 3; ++i) atlas_worker_memory_warning();
@@ -424,9 +341,9 @@ int main(int argc, char **argv) {
     char metadata[512] = {0};
     assert(fread(metadata, 1, sizeof metadata - 1, file) > 0); fclose(file);
     assert(strstr(metadata, "\"width\":3,\"height\":2"));
-    assert(strstr(metadata, "\"encoding\":\"sqrt(c/(1+c))\""));
-    assert(strstr(metadata, "\"renderingProfile\":\"full-hdr\""));
-    assert(strstr(metadata, "\"depth\":\"log\""));
+    assert(strstr(metadata, "\"encoding\":\"display-srgb\""));
+    assert(strstr(metadata, "\"renderingProfile\":\"display-prelit\""));
+    assert(strstr(metadata, "\"depth\":\"inverse-distance-when-used/zero-when-unused\""));
     assert(strstr(metadata, "\"origin\":\"bottom-left\""));
     snprintf(path, sizeof path, "%s/frame-hdr.rgba.new", directory);
     assert(access(path, F_OK) != 0);
@@ -482,8 +399,9 @@ int main(int argc, char **argv) {
      * the old 64-row boundary. Verify every output byte and preservation of the
      * old capture until atomic completion. GL and partial-write failures must
      * remove staging/metadata without exposing or replacing partial pixels. */
-    assert(atlas_worker_surface_pause());
-    assert(atlas_worker_surface_resize((void *)130, 3, &resized_width, &resized_height));
+    atlas_worker_stop();
+    context_bound = 1;
+    assert(atlas_worker_start((void *)1, 1, 2, 130, 130, directory, directory));
     sequence = atlas_worker_action(-1); wait_ack(&snapshot, sequence);
     snprintf(atomic_capture_path, sizeof atomic_capture_path, "%s/frame.rgba", directory);
     for (int failure = 0; failure < 3; ++failure) {
@@ -542,7 +460,6 @@ int main(int argc, char **argv) {
     printf("PASS: exclusive owner; nonblocking input; copied snapshot; post-frame nonce; "
            "completed render/present timing; capture exclusion; atomic capture and HDR metadata; "
            "single full-frame capture, exact row order, GL/write failure cleanup; "
-           "surface transition barrier and sticky-error rollback; background after failed resize; "
            "background GL barrier; stale-touch purge; OOM end recovery; "
            "allocation-free coalesced memory pressure; deferred background warning; "
            "resume; failed context handoff; restart; join-before-shutdown (%d frames).\n",

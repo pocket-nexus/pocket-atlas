@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { BLOOM_RADIANCE_LIMIT, BLOOM_RGBM_RANGE, bloomStorage, pointCoverage, displayHazeDepth, displayBloomSource, displayHazeBloomSource, fieldAppearanceFragment, steamCoverageFragment, displayParticleVertex } from "./atlas-ipod-effects";
+import { displayHazeDepth, displayBloomSource, displayHazeBloomSource, fieldAppearanceFragment, steamCoverageFragment, displayParticleVertex } from "./atlas-ipod-effects";
 import { shader as compileShader, fieldAppearanceVertex, preparedHazeFragment } from "./atlas-ipod-shaders";
 import { hdrFragment } from "./atlas-ipod-hdr";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -156,137 +156,9 @@ test("cached field phase removes only the vertex sine and leaves full/Vita defau
   }
 });
 
-const clampRadiance = (c: number[]) => c.map(x => Math.max(0, Math.min(BLOOM_RADIANCE_LIMIT, x)));
-function encode(c: number[]): number[] {
-  c = clampRadiance(c);
-  const m = Math.max(1, Math.ceil(Math.max(...c) * 255 / BLOOM_RGBM_RANGE)) / 255;
-  return [...c.map(x => byte(x / (m * BLOOM_RGBM_RANGE))), byte(m)];
-}
-const decode = (c: number[]) => c.slice(0, 3).map(x => x * c[3] * BLOOM_RGBM_RANGE);
-
-test("RGBM quantization is bounded, finite and preserves the existing radiance limit", () => {
-  for (let exponent = -4; exponent <= Math.log10(126); exponent += 0.025) {
-    for (const ratio of [[1, 1, 1], [1, 0.1, 0.01], [0.05, 0.8, 1]]) {
-      const color = ratio.map(x => 10 ** exponent * x);
-      const packed = encode(color);
-      const decoded = decode(packed);
-      const halfStep = packed[3] * BLOOM_RGBM_RANGE / 510;
-      for (let c = 0; c < 3; c++) {
-        expect(Number.isFinite(decoded[c])).toBe(true);
-        expect(Math.abs(decoded[c] - color[c])).toBeLessThanOrEqual(halfStep + 1e-6);
-      }
-      expect(packed.every(x => x >= 0 && x <= 1)).toBe(true);
-    }
-  }
-  expect(decode(encode([0, 0, 0]))).toEqual([0, 0, 0]);
-  const clipped = decode(encode([200, -1, 126]));
-  expect(clipped[0]).toBeCloseTo(126, 0);
-  expect(clipped[1]).toBe(0);
-  expect(clipped[2]).toBeCloseTo(126, 0);
-});
-
-// A single coloured light through the actual five-tap downsample pattern,
-// including RGBA8 quantization and hardware bilinear interpolation. RGBM
-// interpolation is approximate; this checks that it loses less bright-point
-// energy than bilinear interpolation of the main nonlinear HDR encoding.
-test("a bright isolated light survives the bloom downsample better than the scene codec", () => {
-  const pixels = Array.from({ length: 32 * 32 }, (_, i) => i === 16 * 32 + 16 ? [24, 12, 3] : [0, 0, 0]);
-  const filter = (pack: (c: number[]) => number[], unpack: (c: number[]) => number[]) => {
-    const source = pixels.map(pack);
-    const energy = [0, 0, 0];
-    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
-      for (const [dx, dy, weight] of [[0, 0, 0.5], [-1, -1, 0.125], [1, 1, 0.125], [1, -1, 0.125], [-1, 1, 0.125]]) {
-        const sx = x * 2 + 0.5 + dx, sy = y * 2 + 0.5 + dy;
-        const ix = Math.floor(sx), iy = Math.floor(sy), fx = sx - ix, fy = sy - iy;
-        const sample = [0, 0, 0, 0];
-        for (let j = 0; j < 2; j++) for (let k = 0; k < 2; k++) {
-          const c = source[Math.min(31, Math.max(0, iy + j)) * 32 + Math.min(31, Math.max(0, ix + k))];
-          const w = (k ? fx : 1 - fx) * (j ? fy : 1 - fy);
-          for (let channel = 0; channel < 4; channel++) sample[channel] += c[channel] * w;
-        }
-        const color = unpack(sample);
-        for (let channel = 0; channel < 3; channel++) energy[channel] += color[channel] * weight;
-      }
-    }
-    return energy;
-  };
-  const reference = filter(c => [...c, 1], c => c.slice(0, 3));
-  const mainHdr = filter(c => [...c.map(x => byte(Math.sqrt(x / (1 + x)))), 0],
-    c => c.slice(0, 3).map(x => x * x / Math.max(1 - x * x, 1 / 255)));
-  const rgbm = filter(encode, decode);
-  expect(reference).toEqual([6, 3, 0.75]);
-  for (let c = 0; c < 3; c++) {
-    expect(rgbm[c]).toBeGreaterThan(mainHdr[c]);
-    expect(rgbm[c]).toBeLessThanOrEqual(reference[c]);
-  }
-  expect(rgbm[0] / rgbm[1]).toBeCloseTo(2, 4);
-  expect(Math.abs(rgbm[0] / rgbm[2] / 8 - 1)).toBeLessThan(0.01);
-});
-
-const shader = `#version 100
-precision highp float;
-uniform sampler2D uScene;
-uniform sampler2D uHazeTex;
-uniform vec4 uThreshold;
-varying vec2 vUv;
-highp vec4 atlasDecode(highp vec4 c) {
- highp vec3 q=c.rgb*c.rgb;
- return vec4(q/max(vec3(1.0)-q,vec3(1.0/255.0)),exp2(c.a*16.0)-1.0);
-}
-highp vec4 atlasEncode(highp vec4 c) {
- highp vec3 rgb=clamp(c.rgb,vec3(0.0),vec3(126.0));
- return vec4(sqrt(rgb/(vec3(1.0)+rgb)),log2(1.0+c.a)/16.0);
-}
-void main() {
- highp vec3 c=atlasDecode(texture2D(uScene,vUv)).rgb;
- highp vec3 h=atlasDecode(texture2D(uHazeTex, vUv)).rgb*uThreshold.z;
- gl_FragColor=atlasEncode(vec4(c+h,1.0));
-}`;
-
-test("codec direction keeps scene inputs and the public bloom output in the main format", () => {
-  const prefilter = bloomStorage(shader, "write");
-  expect(prefilter).toContain("q/max");
-  expect(prefilter).toContain("ceil(m*");
-  const blur = bloomStorage(shader, "both");
-  expect(blur).toContain("c.rgb*(c.a*128.0)");
-  expect(blur).not.toContain("sqrt(");
-  expect(blur).not.toContain("log2(");
-  expect(blur).not.toContain("exp2(");
-  const final = bloomStorage(shader, "read");
-  expect(final).toContain("c.rgb*(c.a*128.0)");
-  expect(final).toContain("sqrt(rgb/(vec3(1.0)+rgb))");
-  expect(final).not.toContain("ceil(m*");
-});
-
-test("shared bloom HAZE variants preserve optional haze before RGBM encoding", () => {
-  const directory = resolve(import.meta.dir, "../.pocket-build/validation/ipod-effects-tests/prefilter");
-  mkdirSync(directory, { recursive: true });
-  const vertex = compileShader("post_v");
-  const vert = join(directory, "post.vert");
-  writeFileSync(vert, readFileSync(resolve(import.meta.dir, `../.pocket-build/ipod/assets/shaders/${vertex}.glsl`), "utf8"));
-  for (const points of [false, true]) for (const haze of [false, true]) {
-    const key = compileShader("prefilter_f", { ...(points ? { PER_PIXEL: 1 } : {}), ...(haze ? { HAZE: 1 } : {}) });
-    const compiled = bloomStorage(readFileSync(resolve(import.meta.dir, `../.pocket-build/ipod/assets/shaders/${key}.glsl`), "utf8"), "write");
-    expect(compiled.includes("texture2D(uHazeTex")).toBe(haze);
-    expect(compiled.includes("uniform mediump sampler2D uHazeTex")).toBe(haze);
-    expect(compiled).toContain("texture2D(uScene");
-    expect(compiled).toContain("ceil(m*");
-    const frag = join(directory, `${+points}-${+haze}.frag`);
-    writeFileSync(frag, compiled);
-    const linked = Bun.spawnSync(["glslangValidator", "-l", vert, frag], { stdout: "pipe", stderr: "pipe" });
-    expect(linked.exitCode, linked.stdout.toString() + linked.stderr.toString()).toBe(0);
-  }
-  expect(() => bloomStorage("void main(){}", "both")).toThrow("Missing HDR codec");
-});
-
-test("LDR point coverage preserves the shared radial profile and fails on changed output", () => {
-  const source = "atlasColor = vec4(vColor * (_71 * _71), 0.0);";
-  expect(pointCoverage(source)).toBe("atlasColor = vec4(vColor * (_71 * _71), _71 * _71);");
-  expect(() => pointCoverage("atlasColor = vec4(vColor, 0.0);")).toThrow("Missing shared point-light");
-});
-
 test("LDR haze reads inverse depth without decoding display RGB", () => {
-  const source = displayHazeDepth(shader);
+  const key = compileShader("haze_f", { HAZE_LIGHTS: 6, ATLAS_LDR: 1, ATLAS_BLEND: 2 });
+  const source = displayHazeDepth(readFileSync(resolve(import.meta.dir, `../.pocket-build/ipod/assets/shaders/${key}.glsl`), "utf8"));
   expect(source).toContain("vec4(c.rgb, 32.0*(1.0/max(c.a,1e-6)-1.0))");
   expect(source).not.toContain("exp2(c.a");
   expect(source).not.toContain("q/max");

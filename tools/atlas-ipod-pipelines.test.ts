@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { colorPair, performanceMainPair, performanceReflectionPair, windowParameterDraws, windowRayDraws } from "./atlas-ipod-pipelines";
+import { colorPair, mainPair, reflectionPair, windowParameterDraws, windowRayDraws } from "./atlas-ipod-pipelines";
 import { samplerDeclarations } from "./atlas-ipod-textures";
 
 test("optimized interior-window mirrors select REFLECTION and the display tier by material kind", () => {
@@ -10,10 +10,10 @@ test("optimized interior-window mirrors select REFLECTION and the display tier b
   const compile = (...args: any[]) => { calls.push(args); return ["vertex", "display-reflection"]; };
   for (const kind of ["standard", "glass", "water", "products", "interior_window", "lights"]) {
     const scene = { materials: [{ kind }] };
-    const result = performanceReflectionPair(scene, draw, undefined, compile);
+    const result = reflectionPair(scene, draw, undefined, compile);
     if (kind === "interior_window") {
       expect(result).toEqual(["vertex", "display-reflection"]);
-      expect(calls.at(-1)).toEqual([scene, draw, true, 3]);
+      expect(calls.at(-1)).toEqual([scene, draw, true]);
     } else expect(result).toBeNull();
   }
   expect(calls).toHaveLength(1);
@@ -28,11 +28,11 @@ test("window parameter selection requires the versioned proof and affects only d
   const calls: unknown[][] = [];
   const compile = (...args: any[]) => { calls.push(args); return ["v", "f"]; };
   for (const enabled of [false, true]) {
-    performanceMainPair(scene, draw, enabled, false, compile);
-    expect(calls.at(-1)).toEqual([scene, draw, false, 3, "scene", enabled, false]);
+    mainPair(scene, draw, enabled, false, compile);
+    expect(calls.at(-1)).toEqual([scene, draw, false, "scene", enabled, false]);
   }
-  performanceReflectionPair(scene, draw, undefined, compile);
-  expect(calls.at(-1)).toEqual([scene, draw, true, 3]);
+  reflectionPair(scene, draw, undefined, compile);
+  expect(calls.at(-1)).toEqual([scene, draw, true]);
   for (const recipe of [{ version: 2, draws: [0] }, { version: 1, draws: [1, 0] },
     { version: 1, draws: [0, 0] }, { version: 1, draws: [2] }, { version: 1, draws: [-1] },
     { version: 1, draws: [0.5] }, { version: 1, draws: null }]) {
@@ -72,23 +72,23 @@ test("window ray recipe is an independent static subset and never inferred from 
 test("independent ray flag changes only optimized main and requires both proofs", () => {
   const scene = { materials: [{ kind: "interior_window", blend: "opaque", fog: true }], rain: {active:true}, skins: [] };
   const draw = {material:0,layout:"static",node:null,skin:null};
-  const previous = performanceMainPair(scene,draw,true);
-  const ray = performanceMainPair(scene,draw,true,true);
+  const previous = mainPair(scene,draw,true);
+  const ray = mainPair(scene,draw,true,true);
   expect(ray[0]).not.toBe(previous[0]); expect(ray[1]).not.toBe(previous[1]);
   const read = (key:string) => readFileSync(resolve(import.meta.dir, `../.pocket-build/ipod/assets/shaders/${key}.glsl`),"utf8");
   expect(read(ray[0])).toContain("vWindowReflect"); expect(read(ray[1])).toContain("vWindowRay");
   expect(read(ray[1])).not.toContain("vNormal");
   expect(samplerDeclarations(read(ray[1]))).toEqual(samplerDeclarations(read(previous[1])));
-  expect(read(performanceReflectionPair(scene,draw)![1])).not.toContain("vWindowRay");
-  expect(() => performanceMainPair(scene,draw,false,true)).toThrow("static window parameter recipe");
+  expect(read(reflectionPair(scene,draw)![1])).not.toContain("vWindowRay");
+  expect(() => mainPair(scene,draw,false,true)).toThrow("static window parameter recipe");
 },30_000);
 
 test("proved display main selects the lowered program while absent proof keeps the original", () => {
   const scene = { materials: [{ kind: "interior_window", blend: "opaque", fog: true }],
     rain: { active: true }, skins: [] };
   const draw = { material: 0, layout: "static", node: null, skin: null };
-  const original = performanceMainPair(scene, draw, false);
-  const lowered = performanceMainPair(scene, draw, true);
+  const original = mainPair(scene, draw, false);
+  const lowered = mainPair(scene, draw, true);
   expect(lowered[0]).not.toBe(original[0]);
   expect(lowered[1]).not.toBe(original[1]);
   const read = (key: string) => readFileSync(resolve(import.meta.dir, `../.pocket-build/ipod/assets/shaders/${key}.glsl`), "utf8");
@@ -109,7 +109,7 @@ test("display window reflection links both fog modes and excludes the full room 
       skins: [], rain: { active: true }, vista_haze: vista ? {} : null,
     };
     const draw = { material: 0, layout: "static", node: null, skin: null };
-    const pair = performanceReflectionPair(scene, draw)!;
+    const pair = reflectionPair(scene, draw)!;
     const source = pair.map(key => readFileSync(resolve(import.meta.dir, `../.pocket-build/ipod/assets/shaders/${key}.glsl`), "utf8"));
     expect(samplerDeclarations(source[1])).toEqual(["uAtlasLut", "uEnv"]);
     expect(source[1]).not.toMatch(/\bsin\s*\(|\bfract\s*\(|uPuddles|gl_LastFragData/);
@@ -148,24 +148,24 @@ test("mirror depth omission is restricted to opaque display colours, preserving 
   const { scene, draw, color } = colorFixture();
   for (const kind of ["standard", "unlit", "products"]) {
     scene.materials[0].kind = kind;
-    expect(performanceReflectionPair(scene, draw,
+    expect(reflectionPair(scene, draw,
       { ...color, flags: kind === "products" ? 64 : kind === "unlit" ? 0 : 8 })).not.toBeNull();
   }
   for (const kind of ["glass", "water", "tower", "lights"]) {
     scene.materials[0].kind = kind;
-    expect(performanceReflectionPair(scene, draw, color)).toBeNull();
+    expect(reflectionPair(scene, draw, color)).toBeNull();
   }
   scene.materials[0].kind = "standard";
-  expect(performanceReflectionPair(scene, draw)).toBeNull();
+  expect(reflectionPair(scene, draw)).toBeNull();
   for (const blend of ["alpha", "premultiplied", "additive"]) {
     scene.materials[0].blend = blend;
-    expect(performanceReflectionPair(scene, draw, color)).toBeNull();
+    expect(reflectionPair(scene, draw, color)).toBeNull();
   }
   scene.materials[0].blend = "opaque";
   for (const flags of [16, 32, 16 | 32])
-    expect(performanceReflectionPair(scene, draw, { ...color, flags })).toBeNull();
+    expect(reflectionPair(scene, draw, { ...color, flags })).toBeNull();
   scene.rain.active = false;
-  expect(performanceReflectionPair(scene, draw, color)).toEqual(colorPair(scene, draw, color));
+  expect(reflectionPair(scene, draw, color)).toEqual(colorPair(scene, draw, color));
 });
 
 // This is a compiler-output comparison, not a rewritten RGB reference model:
@@ -189,7 +189,7 @@ test("mirror colour pairs remove only depth while keeping fog, coverage, texture
       for (const alpha of [false, true]) {
         const { scene, draw, color } = colorFixture(fog, geometry, alpha);
         const main = colorPair(scene, draw, color).map(readColorShader);
-        const mirror = performanceReflectionPair(scene, draw, color)!.map(readColorShader);
+        const mirror = reflectionPair(scene, draw, color)!.map(readColorShader);
         expect(main[0]).toContain("vDepth"); expect(main[1]).toContain("vDepth");
         expect(mirror.join("\n")).not.toContain("vDepth");
         expect(mirror[0]).not.toMatch(/\blength\s*\(/);
@@ -222,7 +222,7 @@ test("untextured mirrors and scene-wide haze triggers keep the main depth contra
       fog_lights: cause === "lights" ? [{}] : [],
       atmosphere: { haze_ambient: cause === "ambient" ? [0.1, 0, 0] : [0, 0, 0] } };
     const main = colorPair(input, draw, color).map(readColorShader);
-    const mirror = performanceReflectionPair(input, draw, color)!.map(readColorShader);
+    const mirror = reflectionPair(input, draw, color)!.map(readColorShader);
     expect(main[0]).toContain("vDepth");
     expect(mirror.join("\n")).not.toContain("vDepth");
     expect(samplerDeclarations(mirror[1])).toEqual([]);

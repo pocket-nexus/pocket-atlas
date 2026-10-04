@@ -1,5 +1,5 @@
 //! SGX display-only index LODs. Tangents are absent from the float display
-//! vertex stream; all other source attributes and the Reference topology stay
+//! vertex stream; all other source attributes and the source topology stay
 //! immutable. As for ordinary source LODs, error is the compiler's measured
 //! attribute-weighted simplifier error, not a Hausdorff or raster guarantee.
 use crate::{Draw, DrawLod, Meta, Range, VertexLayout};

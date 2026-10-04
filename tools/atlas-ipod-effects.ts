@@ -8,10 +8,6 @@ import { shader } from "./atlas-ipod-shaders";
 const assets = resolve(import.meta.dir, "../.pocket-build/ipod/assets");
 const output = join(assets, "shaders");
 
-export const BLOOM_RGBM_RANGE = 128;
-export const BLOOM_RADIANCE_LIMIT = 126;
-export type BloomStorage = "write" | "both" | "read";
-
 function replaceFunction(source: string, name: string, replacement: string): string {
   const start = source.indexOf(`highp vec4 ${name}(`);
   if (start < 0) throw new Error(`Missing HDR codec ${name}`);
@@ -23,33 +19,6 @@ function replaceFunction(source: string, name: string, replacement: string): str
   }
   if (depth) throw new Error(`Unclosed HDR codec ${name}`);
   return source.slice(0, start) + replacement + source.slice(end);
-}
-
-/** Keep the authoritative threshold/filter kernels, but use RGBM8 while
- * blurring. Its sample decode is four multiplies rather than three channel
- * reciprocals plus transcendental HDR conversion. The last upsample returns
- * to the main HDR codec, so no other renderer consumes RGBM accidentally. */
-export function bloomStorage(source: string, storage: BloomStorage): string {
-  if (storage !== "write") {
-    source = replaceFunction(source, "atlasDecode", `highp vec4 atlasDecode(highp vec4 c) {
- return vec4(c.rgb*(c.a*${BLOOM_RGBM_RANGE.toFixed(1)}), 1.0);
-}`);
-  }
-  if (storage !== "read") {
-    source = replaceFunction(source, "atlasEncode", `highp vec4 atlasEncode(highp vec4 c) {
- highp vec3 rgb=clamp(c.rgb,vec3(0.0),vec3(${BLOOM_RADIANCE_LIMIT.toFixed(1)}));
- highp float m=max(max(rgb.r,rgb.g),rgb.b);
- m=max(ceil(m*(255.0/${BLOOM_RGBM_RANGE.toFixed(1)})),1.0)/255.0;
- return vec4(rgb*(1.0/(m*${BLOOM_RGBM_RANGE.toFixed(1)})),m);
-}`);
-  }
-  return source;
-}
-
-export function pointCoverage(source: string): string {
-  const color = /atlasColor\s*=\s*vec4\(vColor\s*\*\s*\((\w+)\s*\*\s*\1\),\s*0\.0\);/;
-  if (!color.test(source)) throw new Error("Missing shared point-light falloff");
-  return source.replace(color, (_, f: string) => `atlasColor = vec4(vColor * (${f} * ${f}), ${f} * ${f});`);
 }
 
 /** One material appearance sample. The vertex stage already applies the
@@ -189,7 +158,7 @@ function writeEffectSource(name: string, source: string): string {
   return key;
 }
 
-type EffectVariant = { bloom?: BloomStorage; displayDepth?: boolean };
+type EffectVariant = { displayDepth?: boolean };
 
 function effectShader(
   name: string,
@@ -224,9 +193,7 @@ function effectShader(
       "",
     );
     source = source.replace(/\bvCoord\b/g, "gl_PointCoord");
-    if (defines.ATLAS_COVERAGE) source = pointCoverage(source);
   }
-  if (variant.bloom) source = bloomStorage(source, variant.bloom);
   if (variant.displayDepth) source = displayHazeDepth(source);
   return writeEffectSource(name, source);
 }
@@ -239,42 +206,25 @@ export function writeEffects(): void {
     effectShader("post_v"),
     effectShader(fragment, defines, variant),
   ];
-  const particles = (display: boolean) => ["STREAK", "DRIP", "SPLASH", "STEAM", "BEACON"].map(
+  const particles = () => ["STREAK", "DRIP", "SPLASH", "STEAM", "BEACON"].map(
     (kind) => [
-      effectShader("fx_v", { [kind]: 1, ...(display ? { DISPLAY_COLOR: 1 } : {}) }),
+      effectShader("fx_v", { [kind]: 1, DISPLAY_COLOR: 1 }),
       effectShader("fx_f", {
         [kind === "DRIP" ? "STREAK" : kind]: 1,
         ATLAS_BLEND: kind === "STEAM" ? 3 : 2,
-        ...(display ? { ATLAS_LDR: 1, ATLAS_OUTPUT_LDR: 1 } : {}),
+        ATLAS_LDR: 1, ATLAS_OUTPUT_LDR: 1,
       }),
     ],
   );
   const hazeLdr = post("haze_f", { HAZE_LIGHTS: 6, SGX_HAZE_PREPARED: 1, ATLAS_LDR: 1, ATLAS_BLEND: 2 }, { displayDepth: true });
   const config = {
-    field: [
-      effectShader("lights_v"),
-      effectShader("lights_f", { ATLAS_BLEND: 2 }),
-    ],
-    field_vista: [
-      effectShader("lights_v", { VISTA: 1 }),
-      effectShader("lights_f", { ATLAS_BLEND: 2 }),
-    ],
     field_ldr: [effectShader("lights_v", { PHASE_CACHED: 1, DENSITY_LOD: 1, SGX_FIELD_APPEARANCE: 1 }), writeEffectSource("field_appearance_f", fieldAppearanceFragment())],
     field_vista_ldr: [effectShader("lights_v", { VISTA: 1, PHASE_CACHED: 1, DENSITY_LOD: 1, SGX_FIELD_APPEARANCE: 1 }), writeEffectSource("field_appearance_f", fieldAppearanceFragment())],
-    particles: particles(false),
-    particles_ldr: particles(true),
+    particles_ldr: particles(),
     steam_coverage_ldr: [effectShader("fx_v", { STEAM: 1, DISPLAY_COLOR: 1 }), writeEffectSource("steam_coverage_f", steamCoverageFragment())],
-    haze: post("haze_f", { HAZE_LIGHTS: 6 }),
     haze_ldr: hazeLdr,
     haze_bloom_ldr: [effectShader("post_v"), writeEffectSource("haze_bloom_ldr_f", displayHazeBloomSource())],
-    prefilter: post("prefilter_f", { HAZE: 1 }, { bloom: "write" }),
-    prefilter_no_haze: post("prefilter_f", {}, { bloom: "write" }),
-    prefilter_points: post("prefilter_f", { PER_PIXEL: 1, HAZE: 1 }, { bloom: "write" }),
-    prefilter_points_no_haze: post("prefilter_f", { PER_PIXEL: 1 }, { bloom: "write" }),
     tiny_ldr: [effectShader("post_v"), writeEffectSource("bloom_ldr_f", displayBloomSource())],
-    down: post("down_f", {}, { bloom: "both" }),
-    up: post("up_f", {}, { bloom: "both" }),
-    up_final: post("up_f", {}, { bloom: "read" }),
   };
   writeFileSync(join(assets, "effects.json"), JSON.stringify(config));
 }

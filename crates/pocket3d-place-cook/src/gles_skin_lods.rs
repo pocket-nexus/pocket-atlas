@@ -1,5 +1,5 @@
 //! SGX-only, same-influence index LODs over untouched source float vertices.
-//! The shared frontend deliberately emits no skinned LODs. Reference retains
+//! The shared frontend deliberately emits no skinned LODs. The pack retains
 //! that full topology; these optional ranges belong only to the target recipe.
 use super::{pc, Result};
 use crate::{geometry, source};

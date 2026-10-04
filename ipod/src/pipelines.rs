@@ -1,5 +1,4 @@
-//! Compile exactly one material profile. Draw slots remain stable for the
-//! renderer; aliases refer to the same owned Program and never duplicate it.
+//! Compile the SGX main and reflection programs with shared ownership.
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use serde::Deserialize;
 
@@ -17,12 +16,9 @@ struct DrawPrograms {
     window_vertex_params: bool,
     #[serde(default)]
     window_ray_params: bool,
-    detail: [String; 2],
-    far: [String; 2],
-    reflection: [String; 2],
-    performance: [String; 2],
+    main: [String; 2],
     #[serde(default)]
-    performance_reflection: Option<[String; 2]>,
+    reflection: Option<[String; 2]>,
     #[serde(default)]
     wet_response: Option<[String; 2]>,
     #[serde(default)]
@@ -33,28 +29,24 @@ struct DrawPrograms {
 pub struct Pipelines {
     draws: Vec<Option<DrawPrograms>>,
     sky: [String; 2],
-    sky_performance: [String; 2],
     post: [String; 2],
-    post_performance: [String; 2],
     blit: [String; 2],
     copy: [String; 2],
-    down: [String; 2],
 }
 
 pub struct Compiled<P> {
     pub programs: Vec<P>,
-    pub draws: Vec<[usize; 4]>,
+    pub draws: Vec<[usize; 2]>,
     pub wet_response: Vec<Option<usize>>,
     pub water_response: Vec<Option<usize>>,
     pub sky: usize,
     pub post: usize,
     pub blit: usize,
     pub copy: usize,
-    pub down: usize,
 }
 
 impl Pipelines {
-    /// Both profiles use stable draw indices. Only light fields omit a mesh
+    /// Stable draw indices: only light fields omit a mesh
     /// program; accepting a null ordinary draw would silently use program zero.
     pub fn validate_draws(
         &self,
@@ -105,7 +97,7 @@ impl Pipelines {
     }
     /// A pipeline flag cannot opt a draw into the window specialization. The
     /// compiler recipe was re-proved against original GEOM by the Scene loader;
-    /// both profiles check this binding, but only Optimized compiles the pair.
+    /// the table must match the validated material contract.
     pub fn validate_windows(
         &self,
         count: usize,
@@ -132,7 +124,6 @@ impl Pipelines {
     }
     pub fn compile<P>(
         self,
-        performance: bool,
         mut create: impl FnMut(&[String; 2]) -> Result<P, String>,
     ) -> Result<Compiled<P>, String> {
         let mut programs = Vec::new();
@@ -150,48 +141,23 @@ impl Pipelines {
         let mut wet_response = Vec::with_capacity(self.draws.len());
         let mut water_response = Vec::with_capacity(self.draws.len());
         for draw in self.draws {
-            water_response.push(if performance {
-                draw.as_ref().and_then(|d| d.water_response.as_ref()).map(&mut add).transpose()?
-            } else { None });
-            wet_response.push(if performance {
-                draw.as_ref().and_then(|d| d.wet_response.as_ref()).map(&mut add).transpose()?
-            } else { None });
+            water_response.push(draw.as_ref().and_then(|d| d.water_response.as_ref()).map(&mut add).transpose()?);
+            wet_response.push(draw.as_ref().and_then(|d| d.wet_response.as_ref()).map(&mut add).transpose()?);
             draws.push(match draw {
-                Some(draw) if performance => {
-                    let main = add(&draw.performance)?;
-                    let mirror = draw.performance_reflection.as_ref().map(&mut add).transpose()?.unwrap_or(main);
-                    [main, main, mirror, main]
-                },
                 Some(draw) => {
-                    let detail = add(&draw.detail)?;
-                    [detail, add(&draw.far)?, add(&draw.reflection)?, detail]
-                }
-                None => [0; 4],
+                    let main = add(&draw.main)?;
+                    let mirror = draw.reflection.as_ref().map(&mut add).transpose()?.unwrap_or(main);
+                    [main, mirror]
+                },
+                None => [0; 2],
             });
         }
-        let blit = add(&self.blit)?;
-        let copy = if performance { add(&self.copy)? } else { blit };
-        let sky = add(if performance {
-            &self.sky_performance
-        } else {
-            &self.sky
-        })?;
-        let post = add(if performance {
-            &self.post_performance
-        } else {
-            &self.post
-        })?;
-        let down = if performance { blit } else { add(&self.down)? };
         Ok(Compiled {
-            programs,
-            draws,
-            wet_response,
-            water_response,
-            sky,
-            post,
-            blit,
-            copy,
-            down,
+            blit: add(&self.blit)?,
+            copy: add(&self.copy)?,
+            sky: add(&self.sky)?,
+            post: add(&self.post)?,
+            programs, draws, wet_response, water_response,
         })
     }
 }
@@ -205,41 +171,27 @@ mod tests {
     fn config() -> Pipelines {
         serde_json::from_value(serde_json::json!({
             "draws": [
-                {"detail":["v","detail"],"far":["v","far"],"reflection":["v","reflection"],"performance":["v","performance"]},
-                {"detail":["v","detail"],"far":["v","far"],"reflection":["v","reflection"],"performance":["v","performance"]},
+                {"main":["v","performance"]},
+                {"main":["v","performance"]},
                 null
             ],
-            "sky":["v","sky"],"sky_performance":["v","sky"],"post":["v","full-post"],"post_performance":["v","fast-post"],"blit":["v","blit"],"copy":["v","copy"],"down":["v","down"]
+            "sky":["v","sky"],"post":["v","fast-post"],"blit":["v","blit"],"copy":["v","copy"]
         })).unwrap()
     }
 
     #[test]
-    fn one_profile_compiles_only_used_variants_and_shares_programs() {
-        let fast = config().compile(true, |pair| Ok(pair[1].clone())).unwrap();
+    fn compiles_only_used_variants_and_shares_programs() {
+        let fast = config().compile(|pair| Ok(pair[1].clone())).unwrap();
         assert_eq!(
             fast.programs,
             vec!["performance", "blit", "copy", "sky", "fast-post"]
         );
-        assert_eq!(fast.draws[0], [0; 4]);
+        assert_eq!(fast.draws[0], [0; 2]);
         assert_eq!(fast.draws[0], fast.draws[1]);
-        let full = config().compile(false, |pair| Ok(pair[1].clone())).unwrap();
-        assert_eq!(
-            full.programs,
-            vec![
-                "detail",
-                "far",
-                "reflection",
-                "blit",
-                "sky",
-                "full-post",
-                "down"
-            ]
-        );
-        assert_eq!(full.draws[0], [0, 1, 2, 0]);
     }
 
     #[test]
-    fn both_profiles_require_every_mesh_program_and_only_omit_lights() {
+    fn tables_require_every_mesh_program_and_only_omit_lights() {
         let cfg = config();
         assert!(cfg.validate_draws(3, |i| i == 2).is_ok());
         // A shortened or expanded table must fail before indexed rendering.
@@ -249,11 +201,11 @@ mod tests {
         // must not accidentally consume a mesh program.
         assert!(cfg.validate_draws(3, |_| false).is_err());
         assert!(cfg.validate_draws(3, |i| i >= 1).is_err());
-        for performance in [false, true] {
+        {
             let cfg = config();
             cfg.validate_draws(3, |i| i == 2).unwrap();
             assert_eq!(
-                cfg.compile(performance, |p| Ok(p.clone()))
+                cfg.compile(|p| Ok(p.clone()))
                     .unwrap()
                     .draws
                     .len(),
@@ -263,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    fn window_program_flag_requires_exact_proved_draws_and_preserves_reference() {
+    fn window_program_flag_requires_exact_proved_draws_and_preserves_geometry() {
         // Missing flags on old pipeline tables retain the original path.
         assert!(config().validate_windows(3, |_| false).is_ok());
         for flag in [false, true] {
@@ -282,30 +234,25 @@ mod tests {
         draw.display_color = true;
         assert!(invalid.validate_windows(3, |i| i == 0).is_err());
 
-        for performance in [false, true] {
+        {
             let mut cfg = config();
             let draw = cfg.draws[0].as_mut().unwrap();
             draw.window_vertex_params = true;
-            draw.performance = ["window-params-v".into(), "window-params-f".into()];
-            draw.performance_reflection = Some(["v".into(), "window-mirror".into()]);
+            draw.main = ["window-params-v".into(), "window-params-f".into()];
+            draw.reflection = Some(["v".into(), "window-mirror".into()]);
             cfg.validate_windows(3, |i| i == 0).unwrap();
-            let result = cfg.compile(performance, |pair| Ok(pair[1].clone())).unwrap();
+            let result = cfg.compile(|pair| Ok(pair[1].clone())).unwrap();
             let slots = result.draws[0];
-            if performance {
-                assert_eq!(result.programs[slots[3]], "window-params-f");
-                assert_eq!(result.programs[slots[2]], "window-mirror");
-            } else {
-                assert_eq!(result.programs[slots[0]], "detail");
-                assert_eq!(result.programs[slots[1]], "far");
-                assert_eq!(result.programs[slots[2]], "reflection");
-                assert!(!result.programs.iter().any(|p| p.starts_with("window-")));
+            {
+                assert_eq!(result.programs[slots[0]], "window-params-f");
+                assert_eq!(result.programs[slots[1]], "window-mirror");
             }
         }
     }
 
     #[test]
-    fn window_ray_flag_is_proof_bound_and_never_enables_reference_or_mirror_variant() {
-        for performance in [false,true] {
+    fn window_ray_flag_is_proof_bound_and_never_enables_mirror_variant() {
+        {
             let mut cfg=config();
             assert!(cfg.validate_window_rays(3, |_|false).is_ok());
             assert!(cfg.validate_window_rays(3, |i|i==0).is_err());
@@ -314,12 +261,12 @@ mod tests {
             assert!(cfg.validate_window_rays(3, |i|i==0).is_err());
             let d=cfg.draws[0].as_mut().unwrap();
             d.window_vertex_params=true;
-            d.performance=["ray-v".into(),"ray-f".into()];
-            d.performance_reflection=Some(["original-v".into(),"mirror-f".into()]);
+            d.main=["ray-v".into(),"ray-f".into()];
+            d.reflection=Some(["original-v".into(),"mirror-f".into()]);
             cfg.validate_window_rays(3, |i|i==0).unwrap();
-            let compiled=cfg.compile(performance, |pair|Ok(pair[1].clone())).unwrap();
-            assert_eq!(compiled.programs[compiled.draws[0][3]],if performance {"ray-f"} else {"detail"});
-            assert_eq!(compiled.programs[compiled.draws[0][2]],if performance {"mirror-f"} else {"reflection"});
+            let compiled=cfg.compile(|pair|Ok(pair[1].clone())).unwrap();
+            assert_eq!(compiled.programs[compiled.draws[0][0]],"ray-f");
+            assert_eq!(compiled.programs[compiled.draws[0][1]],"mirror-f");
         }
     }
 
@@ -369,8 +316,8 @@ mod tests {
     }
 
     #[test]
-    fn optimized_response_programs_are_shared_and_reference_never_compiles_them() {
-        for performance in [true, false] {
+    fn optimized_response_programs_are_shared_() {
+        {
             let mut cfg = config();
             for draw in cfg.draws.iter_mut().flatten() {
                 draw.display_color = true;
@@ -378,41 +325,36 @@ mod tests {
                 draw.wet_response = Some(["wv".into(), "response".into()]);
             }
             cfg.validate_colors(3, |i| (i < 2).then_some((16, false, None))).unwrap();
-            let compiled = cfg.compile(performance, |pair| Ok(pair[1].clone())).unwrap();
+            let compiled = cfg.compile(|pair| Ok(pair[1].clone())).unwrap();
             assert_eq!(compiled.wet_response.len(), 3);
             assert_eq!(compiled.wet_response[2], None);
-            if performance {
+            {
                 let index = compiled.wet_response[0].unwrap();
                 assert_eq!(compiled.wet_response[1], Some(index));
                 assert_eq!(compiled.programs[index], "response");
                 assert_ne!(index, compiled.draws[0][0]);
                 assert_eq!(compiled.programs.iter().filter(|p| *p == "response").count(), 1);
                 assert!(!compiled.programs.iter().any(|p| ["detail", "far", "reflection"].contains(&p.as_str())));
-            } else {
-                assert!(compiled.wet_response.iter().all(Option::is_none));
-                assert!(!compiled.programs.iter().any(|p| ["response", "performance"].contains(&p.as_str())));
             }
         }
     }
 
     #[test]
-    fn optimized_reflection_has_its_own_program_and_reference_keeps_its_variants() {
-        for performance in [true, false] {
+    fn optimized_reflection_has_its_own_program_() {
+        {
             let mut cfg = config();
-            cfg.draws[0].as_mut().unwrap().performance_reflection = Some(["v".into(), "display-mirror".into()]);
-            let c = cfg.compile(performance, |p| Ok(p[1].clone())).unwrap();
-            assert_eq!(c.programs[c.draws[0][0]], if performance { "performance" } else { "detail" });
-            assert_eq!(c.programs[c.draws[0][2]], if performance { "display-mirror" } else { "reflection" });
-            if performance {
-                assert_eq!(c.draws[1], [c.draws[1][0]; 4]);
-            } else {
-                assert!(!c.programs.iter().any(|p| p == "display-mirror"));
+            cfg.draws[0].as_mut().unwrap().reflection = Some(["v".into(), "display-mirror".into()]);
+            let c = cfg.compile(|p| Ok(p[1].clone())).unwrap();
+            assert_eq!(c.programs[c.draws[0][0]], "performance");
+            assert_eq!(c.programs[c.draws[0][1]], "display-mirror");
+            {
+                assert_eq!(c.draws[1], [c.draws[1][0]; 2]);
             }
         }
     }
 
     #[test]
-    fn water_response_is_required_only_for_eligible_materials_and_never_compiled_by_reference() {
+    fn water_response_is_required_only_for_eligible_materials_() {
         let mut cfg = config();
         assert!(cfg.validate_water(3, |_| false).is_ok());
         assert!(cfg.validate_water(3, |i| i == 0).is_err());
@@ -421,14 +363,10 @@ mod tests {
         assert!(cfg.validate_water(2, |i| i == 0).is_err());
         assert!(cfg.validate_water(3, |_| false).is_err());
         assert!(cfg.validate_water(3, |i| i == 2).is_err());
-        let compiled = cfg.compile(true, |p| Ok(p[1].clone())).unwrap();
+        let compiled = cfg.compile(|p| Ok(p[1].clone())).unwrap();
         assert_eq!(compiled.programs[compiled.water_response[0].unwrap()], "water");
         assert!(compiled.water_response[1..].iter().all(Option::is_none));
-        let mut cfg = config();
-        cfg.draws[0].as_mut().unwrap().water_response = Some(["v".into(), "water".into()]);
-        let reference = cfg.compile(false, |p| Ok(p[1].clone())).unwrap();
-        assert!(reference.water_response.iter().all(Option::is_none));
-        assert!(!reference.programs.iter().any(|p| p == "water"));
+
     }
 
     #[test]
@@ -436,7 +374,7 @@ mod tests {
         let live = Rc::new(Cell::new(0));
         let mut cfg = config();
         cfg.draws[1].as_mut().unwrap().wet_response = Some(["v".into(), "response".into()]);
-        let result = cfg.compile(true, |pair| {
+        let result = cfg.compile(|pair| {
             if pair[1] == "response" { return Err("injected response compile failure".into()); }
             Ok(owned(&live))
         });
@@ -458,7 +396,7 @@ mod tests {
     #[test]
     fn failed_compile_releases_partial_programs() {
         let live = Rc::new(Cell::new(0));
-        let result = config().compile(true, |pair| {
+        let result = config().compile(|pair| {
             if pair[1] == "sky" {
                 return Err("injected compile failure".into());
             }

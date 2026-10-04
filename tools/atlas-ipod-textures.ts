@@ -15,7 +15,7 @@ export function samplerDeclarations(source: string): string[] {
 }
 
 export function textureUsage(
-  draws: ({ performance: string[]; wet_response?: string[] | null; water_response?: string[] | null; performance_reflection?: string[] | null } | null)[], sky: string[],
+  draws: ({ main: string[]; wet_response?: string[] | null; water_response?: string[] | null; reflection?: string[] | null } | null)[], sky: string[],
   readShader: (name: string) => string,
 ) {
   const cache = new Map<string, string[]>();
@@ -29,5 +29,5 @@ export function textureUsage(
       return cache.get(name)!;
     }))].sort(),
   });
-  return { version: 1, draws: draws.map(draw => draw ? entry(draw.performance, draw.wet_response, draw.water_response, draw.performance_reflection) : null), sky: entry(sky) };
+  return { version: 1, draws: draws.map(draw => draw ? entry(draw.main, draw.wet_response, draw.water_response, draw.reflection) : null), sky: entry(sky) };
 }

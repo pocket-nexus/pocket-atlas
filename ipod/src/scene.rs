@@ -143,8 +143,6 @@ impl SkinBounds {
     }
 }
 pub struct Scene {
-    /// Performance assets are loaded together and never required by Retina.
-    pub performance: bool,
     pub meta: pc::Meta,
     pub textures: Vec<u32>,
     /// Material-indexed display environments for water/glass; zero for others.
@@ -157,10 +155,10 @@ pub struct Scene {
     pub geometry: u32,
     geometry_source_bytes: usize,
     geometry_usage: Option<crate::geometry_usage::GeometryUsage>,
-    /// Per-point sin/cos of the decoded phase; display fields use slot 1.
+    /// Per-point sin/cos of the decoded phase for display fields.
     /// The original packed LightPoint stream remains authoritative.
     pub light_phase_buffer: u32,
-    /// Validated IPLF float vertices; only Optimized owns this buffer.
+    /// Validated IPLF float vertices.
     pub light_page_buffer: u32,
     pub light_phase_offsets: Vec<Option<u32>>,
     pub light_lod_source: crate::light_lod::Sources,
@@ -966,15 +964,7 @@ unsafe fn check_gl(operation: &str) -> Result<(), String> {
 impl Scene {
     /// The scene's GLES context must remain current on the calling thread
     /// through loading, use and Drop (including the error cleanup path).
-    #[cfg(test)]
     pub unsafe fn load(path: &str) -> Result<Self, String> {
-        Self::load_for_profile(path, true)
-    }
-
-    /// Retina retains the complete original pack while skipping display-only
-    /// sidecars, CPU selection data and auxiliary GLES resources. The caller
-    /// must keep this scene's GLES context current through use and Drop.
-    pub unsafe fn load_for_profile(path: &str, performance: bool) -> Result<Self, String> {
         let mut file = PlaceFile::open(path)?;
         let header = file.read(0, 16)?;
         let table_size = validation::place_header_size(&header, file.len)?;
@@ -1028,7 +1018,7 @@ impl Scene {
             .collect();
         drop(anim_bytes);
         validation::validate(&meta, geom.size as usize, tex.size as usize, &anim)?;
-        let mut texture_plan = if performance {
+        let mut texture_plan = {
             if let Some(mut pipelines) = PlaceFile::optional(&sidecar_path(path, "pipelines.json"))?
             {
                 let budget = meta
@@ -1044,8 +1034,6 @@ impl Scene {
             } else {
                 None
             }
-        } else {
-            None
         };
         if let Some(plan) = &mut texture_plan { plan.include_recipes(&ipod_recipes)?; }
         let needs_texture = |index| texture_plan.as_ref().is_none_or(|p| p.needs(index));
@@ -1064,7 +1052,6 @@ impl Scene {
         // The final owner exists before the first GL allocation. All names
         // start at zero, so every later `?` releases exactly what was created.
         let mut scene = Self {
-            performance,
             ldr_colors: vec![None; meta.draws.len()],
             display_states: Vec::new(),
             ldr_color_bytes: 0,
@@ -1133,23 +1120,23 @@ impl Scene {
             validation::validate_texture(t, &data)?;
             texture_hash.update(&data);
             // Bind compiler cubes to the source pixel interpretation and every
-            // original ENV mip, before conversion. Reference validates too.
+            // original ENV mip, before conversion.
             let environment_hash = if scene.meta.atmosphere.environment == Some(index as u32) {
                 Some(pc::ipod::display_environment::source_hash(t, &data)?)
             } else { None };
-            // Validate the optional compressed payload even when Reference or
+            // Validate the optional compressed payload even when
             // sampler demand skips its upload. Original RGBA stays the source
             // identity and is checked before any lossy GPU storage conversion.
             let compressed = if let Some(recipe) = scene.ipod_recipes.pvrtc.iter().find(|r| r.texture as usize == index) {
                 let bytes = file.payload(compressed_section.ok_or("PVRTC payload section missing")?, &recipe.range)?;
                 crate::texture_storage::validate_pvrtc_payload(recipe, &data, &bytes)?;
-                performance.then_some(bytes)
+                Some(bytes)
             } else { None };
             if id != 0 {
                 glBindTexture(GL_TEXTURE_2D, id);
                 glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
                 let half = t.format == pc::TexFormat::Rgba16f;
-                let rgb565 = performance && compressed.is_none() && crate::texture_storage::pack_opaque_color(t, &mut data);
+                let rgb565 = compressed.is_none() && crate::texture_storage::pack_opaque_color(t, &mut data);
                 let format = if rgb565 { GL_RGB } else { GL_RGBA };
                 let pixel_type = if rgb565 { GL_UNSIGNED_SHORT_5_6_5 } else { GL_UNSIGNED_BYTE };
                 let (mut w, mut h, mut at) = (t.width, t.height, 0usize);
@@ -1224,33 +1211,13 @@ impl Scene {
                     for recipe in &scene.ipod_recipes.display_cubes {
                         let pixels = file.payload(cube_section.ok_or("display cube section missing")?, &recipe.range)?;
                         crate::texture_storage::validate_display_cube_payload(recipe, &source_hash, &pixels)?;
-                        if performance {
+                        {
                             let id = upload_display_environment(&mut scene.display_environment_textures, &pixels)?;
-                            scene.gpu_bytes += crate::display_environment::CUBE_BYTES;
+                            scene.gpu_bytes += pc::ipod::display_environment::CUBE_BYTES;
                             for &material in &recipe.materials {
                                 scene.display_environments[material as usize] = id;
                             }
                         }
-                    }
-                } else if performance {
-                    // Legacy PLIP v1 packs use the compiler's same bake math.
-                    // New packs upload their IPEN bytes without runtime grading.
-                    let mut cache = Vec::<(u32, u32)>::new();
-                    for (material, m) in scene.meta.materials.iter().enumerate() {
-                        if !matches!(m.kind, pc::Kind::Water | pc::Kind::Glass) {
-                            continue;
-                        }
-                        let strength = m.env_strength * scene.meta.atmosphere.environment_strength;
-                        let id = if let Some(&(_, id)) = cache.iter().find(|&&(bits, _)| bits == strength.to_bits()) {
-                            id
-                        } else {
-                            let pixels = crate::display_environment::bake(t, &data, strength, &scene.meta.post)?;
-                            let id = upload_display_environment(&mut scene.display_environment_textures, &pixels)?;
-                            scene.gpu_bytes += crate::display_environment::CUBE_BYTES;
-                            cache.push((strength.to_bits(), id));
-                            id
-                        };
-                        scene.display_environments[material] = id;
                     }
                 }
             }
@@ -1260,7 +1227,7 @@ impl Scene {
         let light_payload = if let Some(recipe) = &scene.ipod_recipes.light_pages {
             let payload = file.section(light_section.unwrap())?;
             pc::ipod::light_pages::validate(&scene.meta, &data, &payload, recipe)?;
-            if performance { Some(payload) } else { None }
+            Some(payload)
         } else { None };
         scene.skin_bounds = SkinBounds::build(&scene.meta, &data)?;
         validation::validate_window_parameters(&scene.meta, &scene.ipod_recipes, &data)?;
@@ -1286,11 +1253,11 @@ impl Scene {
             }
         }
         pc::ipod::display_lods::validate(&scene.meta, &data, &scene.ipod_recipes)?;
-        if performance {
+        {
             scene.effective_lods = pc::ipod::display_lods::EffectiveLods::new(&scene.meta, &scene.ipod_recipes)?;
         }
 
-        let colors = if performance {
+        let colors = {
             scene.light_lod_source = crate::light_lod::Sources::new(&scene.meta, &data)?;
             if let Some(recipe) = &scene.ipod_recipes.light_pages {
                 scene.light_lod_source = core::mem::take(&mut scene.light_lod_source).with_pages(recipe)?;
@@ -1303,17 +1270,15 @@ impl Scene {
                 &animation_hash,
                 &format!("{:016x}", texture_hash.finish()),
             )?
-        } else {
-            None
         };
-        if performance {
+        {
             for entry in scene.ipod_recipes.display_lods.iter().flat_map(|r| &r.draws) {
                 if !colors.as_ref().is_some_and(|c| c.draws.iter().any(|d| d.draw == entry.draw && d.page.is_some() && d.flags & (16 | 32 | 64) == 0)) {
                     return Err("display LOD requires a validated dry float display page".into());
                 }
             }
         }
-        if performance {
+        {
             for recipe in scene
                 .ipod_recipes
                 .animated_display_lods
@@ -1347,7 +1312,7 @@ impl Scene {
             colors.validate_float_geometry(&scene.meta, &data)?;
             scene.index_overrides = colors.validate_index_overrides(&scene.meta, &data)?;
         }
-        if performance {
+        {
             scene.index_cache = IndexCache::with_lods(
                 &scene.meta,
                 &data,
@@ -1381,10 +1346,8 @@ impl Scene {
         scene.cpu_index_bytes = scene.effective_lods.bytes() + scene.index_cache.bytes()
             + scene.index_overrides.capacity() * core::mem::size_of::<DisplayIndices>()
             + scene.index_overrides.iter().map(|o| o.indices.capacity() * 2).sum::<usize>();
-        if let Some(mut clusters) = if performance {
+        if let Some(mut clusters) = {
             PlaceFile::optional(&sidecar_path(path, "ipod-clusters.bin"))?
-        } else {
-            None
         } {
             if clusters.len > crate::mesh_clusters::max_file_bytes_with_lods(&scene.meta, &scene.effective_lods)? {
                 return Err("cluster sidecar exceeds source geometry budget".into());
@@ -1396,25 +1359,15 @@ impl Scene {
             scene.mesh_clusters = Some(parsed);
         }
         drop(meta_bytes);
-        let phases = if performance {
+        let phases = {
             if let Some(recipe) = &scene.ipod_recipes.light_pages {
                 LightPhases::for_pages(&scene.meta, &data, recipe)?
             } else { LightPhases::new(&scene.meta, &data)? }
-        } else {
-            LightPhases {
-                data: Vec::new(),
-                offsets: Vec::new(),
-            }
         };
-        let packages = if performance {
+        let packages = {
             PackageParameters::new(&scene.meta, &data)?
-        } else {
-            PackageParameters {
-                data: Vec::new(),
-                offsets: Vec::new(),
-            }
         };
-        if performance {
+        {
             let mut display_pages = vec![false; scene.meta.draws.len()];
             if let Some(colors) = &colors {
                 for entry in colors.draws.iter().filter(|e| e.page.is_some()) {
@@ -1433,11 +1386,6 @@ impl Scene {
             )?;
             usage.compact(&mut data)?;
             scene.geometry_usage = Some(usage);
-        } else if scene.ipod_recipes.skin_lods.is_some() || scene.ipod_recipes.display_lods.is_some() || scene.ipod_recipes.animated_display_lods.is_some() {
-            // Validation above reads the whole source plus recipe payload.
-            // Reference uploads only original ranges, never derived indices.
-            data.truncate(pc::ipod::display_lods::source_end(&scene.meta)? as usize);
-            scene.geometry_source_bytes = data.len();
         }
         // All source hashes, vertices, LODs, clusters and auxiliary CPU data
         // were validated above. Only now may the upload discard unused bytes.
@@ -1805,8 +1753,7 @@ impl Scene {
             .map(|n| self.world[n as usize])
             .unwrap_or(Mat4::IDENTITY)
     }
-    /// Only Scene loading can establish this proof. Reference validates the
-    /// same recipe but continues to compile its original material programs.
+    /// Only Scene loading can establish this proof.
     pub fn window_vertex_params(&self, draw: usize) -> bool {
         u32::try_from(draw).ok().is_some_and(|draw| {
             self.ipod_recipes.window_vertex_params.as_ref()
@@ -1820,7 +1767,7 @@ impl Scene {
         })
     }
     /// Index ranges in the original GEOM address space, retained only in the
-    /// performance profile for opaque, depth-writing baked draws and LODs.
+    /// opaque, depth-writing baked draws and LODs.
     pub fn effective_lods(&self, draw: usize) -> &[pc::DrawLod] {
         self.effective_lods.get(&self.meta, draw)
     }
@@ -1851,17 +1798,6 @@ impl Scene {
             Some(usage) => usage.index_offset(source, count),
             None => Some(source),
         }
-    }
-    /// Replacing a Renderer can retain this Scene. VAOs
-    /// retain element-buffer bindings, including renderer-owned stream IBOs:
-    /// detach those references before deleting the old renderer's buffers.
-    pub unsafe fn reset_index_bindings(&self) {
-        for &vao in self.vaos.iter().chain(&self.ldr_vaos).filter(|&&vao| vao != 0) {
-            glBindVertexArrayOES(vao);
-            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.geometry);
-        }
-        glBindVertexArrayOES(0);
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
     }
     pub fn bones(&self, skin: u32) -> &[f32] {
         &self.bone_palettes[skin as usize]
@@ -1942,7 +1878,7 @@ fn half_float(h: u16) -> f32 {
 }
 
 unsafe fn upload_display_environment(owner: &mut Vec<u32>, pixels: &[u8]) -> Result<u32, String> {
-    if pixels.len() != crate::display_environment::CUBE_BYTES {
+    if pixels.len() != pc::ipod::display_environment::CUBE_BYTES {
         return Err("display cube upload size".into());
     }
     // Record ownership before allocation: partial face uploads and GL errors
@@ -1957,9 +1893,9 @@ unsafe fn upload_display_environment(owner: &mut Vec<u32>, pixels: &[u8]) -> Res
     }
     glBindTexture(GL_TEXTURE_CUBE_MAP, id);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    for (face, pixels) in pixels.chunks_exact(crate::display_environment::CUBE_BYTES / 6).enumerate() {
+    for (face, pixels) in pixels.chunks_exact(pc::ipod::display_environment::CUBE_BYTES / 6).enumerate() {
         glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face as u32, 0, GL_RGBA as _,
-            crate::display_environment::FACE_SIZE as _, crate::display_environment::FACE_SIZE as _,
+            pc::ipod::display_environment::FACE_SIZE as _, pc::ipod::display_environment::FACE_SIZE as _,
             0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.as_ptr() as _);
         check_gl("upload display environment face")?;
     }
@@ -1971,8 +1907,6 @@ unsafe fn upload_display_environment(owner: &mut Vec<u32>, pixels: &[u8]) -> Res
     Ok(id)
 }
 
-#[cfg(test)]
-use crate::display_environment::oct_pixels as display_environment_pixels;
 
 #[cfg(test)]
 mod tests {
@@ -2491,14 +2425,14 @@ mod tests {
     }
 
     #[test]
-    fn window_recipe_proves_all_original_lods_in_both_profiles_and_preserves_geometry() {
+    fn window_recipe_proves_all_original_lods_and_preserves_geometry() {
         let _lock = SERIAL.lock().unwrap();
         let (meta, geometry, animation, recipes) = window_fixture();
-        for performance in [false, true] {
+        {
             reset(None);
             GL.lock().unwrap().capture_buffers = true;
             let file = PackFile::write(&window_pack(&meta, &geometry, &animation, &recipes));
-            let scene = unsafe { Scene::load_for_profile(file.path(), performance) }.unwrap();
+            let scene = unsafe { Scene::load(file.path()) }.unwrap();
             assert!(scene.window_vertex_params(0));
             assert!(!scene.window_vertex_params(1));
             assert!(!scene.window_vertex_params(usize::MAX));
@@ -2510,10 +2444,10 @@ mod tests {
         // No recipe remains compatible, including geometry outside the proof.
         let mut outside = geometry;
         outside[40..44].copy_from_slice(&3.0f32.to_le_bytes());
-        for performance in [false, true] {
+        {
             reset(None);
             let file = PackFile::write(&window_pack(&meta, &outside, &animation, &pc::ipod::Recipes::default()));
-            let scene = unsafe { Scene::load_for_profile(file.path(), performance) }.unwrap();
+            let scene = unsafe { Scene::load(file.path()) }.unwrap();
             assert!(!scene.window_vertex_params(0));
             drop(scene);
             released();
@@ -2524,7 +2458,7 @@ mod tests {
     fn window_recipe_corruption_is_rejected_instead_of_trusting_the_draw_list() {
         let _lock = SERIAL.lock().unwrap();
         let (meta, geometry, animation, recipes) = window_fixture();
-        for performance in [false, true] {
+        {
             for fault in 0..11 {
                 let mut m = meta.clone();
                 let mut g = geometry.clone();
@@ -2549,8 +2483,8 @@ mod tests {
                 }
                 reset(None);
                 let file = PackFile::write(&window_pack(&m, &g, &animation, &r));
-                let error = unsafe { Scene::load_for_profile(file.path(), performance) }.err().unwrap();
-                assert!(error.contains("window parameters"), "profile {performance}, fault {fault}: {error}");
+                let error = unsafe { Scene::load(file.path()) }.err().unwrap();
+                assert!(error.contains("window parameters"), "fault {fault}: {error}");
                 released();
             }
         }
@@ -2620,10 +2554,10 @@ mod tests {
                 pc::ipod::floats::<2>(&geometry, pc::ipod::UV).unwrap(),
                 [-0.25, 0.5]
             );
-            for performance in [false, true] {
+            {
                 reset(None);
                 let file = PackFile::write(&bytes);
-                let scene = unsafe { Scene::load_for_profile(file.path(), performance) }.unwrap();
+                let scene = unsafe { Scene::load(file.path()) }.unwrap();
                 let mut expected = vec![
                     (0, 3, GL_FLOAT, 0, pc::ipod::POSITION),
                     (1, 3, GL_FLOAT, 0, pc::ipod::NORMAL),
@@ -2691,7 +2625,7 @@ mod tests {
         let _lock = SERIAL.lock().unwrap();
         let (m, g, a) = baked_fixture();
         let file = PackFile::write(&pack(&m, &g, &a, &[255; 64]));
-        for performance in [false, true] {
+        {
             for operation in [
                 "limit",
                 "textures",
@@ -2702,7 +2636,7 @@ mod tests {
                 "attributes",
             ] {
                 reset(Some(operation));
-                let error = unsafe { Scene::load_for_profile(file.path(), performance) }
+                let error = unsafe { Scene::load(file.path()) }
                     .err()
                     .expect(operation);
                 assert!(error.contains("GLES error"), "{operation}: {error}");
@@ -2711,85 +2645,9 @@ mod tests {
         }
     }
 
-    fn assert_original_resources_only(scene: &Scene) {
-        assert!(!scene.performance);
-        assert_eq!(scene.textures.len(), scene.meta.textures.len());
-        assert_eq!(scene.vaos.len(), scene.meta.draws.len());
-        assert!(scene.textures.iter().chain(&scene.vaos).all(|&id| id != 0));
-        assert_ne!(scene.geometry, 0);
-        assert_eq!(scene.cpu_index_bytes, 0);
-        assert_eq!(scene.index_cache.bytes(), 0);
-        assert!(scene.mesh_clusters.is_none());
-        assert!(scene.ldr_colors.iter().all(Option::is_none));
-        assert!(scene.display_states.is_empty());
-        assert!(scene.display_environment_textures.is_empty());
-        assert!(scene.display_environments.iter().all(|&id| id == 0));
-        assert_eq!(scene.ldr_color_bytes, 0);
-        assert_eq!(scene.ldr_color_buffer, 0);
-        assert!(scene.ldr_vaos.is_empty());
-        assert_eq!(scene.package_buffer, 0);
-        assert_eq!(scene.light_phase_buffer, 0);
-        assert!(scene.light_phase_offsets.is_empty());
-        assert!(scene.light_lod_source.is_empty());
-        assert_eq!(scene.light_lod_source.bytes(), 0);
-        let state = GL.lock().unwrap();
-        assert_eq!(
-            state.live.len(),
-            scene.textures.len() + scene.vaos.len() + 1
-        );
-        for (i, draw) in scene.meta.draws.iter().enumerate() {
-            for (range, count) in core::iter::once((&draw.indices, draw.index_count))
-                .chain(draw.lods.iter().map(|l| (&l.indices, l.index_count)))
-            {
-                // Renderer keeps the original range/GEOM binding when this
-                // query returns None, including a previously cached raw run.
-                assert!(scene.indices(range.offset, count).is_none());
-            }
-            if draw.layout != pc::VertexLayout::Lights {
-                assert_eq!(state.element_buffers[&scene.vaos[i]], scene.geometry);
-                assert!(state
-                    .attributes
-                    .iter()
-                    .filter(|a| a.0 == scene.vaos[i])
-                    .all(|a| a.2 == scene.geometry));
-            }
-        }
-    }
 
-    #[test]
-    fn retina_ignores_display_sidecars_but_validates_original_geometry() {
-        let _lock = SERIAL.lock().unwrap();
-        let (meta, mut geometry, animation) = baked_fixture();
-        let file = PackFile::write(&pack(&meta, &geometry, &animation, &[255; 64]));
-        for path in [
-            color_path(file.path(), "json"),
-            color_path(file.path(), "bin"),
-            sidecar_path(file.path(), "ipod-clusters.bin"),
-        ] {
-            std::fs::write(path, b"invalid optional performance asset").unwrap();
-        }
-        reset(None);
-        let mut scene = unsafe { Scene::load_for_profile(file.path(), false) }.unwrap();
-        assert_original_resources_only(&scene);
-        assert_eq!(scene.gpu_bytes, 64 + geometry.len());
-        assert_eq!(scene.anim, animation);
-        scene.update(0.25, Vec3::ZERO, 1.0 / 60.0);
-        assert!(scene.world.iter().all(|m| m.is_finite()));
-        drop(scene);
-        released();
-        reset(None);
-        assert!(unsafe { Scene::load(file.path()) }.is_err());
-        released();
-        geometry[BAKED_VERTEX_BYTES as usize..BAKED_VERTEX_BYTES as usize + 2]
-            .copy_from_slice(&u16::MAX.to_le_bytes());
-        let bad = PackFile::write(&pack(&meta, &geometry, &animation, &[255; 64]));
-        reset(None);
-        assert!(unsafe { Scene::load_for_profile(bad.path(), false) }
-            .err()
-            .unwrap()
-            .contains("index exceeds"));
-        released();
-    }
+
+
 
     #[test]
     fn optional_clusters_validate_identity_budget_and_release_prior_gpu_uploads() {
@@ -2933,51 +2791,6 @@ mod tests {
                 (scene.ldr_color_buffer, 4, 4, 0)
             );
             assert!(attrs[..2].iter().all(|a| a.2 == scene.geometry));
-        }
-        drop(scene);
-        released();
-    }
-    #[test]
-    fn retained_scene_releases_renderer_index_bindings_without_changing_vertices() {
-        let _lock = SERIAL.lock().unwrap();
-        let (meta, geometry, animation) = baked_fixture();
-        let source = pack(&meta, &geometry, &animation, &[255; 64]);
-        let file = PackFile::write(&source);
-        let (json, bytes) = color_sidecar(&source);
-        write_colors(&file, &json, &bytes);
-        reset(None);
-        let scene = unsafe { Scene::load(file.path()) }.unwrap();
-        let attributes = GL.lock().unwrap().attributes.clone();
-        let mut streams = [0; 2];
-        unsafe {
-            glGenBuffers(2, streams.as_mut_ptr());
-            for (i, &vao) in scene.vaos.iter().chain(&scene.ldr_vaos).enumerate() {
-                glBindVertexArrayOES(vao);
-                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, streams[i % 2]);
-            }
-            glBindVertexArrayOES(0);
-            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, streams[0]);
-            scene.reset_index_bindings();
-        }
-        {
-            let state = GL.lock().unwrap();
-            assert_eq!(state.vao, 0);
-            assert_eq!(state.element_buffers[&0], 0);
-            for vao in scene.vaos.iter().chain(&scene.ldr_vaos) {
-                assert_eq!(state.element_buffers[vao], scene.geometry);
-                assert!(state.live.contains(&(b'V', *vao)));
-            }
-            assert!(!state
-                .element_buffers
-                .values()
-                .any(|id| streams.contains(id)));
-            assert_eq!(
-                state.attributes, attributes,
-                "vertex ownership/layout must survive profile changes"
-            );
-        }
-        unsafe {
-            glDeleteBuffers(2, streams.as_ptr());
         }
         drop(scene);
         released();
@@ -3229,14 +3042,14 @@ mod tests {
     #[test]
     fn products_reverse_lod_uses_source_local_indices_and_cull_only_state_without_gpu_tail() {
         let _lock = SERIAL.lock().unwrap();
-        let (meta, geometry, _, source, json, colors) = product_indices_fixture();
+        let (meta, _geometry, _, source, json, colors) = product_indices_fixture();
         let file = PackFile::write(&source); write_colors(&file, &json, &colors);
         let range = &meta.draws[0].lods[0].indices;
-        for performance in [true, false] {
+        {
             reset(None); GL.lock().unwrap().capture_buffers = true;
-            let scene = unsafe { Scene::load_for_profile(file.path(), performance) }.unwrap();
+            let scene = unsafe { Scene::load(file.path()) }.unwrap();
             assert_eq!(serde_json::to_vec(&scene.meta).unwrap(), serde_json::to_vec(&meta).unwrap());
-            if performance {
+            {
                 let replaced = scene.index_override(0, range).unwrap();
                 assert_eq!(replaced.indices, [0, 1, 2]);
                 assert_eq!(replaced.state, 1);
@@ -3247,10 +3060,6 @@ mod tests {
                 assert_eq!(scene.ldr_color_bytes, 216);
                 assert_eq!(GL.lock().unwrap().buffer_data[&scene.ldr_color_buffer], colors[..216]);
                 assert!(scene.cpu_index_bytes >= replaced.indices.len() * 2);
-            } else {
-                assert!(scene.index_override(0, range).is_none());
-                assert_original_resources_only(&scene);
-                assert_eq!(GL.lock().unwrap().buffer_data[&scene.geometry], geometry);
             }
             assert!(scene.index_override(1, range).is_none());
             assert!(scene.index_override(usize::MAX, range).is_none());
@@ -3288,22 +3097,18 @@ mod tests {
         let file = PackFile::write(&source);
         write_colors(&file, &json, &colors);
         let range = &meta.draws[0].lods[0].indices;
-        for performance in [true, false] {
+        {
             reset(None);
             GL.lock().unwrap().capture_buffers = true;
-            let scene = unsafe { Scene::load_for_profile(file.path(), performance) }.unwrap();
+            let scene = unsafe { Scene::load(file.path()) }.unwrap();
             assert_eq!(serde_json::to_vec(&scene.meta).unwrap(), serde_json::to_vec(&meta).unwrap());
-            if performance {
+            {
                 assert_eq!(scene.indices(range.offset, 6), Some(&[0, 1, 2, 3, 5, 4][..]));
                 let replaced = scene.index_override(0, range).unwrap();
                 assert_eq!(replaced.indices, [0, 1, 2]);
                 assert_eq!(replaced.state, 0);
                 assert_eq!(scene.display_states.len(), 1);
                 assert!(!scene.display_states[0].cull);
-            } else {
-                assert!(scene.index_override(0, range).is_none());
-                assert_original_resources_only(&scene);
-                assert_eq!(GL.lock().unwrap().buffer_data[&scene.geometry], geometry);
             }
             drop(scene);
             released();
@@ -3350,12 +3155,7 @@ mod tests {
             let error = unsafe { Scene::load(file.path()) }.err().unwrap_or_else(|| panic!("accepted fault {fault}"));
             assert!(error.contains("LDR"), "fault {fault}: {error}");
             released();
-            // Optional optimized recipes never replace or mutate Reference.
-            reset(None); GL.lock().unwrap().capture_buffers = true;
-            let scene = unsafe { Scene::load_for_profile(file.path(), false) }.unwrap();
-            assert!(scene.index_overrides.is_empty());
-            assert_eq!(GL.lock().unwrap().buffer_data[&scene.geometry], original);
-            drop(scene); released();
+
         }
         std::fs::write(file.path(), source).unwrap(); write_colors(&file, &json, &colors);
         for stage in ["color buffer", "color upload", "color vaos", "color attributes"] {
@@ -3406,11 +3206,10 @@ mod tests {
             serde_json::json!([pc::display::State::for_draw(&meta, draw, Some(0), 0).unwrap()]);
         json["colorsBytes"] = colors.len().into();
         json["colorsHash"] = color_hash(&colors).into();
-        for (both_pages, shadow, performance) in [
-            (false, false, true),
-            (true, false, true),
-            (true, true, true),
-            (true, false, false),
+        for (both_pages, shadow) in [
+            (false, false),
+            (true, false),
+            (true, true),
         ] {
             let mut entries = json.clone();
             if !both_pages {
@@ -3442,9 +3241,9 @@ mod tests {
             .unwrap();
             reset(None);
             GL.lock().unwrap().capture_buffers = true;
-            let scene = unsafe { Scene::load_for_profile(file.path(), performance) }.unwrap();
+            let scene = unsafe { Scene::load(file.path()) }.unwrap();
             assert_eq!(serde_json::to_vec(&scene.meta).unwrap(), source_meta);
-            let all_resident = !performance || shadow;
+            let all_resident = shadow;
             let uploaded = if all_resident {
                 &geometry[..]
             } else if both_pages {
@@ -3454,7 +3253,7 @@ mod tests {
             };
             assert_eq!(
                 scene.gpu_bytes,
-                uploaded.len() + if performance { 32 + colors.len() } else { 64 }
+                uploaded.len() + 32 + colors.len()
             );
             {
                 let gl = GL.lock().unwrap();
@@ -3491,7 +3290,7 @@ mod tests {
                             scene.gpu_index_offset(r.offset, count),
                             retained.then_some(expected)
                         );
-                        if performance {
+                        {
                             let expected: Vec<_> = pc::parts::slice(&geometry, r)
                                 .unwrap()
                                 .chunks_exact(2)
@@ -3503,9 +3302,6 @@ mod tests {
                 }
             }
             assert!(scene.gpu_index_offset(geometry.len() as u32, 0).is_some());
-            unsafe {
-                scene.reset_index_bindings();
-            }
             drop(scene);
             released();
         }
@@ -3710,11 +3506,11 @@ mod tests {
             m.materials[0].wet = Some(pc::Wet { planar: true, darken, ..Default::default() });
             let source = pack(&m, &g, &a, &[255; 64]);
             let file = PackFile::write(&source);
-            // Source and Reference remain valid. Only the RGBA8 response
+            // Source equations remain valid. Only the RGBA8 response
             // approximation rejects a multiplier outside its encoded range.
-            for performance in [true, false] {
+            {
                 reset(None);
-                let scene = unsafe { Scene::load_for_profile(file.path(), performance) }.unwrap();
+                let scene = unsafe { Scene::load(file.path()) }.unwrap();
                 assert_eq!(scene.meta.materials[0].wet.as_ref().unwrap().darken, darken);
                 assert!(scene.ldr_colors.iter().all(Option::is_none));
                 drop(scene);
@@ -3922,14 +3718,6 @@ mod tests {
             assert!(unsafe { Scene::load(file.path()) }.is_err());
             released();
         }
-        // A missing manifest remains backwards compatible; Retina disregards
-        // this optional optimization and still uploads all four textures.
-        reset(None);
-        let scene = unsafe { Scene::load_for_profile(file.path(), false) }.unwrap();
-        assert_original_resources_only(&scene);
-        assert_eq!(scene.gpu_bytes, geometry.len() + pixels.len());
-        drop(scene);
-        released();
         let (mut colors, bytes) = color_sidecar(&source);
         for draw in colors["draws"].as_array_mut().unwrap() {
             draw["texture"] = 1.into();
@@ -4128,7 +3916,6 @@ mod tests {
             reset(None);
             let mut scene = unsafe { Scene::load(path.to_str().unwrap()) }
                 .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-            assert!(scene.performance);
             assert_eq!(scene.vaos.len(), scene.meta.draws.len());
             assert_eq!(scene.textures.len(), scene.meta.textures.len());
             // Independently inspect the actual emitted shader declarations,
@@ -4174,11 +3961,11 @@ mod tests {
                         if draw.is_null() {
                             BTreeSet::new()
                         } else {
-                            declarations(&draw["performance"])
+                            declarations(&draw["main"])
                         }
                     })
                     .collect();
-                let sky = declarations(&pipelines["sky_performance"]);
+                let sky = declarations(&pipelines["sky"]);
                 crate::texture_usage::validate_resident(
                     &scene.meta,
                     &scene.textures,
@@ -4229,30 +4016,8 @@ mod tests {
                 }
             }
             scene.update(3.25, Vec3::new(1.0, 2.0, 3.0), 1.0 / 60.0);
-            let original = (
-                serde_json::to_vec(&scene.meta).unwrap(),
-                scene.anim.clone(),
-                scene.world.clone(),
-                scene.bone_palettes.clone(),
-                scene.emissive.clone(),
-            );
-            drop(scene);
-            released();
-            reset(None);
-            let mut scene = unsafe { Scene::load_for_profile(path.to_str().unwrap(), false) }
-                .unwrap_or_else(|e| panic!("{} Retina: {e}", path.display()));
-            assert_original_resources_only(&scene);
-            scene.update(3.25, Vec3::new(1.0, 2.0, 3.0), 1.0 / 60.0);
-            assert_eq!(serde_json::to_vec(&scene.meta).unwrap(), original.0);
-            assert_eq!(scene.anim, original.1);
-            assert_eq!(scene.world, original.2);
-            assert_eq!(scene.bone_palettes, original.3);
-            assert_eq!(scene.emissive, original.4);
-            std::println!(
-                "profiles {}: GPU performance={} Retina={} difference={}; skippedTextureBytes={}; CPU dropped index={} light={} display_tables={} bytes (host backing storage, excludes allocator overhead)",
-                path.display(), performance_gpu, scene.gpu_bytes, performance_gpu as isize - scene.gpu_bytes as isize,
-                skipped_texture_bytes, indices_cpu, light_cpu, display_cpu,
-            );
+            std::println!("{}: GPU={}, skipped texture bytes={}, CPU indices={}, lights={}, display tables={}",
+                path.display(), performance_gpu, skipped_texture_bytes, indices_cpu, light_cpu, display_cpu);
             drop(scene);
             released();
             count += 1;
@@ -4261,7 +4026,7 @@ mod tests {
     }
 
     #[test]
-    fn window_ray_recipe_requires_its_source_proof_in_both_profiles() {
+    fn window_ray_recipe_requires_its_source_proof_() {
         let _lock = SERIAL.lock().unwrap();
         let (mut meta, mut geometry, animation, mut recipes) = window_fixture();
         meta.draws[0].node = None;
@@ -4271,10 +4036,10 @@ mod tests {
             }
         }
         recipes.window_ray_params = Some(pc::ipod::WindowRayParams { version:1, draws:vec![0] });
-        for performance in [false,true] {
+        {
             reset(None);
             let file=PackFile::write(&window_pack(&meta,&geometry,&animation,&recipes));
-            let scene=unsafe { Scene::load_for_profile(file.path(),performance) }.unwrap();
+            let scene=unsafe { Scene::load(file.path()) }.unwrap();
             assert!(scene.window_ray_params(0));assert!(!scene.window_ray_params(usize::MAX));
             drop(scene);released();
             for fault in 0..6 {
@@ -4290,7 +4055,7 @@ mod tests {
                 }
                 reset(None);
                 let file=PackFile::write(&window_pack(&meta,&g,&animation,&r));
-                let error=unsafe {Scene::load_for_profile(file.path(),performance)}.err().unwrap();
+                let error=unsafe {Scene::load(file.path())}.err().unwrap();
                 assert!(error.contains("window rays"),"{fault}: {error}");released();
             }
         }
@@ -4357,12 +4122,12 @@ mod tests {
     fn compiler_light_pages_replace_only_optimized_geometry_and_reorder_original_phases() {
         let _lock=SERIAL.lock().unwrap();
         let (meta,geometry,animation,recipes,payload)=light_page_fixture();
-        for performance in [true,false] {
+        {
             reset(None);GL.lock().unwrap().capture_buffers=true;
             let file=PackFile::write(&light_page_pack(&meta,&geometry,&animation,&recipes,Some(&payload)));
-            let scene=unsafe{Scene::load_for_profile(file.path(),performance)}.unwrap();
+            let scene=unsafe{Scene::load(file.path())}.unwrap();
             let state=GL.lock().unwrap();
-            if performance {
+            {
                 assert_eq!(state.buffer_data[&scene.light_page_buffer],payload);
                 assert_eq!(state.buffer_data[&scene.geometry],geometry[..162]);
                 assert_eq!(scene.light_phase_offsets,[None,Some(0),Some(32),Some(16)]);
@@ -4374,10 +4139,6 @@ mod tests {
                 assert!(scene.gpu_vertex_offset(1).is_none());
                 assert!(scene.gpu_vertex_offset(2).is_none());
                 assert_eq!(scene.light_lod_source.pages().len(),2);
-            } else {
-                assert_eq!(scene.light_page_buffer,0);assert_eq!(scene.light_phase_buffer,0);
-                assert_eq!(state.buffer_data[&scene.geometry],geometry);
-                assert_eq!(scene.gpu_vertex_offset(1),Some(meta.draws[1].vertices.offset));
             }
             assert_eq!(serde_json::to_vec(&scene.meta).unwrap(),serde_json::to_vec(&meta).unwrap());
             drop(state);drop(scene);released();
@@ -4389,10 +4150,10 @@ mod tests {
         }
     }
     #[test]
-    fn light_page_source_payload_and_group_proofs_are_required_in_both_profiles() {
+    fn light_page_source_payload_and_group_proofs_are_required_() {
         let _lock=SERIAL.lock().unwrap();
         let (meta,geometry,animation,recipes,payload)=light_page_fixture();
-        for performance in [false,true] { for fault in 0..11 {
+        { for fault in 0..11 {
             let mut r=recipes.clone();let mut p=payload.clone();let mut m=meta.clone();
             let recipe=r.light_pages.as_mut().unwrap();
             match fault {
@@ -4411,7 +4172,7 @@ mod tests {
             }
             reset(None);
             let file=PackFile::write(&light_page_pack(&m,&geometry,&animation,&r,if fault==9{None}else{Some(&p)}));
-            let error=unsafe{Scene::load_for_profile(file.path(),performance)}.err().unwrap();
+            let error=unsafe{Scene::load(file.path())}.err().unwrap();
             assert!(error.contains("light page"),"{fault}: {error}");released();
         }}
     }
@@ -4487,12 +4248,6 @@ mod tests {
         assert_eq!(scene.gpu_bytes, 32 + geometry.len() + 8 * 8);
         drop(scene);
         released();
-        reset(None);
-        let scene = unsafe { Scene::load_for_profile(file.path(), false) }.unwrap();
-        assert_original_resources_only(&scene);
-        assert_eq!(scene.gpu_bytes, 64 + geometry.len());
-        drop(scene);
-        released();
         // No Products or display sidecar: the mock's second VBO is phases.
         for (failure, context) in [
             ("color buffer", "create light phase buffer"),
@@ -4535,11 +4290,6 @@ mod tests {
             assert_eq!(state.live, baseline);
             assert!(state.invalid_deletes.is_empty());
         }
-        drop(scene);
-        released();
-        reset(None);
-        let scene = unsafe { Scene::load_for_profile(file.path(), false) }.unwrap();
-        assert_original_resources_only(&scene);
         drop(scene);
         released();
     }
@@ -4759,12 +4509,6 @@ mod tests {
         }
         drop(scene);
         released();
-        reset(None);
-        let scene = unsafe { Scene::load_for_profile(file.path(), false) }.unwrap();
-        assert_original_resources_only(&scene);
-        assert_eq!(scene.gpu_bytes, 64 + geometry.len());
-        drop(scene);
-        released();
         // The mock calls every second VBO a color buffer; here it is the
         // package VBO, so these failures specifically cover its ownership.
         for (failure, context) in [
@@ -4890,15 +4634,15 @@ mod tests {
         let (mut meta, geometry, animation) = float_fixture();
         meta.textures[0] = texture_meta.textures[0].clone();
         let file = PackFile::write(&pvrtc_pack(&meta, &geometry, &animation, &source, &recipes, Some(&payload)));
-        for performance in [true, false] {
+        {
             reset(None);
             GL.lock().unwrap().capture_textures = true;
-            let scene = unsafe { Scene::load_for_profile(file.path(), performance) }.unwrap();
+            let scene = unsafe { Scene::load(file.path()) }.unwrap();
             assert_eq!(scene.meta.textures[0].format, pc::TexFormat::Rgba8);
-            assert_eq!(scene.gpu_bytes, geometry.len() + if performance { 128 } else { 340 });
+            assert_eq!(scene.gpu_bytes, geometry.len() + 128);
             {
                 let state = GL.lock().unwrap();
-                if performance {
+                {
                     assert!(state.texture_uploads.is_empty());
                     assert_eq!(state.compressed_uploads.len(), 4);
                     for (i, upload) in state.compressed_uploads.iter().enumerate() {
@@ -4907,19 +4651,6 @@ mod tests {
                         assert_eq!((upload.level, upload.width, upload.height), (i as i32, 8 >> i, 8 >> i));
                         assert_eq!(upload.data, payload[i * 32..(i + 1) * 32]);
                     }
-                } else {
-                    assert!(state.compressed_uploads.is_empty());
-                    assert_eq!(state.texture_uploads.len(), 4);
-                    let mut at = 0;
-                    for (i, upload) in state.texture_uploads.iter().enumerate() {
-                        let dimension = 8 >> i;
-                        let size = dimension * dimension * 4;
-                        assert_eq!((upload.level, upload.width, upload.height), (i as i32, dimension as i32, dimension as i32));
-                        assert_eq!((upload.internal_format, upload.format, upload.pixel_type), (GL_RGBA as i32, GL_RGBA, GL_UNSIGNED_BYTE));
-                        assert_eq!(upload.data, source[at..at + size]);
-                        at += size;
-                    }
-                    assert_eq!(at, 340);
                 }
                 assert!(state.texture_parameters.contains(&(GL_TEXTURE_2D, 0x813d, 3)));
                 assert!(state.texture_parameters.contains(&(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, 0x2703)));
@@ -4941,12 +4672,12 @@ mod tests {
     }
 
     #[test]
-    fn pvrtc_validation_is_required_in_reference_and_without_color_sidecars() {
+    fn pvrtc_validation_is_required_without_color_sidecars() {
         let _lock = SERIAL.lock().unwrap();
         let (texture_meta, recipes, source, payload) = crate::texture_storage::tests::pvrtc_fixture();
         let (mut meta, geometry, animation) = float_fixture();
         meta.textures[0] = texture_meta.textures[0].clone();
-        for performance in [true, false] {
+        {
             for fault in 0..11 {
                 let mut r = recipes.clone(); let mut src = source.clone(); let mut bytes = payload.clone();
                 match fault {
@@ -4969,8 +4700,8 @@ mod tests {
                     if fault == 10 { None } else { Some(&bytes) }));
                 assert!(!std::path::Path::new(&color_path(file.path(), "json")).exists());
                 reset(None);
-                let error = unsafe { Scene::load_for_profile(file.path(), performance) }.err().unwrap();
-                assert!(error.contains("PVRTC"), "profile {performance}, fault {fault}: {error}");
+                let error = unsafe { Scene::load(file.path()) }.err().unwrap();
+                assert!(error.contains("PVRTC"), "fault {fault}: {error}");
                 assert!(GL.lock().unwrap().compressed_uploads.is_empty());
                 assert!(GL.lock().unwrap().texture_uploads.is_empty());
                 released();
@@ -4990,7 +4721,7 @@ mod tests {
         // Independent expected packed words for red, green, blue, white,
         // followed by the single 1x1 texel (R=16/31,G=16/63,B=4/31).
         let packed = [0x00, 0xf8, 0xe0, 0x07, 0x1f, 0x00, 0xff, 0xff, 0x04, 0x82];
-        for mode in 0..7 {
+        for mode in [0, 2, 3, 4, 5, 6] {
             let (mut meta, geometry, animation) = float_fixture();
             let texture = &mut meta.textures[0];
             texture.width = 2;
@@ -5006,13 +4737,12 @@ mod tests {
                 6 => texture.has_alpha = true, // Actual payload remains opaque.
                 _ => {}
             }
-            let performance = mode != 1;
-            let is_565 = mode == 0 || mode == 6;
+                        let is_565 = mode == 0 || mode == 6;
             let source_meta = serde_json::to_vec(&meta).unwrap();
             let file = PackFile::write(&pack(&meta, &geometry, &animation, &pixels));
             reset(None);
             GL.lock().unwrap().capture_textures = true;
-            let scene = unsafe { Scene::load_for_profile(file.path(), performance) }.unwrap();
+            let scene = unsafe { Scene::load(file.path()) }.unwrap();
             assert_eq!(serde_json::to_vec(&scene.meta).unwrap(), source_meta);
             assert_eq!(
                 scene.gpu_bytes,
@@ -5110,7 +4840,7 @@ mod tests {
     }
 
     #[test]
-    fn compiled_cubes_upload_exact_faces_share_materials_and_leave_reference_original() {
+    fn compiled_cubes_upload_exact_faces_share_materials_() {
         let _lock = SERIAL.lock().unwrap();
         let (template, mut recipes, source, mut payload) = crate::texture_storage::tests::cube_fixture();
         let (mut meta, geometry, animation) = float_fixture();
@@ -5118,19 +4848,19 @@ mod tests {
         meta.atmosphere = template.atmosphere;
         // A valid payload identity is authoritative. This deliberate changed
         // texel proves the loader uploads IPEN rather than silently rebaking.
-        let face_bytes = crate::display_environment::CUBE_BYTES / 6;
+        let face_bytes = pc::ipod::display_environment::CUBE_BYTES / 6;
         payload[face_bytes - 4] ^= 1;
-        recipes.display_cubes[0].payload_hash = color_hash(&payload[..crate::display_environment::CUBE_BYTES]);
+        recipes.display_cubes[0].payload_hash = color_hash(&payload[..pc::ipod::display_environment::CUBE_BYTES]);
         let file = PackFile::write(&cube_pack(&meta, &geometry, &animation, &source, &recipes, Some(&payload)));
-        for performance in [true, false] {
+        {
             reset(None); GL.lock().unwrap().capture_textures = true;
-            let scene = unsafe { Scene::load_for_profile(file.path(), performance) }.unwrap();
-            if performance {
+            let scene = unsafe { Scene::load(file.path()) }.unwrap();
+            {
                 assert_eq!(scene.display_environment_textures.len(), 2);
                 assert_eq!(scene.display_environments[0], scene.display_environments[1]);
                 assert_ne!(scene.display_environments[0], scene.display_environments[2]);
                 assert_eq!(scene.display_environments[3], 0);
-                assert_eq!(scene.gpu_bytes, geometry.len() + 32 + 84 + 2 * crate::display_environment::CUBE_BYTES);
+                assert_eq!(scene.gpu_bytes, geometry.len() + 32 + 84 + 2 * pc::ipod::display_environment::CUBE_BYTES);
                 let state = GL.lock().unwrap();
                 let faces: Vec<_> = state.texture_uploads.iter().filter(|u| u.target != GL_TEXTURE_2D).collect();
                 assert_eq!(faces.len(), 12);
@@ -5140,10 +4870,6 @@ mod tests {
                     assert_eq!(face.texture, scene.display_environment_textures[i / 6]);
                     assert_eq!(face.data, payload[i * face_bytes..(i + 1) * face_bytes]);
                 }
-            } else {
-                assert_original_resources_only(&scene);
-                assert_eq!(scene.gpu_bytes, geometry.len() + 64 + 84);
-                assert!(GL.lock().unwrap().texture_uploads.iter().all(|u| u.target == GL_TEXTURE_2D));
             }
             drop(scene); released();
         }
@@ -5153,24 +4879,24 @@ mod tests {
         reset(None);
         let scene = unsafe { Scene::load(file.path()) }.unwrap();
         assert!(scene.textures.iter().all(|&id| id == 0));
-        assert_eq!(scene.gpu_bytes, geometry.len() + 2 * crate::display_environment::CUBE_BYTES);
+        assert_eq!(scene.gpu_bytes, geometry.len() + 2 * pc::ipod::display_environment::CUBE_BYTES);
         drop(scene); released();
     }
 
     #[test]
-    fn compiled_cube_corruption_is_rejected_in_both_profiles_and_releases_partial_uploads() {
+    fn compiled_cube_corruption_is_rejected_and_releases_partial_uploads() {
         let _lock = SERIAL.lock().unwrap();
         let (template, recipes, source, payload) = crate::texture_storage::tests::cube_fixture();
         let (mut meta, geometry, animation) = float_fixture();
         meta.textures = template.textures; meta.materials = template.materials;
         meta.atmosphere = template.atmosphere;
-        for performance in [true, false] {
+        {
             for fault in 0..11 {
                 let mut m = meta.clone(); let mut r = recipes.clone();
                 let mut src = source.clone(); let mut bytes = payload.clone();
                 let expected = match fault {
                     0 => { src[224] ^= 1; "source identity" }, // Last ENV mip, not used by bake.
-                    1 => { bytes[crate::display_environment::CUBE_BYTES + 4] ^= 1; "payload identity" },
+                    1 => { bytes[pc::ipod::display_environment::CUBE_BYTES + 4] ^= 1; "payload identity" },
                     2 => { m.post.exposure += 0.1; "recipe contract" },
                     3 => { m.materials[0].env_strength += 0.01; "ownership or strength" },
                     4 => { r.display_cubes[0].materials.pop(); "coverage" },
@@ -5191,9 +4917,9 @@ mod tests {
                 let file = PackFile::write(&cube_pack(&m, &geometry, &animation, &src, &r,
                     (fault != 6).then_some(bytes.as_slice())));
                 reset(None);
-                let error = unsafe { Scene::load_for_profile(file.path(), performance) }.err().unwrap();
-                assert!(error.contains(expected), "profile {performance}, fault {fault}: {error}");
-                if performance && fault == 1 {
+                let error = unsafe { Scene::load(file.path()) }.err().unwrap();
+                assert!(error.contains(expected), "fault {fault}: {error}");
+                if fault == 1 {
                     assert_eq!(GL.lock().unwrap().texture_uploads.iter().filter(|u| u.target != GL_TEXTURE_2D).count(), 6);
                 }
                 released();
@@ -5207,9 +4933,9 @@ mod tests {
             .find(|&i| misaligned[16 + i * 16..20 + i * 16] == pc::ipod::TAG_DISPLAY_CUBES).unwrap();
         misaligned[28 + table_index * 16..32 + table_index * 16].copy_from_slice(&4u32.to_le_bytes());
         std::fs::write(file.path(), &misaligned).unwrap();
-        for performance in [true, false] {
+        {
             reset(None);
-            let error = unsafe { Scene::load_for_profile(file.path(), performance) }.err().unwrap();
+            let error = unsafe { Scene::load(file.path()) }.err().unwrap();
             assert!(error.contains("display cube section alignment"), "{error}");
             assert_eq!(GL.lock().unwrap().next, 0);
             released();
@@ -5230,193 +4956,36 @@ mod tests {
     }
 
     #[test]
-    fn successful_scene_keeps_vao_animation_and_hdr_encoding_until_drop() {
+    fn hdr_upload_preserves_animation_and_rejects_nonfinite_source() {
         let _lock = SERIAL.lock().unwrap();
-        let (mut m, g, a) = float_fixture();
-        let mut hdr = m.textures[0].clone();
+        let (mut meta, geometry, animation) = float_fixture();
+        let mut hdr = meta.textures[0].clone();
         hdr.role = pc::TexRole::Environment;
         hdr.format = pc::TexFormat::Rgba16f;
-        hdr.data = pc::Range {
-            offset: 64,
-            size: 128,
-        };
-        m.textures.push(hdr);
-        m.atmosphere.environment = Some(1);
-        m.atmosphere.environment_strength = 0.5;
-        let nonwater = m.materials[0].clone();
-        m.materials[0].kind = pc::Kind::Water;
-        m.materials[0].env_strength = 0.72;
-        m.materials.push(m.materials[0].clone());
-        m.materials.push(nonwater);
+        hdr.data = pc::Range { offset: 64, size: 128 };
+        meta.textures.push(hdr);
+        meta.atmosphere.environment = Some(1);
         let mut pixels = vec![255; 64];
         pixels.extend([0, 0x3c].repeat(64));
-        let file = PackFile::write(&pack(&m, &g, &a, &pixels));
+        let file = PackFile::write(&pack(&meta, &geometry, &animation, &pixels));
         reset(None);
         let scene = unsafe { Scene::load(file.path()) }.unwrap();
         assert_eq!(scene.textures.len(), 2);
         assert_eq!(scene.vaos.len(), 1);
-        assert_eq!(scene.anim, a);
+        assert_eq!(scene.anim, animation);
         assert_eq!(scene.world[0], Mat4::IDENTITY);
-        assert_eq!(scene.gpu_bytes, 32 + 64 + crate::display_environment::CUBE_BYTES + g.len());
-        assert_eq!(scene.cpu_index_bytes, 0);
-        assert_ne!(scene.display_environments[0], 0);
-        assert_eq!(scene.display_environments[0], scene.display_environments[1]);
-        assert_eq!(scene.display_environments[2], 0);
-        assert_eq!(scene.display_environment_textures.len(), 1);
-        {
-            let state = GL.lock().unwrap();
-            assert_eq!(state.live.len(), 5);
-            assert!(state.deleted.is_empty());
-            assert!(state.uploads.contains(&[180, 180, 180, 255]));
-            let graded = pc::color::tone([0.36; 3], &m.post).map(|v| (v * 255.0 + 0.5) as u8);
-            assert!(state
-                .uploads
-                .contains(&[graded[0], graded[1], graded[2], 255]));
-            assert_eq!(state.vao, 0);
-            let faces: Vec<_> = state.texture_uploads.iter()
-                .filter(|upload| upload.texture == scene.display_environments[0]).collect();
-            assert_eq!(faces.len(), 6);
-            for (face, upload) in faces.iter().enumerate() {
-                assert_eq!(upload.target, GL_TEXTURE_CUBE_MAP_POSITIVE_X + face as u32);
-                assert_eq!((upload.level, upload.width, upload.height), (0, 64, 64));
-                assert_eq!((upload.internal_format, upload.format, upload.pixel_type),
-                    (GL_RGBA as i32, GL_RGBA, GL_UNSIGNED_BYTE));
-                assert_eq!(upload.byte_len, 64 * 64 * 4);
-            }
-            for (parameter, value) in [(GL_TEXTURE_MIN_FILTER, GL_LINEAR),
-                (GL_TEXTURE_MAG_FILTER, GL_LINEAR), (GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE),
-                (GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)] {
-                assert!(state.texture_parameters.contains(&(GL_TEXTURE_CUBE_MAP, parameter, value)));
-            }
-        }
-        drop(scene);
-        released();
-        assert_eq!(
-            GL.lock()
-                .unwrap()
-                .deleted
-                .iter()
-                .filter(|(kind, _)| *kind == b'B')
-                .count(),
-            1
-        );
-        for operation in ["display texture", "display upload"] {
-            reset(Some(operation));
-            assert!(unsafe { Scene::load(file.path()) }
-                .err()
-                .unwrap()
-                .contains("GLES error"));
-            released();
-        }
-        for face in 0..6 {
-            reset(None);
-            GL.lock().unwrap().fail_cube_face = Some(face);
-            assert!(unsafe { Scene::load(file.path()) }.err().unwrap()
-                .contains("upload display environment face"));
-            let uploads = GL.lock().unwrap().texture_uploads.iter()
-                .filter(|upload| upload.target != GL_TEXTURE_2D).count();
-            assert_eq!(uploads, face + 1, "stop at failing face {face}");
-            released();
-        }
-        reset(Some("zero display texture"));
-        assert!(unsafe { Scene::load(file.path()) }.err().unwrap()
-            .contains("did not allocate display environment"));
-        released();
-        reset(None);
-        let scene = unsafe { Scene::load_for_profile(file.path(), false) }.unwrap();
-        assert_original_resources_only(&scene);
-        assert_eq!(scene.gpu_bytes, 64 + 64 + g.len());
-        assert!(GL.lock().unwrap().texture_uploads.iter().all(|u| u.target == GL_TEXTURE_2D));
+        assert_eq!(scene.gpu_bytes, 32 + 64 + geometry.len());
         assert!(GL.lock().unwrap().uploads.contains(&[180, 180, 180, 255]));
         drop(scene);
         released();
-        let manifest = crate::texture_usage::tests::manifest(&m, &["uDisplayEnv"]);
-        std::fs::write(
-            sidecar_path(file.path(), "pipelines.json"),
-            serde_json::to_vec(&manifest).unwrap(),
-        )
-        .unwrap();
-        reset(None);
-        let scene = unsafe { Scene::load(file.path()) }.unwrap();
-        assert!(scene.textures.iter().all(|&id| id == 0));
-        assert_ne!(scene.display_environments[0], 0);
-        assert_eq!(scene.display_environments[0], scene.display_environments[1]);
-        assert_eq!(scene.gpu_bytes, crate::display_environment::CUBE_BYTES + g.len());
-        drop(scene);
-        released();
         pixels[64..66].copy_from_slice(&0x7e00u16.to_le_bytes());
-        std::fs::write(file.path(), pack(&m, &g, &a, &pixels)).unwrap();
+        std::fs::write(file.path(), pack(&meta, &geometry, &animation, &pixels)).unwrap();
         reset(None);
-        assert!(unsafe { Scene::load(file.path()) }
-            .err()
-            .unwrap()
-            .contains("non-finite half-float"));
+        assert!(unsafe { Scene::load(file.path()) }.err().unwrap().contains("non-finite half-float"));
         released();
     }
 
-    #[test]
-    fn display_environment_averages_linear_radiance_before_grade_at_bounded_size() {
-        let (m, _, _) = float_fixture();
-        let mut texture = m.textures[0].clone();
-        texture.width = 128;
-        texture.height = 64;
-        texture.format = pc::TexFormat::Rgba16f;
-        let mut data = Vec::new();
-        for x in 0..128 * 64 {
-            // Every output footprint has equal black and radiance=4 texels.
-            let value: u16 = if x % 2 == 0 { 0 } else { 0x4400 };
-            for _ in 0..3 {
-                data.extend(value.to_le_bytes());
-            }
-            data.extend(0x3c00u16.to_le_bytes());
-        }
-        // Later roughness mips are not part of the base environment average.
-        data.extend([0; 32]);
-        let (w, h, pixels) = display_environment_pixels(&texture, &data, 0.25, &m.post).unwrap();
-        assert_eq!((w, h, pixels.len()), (64, 32, 64 * 32 * 4));
-        let expected = pc::color::tone([0.5; 3], &m.post).map(|v| (v * 255.0 + 0.5) as u8);
-        assert!(pixels
-            .chunks_exact(4)
-            .all(|p| p == [expected[0], expected[1], expected[2], 255]));
-        assert!(display_environment_pixels(&texture, &data[..8], 1.0, &m.post).is_err());
-        texture.width = 1;
-        texture.height = 1;
-        texture.format = pc::TexFormat::Rgba8;
-        let (w, h, pixels) = display_environment_pixels(&texture, &[255; 4], 0.5, &m.post).unwrap();
-        assert_eq!((w, h), (1, 1));
-        assert_eq!(pixels, [expected[0], expected[1], expected[2], 255]);
-    }
-
-    #[test]
-    #[ignore = "set POCKET_ATLAS_VALIDATION_PACKS; compares CPU sampling, not GPU precision"]
-    fn display_cube_real_pack_reprojection_error() {
-        let dir = std::env::var("POCKET_ATLAS_VALIDATION_PACKS").expect("pack directory");
-        let mut count = 0;
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.extension().and_then(|s| s.to_str()) != Some("place") { continue; }
-            let bytes = std::fs::read(&path).unwrap();
-            let pack = parse(&bytes).unwrap();
-            let meta: pc::Meta = serde_json::from_slice(pack.section(pc::TAG_META).unwrap()).unwrap();
-            let Some(index) = meta.atmosphere.environment else { continue; };
-            let texture = &meta.textures[index as usize];
-            let data = pc::parts::slice(pack.section(pc::TAG_TEXTURES).unwrap(), &texture.data).unwrap();
-            let mut strengths = BTreeSet::new();
-            for material in &meta.materials {
-                if !matches!(material.kind, pc::Kind::Water | pc::Kind::Glass) { continue; }
-                let strength = material.env_strength * meta.atmosphere.environment_strength;
-                if !strengths.insert(strength.to_bits()) { continue; }
-                let (w, h, pixels) = display_environment_pixels(texture, data, strength, &meta.post).unwrap();
-                for size in [32, 64, 128] {
-                    let (rmse, max, samples) = crate::display_environment::tests::error_at_size(w, h, &pixels, size);
-                    std::println!("cube {} strength={strength} oct={w}x{h} cube=6x{size}x{size} samples={samples} RGB byte RMSE={rmse:.6} max={max:.6}", path.display());
-                    assert!(rmse.is_finite() && max.is_finite());
-                }
-                count += 1;
-            }
-        }
-        assert!(count > 0, "no eligible scene environment");
-    }    fn skin_recipe_fixture() -> (pc::Meta, Vec<u8>, Vec<f32>, pc::ipod::Recipes) {
+    fn skin_recipe_fixture() -> (pc::Meta, Vec<u8>, Vec<f32>, pc::ipod::Recipes) {
         let (mut meta, _, mut animation) = float_fixture();
         let mut geometry = Vec::new();
         for p in [[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]] {
@@ -5492,33 +5061,29 @@ mod tests {
         )
     }
     #[test]
-    fn derived_skin_lods_map_tail_gpu_ranges_and_reference_keeps_original_only() {
+    fn derived_skin_lods_map_tail_gpu_ranges() {
         let _lock = SERIAL.lock().unwrap();
         let (meta, geometry, animation, recipes) = skin_recipe_fixture();
         let tail = &recipes.skin_lods.as_ref().unwrap().draws[0].levels[0].indices;
         let file = PackFile::write(&window_pack(&meta, &geometry, &animation, &recipes));
-        for performance in [true, false] {
+        {
             reset(None);
             GL.lock().unwrap().capture_buffers = true;
-            let scene = unsafe { Scene::load_for_profile(file.path(), performance) }.unwrap();
+            let scene = unsafe { Scene::load(file.path()) }.unwrap();
             assert!(scene.meta.draws[0].lods.is_empty());
             assert_eq!(
                 scene.effective_lods(0).len(),
-                if performance { 1 } else { 0 }
+                1
             );
             let state = GL.lock().unwrap();
             let uploaded = &state.buffer_data[&scene.geometry];
             assert_eq!(
                 uploaded,
-                &geometry[..if performance {
-                    geometry.len()
-                } else {
-                    tail.offset as usize
-                }]
+                &geometry[..]
             );
             assert_eq!(
                 scene.gpu_index_offset(tail.offset, 3),
-                if performance { Some(tail.offset) } else { None }
+                Some(tail.offset)
             );
             drop(state);
             drop(scene);
@@ -5539,15 +5104,15 @@ mod tests {
                 _ => draw.draw = u32::MAX,
             }
             let bad = PackFile::write(&window_pack(&meta, &geometry, &animation, &bad));
-            for performance in [true, false] {
+            {
                 reset(None);
-                assert!(unsafe { Scene::load_for_profile(bad.path(), performance) }.is_err());
+                assert!(unsafe { Scene::load(bad.path()) }.is_err());
                 released();
             }
         }
     }
     #[test]
-    fn animation_display_recipe_binds_colors_preserves_reference_and_releases_failed_loads() {
+    fn animation_display_recipe_binds_colors_releases_failed_loads() {
         let _lock = SERIAL.lock().unwrap();
         let (meta, geometry, animation, mut recipes) = skin_recipe_fixture();
         let old = recipes.skin_lods.take().unwrap();
@@ -5594,16 +5159,16 @@ mod tests {
         let file = PackFile::write(&source);
         let (json, bytes) = color_sidecar(&source);
         write_colors(&file, &json, &bytes);
-        for performance in [true, false] {
+        {
             reset(None);
-            let scene = unsafe { Scene::load_for_profile(file.path(), performance) }.unwrap();
-            assert_eq!(scene.effective_lods(0).len(), usize::from(performance));
+            let scene = unsafe { Scene::load(file.path()) }.unwrap();
+            assert_eq!(scene.effective_lods(0).len(), 1);
             assert!(scene.meta.draws[0].lods.is_empty());
             assert_eq!(
                 scene
                     .gpu_index_offset(levels[0].indices.offset, 3)
                     .is_some(),
-                performance
+                true
             );
             drop(scene);
             released();
@@ -5634,9 +5199,6 @@ mod tests {
         std::fs::remove_file(color_path(file.path(), "json")).unwrap();
         reset(None);
         assert!(unsafe { Scene::load(file.path()) }.is_err());
-        released();
-        reset(None);
-        drop(unsafe { Scene::load_for_profile(file.path(), false) }.unwrap());
         released();
     }
     #[test]
@@ -5747,7 +5309,7 @@ mod tests {
         geometry.extend([0u8;6]);
         recipes.display_lods.as_mut().unwrap().draws[0]=display;
         pc::ipod::display_lods::validate_ranges(&meta,&geometry,&recipes).unwrap();
-        // The immutable source levels remain available to Reference. Only
+        // The immutable source levels remain in the pack. Only
         // the Optimized view drops a tier dominated by a lower-error recipe.
         meta.draws[0].index_count=18;
         meta.draws[0].lods=vec![pc::DrawLod{indices:source.clone(),index_count:12,error:0.02},pc::DrawLod{indices:source.clone(),index_count:6,error:0.08}];

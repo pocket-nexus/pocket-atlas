@@ -7,9 +7,9 @@ use serde::Deserialize;
 
 #[derive(Deserialize)]
 struct DrawProgram {
-    performance: [String; 2],
+    main: [String; 2],
     #[serde(default)]
-    performance_reflection: Option<[String; 2]>,
+    reflection: Option<[String; 2]>,
     #[serde(default)]
     wet_response: Option<[String; 2]>,
     #[serde(default)]
@@ -22,7 +22,7 @@ struct DrawProgram {
 #[derive(Deserialize)]
 struct Pipelines {
     draws: Vec<Option<DrawProgram>>,
-    sky_performance: [String; 2],
+    sky: [String; 2],
     texture_usage: Manifest,
 }
 
@@ -73,7 +73,7 @@ impl Plan {
         if manifest.version != 1
             || pipelines.draws.len() != meta.draws.len()
             || manifest.draws.len() != meta.draws.len()
-            || manifest.sky.program != pipelines.sky_performance
+            || manifest.sky.program != pipelines.sky
         {
             return Err("texture usage pipeline version, count or sky mismatch".into());
         }
@@ -97,7 +97,7 @@ impl Plan {
             let (Some(pipeline), Some(binding)) = (pipeline, binding) else {
                 return Err("texture usage mesh pipeline is missing".into());
             };
-            if binding.program != pipeline.performance || binding.reflection_program != pipeline.performance_reflection || binding.response_program != pipeline.wet_response || binding.water_response_program != pipeline.water_response {
+            if binding.program != pipeline.main || binding.reflection_program != pipeline.reflection || binding.response_program != pipeline.wet_response || binding.water_response_program != pipeline.water_response {
                 return Err("texture usage selected program mismatch".into());
             }
             validate_samplers(&binding.samplers)?;
@@ -281,7 +281,7 @@ pub(crate) mod tests {
                 if d.layout == pc::VertexLayout::Lights {
                     serde_json::Value::Null
                 } else {
-                    json!({"performance":["v","f"],"display_color":false})
+                    json!({"main":["v","f"],"display_color":false})
                 }
             })
             .collect();
@@ -296,7 +296,7 @@ pub(crate) mod tests {
                 }
             })
             .collect();
-        json!({"draws":draws,"sky_performance":["sv","sf"],"texture_usage":{
+        json!({"draws":draws,"sky":["sv","sf"],"texture_usage":{
             "version":1,"draws":bindings,"sky":{"program":["sv","sf"],"samplers":[]}
         }})
     }
@@ -364,7 +364,7 @@ pub(crate) mod tests {
         for (recipe_field, binding_field, response_sampler) in [
             ("wet_response", "response_program", "uWetResponse"),
             ("water_response", "water_response_program", "uWaterResponse"),
-            ("performance_reflection", "reflection_program", "uSource"),
+            ("reflection", "reflection_program", "uSource"),
         ] {
         let mut value = manifest(&meta, &["uAlbedo", response_sampler, "uPuddles", "uRipples", "uDisplayReflSharp"]);
         value["draws"][0][recipe_field] = json!(["wv", "response"]);

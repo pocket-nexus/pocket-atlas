@@ -4,8 +4,6 @@
 
 extern crate alloc;
 
-#[path = "../../src/display_environment.rs"]
-mod display_environment;
 #[path = "../../src/gl.rs"]
 mod gl;
 #[path = "../../src/geometry_usage.rs"]

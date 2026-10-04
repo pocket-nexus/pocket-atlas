@@ -27,25 +27,14 @@ extern "C" {
 
 #[derive(Deserialize)]
 struct Pipelines {
-    field: [String; 2],
-    field_vista: [String; 2],
     field_ldr: [String; 2],
     field_vista_ldr: [String; 2],
-    particles: [[String; 2]; 5],
     particles_ldr: [[String; 2]; 5],
     #[serde(default)]
     steam_coverage_ldr: Option<[String; 2]>,
-    haze: [String; 2],
     haze_ldr: [String; 2],
     haze_bloom_ldr: [String; 2],
-    prefilter: [String; 2],
-    prefilter_no_haze: [String; 2],
-    prefilter_points: [String; 2],
-    prefilter_points_no_haze: [String; 2],
     tiny_ldr: [String; 2],
-    down: [String; 2],
-    up: [String; 2],
-    up_final: [String; 2],
 }
 
 /// Cached, place-constant vista tables. The eye-dependent density is small
@@ -918,7 +907,7 @@ impl Drop for ParticleBuffer {
 }
 
 struct ParticlePass {
-    program: [Program; 2],
+    program: Program,
     buffer: ParticleBuffer,
 }
 
@@ -1036,10 +1025,7 @@ pub(crate) fn in_frustum(vp: Mat4, lo: Vec3, hi: Vec3) -> bool {
 
 struct PostTargets {
     haze: Option<Target>,
-    levels: Vec<Target>,
-    up: Vec<Target>,
-    spread: f32,
-    performance: bool,
+    bloom: Target,
 }
 
 fn display_bloom_threshold(post: &pc::Post, haze_weight: f32) -> [f32; 4] {
@@ -1067,118 +1053,36 @@ fn display_effect_scale(bloom_intensity: f32) -> f32 {
     1.0 + bloom_intensity.max(0.0)
 }
 
-#[derive(Clone, Copy)]
-struct BloomPlan {
-    divisor: i32,
-    levels: usize,
-    spread: f32,
+// One threshold target avoids dependent tile stores/loads on SGX535.
+// Field peaks keep twice the sampling density, bounded to an 80-pixel edge.
+fn bloom_divisor(w: i32, h: i32, has_fields: bool) -> i32 {
+    (if has_fields { 4 } else { 8 }).max((w.max(h) + 79) / 80)
 }
-
-impl BloomPlan {
-    fn new(w: i32, h: i32, has_fields: bool, performance: bool) -> Self {
-        if performance {
-            // On SGX535 each dependent FBO adds a tile store/load. Keep
-            // the threshold pass alone, at <=80 pixels on the longest
-            // edge; linear composite sampling provides the small halo.
-            // Light fields retain twice the sampling density so isolated
-            // peaks have a better chance of surviving the prefilter.
-            return Self {
-                divisor: (if has_fields { 4 } else { 8 }).max((w.max(h) + 79) / 80),
-                levels: 1,
-                spread: 1.0,
-            };
-        }
-        // Preserve isolated point-light peaks before any downsampling.
-        let divisor = if has_fields { 2 } else { 4 };
-        // A tiny final mip carries no useful spatial detail. At these
-        // sizes use one broad blur instead of two narrow blurs, retaining
-        // the thresholded support image and approximately the same halo.
-        let levels = if w.min(h) / (divisor * 4) < 24 { 2 } else { 3 };
-        Self {
-            divisor,
-            levels,
-            spread: if levels == 2 { 2.0 } else { 1.0 },
-        }
-    }
-
-    fn texel(&self, w: i32, h: i32, first_w: i32, first_h: i32) -> [f32; 4] {
-        if self.levels == 1 {
-            // Four quadrant samples cover the tiny output pixel. Their
-            // normalized shared kernel preserves uniform-source energy;
-            // bilinear composite sampling spreads the result continuously.
-            [0.25 / first_w as f32, 0.25 / first_h as f32, 1.0, 0.0]
-        } else {
-            [
-                1.0 / w as f32,
-                1.0 / h as f32,
-                if w as f32 / first_w as f32 <= 2.0 {
-                    0.5
-                } else {
-                    1.0
-                },
-                0.0,
-            ]
-        }
-    }
+fn bloom_texel(w: i32, h: i32) -> [f32; 4] {
+    [0.25 / w as f32, 0.25 / h as f32, 1.0, 0.0]
 }
-fn haze_divisor(w: i32, h: i32, performance: bool) -> i32 {
-    if performance { 8.max((w.max(h) + 39) / 40) } else { 4 }
+fn haze_divisor(w: i32, h: i32) -> i32 {
+    8.max((w.max(h) + 39) / 40)
 }
-
 impl PostTargets {
-    unsafe fn new(
-        w: i32,
-        h: i32,
-        haze: bool,
-        has_fields: bool,
-        performance: bool,
-    ) -> Result<Self, String> {
-        let plan = BloomPlan::new(w, h, has_fields, performance);
-        let size = |d: i32| ((w / d).max(1), (h / d).max(1));
-        let target = |d| {
-            let (w, h) = size(d);
-            Target::new(w, h, false)
-        };
-        let mut levels = Vec::with_capacity(plan.levels);
-        let mut up = Vec::with_capacity(plan.levels - 1);
-        for i in 0..plan.levels {
-            levels.push(target(plan.divisor << i)?);
-            if i + 1 < plan.levels {
-                up.push(target(plan.divisor << i)?);
-            }
-        }
+    unsafe fn new(w: i32, h: i32, haze: bool, has_fields: bool) -> Result<Self, String> {
+        let target = |d: i32| Target::new((w / d).max(1), (h / d).max(1), false);
         Ok(Self {
-            haze: if haze {
-                Some(target(haze_divisor(w, h, performance))?)
-            } else {
-                None
-            },
-            levels,
-            up,
-            spread: plan.spread,
-            performance,
+            haze: if haze { Some(target(haze_divisor(w, h))?) } else { None },
+            bloom: target(bloom_divisor(w, h, has_fields))?,
         })
     }
 }
 
 pub struct Effects {
-    /// Opt-in density/resolution budget. Change this before `resize`, even
-    /// if dimensions stay the same, to recreate the post targets. Dense
-    /// subpixel static fields and rain use stable display sampling; moving,
-    /// blinking and sparse fields, splashes, drips, steam and beacons remain.
-    pub performance: bool,
-    fields: [Option<[Program; 2]>; 2],
+    fields: [Option<Program>; 2],
     field_appearance: Option<FieldAppearance>,
     light_lod: Option<crate::light_lod::LightLod>,
     particles: [Option<ParticlePass>; 5],
     particle_grade: Option<ParticleGrade>,
-    haze: Option<[Program; 2]>,
+    haze: Option<Program>,
     haze_bloom: Option<Program>,
-    prefilter: [Program; 2],
     tiny: Program,
-    down: Program,
-    up: Program,
-    up_final: Program,
     vista: Option<VistaUniforms>,
     targets: PostTargets,
     triangle: u32,
@@ -1206,28 +1110,13 @@ impl Effects {
             let m = &scene.meta.materials[d.material as usize];
             let index = (m.fog && scene.meta.vista_haze.is_some()) as usize;
             if fields[index].is_none() {
-                fields[index] = Some([
-                    Program::new(
-                        root,
-                        if index == 1 {
-                            &cfg.field_vista
-                        } else {
-                            &cfg.field
-                        },
-                    )?,
-                    Program::new(
-                        root,
-                        if index == 1 {
-                            &cfg.field_vista_ldr
-                        } else {
-                            &cfg.field_ldr
-                        },
-                    )?,
-                ]);
+                fields[index] = Some(Program::new(root,
+                    if index == 1 { &cfg.field_vista_ldr } else { &cfg.field_ldr },
+                )?);
             }
         }
         if scene.light_page_buffer != 0 && fields.iter().flatten().any(|p| {
-            !p[1].attrs[1] || !p[1].attrs[3] || !p[1].attrs[6]
+            !p.attrs[1] || !p.attrs[3] || !p.attrs[6]
         }) {
             return Err("light pages require cached phase, appearance and density field attributes".into());
         }
@@ -1241,14 +1130,11 @@ impl Effects {
             if scene.meta.rain.active { 1.0 } else { 0.0 },
         );
         let mut particles: [Option<ParticlePass>; 5] = core::array::from_fn(|_| None);
-        let particle_programs = |i: usize| -> Result<[Program; 2], String> {
-            let display = if i == 3 && scene.performance && scene.ipod_recipes.steam_coverage.is_some() {
+        let particle_programs = |i: usize| -> Result<Program, String> {
+            let display = if (i == 3) && scene.ipod_recipes.steam_coverage.is_some() {
                 cfg.steam_coverage_ldr.as_ref().ok_or("steam coverage recipe requires its shader pipeline")?
             } else { &cfg.particles_ldr[i] };
-            Ok([
-                Program::new(root, &cfg.particles[i])?,
-                Program::new(root, display)?,
-            ])
+            Program::new(root, display)
         };
         let mut rng = Rng(0x2545_f491);
         let streak_corners = [[-0.5, 0.0], [0.5, 0.0], [0.5, 1.0], [-0.5, 1.0]];
@@ -1303,42 +1189,18 @@ impl Effects {
             });
         }
         let haze = if has_haze {
-            Some([
-                Program::new(root, &cfg.haze)?,
-                Program::new(root, &cfg.haze_ldr)?,
-            ])
+            Some(Program::new(root, &cfg.haze_ldr)?)
         } else {
             None
         };
-        let prefilter = [
-            Program::new(
-                root,
-                if has_fields {
-                    &cfg.prefilter_points_no_haze
-                } else {
-                    &cfg.prefilter_no_haze
-                },
-            )?,
-            Program::new(
-                root,
-                if has_fields {
-                    &cfg.prefilter_points
-                } else {
-                    &cfg.prefilter
-                },
-            )?,
-        ];
         let tiny = Program::new(root, &cfg.tiny_ldr)?;
         let haze_bloom = if has_haze {
             Some(Program::new(root, &cfg.haze_bloom_ldr)?)
         } else {
             None
         };
-        let down = Program::new(root, &cfg.down)?;
-        let up = Program::new(root, &cfg.up)?;
-        let up_final = Program::new(root, &cfg.up_final)?;
-        let targets = PostTargets::new(width, height, has_haze, has_fields, false)?;
-        let field_appearance = if scene.performance && fields.iter().flatten().any(|p| p[1].has("uFieldAppearance")) {
+        let targets = PostTargets::new(width, height, has_haze, has_fields)?;
+        let field_appearance = if fields.iter().flatten().any(|p| p.has("uFieldAppearance")) {
             Some(FieldAppearance::new(&scene.light_lod_source, &scene.meta.post)?)
         } else { None };
         let mut triangle = 0;
@@ -1347,7 +1209,6 @@ impl Effects {
         let mut range = [1.0, 1.0];
         glGetFloatv(0x846d, range.as_mut_ptr()); // GL_ALIASED_POINT_SIZE_RANGE
         let result = Self {
-            performance: false,
             fields,
             field_appearance,
             light_lod: None,
@@ -1358,11 +1219,7 @@ impl Effects {
             particles,
             haze,
             haze_bloom,
-            prefilter,
             tiny,
-            down,
-            up,
-            up_final,
             vista: VistaUniforms::new(scene),
             targets,
             triangle,
@@ -1385,18 +1242,13 @@ impl Effects {
         if width <= 0 || height <= 0 {
             return Err("effect target dimensions".into());
         }
-        if !self.performance {
-            self.light_lod = None;
-        }
         if (self.width, self.height) != (width, height)
-            || self.targets.performance != self.performance
         {
             self.targets = PostTargets::new(
                 width,
                 height,
                 self.haze.is_some(),
                 self.has_fields,
-                self.performance,
             )?;
             self.width = width;
             self.height = height;
@@ -1412,7 +1264,7 @@ impl Effects {
         self.field_appearance.as_ref().map_or(0, |a| a.gpu_bytes)
     }
 
-    /// Draw into the bound main HDR framebuffer after opaque/transparent
+    /// Draw into the bound main display framebuffer after opaque/transparent
     /// meshes. Depth tests occlude particles while alpha retains eye distance.
     pub unsafe fn draw_geometry(
         &mut self,
@@ -1431,22 +1283,15 @@ impl Effects {
         glDepthMask(0);
         glDisable(GL_CULL_FACE);
         glDisable(0x8037); // GL_POLYGON_OFFSET_FILL
-                           // SGX535 stores reversible HDR in RGBA8. The shared shader adapter
-                           // composites in linear radiance with framebuffer fetch, retaining
-                           // the destination's depth alpha; hardware blending must stay off.
-        if self.performance {
-            glEnable(GL_BLEND);
-            glBlendFuncSeparate(GL_ONE, GL_ONE, 0, GL_ONE);
-        } else {
-            glDisable(GL_BLEND);
-        }
+        // Add display-space particle light while preserving depth in alpha.
+        glEnable(GL_BLEND);
+        glBlendFuncSeparate(GL_ONE, GL_ONE, 0, GL_ONE);
         let result = (|| -> Result<EffectsStats, String> {
             let black = crate::gpu::tone_black(&scene.meta.post);
             let tan_half = libm::tanf(fov_degrees * core::f32::consts::PI / 360.0);
-            let use_lod = self.performance
-                && (!scene.light_lod_source.is_empty() || scene.light_page_buffer != 0)
-                && self.fields.iter().flatten().all(|p| p[1].attrs[3]);
-            let paged = self.performance && scene.light_page_buffer != 0;
+            let use_lod = (!scene.light_lod_source.is_empty() || scene.light_page_buffer != 0)
+                && self.fields.iter().flatten().all(|p| p.attrs[3]);
+            let paged = scene.light_page_buffer != 0;
             if use_lod {
                 if self.light_lod.is_none() {
                     self.light_lod =
@@ -1487,10 +1332,10 @@ impl Effects {
                     continue;
                 };
                 let field_kind = (material.fog && self.vista.is_some()) as usize;
-                let program = &self.fields[field_kind].as_ref().unwrap()[self.performance as usize];
+                let program = self.fields[field_kind].as_ref().unwrap();
                 // Older shader tables still use the original sine/angle
                 // contract. Only the cached-phase attribute changes it.
-                let phase_cached = self.performance && program.attrs[1];
+                let phase_cached = program.attrs[1];
                 let lod_draw = if use_lod {
                     Some(
                         if paged { self.light_lod.as_ref().unwrap().page(entry) }
@@ -1521,7 +1366,7 @@ impl Effects {
                 // quantized vertex page. Avoid resending both 17-knot Vista tables
                 // for every static field chunk.
                 if !field_globals[field_kind] {
-                    if self.performance {
+                    {
                         program.tex("uAtlasLut", display_lut, 7);
                         program.v("uAtlasBlack", &black);
                         if program.has("uFieldAppearance") {
@@ -1655,7 +1500,7 @@ impl Effects {
                 wind,
                 pixel: 2.0 * tan_half / self.height as f32,
                 dry: &scene.meta.rain.dry_boxes,
-                rain_divisor: if self.performance { 3 } else { 1 },
+                rain_divisor: 3,
             };
             let mut lights = if rain_enabled && self.particles[..4].iter().any(Option::is_some) {
                 fog_lights(scene, time)
@@ -1697,9 +1542,9 @@ impl Effects {
                 if pass.buffer.count == 0 {
                     continue;
                 }
-                let p = &pass.program[self.performance as usize];
+                let p = &pass.program;
                 p.bind();
-                if self.performance {
+                {
                     pass.buffer.grade(
                         k,
                         &view,
@@ -1820,10 +1665,10 @@ impl Effects {
             );
         let bloom = bloom_enabled && scene.meta.post.bloom_intensity > 0.0;
         if let (true, Some(programs), Some(haze)) = (visible_haze, &self.haze, &self.targets.haze) {
-            let program = &programs[self.performance as usize];
+            let program = programs;
             haze.bind();
             program.bind();
-            if self.performance {
+            {
                 program.tex("uAtlasLut", display_lut, 7);
                 program.v("uAtlasBlack", &crate::gpu::tone_black(&scene.meta.post));
             }
@@ -1883,44 +1728,29 @@ impl Effects {
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
             output.haze = haze.texture;
             output.haze_weight = 1.0;
-            if self.performance {
+            {
                 output.bloom = haze.texture;
                 output.bloom_weight = 1.0;
             }
         }
         if bloom {
-            let levels = &self.targets.levels;
-            levels[0].bind();
-            let combine = self.targets.performance && output.haze_weight > 0.0;
-            let prefilter = if self.targets.performance {
+            let bloom = &self.targets.bloom;
+            bloom.bind();
+            let combine = output.haze_weight > 0.0;
+            let prefilter = {
                 if combine { self.haze_bloom.as_ref().unwrap() } else { &self.tiny }
-            } else {
-                &self.prefilter[(output.haze_weight > 0.0) as usize]
             };
             prefilter.bind();
             prefilter.tex("uScene", scene_texture, 0);
             prefilter.tex("uHazeTex", output.haze, 1);
             prefilter.v(
                 "uTexel",
-                &BloomPlan::new(
-                    self.width,
-                    self.height,
-                    self.has_fields,
-                    self.targets.performance,
-                )
-                .texel(self.width, self.height, levels[0].w, levels[0].h),
+                &bloom_texel(bloom.w, bloom.h),
             );
             prefilter.v(
                 "uThreshold",
-                &if self.targets.performance {
+                &{
                     display_bloom_threshold(&scene.meta.post, output.haze_weight)
-                } else {
-                    [
-                        scene.meta.post.bloom_threshold,
-                        scene.meta.post.bloom_smoothing,
-                        output.haze_weight,
-                        0.0,
-                    ]
                 },
             );
             if combine {
@@ -1930,38 +1760,7 @@ impl Effects {
                 ]);
             }
             self.fullscreen();
-            let spread = self.targets.spread;
-            for i in 1..levels.len() {
-                let src = &levels[i - 1];
-                levels[i].bind();
-                self.down.bind();
-                self.down.tex("uSource", src.texture, 0);
-                self.down.v(
-                    "uTexel",
-                    &[spread / src.w as f32, spread / src.h as f32, 0.0, 0.0],
-                );
-                self.fullscreen();
-            }
-            for i in (0..self.targets.up.len()).rev() {
-                let src = if i + 1 == self.targets.up.len() {
-                    &levels[i + 1]
-                } else {
-                    &self.targets.up[i + 1]
-                };
-                self.targets.up[i].bind();
-                // Only the public final bloom texture uses the main HDR
-                // codec; all private filter inputs/outputs remain RGBM8.
-                let up = if i == 0 { &self.up_final } else { &self.up };
-                up.bind();
-                up.tex("uSource", src.texture, 0);
-                up.tex("uSupport", levels[i].texture, 1);
-                up.v(
-                    "uTexel",
-                    &[spread / src.w as f32, spread / src.h as f32, 0.7, 0.0],
-                );
-                self.fullscreen();
-            }
-            output.bloom = self.targets.up.first().unwrap_or(&levels[0]).texture;
+            output.bloom = bloom.texture;
             output.bloom_weight = if combine {
                 display_effect_scale(scene.meta.post.bloom_intensity)
             } else { scene.meta.post.bloom_intensity };
@@ -1986,13 +1785,12 @@ mod tests {
     #[test]
     fn display_haze_keeps_its_own_low_frequency_target() {
         for (w, h) in [(480, 320), (640, 426), (960, 640)] {
-            let d = haze_divisor(w, h, true);
-            let bloom = BloomPlan::new(w, h, false, true);
+            let d = haze_divisor(w, h);
+            let bloom = bloom_divisor(w, h, false);
             assert_eq!(w / d, 40);
             assert_eq!(h / d, 26);
-            assert_eq!(w / bloom.divisor, if w == 480 { 60 } else { 80 });
-            assert!(2 * (w / d) * (h / d) <= (w / bloom.divisor) * (h / bloom.divisor));
-            assert_eq!(haze_divisor(w, h, false), 4);
+            assert_eq!(w / bloom, if w == 480 { 60 } else { 80 });
+            assert!(2 * (w / d) * (h / d) <= (w / bloom) * (h / bloom));
         }
     }
 
@@ -2715,24 +2513,7 @@ mod tests {
         assert!(last_center.distance(center) + last_radius <= radius);
     }
 
-    #[test]
-    fn bloom_keeps_peak_prefilter_and_omits_only_tiny_last_mips() {
-        for (w, h, fields, divisor, levels) in [
-            (320, 213, false, 4, 2),
-            (480, 320, false, 4, 2),
-            (640, 426, false, 4, 3),
-            (320, 213, true, 2, 3),
-            (1, 1, true, 2, 2),
-        ] {
-            let plan = BloomPlan::new(w, h, fields, false);
-            assert_eq!((plan.divisor, plan.levels), (divisor, levels));
-            assert_eq!(plan.spread, if levels == 2 { 2.0 } else { 1.0 });
-            for level in 0..levels {
-                assert!((w / (plan.divisor << level)).max(1) >= 1);
-                assert!((h / (plan.divisor << level)).max(1) >= 1);
-            }
-        }
-    }
+
 
     #[test]
     fn performance_bloom_has_one_target_and_a_resolution_bounded_footprint() {
@@ -2745,12 +2526,11 @@ mod tests {
             (640, 960),
         ] {
             for fields in [false, true] {
-                let plan = BloomPlan::new(w, h, fields, true);
-                let bw = (w / plan.divisor).max(1);
-                let bh = (h / plan.divisor).max(1);
-                assert_eq!(plan.levels, 1); // no downsample/upsample targets or passes
+                let divisor = bloom_divisor(w, h, fields);
+                let bw = (w / divisor).max(1);
+                let bh = (h / divisor).max(1);
                 assert!(bw <= 80 && bh <= 80);
-                let texel = plan.texel(w, h, bw, bh);
+                let texel = bloom_texel(bw, bh);
                 assert!(texel.iter().all(|v| v.is_finite()));
                 // The four taps stay at output-pixel quadrant centres,
                 // including portrait and nonintegral scaling factors.
@@ -2759,8 +2539,8 @@ mod tests {
                 assert_eq!(texel[2], 1.0);
             }
         }
-        assert_eq!(320 / BloomPlan::new(320, 213, false, true).divisor, 40);
-        assert_eq!(320 / BloomPlan::new(320, 213, true, true).divisor, 80);
+        assert_eq!(320 / bloom_divisor(320, 213, false), 40);
+        assert_eq!(320 / bloom_divisor(320, 213, true), 80);
     }
 
     #[test]

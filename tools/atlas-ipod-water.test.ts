@@ -17,7 +17,7 @@ test("only opaque depth-writing water separates shading and compiles the coverag
   const compileResponse = () => { calls++; return response; };
   const selected = waterPrograms(scene, draw, original, compileResponse);
   expect(selected.water_response).toBe(response);
-  expect(selected.performance[1]).toStartWith("water_resolve_f-");
+  expect(selected.main[1]).toStartWith("water_resolve_f-");
   for (const material of [
     { kind: "water", blend: "alpha", depth_write: true },
     { kind: "water", blend: "additive", depth_write: true },
@@ -26,7 +26,7 @@ test("only opaque depth-writing water separates shading and compiles the coverag
   ]) {
     const s = { ...scene, materials: [material] };
     expect(usesWaterResponse(s, draw)).toBe(false);
-    expect(waterPrograms(s, draw, original, compileResponse)).toEqual({ performance: original, water_response: null });
+    expect(waterPrograms(s, draw, original, compileResponse)).toEqual({ main: original, water_response: null });
   }
   expect(calls).toBe(1);
 });
@@ -54,7 +54,7 @@ test("water resolve links static, rigid and skinned transforms while sampling on
     expect(defines.SCREEN).toBe(1); expect(defines.LDR_COLOR).toBe(1);
     expect(defines).not.toHaveProperty("WAVES");
     const result = waterPrograms(scene, draw, ["water-v", "water-f"], () => ["water-v", "coverage-f"]);
-    const vertex = readFileSync(resolve(import.meta.dir, `../.pocket-build/ipod/assets/shaders/${result.performance[0]}.glsl`), "utf8");
+    const vertex = readFileSync(resolve(import.meta.dir, `../.pocket-build/ipod/assets/shaders/${result.main[0]}.glsl`), "utf8");
     expect(vertex).toContain("vScreen"); expect(vertex).toContain("vDepth");
     expect(vertex.includes("uBones")).toBe(draw.layout === "skinned");
     const vert = join(directory, `water-${i}.vert`), frag = join(directory, `water-${i}.frag`);

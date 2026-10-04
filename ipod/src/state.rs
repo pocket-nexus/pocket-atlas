@@ -140,16 +140,11 @@ impl Store {
         }
         let mut state: UserState =
             serde_json::from_slice(&bytes[..length]).map_err(|_| "invalid user state JSON")?;
-        // Version 1 launched in full Retina by default. Its schema did not
-        // distinguish that default from a choice, so migrate only that quality
-        // value once, leaving the user's complete view and other settings intact.
-        if state.version == 1 {
-            state.version = VERSION;
-            if state.quality == 1 {
-                state.quality = 0;
-            }
-        }
+        // Earlier checkpoints may contain the removed comparison setting.
+        // Keep the complete saved view; only normalize that obsolete choice.
+        if state.version == 1 { state.version = VERSION; }
         state.validate()?;
+        state.quality = 0;
         Ok(Some(state))
     }
 

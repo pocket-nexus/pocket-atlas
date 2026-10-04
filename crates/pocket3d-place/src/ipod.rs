@@ -51,7 +51,7 @@ pub struct Recipes {
 }
 
 /// Source-equivalent SGX light vertices, grouped only by field shader inputs.
-/// Ranges address IPLF, never the original GEOM used by Reference.
+/// Ranges address IPLF, never the original source GEOM.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LightPages {
@@ -76,7 +76,7 @@ pub struct LightPageField {
 pub const TAG_LIGHT_PAGES: [u8; 4] = *b"IPLF";
 
 /// SGX diffuse-only index tiers. Tangents are not consumed by this path;
-/// source vertices and original Reference LODs remain unchanged.
+/// source vertices and original source LODs remain unchanged.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DisplayLods {
@@ -94,7 +94,7 @@ pub struct DisplayLodDraw {
 
 /// Explicitly approximate animation-aware display LODs. Surface measurements
 /// sample the complete authored loop; they are not a continuous Hausdorff or
-/// pixel guarantee. Original vertices, weights and Reference remain unchanged.
+/// pixel guarantee. Original vertices, weights and source topology remain unchanged.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AnimatedDisplayLods {
@@ -124,7 +124,7 @@ pub struct AnimatedLodMeasurement {
     pub dense_point_samples: u64,
 }
 
-/// Optional SGX index-only simplification. Original source/Reference topology
+/// Optional SGX index-only simplification. Original source topology
 /// and every vertex attribute remain unchanged. Ranges address the GEOM tail.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -158,7 +158,7 @@ pub struct WindowRayParams {
 }
 
 /// Display-referred environment recipe. Original ENV/TEXD remains the source
-/// for Reference. All listed Water/Glass materials use this exact strength.
+/// for validation. All listed Water/Glass materials use this exact strength.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DisplayCube {

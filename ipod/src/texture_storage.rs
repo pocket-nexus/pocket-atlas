@@ -28,7 +28,7 @@ pub fn pack_opaque_color(texture: &Texture, pixels: &mut Vec<u8>) -> bool {
 }
 
 /// Recipes describe target storage, never shared material semantics. Reject
-/// malformed references before creating GL names, even in Reference mode.
+/// malformed references before creating GL names.
 pub fn validate_recipes(meta: &pc::Meta, recipes: &pc::ipod::Recipes) -> Result<(), String> {
     if let Some(index) = recipes.steam_coverage {
         let t = meta
@@ -137,6 +137,10 @@ pub fn validate_pvrtc_payload(
 pub fn validate_display_cubes(meta: &pc::Meta, recipes: &pc::ipod::Recipes) -> Result<(), String> {
     use pc::ipod::display_environment::{post_hash, CUBE_BYTES, FACE_SIZE};
     if recipes.display_cubes.is_empty() {
+        if meta.atmosphere.environment.is_some() && meta.materials.iter().any(|m|
+            matches!(m.kind, pc::Kind::Water | pc::Kind::Glass)) {
+            return Err("display cube recipe missing; recook the iPod pack".into());
+        }
         return Ok(());
     }
     let environment = meta
@@ -355,8 +359,8 @@ pub(crate) mod tests {
                 "cube recipe fault {fault}"
             );
         }
-        // Recipe-free PLIP remains valid, with the shared startup fallback.
-        validate_display_cubes(&meta, &pc::ipod::Recipes::default()).unwrap();
+        // Eligible materials require compiler output; no on-device rebake.
+        assert!(validate_display_cubes(&meta, &pc::ipod::Recipes::default()).is_err());
         let mut rgba = meta.clone();
         rgba.textures[1].format = TexFormat::Rgba8;
         validate_display_cubes(&rgba, &recipes).unwrap();

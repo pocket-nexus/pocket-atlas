@@ -56,20 +56,19 @@ struct Texture {
 struct Pipelines {
     globe: [String; 2],
     post: [String; 2],
-    post_performance: [String; 2],
+    post_bounded: [String; 2],
     background: [String; 2],
     marker: [String; 2],
     blit: [String; 2],
 }
 pub struct Globe {
     pub profile: bool,
-    pub performance: bool,
     /// Background, Earth surface, place markers, and final grade/composite.
     pub timings: [f32; 4],
     pub draws: u32,
     pub triangles: u32,
     pub sphere_step: u32,
-    /// Grade, then display blit. The complete direct path has no blit pass.
+    /// Grade, then display blit.
     pub post_steps_ms: [f32; 2],
     _objects: Objects,
     marker: Program,
@@ -78,14 +77,11 @@ pub struct Globe {
     meta: Meta,
     program: Program,
     post: Program,
-    post_names: [[String; 2]; 2],
-    root: String,
-    bounded_background: bool,
     blit: Program,
     background: Program,
     textures: BTreeMap<String, u32>,
     target: Target,
-    grade_target: Option<Target>,
+    grade_target: Target,
     vb: u32,
     ib: u32,
     tri: u32,
@@ -100,7 +96,7 @@ struct SphereLevel {
     offset: usize,
 }
 impl Globe {
-    pub unsafe fn new(root: &str, width: i32, performance: bool) -> Result<Self, String> {
+    pub unsafe fn new(root: &str, width: i32) -> Result<Self, String> {
         let (width, height) = target_size(width)?;
         let meta: Meta = serde_json::from_slice(&read(&format!("{root}/globe/globe.json"))?)
             .map_err(|e| format!("globe metadata {e}"))?;
@@ -227,14 +223,13 @@ impl Globe {
         let lut = crate::gpu::tone_lut(&grade);
         objects.textures.push(lut);
         let (white, grain) = crate::gpu::grade_textures(&mut objects, 0.3);
-        let post_names = [pipelines.post, pipelines.post_performance];
+        let post_names = [pipelines.post, pipelines.post_bounded];
         let post = Program::new(
             root,
-            &post_names[usize::from(performance && bounded_background)],
+            &post_names[usize::from(bounded_background)],
         )?;
         Ok(Self {
             profile: false,
-            performance,
             timings: [0.0; 4],
             draws: 0,
             triangles: 0,
@@ -247,18 +242,11 @@ impl Globe {
             meta,
             program: Program::new(root, &pipelines.globe)?,
             post,
-            post_names,
-            root: root.into(),
-            bounded_background,
             blit: Program::new(root, &pipelines.blit)?,
             background: Program::new(root, &pipelines.background)?,
             textures,
             target: Target::new(width, height, true)?,
-            grade_target: if performance {
-                Some(Target::new(width, height, false)?)
-            } else {
-                None
-            },
+            grade_target: Target::new(width, height, false)?,
             vb,
             ib,
             tri,
@@ -271,38 +259,14 @@ impl Globe {
     pub fn dimensions(&self) -> (i32, i32) {
         (self.target.w, self.target.h)
     }
-    pub unsafe fn resize(&mut self, width: i32, performance: bool) -> Result<(), String> {
+    pub unsafe fn resize(&mut self, width: i32) -> Result<(), String> {
         let (width, height) = target_size(width)?;
         // Keep the usable target if allocation fails. The App latches failures
         // until an explicit retry, just as it does for a place renderer.
-        let target = if self.dimensions() != (width, height) {
-            Some(Target::new(width, height, true)?)
-        } else {
-            None
-        };
-        let grade_target = if performance {
-            Some(Target::new(width, height, false)?)
-        } else {
-            None
-        };
-        let post = if self.performance != performance {
-            Some(Program::new(
-                &self.root,
-                &self.post_names[usize::from(performance && self.bounded_background)],
-            )?)
-        } else {
-            None
-        };
-        if let Some(target) = target {
-            self.target = target;
-        }
+        let target = Target::new(width, height, true)?;
+        let grade_target = Target::new(width, height, false)?;
+        self.target = target;
         self.grade_target = grade_target;
-        if let Some(post) = post {
-            // A direct full-quality grade may still be the current program.
-            glUseProgram(0);
-            self.post = post;
-        }
-        self.performance = performance;
         Ok(())
     }
     unsafe fn triangle(&self) {
@@ -398,7 +362,7 @@ impl Globe {
         }
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(GL_LEQUAL);
-        if self.performance {
+        {
             // The indexed sphere is counter-clockwise from outside. GL_BACK
             // is the context's default cull mode and is never changed here.
             glFrontFace(0x0901);
@@ -415,7 +379,7 @@ impl Globe {
         glVertexAttribPointer(3, 2, GL_FLOAT, 0, 20, 12usize as _);
         let radius = m.framing.radius_px
             * (self.target.w as f32 / m.framing.width).max(self.target.h as f32 / m.framing.height);
-        let level = &self.sphere_levels[sphere_level(radius, m.camera.distance, self.performance)];
+        let level = &self.sphere_levels[sphere_level(radius, m.camera.distance)];
         self.sphere_step = level.step;
         glDrawElements(
             GL_TRIANGLES,
@@ -483,11 +447,7 @@ impl Globe {
         }
         stamp = finish_pass(self.profile, &mut timings, 2, stamp);
         glDisable(GL_DEPTH_TEST);
-        if let Some(target) = &self.grade_target {
-            target.bind();
-        } else {
-            composite_target(fbo, w, h);
-        }
+        self.grade_target.bind();
         let p = &self.post;
         p.bind();
         p.tex("uScene", self.target.texture, 0);
@@ -508,19 +468,15 @@ impl Globe {
         }
         let grade_done = crate::atlas_seconds();
         self.post_steps_ms[0] = ((grade_done - stamp) * 1000.0) as f32;
-        if let Some(target) = &self.grade_target {
-            composite_target(fbo, w, h);
-            self.blit.bind();
-            self.blit.tex("uSource", target.texture, 0);
-            self.triangle();
-            self.draws += 1;
-            self.triangles += 1;
-        }
+        composite_target(fbo, w, h);
+        self.blit.bind();
+        self.blit.tex("uSource", self.grade_target.texture, 0);
+        self.triangle();
+        self.draws += 1;
+        self.triangles += 1;
         glViewport(0, 0, w, h);
         let post_done = finish_pass(self.profile, &mut timings, 3, stamp);
-        if self.grade_target.is_some() {
-            self.post_steps_ms[1] = ((post_done - grade_done) * 1000.0) as f32;
-        }
+        self.post_steps_ms[1] = ((post_done - grade_done) * 1000.0) as f32;
         self.timings = timings;
     }
 }
@@ -577,8 +533,8 @@ fn silhouette_error(radius_px: f32, distance: f32, step: u32) -> f32 {
     (radius_px as f64 * (1.0 - ratio)) as f32
 }
 
-fn sphere_level(radius_px: f32, distance: f32, performance: bool) -> usize {
-    if performance {
+fn sphere_level(radius_px: f32, distance: f32) -> usize {
+    {
         for (index, step) in [(2, 4), (1, 2)] {
             if silhouette_error(radius_px, distance, step) <= 0.25 {
                 return index;
@@ -641,17 +597,17 @@ mod tests {
         for width in [160, 192, 256, 320, 400, 480, 640, 960] {
             let (_, height) = target_size(width).unwrap();
             let radius = 201.28 * (width as f32 / 960.0).max(height as f32 / 544.0);
-            let level = sphere_level(radius, distance, true);
+            let level = sphere_level(radius, distance);
             let step = [1, 2, 4][level];
             assert!(silhouette_error(radius, distance, step) <= 0.25);
-            assert_eq!(sphere_level(radius, distance, false), 0);
+
             if level < 2 {
                 assert!(silhouette_error(radius, distance, step * 2) > 0.25);
             }
         }
-        assert_eq!(sphere_level(201.28 / 3.0, distance, true), 1);
-        assert_eq!(sphere_level(201.28 / 6.0, distance, true), 1);
-        assert_eq!(sphere_level(20.0, distance, true), 2);
+        assert_eq!(sphere_level(201.28 / 3.0, distance), 1);
+        assert_eq!(sphere_level(201.28 / 6.0, distance), 1);
+        assert_eq!(sphere_level(20.0, distance), 2);
     }
 
     #[test]

@@ -407,9 +407,9 @@ impl Topology {
     }
 }
 
-/// Full-profile and optimized loaders both verify this optional recipe. The
-/// caller still performs ordinary META/GEOM/ANIM validation. Reference uses
-/// only the original draw ranges, regardless of the recipe being present.
+/// Verify this optional recipe before runtime selection. The
+/// caller still performs ordinary META/GEOM/ANIM validation. Source proofs use
+/// the original draw ranges, regardless of the recipe being present.
 pub fn validate(
     meta: &Meta,
     geometry: &[u8],
