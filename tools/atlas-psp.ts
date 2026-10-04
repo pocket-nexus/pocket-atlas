@@ -3,7 +3,10 @@
 import { $ } from "bun";
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { resolve, join } from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { guardDeviceCommand } from "../vendor/pocketjs/tools/device-lease.ts";
+import { DeviceEvidence, fileSha256 } from "../vendor/pocketjs/tools/device-evidence.ts";
+import { assertFrameSample, compileIdentity } from "./device-validation";
 import {
   readStatus,
   shotCount,
@@ -18,6 +21,7 @@ import { resolvePspBuildToolchain } from "../vendor/pocketjs/tools/psp-toolchain
 const root = resolve(import.meta.dir, "..");
 const args = Bun.argv.slice(2);
 const command = args[0] ?? "build";
+const lease = command === "cook" ? undefined : await guardDeviceCommand(command === "serve" ? "psp:usb:transport" : "psp:usb");
 const opt = (key: string, fallback: string) => {
   const at = args.indexOf(key);
   return at < 0 ? fallback : (args[at + 1] ?? fallback);
@@ -36,8 +40,10 @@ const statusPath = `${share}/status.json`;
 const controlPath = `${share}/control.txt`;
 const receiptPath = `${share}/pocket-atlas.build.json`;
 const sha = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex");
-function identity(): Identity {
+function identity(): Identity & { place: string } {
   const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+  if (typeof receipt.place !== "string" || !/^[a-z0-9-]+$/.test(receipt.place))
+    throw new Error("Invalid PSP build receipt place");
   if (sha(`${share}/scene.place`) !== receipt.packSha256 || sha(`${share}/pocket-atlas.prx`) !== receipt.prxSha256)
     throw new Error("PSP share differs from its build receipt; build the intended place again");
   return receipt;
@@ -50,6 +56,7 @@ async function waitStatus(
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown;
   while (Date.now() < deadline) {
+    lease?.assertHeld();
     // The device truncates and writes status in one operation; retry partial reads.
     try {
       const s = readStatus(statusPath, expected);
@@ -82,29 +89,35 @@ async function build() {
   const pocketjsRevision = (await $`git -C ${root}/vendor/pocketjs rev-parse HEAD`.text()).trim();
   source.update(pocketjsRevision).update(JSON.stringify(tc.manifest));
   const build = source.digest("hex").slice(0, 16);
+  const runtimeBuild = randomUUID().replaceAll("-", "");
   await $`${tc.rustup} run ${tc.manifest.rust.toolchain} cargo psp --release --locked`
     .cwd(`${root}/psp`)
     .env({
       ...tc.environment,
       RUST_PSP_ABORT_ONLY: "1",
+      ATLAS_BUILD_ID: runtimeBuild,
       RUST_PSP_TARGET: `${root}/vendor/pocketjs/hosts/psp/targets/mipsel-sony-psp.json`,
-      ATLAS_BUILD_ID: build,
+      ATLAS_SOURCE_ID: build,
     });
   const out = `${root}/psp/target/mipsel-sony-psp/release`;
+  lease?.assertHeld();
   cpSync(`${out}/pocket-atlas-psp.prx`, `${share}/pocket-atlas.prx`);
   cpSync(`${out}/EBOOT.PBP`, `${share}/EBOOT.PBP`);
   cpSync(pack, `${share}/scene.place`);
   const receipt = {
-    build, place, pocketjsRevision, packVersion: PSP_PACK_VERSION, packHash: packHash(bytes),
+    build, runtimeBuild, place, pocketjsRevision, packVersion: PSP_PACK_VERSION, packHash: packHash(bytes),
     packBytes: bytes.length, packSha256: sha(pack), prxSha256: sha(`${share}/pocket-atlas.prx`),
     ebootSha256: sha(`${share}/EBOOT.PBP`),
   };
   writeFileSync(receiptPath, JSON.stringify(receipt, null, 2) + "\n");
   mkdirSync(`${root}/.pocket-build/validation/psp`, { recursive: true });
   cpSync(receiptPath, `${root}/.pocket-build/validation/psp/build.json`);
+  // Retain the standard evidence receipt path alongside the detailed package receipt.
+  cpSync(receiptPath, `${share}/build.json`);
   console.log(`PSP release: ${share}`);
 }
 async function shell(text: string) {
+  lease?.assertHeld();
   const p = Bun.spawn(["pspsh", "-p", port, "-e", text], {
     stdout: "pipe",
     stderr: "pipe",
@@ -121,7 +134,8 @@ async function shell(text: string) {
     throw new Error(`pspsh failed: ${text}`);
 }
 if (command === "cook") {
-  await $`cargo run --release --locked -p pocket3d-place-cook -- --target psp --in ${root}/.pocket-build/places/${place} --out ${pack}`.cwd(
+  const overrides = ["--tex", "--cell"].flatMap(flag => args.includes(flag) ? [flag, opt(flag, "")] : []);
+  await $`cargo run --release --locked -p pocket3d-place-cook -- --target psp --in ${root}/.pocket-build/places/${place} --out ${pack} ${overrides}`.cwd(
     root,
   );
 } else if (command === "build") await build();
@@ -157,6 +171,14 @@ else if (command === "serve") {
   const live = args.includes("--live");
   const expected = identity();
   await waitStatus(() => true, 2000, expected);
+  const observedIdentity = (s: Status) => ({ device: "psp:usb", runtimeBuild: s.runtimeBuild, assets: { pack: s.packSha256 } });
+  const evidence = new DeviceEvidence<object>({ device: "psp:usb", runtimeBuild: expected.runtimeBuild, assets: { pack: expected.packSha256 } });
+  const measuredPack = resolve(root, `.pocket-build/places/${expected.place}/${expected.place}.psp.place`);
+  if (args.includes("--place") && expected.place !== place) throw new Error("Another PSP place is running");
+  const compilation = compileIdentity(measuredPack, "psp", opt("--compile", measuredPack.replace(/\.place$/, ".compile.json")));
+  if (compilation.packSha256 !== expected.packSha256) throw new Error("PSP build uses a different pack from this compilation");
+  const budgetMs = compilation.budgetMs;
+  let completed = false;
   try {
     const count = shotCount(readFileSync(`${share}/scene.place`));
     for (let shot = 0; shot < count; shot++) {
@@ -177,7 +199,9 @@ else if (command === "serve") {
             (live || Math.abs(s.time - time) < 0.001),
           30000, expected,
         );
+        assertFrameSample(sample, last, ["workMs", "maxWorkMs", "fps", "draws", "triangles"]);
         samples.push(sample);
+        evidence.observe(observedIdentity(sample), { kind: "timing", shot, quality: "psp30", time: live ? null : time, sample, missedBudget: sample.maxWorkMs > budgetMs });
         last = sample.frame;
       }
       const row = {
@@ -193,13 +217,17 @@ else if (command === "serve") {
       rows.push(row);
       console.log(JSON.stringify({ ...row, samples: undefined }));
       const file = `shot-${shot}.bmp`;
-      await shell(`scrshot ${file}`);
+      await shell(`scrshot host0:/${file}`);
       cpSync(`${share}/${file}`, `${directory}/shot-${shot}.bmp`);
+      evidence.observe(observedIdentity(await waitStatus(s => s.controlNonce === nonce && s.shotIndex === shot)),
+        { kind: "capture", shot, file: `shot-${shot}.bmp`, sha256: fileSha256(`${directory}/shot-${shot}.bmp`), visualReview: "not-recorded" });
     }
+    completed = true;
   } finally {
     await Bun.write(`${directory}/shots.json`, JSON.stringify(rows, null, 2));
-    // Another task can reuse the cable. Never send a final camera command to
-    // an unrelated runtime after the identity guard stopped this measurement.
+    await Bun.write(`${directory}/device.json`, JSON.stringify({ ...evidence.receipt(), compilation, complete: completed, cameraCoverage: rows.length, budgetMs, timing: "CPU submission plus remaining GE wait; gpuWaitMs is not serialized GPU time" }, null, 2));
+    // Never send a final command to a runtime that replaced this measurement.
+    lease?.assertHeld();
     try {
       readStatus(statusPath, expected);
       writeControl(controlPath, { shot: 0 });
@@ -220,12 +248,15 @@ else if (command === "serve") {
   );
   mkdirSync(resolve(out, ".."), { recursive: true });
   const file = `capture-${Date.now()}.bmp`;
-  await shell(`scrshot ${file}`);
+  await shell(`scrshot host0:/${file}`);
   if (!existsSync(`${share}/${file}`))
     throw new Error("PSPLINK did not write the screenshot");
   cpSync(`${share}/${file}`, out);
 } else if (command === "package") {
-  await build();
+  if (!args.includes("--no-build")) await build();
+  const expected = identity();
+  if (expected.place !== place || sha(pack) !== expected.packSha256 || sha(`${share}/EBOOT.PBP`) !== JSON.parse(readFileSync(receiptPath, "utf8")).ebootSha256)
+    throw new Error("PSP package files differ from the intended build");
   const out = `${root}/dist/PSP/GAME/PocketAtlas`;
   mkdirSync(out, { recursive: true });
   cpSync(`${share}/EBOOT.PBP`, `${out}/EBOOT.PBP`);

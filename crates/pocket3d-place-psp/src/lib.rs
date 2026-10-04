@@ -4,7 +4,9 @@
 use bytemuck::{Pod, Zeroable};
 
 pub const MAGIC: u32 = u32::from_le_bytes(*b"PLPS");
-pub const VERSION: u32 = 2;
+/// v4 combines packed geometry/TRS tracks, audio and moving sky layers with
+/// the v3 compiler-authored sky dome and explicit texture precision.
+pub const VERSION: u32 = 4;
 pub const MAX_BYTES: usize = 18 * 1024 * 1024;
 pub const NONE: u32 = u32::MAX;
 pub const RGBA4444: u32 = 0;
@@ -48,6 +50,8 @@ pub struct Header {
     pub door_trigger: [f32; 3],
     pub door_radius: f32,
     pub door_travel: f32,
+    /// Camera-centered sky dome; empty when no authored daytime sky.
+    pub sky_vertices: Span,
     pub sky_texture: u32,
     pub cloud_texture: u32,
     pub cloud_drift: f32,
@@ -62,7 +66,17 @@ pub struct Texture {
     pub height: u32,
     pub wrap: u32,
     pub mips: u32,
+    /// Explicit target encoding; sky gradients need more precision than cutouts.
     pub format: u32,
+}
+impl Texture {
+    pub fn bytes_per_pixel(&self) -> Option<u32> {
+        match self.format {
+            RGBA4444 => Some(2),
+            RGBA8888 => Some(4),
+            _ => None,
+        }
+    }
 }
 #[repr(C)]
 #[derive(Clone, Copy, Default, Pod, Zeroable)]
@@ -267,11 +281,7 @@ pub fn validate(bytes: &[u8]) -> Result<&Header, &'static str> {
         {
             return Err("texture mips");
         }
-        let bpp = match t.format {
-            RGBA4444 => 2,
-            RGBA8888 => 4,
-            _ => return Err("texture format"),
-        };
+        let bpp = t.bytes_per_pixel().ok_or("texture format")?;
         let size: u32 = (0..t.mips)
             .map(|m| (t.width >> m) * (t.height >> m) * bpp)
             .sum();
@@ -296,6 +306,31 @@ pub fn validate(bytes: &[u8]) -> Result<&Header, &'static str> {
             || audio.iter().any(|v| !v.is_finite()))
     {
         return Err("audio recipe");
+    }
+    if h.rain > 1 {
+        return Err("rain flag");
+    }
+    if h.sky_vertices.count == 0 {
+        if h.sky_texture != NONE {
+            return Err("sky texture without geometry");
+        }
+    } else {
+        if h.sky_texture as usize >= ts.len()
+            || h.sky_vertices.offset % 16 != 0
+            || h.sky_vertices.count % 3 != 0
+            || h.sky_vertices.count as usize > MAX_INDICES
+        {
+            return Err("sky geometry");
+        }
+        for v in slice::<Vertex>(bytes, h.sky_vertices)? {
+            let length2: f32 = v.pos.iter().map(|x| x * x).sum();
+            if v.pos.iter().chain(v.uv.iter()).any(|x| !x.is_finite())
+                || !(0.99..=1.01).contains(&length2)
+                || v.uv.iter().any(|x| !(0.0..=1.0).contains(x))
+            {
+                return Err("sky vertex");
+            }
+        }
     }
     let ms = slice::<Material>(bytes, h.materials)?;
     for m in ms {
@@ -571,10 +606,19 @@ mod tests {
     fn accepts_minimal_pack_and_rejects_truncation_version_and_bad_camera() {
         let mut data = fixture();
         assert!(validate(bytemuck::cast_slice(&data)).is_ok());
-        assert!(validate(&bytemuck::cast_slice::<_, u8>(&data)[..20]).is_err());
-        data[1] = 99;
-        assert!(validate(bytemuck::cast_slice(&data)).is_err());
+        // Older headers can also be large enough to look like a v4 header;
+        // reject their layout before interpreting any dependent spans.
+        for version in [1, 2, 3, 99] {
+            data[1] = version;
+            assert_eq!(validate(bytemuck::cast_slice(&data)).err(), Some("PSP pack version"));
+        }
         data[1] = VERSION;
+        assert_eq!(core::mem::size_of::<Header>(), 164);
+        assert_eq!(core::mem::offset_of!(Header, sky_vertices), 132);
+        assert_eq!(core::mem::offset_of!(Header, audio), 156);
+        for len in 0..core::mem::size_of::<Header>() {
+            assert_eq!(validate(&bytemuck::cast_slice::<_, u8>(&data)[..len]).err(), Some("header"));
+        }
         *data.last_mut().unwrap() = f32::NAN.to_bits();
         assert!(validate(bytemuck::cast_slice(&data)).is_err());
     }

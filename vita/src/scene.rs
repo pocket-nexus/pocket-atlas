@@ -2,8 +2,6 @@
 //! GPU-mapped main memory (read straight from the file, no staging copy),
 //! animation tracks, and per-frame node / light / fog-light state.
 
-use std::fs::File;
-use std::io::Read;
 
 use glam::{Mat4, Quat, Vec3, Vec4};
 use pocket3d_place as pc;
@@ -67,6 +65,7 @@ pub struct FogNow {
 }
 
 pub struct Scene {
+    pub pack_sha256: String,
     pub meta: pc::Meta,
     pub textures: Vec<Texture>,
     pub draws: Vec<DrawGpu>,
@@ -101,61 +100,7 @@ pub(crate) fn wrap(w: pc::Wrap) -> Wrap {
     }
 }
 
-/// Forward-only reads: the USB host file system does not seek, so a pack is
-/// read in file order and a backward jump reopens the file.
-pub(crate) struct Seq {
-    path: String,
-    f: File,
-    pos: u64,
-    scratch: Vec<u8>,
-}
-
-/// A section of a pack's table by tag.
-pub(crate) fn find(sections: &[pc::Section], tag: [u8; 4]) -> Result<pc::Section, String> {
-    sections.iter().find(|s| s.tag == tag).copied().ok_or(format!("missing section {}", String::from_utf8_lossy(&tag)))
-}
-
-impl Seq {
-    pub(crate) fn open(path: &str) -> Result<Self, String> {
-        Ok(Self { path: path.into(), f: File::open(path).map_err(|e| format!("{path}: {e}"))?, pos: 0, scratch: vec![0; 64 * 1024] })
-    }
-
-    /// The section table of a pack container (place or atlas pack, by magic).
-    pub(crate) fn sections(&mut self, magic: [u8; 4]) -> Result<Vec<pc::Section>, String> {
-        let mut head = [0u8; 16];
-        self.read_at(0, &mut head)?;
-        let count = u32::from_le_bytes(head[8..12].try_into().unwrap()) as usize;
-        let mut table = vec![0u8; 16 + count * 16];
-        table[..16].copy_from_slice(&head);
-        self.read_at(16, &mut table[16..])?;
-        pc::Pack::parse_header_as(&table, magic).map_err(|e| format!("{}: {e}", self.path))
-    }
-
-    /// One section's bytes.
-    pub(crate) fn section(&mut self, s: &pc::Section) -> Result<Vec<u8>, String> {
-        let mut bytes = vec![0u8; s.size as usize];
-        self.read_at(s.offset as u64, &mut bytes)?;
-        Ok(bytes)
-    }
-
-    pub(crate) fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
-        if offset < self.pos {
-            self.f = File::open(&self.path).map_err(|e| format!("{}: {e}", self.path))?;
-            self.pos = 0;
-        }
-        while self.pos < offset {
-            let n = ((offset - self.pos) as usize).min(self.scratch.len());
-            self.f.read_exact(&mut self.scratch[..n]).map_err(|e| format!("{}: skip: {e}", self.path))?;
-            self.pos += n as u64;
-        }
-        // Large reads in 1 MiB pieces keep each USB transfer bounded.
-        for chunk in buf.chunks_mut(1 << 20) {
-            self.f.read_exact(chunk).map_err(|e| format!("{}: read @{}: {e}", self.path, self.pos))?;
-            self.pos += chunk.len() as u64;
-        }
-        Ok(())
-    }
-}
+pub(crate) use crate::pack_io::{find, Seq};
 
 impl Scene {
     /// Loads `path`, calling `progress(done, total, what)` between steps.
@@ -229,6 +174,7 @@ impl Scene {
         f.read_at(s_anim.offset as u64, &mut anim_bytes)?;
         let anim: Vec<f32> = anim_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
         drop(anim_bytes);
+        let pack_sha256 = f.finish_digest()?;
 
         let draws = meta
             .draws
@@ -254,6 +200,7 @@ impl Scene {
 
         let n = meta.nodes.len();
         let mut scene = Self {
+            pack_sha256,
             node_world: vec![Mat4::IDENTITY; n],
             lights: vec![LightNow::default(); meta.lights.len()],
             fog: vec![FogNow::default(); meta.fog_lights.len()],

@@ -125,6 +125,7 @@ fn required_files(document: &Value) -> Result<BTreeSet<String>, String> {
     }
     let mut files = BTreeSet::from(["scene.gltf".into(), "scene.bin".into()]);
     let meta = scene_meta(document)?;
+    if meta["authoring"].is_object() { files.insert("export.json".into()); }
     if meta["environment"].is_object() {
         files.insert("env.rgba16f".into());
     }
@@ -132,7 +133,7 @@ fn required_files(document: &Value) -> Result<BTreeSet<String>, String> {
         local_name(name)?;
         if matches!(
             name,
-            "scene.gltf" | "scene.bin" | "manifest.json" | "env.rgba16f"
+            "scene.gltf" | "scene.bin" | "manifest.json" | "env.rgba16f" | "export.json"
         ) {
             return Err("reserved PlaceIR resource name".into());
         }
@@ -153,18 +154,44 @@ impl Manifest {
                     target.name()
                 ));
             }
-            if target == Target::Psp && matches!(feature.as_str(), "material:water") {
+            if target == Target::Psp && feature == "material:water" {
                 return Err(format!("{}: {feature} has no PSP lowering", self.name));
             }
         }
-        if target == Target::Psp && !matches!(self.kind.as_str(), "night-street" | "daytime-street") {
+        if target == Target::Psp && !matches!(self.kind.as_str(), "night-street" | "daytime-slope" | "daytime-street") {
             return Err(format!(
-                "{}: PSP supports night-street and daytime-street effects, got {}",
+                "{}: PSP currently supports night streets and dry daytime streets/slopes, got {}",
                 self.name, self.kind
             ));
         }
         Ok(())
     }
+}
+
+fn validate_export_receipt(receipt: &Value, meta: &Value) -> Result<(),String> {
+    let a=&meta["authoring"];
+    if receipt["schemaVersion"]!=1 || a["version"]!=1 || &receipt["authoring"]!=a {
+        return Err("export receipt authoring/version disagrees with scene".into());
+    }
+    local_name(a["id"].as_str().ok_or("missing authored place id")?)?;
+    if a["kind"]!=meta["kind"] { return Err("authoring kind disagrees with scene".into()); }
+    let s=&a["sampling"];
+    let fps=s["fps"].as_f64().unwrap_or(0.0);
+    let seconds=s["durationSeconds"].as_f64().unwrap_or(0.0);
+    let start=s["startSeconds"].as_f64().unwrap_or(-1.0);
+    if !(1.0..=120.0).contains(&fps) || fps.fract()!=0.0 || !(0.0..=3600.0).contains(&start) ||
+       !(0.0..=3600.0).contains(&seconds) || seconds==0.0 || (seconds+start)*fps>108000.0 ||
+       (seconds*fps-(seconds*fps).round()).abs()>1e-6 || (start*fps-(start*fps).round()).abs()>1e-6 {
+        return Err("invalid authored sampling contract".into());
+    }
+    if meta["tracks"]["fps"].as_f64()!=Some(fps) || meta["tracks"]["frames"].as_u64()!=Some((seconds*fps).round() as u64) {
+        return Err("exported tracks disagree with authored sampling".into());
+    }
+    if receipt["source"]["files"].as_array().is_none() ||
+       receipt["source"]["sha256"].as_str()!=Some(&digest(&serde_json::to_vec(&receipt["source"]["files"]).unwrap())) {
+        return Err("export source fingerprint mismatch".into());
+    }
+    Ok(())
 }
 
 pub fn import(input: &Path, output: &Path) -> Result<Manifest, String> {
@@ -210,7 +237,7 @@ pub fn import(input: &Path, output: &Path) -> Result<Manifest, String> {
         local_name(name)?;
         if matches!(
             name,
-            "scene.gltf" | "scene.bin" | "manifest.json" | "env.rgba16f"
+            "scene.gltf" | "scene.bin" | "manifest.json" | "env.rgba16f" | "export.json"
         ) {
             return Err("reserved PlaceIR resource name".into());
         }
@@ -219,14 +246,30 @@ pub fn import(input: &Path, output: &Path) -> Result<Manifest, String> {
             std::fs::read(input.join(name)).map_err(|e| e.to_string())?,
         ));
     }
+    if meta["authoring"].is_object() {
+        let raw=std::fs::read(input.join("export.json")).map_err(|e|format!("authoring export receipt: {e}"))?;
+        let receipt:Value=serde_json::from_slice(&raw).map_err(|e|e.to_string())?;
+        validate_export_receipt(&receipt,meta)?;
+        let mut expected:BTreeSet<String>=resources.iter().filter(|(name,_)|name!="scene.gltf" && name!="scene.bin").map(|(name,_)|name.clone()).collect();
+        expected.insert("scene.glb".into());
+        let mut seen=BTreeSet::new();
+        for file in receipt["resources"].as_array().ok_or("export receipt missing resources")? {
+            let name=local_name(file["path"].as_str().ok_or("invalid export resource")?)?;
+            if !expected.contains(name) || !seen.insert(name.to_string()) { return Err(format!("unexpected or duplicate export resource {name}")); }
+            let content=if name=="scene.glb" { &bytes } else { &resources.iter().find(|(p,_)|p==name).unwrap().1 };
+            if file["sha256"].as_str()!=Some(&digest(content)) { return Err(format!("export resource changed: {name}")); }
+        }
+        if seen!=expected { return Err("export receipt resource table disagrees with scene".into()); }
+        resources.push(("export.json".into(),raw));
+    }
     resources.sort_by(|a, b| a.0.cmp(&b.0));
     let manifest = Manifest {
         version: VERSION,
-        name: input
+        name: meta["authoring"]["id"].as_str().map(str::to_owned).unwrap_or(input
             .file_name()
             .and_then(|x| x.to_str())
             .ok_or("missing place name")?
-            .into(),
+            .into()),
         kind,
         features: features(&document)?,
         files: resources
@@ -279,6 +322,12 @@ pub fn open(root: &Path) -> Result<Manifest, String> {
     let required = required_files(&document)?;
     if required != seen.iter().map(|s| s.to_string()).collect() {
         return Err("PlaceIR resource table disagrees with the scene".into());
+    }
+    let meta=scene_meta(&document)?;
+    if meta["authoring"].is_object() {
+        let receipt:Value=serde_json::from_slice(&std::fs::read(root.join("export.json")).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+        validate_export_receipt(&receipt,meta)?;
+        if meta["authoring"]["id"].as_str()!=Some(&manifest.name) { return Err("authoring identity disagrees with PlaceIR".into()); }
     }
     let declared = document["buffers"][0]["byteLength"]
         .as_u64()
@@ -418,6 +467,16 @@ mod tests {
             .unwrap_err()
             .contains("no 3ds lowering"));
         assert!(m.check_target(Target::Psp).is_err());
+    }
+    #[test]
+    fn psp_daylight_admission_keeps_water_and_vista_effects_explicit() {
+        for kind in ["daytime-street", "daytime-slope"] {
+            let mut m = Manifest { version: VERSION, name: "day".into(),
+                kind: kind.into(), features: ["day-sky".into()].into(), files: vec![] };
+            assert!(m.check_target(Target::Psp).is_ok());
+            m.features.insert("material:water".into());
+            assert!(m.check_target(Target::Psp).is_err());
+        }
     }
     #[test]
     fn resources_cannot_escape_the_ir() {

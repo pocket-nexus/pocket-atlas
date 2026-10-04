@@ -2,6 +2,7 @@
 //! host control file, frames never perform host0 I/O. No scene rules live here.
 use alloc::{format, string::String};
 use psp::sys::*;
+use sha2::{Digest, Sha256};
 
 pub struct Command {
     pub shot: i32,
@@ -69,9 +70,10 @@ pub struct Status<'a> {
 pub struct Session {
     enabled: bool,
     nonce: Option<u32>,
+    pack_sha256: String,
 }
 impl Session {
-    pub unsafe fn connect() -> Self {
+    pub unsafe fn connect(bytes: &[u8]) -> Self {
         let fd = sceIoOpen(b"host0:/control.txt\0".as_ptr(), IoOpenFlags::RD_ONLY, 0);
         let enabled = fd.0 >= 0;
         if enabled {
@@ -80,6 +82,7 @@ impl Session {
         Self {
             enabled,
             nonce: None,
+            pack_sha256: format!("{:x}", Sha256::digest(bytes)),
         }
     }
     pub unsafe fn poll(&mut self) -> Option<Command> {
@@ -124,6 +127,7 @@ impl Session {
                 "\"gpuWaitMs\":{:.2},\"maxWorkMs\":{:.2},\"draws\":{},\"triangles\":{},",
                 "\"packBytes\":{},\"rain\":{},\"reflection\":{},\"paused\":{},",
                 "\"freeCamera\":{},\"controlNonce\":{},\"packHash\":{},\"packVersion\":{},\"audioReady\":{},\"muted\":{},\"build\":\"{}\",",
+                "\"packSha256\":\"{}\",\"runtimeBuild\":\"{}\",",
                 "\"controlMs\":{:.3},\"poseMs\":{:.3},\"boundsSkinMs\":{:.3},\"audioMs\":{:.3},",
                 "\"prepareMs\":{:.3},\"lodMs\":{:.3},\"passMs\":{:.3},\"indexCopyMs\":{:.3},\"drawSubmitMs\":{:.3},\"effectsMs\":{:.3},\"clipMs\":{:.3},",
                 "\"clipScanTriangles\":{},\"clipInputTriangles\":{},\"clipVertices\":{},\"clipExtraDraws\":{},\"clipScratchBytes\":{},\"clipBlockBytes\":{},\"clipBlockSkippedTriangles\":{}}}\n"
@@ -149,7 +153,9 @@ impl Session {
             s.pack_version,
             s.audio_ready,
             s.muted,
-            option_env!("ATLAS_BUILD_ID").unwrap_or("unknown"),
+            option_env!("ATLAS_SOURCE_ID").unwrap_or("unknown"),
+            self.pack_sha256,
+            option_env!("ATLAS_BUILD_ID").unwrap_or("unidentified"),
             s.stage_ms[0], s.stage_ms[1], s.stage_ms[2], s.stage_ms[3], s.stage_ms[4],
             s.stage_ms[5], s.stage_ms[6], s.stage_ms[7], s.stage_ms[8], s.stage_ms[9], s.stage_ms[10],
             s.clip_scan_triangles, s.clip_input_triangles, s.clip_vertices, s.clip_extra_draws, s.clip_scratch_bytes, s.clip_block_bytes, s.clip_block_skipped

@@ -105,9 +105,10 @@ static void report_status(void) {
       detail[n - 1] = 0;
     snprintf(response, sizeof response,
              "%s,\"place\":\"%s\",\"sheet\":%s,\"targetFps\":%u,\"antialias\":%"
-             "s,\"error\":\"%s\"}",
+             "s,\"error\":\"%s\",\"packSha256\":\"%s\"}",
              detail, current_place, settings_open() ? "true" : "false",
-             settings_fps(), settings_antialias() ? "true" : "false", escaped);
+             settings_fps(), settings_antialias() ? "true" : "false", escaped,
+             loaded && find_place(current_place) ? find_place(current_place)->sha : "");
   } else {
     snprintf(response, sizeof response,
              "{\"t\":\"atlas.status\",\"build\":\"" ATLAS_BUILD_ID
@@ -182,7 +183,7 @@ static void change_view(void) {
     if (asset && assets_path(asset->sha, path, sizeof path) &&
         !stat(path, &st) && (unsigned long)st.st_size == asset->bytes) {
       in_place = true;
-      loaded = scene_load(path, app_error, sizeof app_error);
+      loaded = scene_load(path, asset->sha, app_error, sizeof app_error);
       if (loaded) {
         snprintf(current_place, sizeof current_place, "%s", pending_place);
         settings_apply();

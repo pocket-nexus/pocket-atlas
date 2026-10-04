@@ -104,7 +104,12 @@ fn day_sky_full_rate_skin_motion_and_audio_lower_without_vita_products() {
     };
     assert_eq!(receipt()["analysis"]["cellMeters"], 8.0);
     let h = pp::validate(&bytes).unwrap();
-    assert_eq!(h.version, 2);
+    assert_eq!(h.version, 4);
+    assert_eq!(h.sky_vertices.count, 32 * 16 * 6);
+    for v in pp::slice::<pp::Vertex>(&bytes, h.sky_vertices).unwrap() {
+        let radius2: f32 = v.pos.iter().map(|x| x * x).sum();
+        assert!((radius2 - 1.0).abs() < 1e-5);
+    }
     assert_eq!((h.frames, h.fps), (960, 15.0));
     assert_eq!(h.lod_pixels, 1.0);
     assert_eq!(h.cloud_drift, 0.001);

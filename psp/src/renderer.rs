@@ -22,7 +22,6 @@ pub struct Renderer {
     batch_offsets: alloc::vec::Vec<usize>,
     batch_selections: alloc::vec::Vec<BatchSelection>,
     selected: alloc::vec::Vec<pp::Span>,
-    sky_vertices: alloc::vec::Vec<pp::Vertex>,
     clip_ranges: alloc::vec::Vec<(usize, usize)>,
     clip_candidates: alloc::vec::Vec<(usize, pp::Span)>,
     clip_blocks: clip::BlockCache,
@@ -184,38 +183,11 @@ fn hash(mut n: u32) -> f32 {
     ((n >> 22) ^ n) as f32 / 4294967296.0
 }
 
-// A retained camera-centred sphere; UVs match the shared panorama's
-// azimuth + elevation convention. The pole seam has duplicated UVs.
-fn sky_dome() -> alloc::vec::Vec<pp::Vertex> {
-    let mut out = alloc::vec::Vec::new();
-    let vertex = |x: usize, y: usize| {
-        let u = x as f32 / 32.0;
-        let v = y as f32 / 16.0;
-        let az = u * core::f32::consts::TAU;
-        let el = (v - 0.5) * core::f32::consts::PI;
-        pp::Vertex {
-            uv: [u, v],
-            color: 0xffffffff,
-            pos: [
-                libm::sinf(az) * libm::cosf(el) * 100.0,
-                libm::sinf(el) * 100.0,
-                -libm::cosf(az) * libm::cosf(el) * 100.0,
-            ],
-        }
-    };
-    for y in 0..16 {
-        for x in 0..32 {
-            out.extend([
-                vertex(x, y),
-                vertex(x + 1, y),
-                vertex(x, y + 1),
-                vertex(x + 1, y),
-                vertex(x + 1, y + 1),
-                vertex(x, y + 1),
-            ]);
-        }
+fn texture_format(t: &pp::Texture) -> TexturePixelFormat {
+    match t.format {
+        pp::RGBA8888 => TexturePixelFormat::Psm8888,
+        _ => TexturePixelFormat::Psm4444, // Pack validation rejects other encodings.
     }
-    out
 }
 
 impl Renderer {
@@ -311,7 +283,6 @@ impl Renderer {
             batch_offsets,
             batch_selections,
             selected: scene.draws.iter().map(|d| d.indices).collect(),
-            sky_vertices: sky_dome(),
             clip_ranges: alloc::vec::Vec::new(),
             clip_candidates: alloc::vec::Vec::new(),
             clip_blocks: clip::BlockCache::default(),
@@ -324,12 +295,8 @@ impl Renderer {
         }
         self.bound_texture = id;
         let t = &s.textures[id as usize];
-        let (format, bpp) = if t.format == pp::RGBA8888 {
-            (TexturePixelFormat::Psm8888, 4)
-        } else {
-            (TexturePixelFormat::Psm4444, 2)
-        };
-        sceGuTexMode(format, t.mips as i32 - 1, 0, 1);
+        let bpp = t.bytes_per_pixel().unwrap();
+        sceGuTexMode(texture_format(t), t.mips as i32 - 1, 0, 1);
         let levels = [
             MipmapLevel::None,
             MipmapLevel::Level1,
@@ -373,9 +340,18 @@ impl Renderer {
         if s.header.sky_texture == pp::NONE {
             return;
         }
-        matrix(MatrixMode::Model, Mat4::from_translation(rig.pos));
+        // The authored dome follows the camera but keeps world orientation.
+        // Both panorama and drifting cloud overlay use the same UV convention.
+        let vertices = pp::slice::<pp::Vertex>(s.bytes, s.header.sky_vertices).unwrap();
+        let vertex_count = vertices.len();
+        let vertex_ptr = vertices.as_ptr();
+        matrix(
+            MatrixMode::Model,
+            Mat4::from_translation(rig.pos) * Mat4::from_scale(Vec3::splat(100.0)),
+        );
         sceGuDisable(GuState::DepthTest);
         sceGuDepthMask(1);
+        sceGuDepthOffset(0);
         sceGuDisable(GuState::Fog);
         sceGuDisable(GuState::CullFace);
         sceGuDisable(GuState::AlphaTest);
@@ -416,12 +392,12 @@ impl Renderer {
                     | VertexType::COLOR_8888
                     | VertexType::VERTEX_32BITF
                     | VertexType::TRANSFORM_3D,
-                self.sky_vertices.len() as i32,
+                vertex_count as i32,
                 ptr::null(),
-                self.sky_vertices.as_ptr() as _,
+                vertex_ptr as _,
             );
             stats.draws += 1;
-            stats.triangles += self.sky_vertices.len() as u32 / 3;
+            stats.triangles += vertex_count as u32 / 3;
         }
         sceGuTexFilter(TextureFilter::LinearMipmapNearest, TextureFilter::Linear);
         sceGuDisable(GuState::Blend);
@@ -841,7 +817,9 @@ impl Renderer {
         let effects_begin = sceKernelGetSystemTimeLow();
         stats.pass_us = effects_begin.wrapping_sub(pass_begin);
         sceGuDepthOffset(0);
-        self.halos(s, rig, time);
+        if !s.lights.is_empty() {
+            self.halos(s, rig, time);
+        }
         if rain {
             self.rain(s, rig, time);
         }

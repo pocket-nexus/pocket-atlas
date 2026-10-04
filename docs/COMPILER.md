@@ -35,11 +35,12 @@ It contains no device version, byte ranges or GPU vertex layouts.
 readers re-export those types for compatibility. `analysis.rs` applies scene
 passes, while `vita.rs`, `pica.rs` and `psp.rs` own their encodings. `main.rs`
 handles the CLI. The analysis representation is not a serialized interchange
-format or a shared scene language for OpenStrike. Device format names/versions remain
-unchanged so this step does not require a runtime format migration. PICA pins
-its PLCE envelope to v5 and its binary table to v4 independently of Vita v7.
-PSP uses PLPS v2. Native runtimes reject older animation/material layouts;
-re-cook each affected target when updating the application.
+format or a shared scene language for OpenStrike. Vita uses PLCE/ATLS v7 and
+META v7. PICA independently pins its PLCE envelope to v5 and its binary table
+to v4. PSP uses PLPS v4, combining explicit texture precision, a bounded sky
+mesh, compact full-loop animation, LOD selection and optional audio. Native
+runtimes reject older layouts; re-cook each affected target when updating the
+application. All packs require their matching target readers.
 Previously a Vita version bump leaked into PICA output and the C reader rejected
 it; the integration test now checks cooked output using the runtime's C format
 header and header validator.
@@ -72,14 +73,21 @@ into geometry and annotations; arbitrary JavaScript, GLSL and gameplay code do
 not become portable automatically. Sampled traffic contains the exported time
 interval. Doors, camera controls and animation evaluation remain runtime code.
 
-Reproducibility starts at a fixed export / PlaceIR and pinned compiler/dependency
-revision. Procedural web authoring may use time or randomness; creating a new
-export is not promised to reproduce an earlier export. Cook timing is kept out
-of the device metadata so repeated cooks can produce identical bytes. Cross-OS
-floating-point or compiler-version identity is not established by the current
-same-host regression tests.
+Authoring definitions now supply a checked seed/sampling/resource contract.
+Fresh exports prevent preview time from advancing actors, use fixed sampling,
+preserve source IDs and canonicalize asynchronous GLB buffer placement. The
+export receipt seals source/resources and browser/GPU identity; matching fresh
+exports are verified on the same recorded environment. Cross-browser/GPU identity
+is not promised for procedural GPU baking. From a sealed PlaceIR and pinned
+compiler/dependencies, target packs and compile receipts are repeatable without
+a browser. See [Authoring](AUTHORING.md) for the complete creator workflow,
+compatibility adapter, limits and device evidence contract.
 
 ## Commands
+
+`bun tools/place.ts inspect|export|import|check|cook|build|report|recipe|profiles`
+is the Atlas creator entry point. The Rust commands below remain available for
+CI and callers that already have sealed inputs.
 
 Export a place using `web/scripts/export-place.ts`, then import it once:
 
@@ -105,7 +113,7 @@ is never a compiler input. The removed `--pica-from` and `psp --in <pack>` forms
 fail with a migration message.
 
 `--tex` overrides the selected profile's surface texture cap. PSP defaults to
-128-pixel surfaces and 512-pixel emissive/detail maps. PICA defaults to 256.
+128-pixel night surfaces, 256-pixel daytime surfaces and 512-pixel emissive/detail maps. PICA defaults to 256.
 Profiles validate overrides against the selected backend's limits. Output suffixes do not identify a universal pack:
 PICA has its own table and geometry layout; PSP uses the separate PLPS header.
 PICA's higher-resolution exceptions inspect the authored 4K text-atlas
@@ -119,9 +127,15 @@ need device headroom measurements.
 ## Capability, release eligibility and evidence
 
 `check --target` rejects known missing lowerings before cooking. Currently
-PICA/GE reject city-light fields and vista height haze. GE supports the
-night-street and daytime-street effect sets, including a cooked day sky,
-clouds and sunlight; it still rejects water and unsupported place kinds. It does not
+PICA/GE reject city-light fields and vista height haze. GE also rejects water
+and kinds outside night streets and dry daytime streets/slopes. Its shared
+daytime lowering bakes the sky and sun from the IR, with a separate drifting
+cloud layer. GE analysis includes static sunlight before refinement/LOD, with
+an explicit transient `baked_sun` marker to avoid applying it twice. Its
+contact guard and intact source-window overlays are native sampling policies;
+the authored IR and Vita/PICA sunlight paths remain independent (see
+`psp/README.md`). PLPS v4 records per-texture precision: RGBA8888 for sky/cloud
+gradients and glossy daytime maps, RGBA4444 for compact surface maps. It does not
 silently treat light-field point records as triangle records. Unsupported
 material annotations fail rather than falling back to a standard material.
 This is an initial capability gate, not an exhaustive Three.js feature checker.
@@ -136,9 +150,9 @@ A successful cook establishes asset construction and structural checks. A host
 build establishes binding/link compatibility. Console launch, SceShaccCg
 compilation, scene switching, visual fidelity and measured frame budgets are
 separate checks. The earlier PlaceIR migration changed PICA/GE output to retain source precision
-and avoid the BC round trip. This typed-analysis refactor preserves the current
-pack bytes for sealed regression inputs. Measurements still belong to the exact
-asset and runtime identities tested.
+and avoid the BC round trip. Format and recipe changes require fresh target
+cooks and validation. Measurements still belong to the exact asset and runtime
+identities tested; pre-integration results do not certify merged builds.
 
 The regression test `tests/pipeline.rs` imports a small textured scene, deletes
 the web export, compiles PSP and PICA before Vita, validates the PSP payload,
@@ -166,6 +180,11 @@ cargo run --locked --release -p pocket3d-place-cook -- \
   --out .pocket-build/validation/tokyo.3ds.place --json
 ```
 
+Recipes expose named/versioned executed passes and GPU-specific decisions.
+Reports retain material/object contributor sets through batching and map output
+textures to source textures. These are material contributor sets, not exact
+per-triangle or TypeScript-line attribution.
+
 Every successful cook writes `<output-stem>.compile.json`; `--report` selects
 another path. The report records the sealed source manifest/resources, compiler
 source hash and Rust version, effective profile and hash, analysis settings,
@@ -185,12 +204,12 @@ inferred from a successful compile.
 
 Native animation formats retain full authored loop samples while deduplicating
 constant and identical tracks. PICA v4 stores compact TRS tracks with quaternion
-interpolation and an affine fallback. PSP v2 uses its own compact tracks and GE
+interpolation and an affine fallback. PLPS v4 uses its own compact tracks and GE
 vertex layouts, with measured position error recorded in compile receipts.
 These encodings are chosen from source floats by each backend, never from Vita
 vertices or animation bytes.
 
-`psp30` revision 2 makes its geometry recipe explicit: daytime streets use
+`psp30` revision 2 makes its geometry recipe explicit: dry daytime streets/slopes use
 8 m static cells, a 1 pixel LOD error, at most 5 mm packed vertex position
 error, 0.25 texel UV error and 6 mm packed translation error. An explicit
 `--cell` overrides the cell recipe; other targets and night streets retain
@@ -198,6 +217,14 @@ their own existing policy. These are acceptance limits for an encoding, not
 promises that every batch is quantized: oversized or stricter inputs retain
 source float data. Empty LODs with a positive error intentionally omit
 subpixel parts; they must not fall back to full geometry.
+
+PSP runtime clipping handles triangles whose projected vertices leave the
+GE's 0–4096 guard range, including faces crossing the near plane. It preserves
+winding, attributes and draw order; safe geometry keeps its resident indices.
+Bounded local block caches accelerate the test without changing the compiled
+mesh or depending on a particular camera. Source window openings remove
+hidden competing faces across all targets, while explicit polygon-offset
+decals preserve intentional overlays. Neither is a global depth-bias workaround.
 
 Optional `extras.pocketAtlas.audio` v1 describes procedural wind, birds and a
 railway pass. Typed analysis validates its timing and gains; native lowerings

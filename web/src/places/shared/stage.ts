@@ -37,7 +37,7 @@ export abstract class PlaceStage<W extends ExportWorld = ExportWorld, A extends 
   protected readonly views: PlaceViews;
   protected readonly audio: A;
   protected baker!: Baker;
-  protected world!: W;
+  protected world!: W & { shadowsDirty?: boolean };
   protected post!: PlacePost;
   protected rig!: CameraRig;
   protected sun: DirectionalLight | null = null;
@@ -134,7 +134,10 @@ export abstract class PlaceStage<W extends ExportWorld = ExportWorld, A extends 
    */
   protected exposeExport(opts: { seconds: number; files?: { name: string; texture: Texture }[]; meta: (c: CommonMeta, seconds: number) => Record<string, unknown> }): void {
     const w = window as unknown as { pocketAtlasExport?: (seconds?: number) => Promise<unknown> };
-    this.exportHook = async (seconds = opts.seconds) => {
+    let consumed = false;
+    this.exportHook = async (seconds = this.ctx.authoring?.sampling.durationSeconds ?? opts.seconds) => {
+      if (consumed) throw new Error("Export consumes a fresh scene; reload before exporting again");
+      consumed = true;
       const { exportPlace } = await import("./export");
       const fog = this.scene.fog as FogExp2;
       try {
@@ -150,7 +153,9 @@ export abstract class PlaceStage<W extends ExportWorld = ExportWorld, A extends 
           fog: { color: fog.color.toArray(), density: fog.density },
           environmentIntensity: this.scene.environmentIntensity,
           record: seconds,
-          fps: 15,
+          fps: this.ctx.authoring?.sampling.fps ?? 15,
+          startSeconds: this.ctx.authoring?.sampling.startSeconds ?? 0,
+          authoring: this.ctx.authoring ? { ...this.ctx.authoring, sampling: { ...this.ctx.authoring.sampling, durationSeconds: seconds } } : undefined,
           files: opts.files,
           meta: (c) => opts.meta(c, seconds),
           onProgress: (label) => console.info(`[export] ${label}`),
@@ -215,9 +220,10 @@ export abstract class PlaceStage<W extends ExportWorld = ExportWorld, A extends 
     const bars = u.get("uBars")!;
     bars.value += ((this.rig.mode === "cinematic" ? 1 : 0) - bars.value) * (1 - Math.exp(-dt * 2.5));
     // Static places reuse the map; an advance() with moving casters may invalidate it.
-    if (this.shadowFrames < 2) {
+    if (this.shadowFrames < 2 || this.world.shadowsDirty) {
       this.ctx.renderer.shadowMap.needsUpdate = true;
       this.shadowFrames++;
+      this.world.shadowsDirty = false;
     }
     this.post.render(dt);
   }

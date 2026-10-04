@@ -211,6 +211,7 @@ export class Haze {
     const before = m.onBeforeCompile;
     const key = m.customProgramCacheKey;
     this.patched.set(m, { before, key });
+    m.userData.pocketAtlas = { ...m.userData.pocketAtlas, vistaHaze: true };
     const additive = m.blending === AdditiveBlending;
     const premultiplied = !additive && (m.premultipliedAlpha || (m.blending === CustomBlending && m.blendSrc === OneFactor));
     const uniforms = this.uniforms;

@@ -152,7 +152,7 @@ publishes this place for web, Vita, 3DS and PSP.
 
 Vita PLCE and ATLS envelopes use version 7, and Vita Place META uses version 7.
 Older readers must reject the new vertex-PBR encoding. PICA keeps its separate
-PLCE v5 envelope and v4 table; PSP uses PLPS v2. Re-cook the corresponding
+PLCE v5 envelope and v4 table; PSP uses PLPS v4. Re-cook the corresponding
 target's places when updating its runtime. Old native readers reject these
 new animation and geometry encodings.
 
@@ -230,12 +230,15 @@ their hidden export pose. Native targets approximate the reference's lighting:
 there is no HDR bloom, screen-space AO or moving train shadow map.
 
 PICA v4 retains float geometry and uses per-joint bounds for skinned particles.
-PSP v2 uses native 16-bit GE vertices where a batch meets the recipe's error
+PSP v4 uses native 16-bit GE vertices where a batch meets the recipe's error
 limit, retaining float vertices for skins and oversized batches. Camera-distance
 LOD selection preserves nearby train equipment and simplifies distant geometry.
 These encodings are produced from source floats, independently of Vita packing.
-The PSP daytime recipe uses 8 m static cells so long rails and distant planting
-do not keep unrelated geometry visible. Batch welding shares byte-identical
+The PSP daytime recipe defaults to 8 m static cells so long rails and distant
+planting do not keep unrelated geometry visible. The merged scene uses explicit
+`--tex 128 --cell 12` overrides to retain its texture detail within the 18 MiB
+pack limit. Constant encoded texture chains collapse losslessly to 8 × 8;
+nonconstant mipmaps and glossy RGBA8888 precision remain intact. Batch welding shares byte-identical
 GE vertices without changing geometry or reducing the train's detail.
 Untextured PSP batches canonicalize unused UVs before welding; textured
 batches retain their original UVs. The renderer keeps each batch's index
@@ -277,19 +280,19 @@ bun tools/atlas-3ds.ts profile --place sangubashi-crossing --shots Train \
 bun tools/atlas-3ds.ts tour --place sangubashi-crossing --seconds 146 \
   --host 192.168.8.159
 
-bun tools/atlas-psp.ts cook --place sangubashi-crossing
+bun tools/atlas-psp.ts cook --place sangubashi-crossing --tex 128 --cell 12
 # Reuse the exact share owned by the existing usbhostfs_pc process.
 bun tools/atlas-psp.ts run --place sangubashi-crossing --share /path/to/host0
-bun tools/atlas-psp.ts shots --time 19.73 --share /path/to/host0
-bun tools/atlas-psp.ts shots --live --share /path/to/host0
-bun tools/atlas-psp.ts package --place sangubashi-crossing --share /path/to/host0
+bun tools/atlas-psp.ts shots --place sangubashi-crossing --time 19.73 --share /path/to/host0
+bun tools/atlas-psp.ts shots --place sangubashi-crossing --live --share /path/to/host0
+bun tools/atlas-psp.ts package --place sangubashi-crossing --no-build --share /path/to/host0
 ```
 
 PSP measurements require the device's build ID, pack version and pack fingerprint
 to match the staged SHA-256 receipt. Captures are taken after timing samples;
 `gpuWaitMs` measures the remaining GE wait, not serialized whole-frame GPU time.
 
-### Native validation status (2026-10-04)
+### Native validation before main integration (2026-10-04)
 
 Host builds and format/runtime regression tests pass. Both formats retain
 960 samples over 64 seconds. PICA's scene pack is 34,278,160 bytes; the PSP
@@ -334,7 +337,7 @@ The standalone Memory Stick files were copied back and matched byte-for-byte:
 separate from the PSPLINK release-runtime tests. An XMB launch and listening
 check have not been performed. PSP reports `audioReady: true`.
 
-The current 3DS runtime `a447441aebd0` and all five asset hashes were verified
+The pre-integration 3DS runtime `a447441aebd0` and all five asset hashes were verified
 on `192.168.8.159:8131`. One transfer heartbeat timed out; the retry completed.
 Six fixed step-0 cameras at t=19.73 averaged 33.34–33.57 ms per frame, with
 20.63–25.51 ms PICA time. A 146-second automatic tour covered all six camera
@@ -349,3 +352,59 @@ audio stage still reports `ndsp-init`, result `0xD880A7FA`; DSP initialization
 has not succeeded, and no 3DS listening acceptance is claimed. Remote mute
 controls were checked independently of audio readiness. Physical button feel
 and listening remain human checks. Vita was not used.
+
+
+### Main integration validation (2026-10-04)
+
+The branch includes Atlas main `1a935a5` (authoring/receipts and Lombard), with
+PocketJS pinned to `b21bd28d`. PLPS v4 combines the full-motion native format
+with main's explicit RGBA4444/RGBA8888 texture layouts and cooked sky geometry.
+Older v1/v2/v3 readers are not compatible. The exported handheld source retains
+64 seconds at 15 Hz; its canonical GLB SHA-256 is
+`ea1531a0ff5b0a772506af454d2be3901a7409f900b72c302a1710a5b8d43df0`.
+
+Rust workspace: 115 tests pass. The compiler/tool/geometry Bun suite passes
+74 tests, the Web contract suite passes 12, and Web build/tools typecheck,
+native audio checks, sun bounds and both native cross-builds pass.
+
+PSP source build `98aee1ebb40cf7bd`, runtime instance
+`14402205cce24324ae09f9593410e20f`, PLPS v4, pack SHA-256
+`c13ab533e47c7e907caadf6579e39c09bd81954f59abd06e8a362eee2bea0904` was tested through PSPLINK.
+The `--tex 128 --cell 12` pack is 18,853,608 bytes, below 18 MiB.
+Six fixed cameras at t=19.73, five 30-frame windows each:
+
+| Camera | PSP fps | Work ms |
+| --- | ---: | ---: |
+| Crossing | 8.57 | 106.07 |
+| Blossom | 8.57 | 104.53 |
+| Tracks | 7.50 | 120.01 |
+| Train | 6.66 | 135.23 |
+| Lane | 8.53 | 115.12 |
+| Spring | 7.50 | 122.14 |
+
+The diagonal Tracks/Train captures retain the roof over the crossing. A quiet
+Crossing capture confirms the warning lettering and facade openings. A
+146-second live tour covers all six cameras with sampled rates
+7.46–10.00 fps; pause/mute/resume pass.
+Generated scratch is 49,152 bytes; the live block-cache accounting peaks at
+205,856 bytes. These are still below 30 fps.
+The 12 m cook lowers work by 1–6% against the merged 16 m candidate, but remains
+3–16% slower than the pre-integration build above; the newer daylight lowering
+and larger budget-constrained cells are retained. This is not a performance
+acceptance or a claim that merging main preserved the previous frame cost.
+
+The exact tested EBOOT and scene were packaged without rebuilding, installed
+to Memory Stick and read back byte-for-byte. EBOOT is 495,785 bytes, SHA-256
+`1d6d69c122b2a68f9866d45ea076649795bf5afcc41ac7b109318710cb42c8ff`. XMB launch and listening
+remain untested. The release is left playing with `audioReady: true`.
+
+3DS runtime `d5f330665846` and all six catalog packs were installed. Device
+byte counts/CRCs matched the host SHA-addressed catalog, including the 34,278,384-byte Sangubashi pack. Entering the scene
+then lost heartbeat/control and subsequent discovery could not reconnect.
+No current integrated 3DS frame or visual acceptance is claimed. The follow-up
+runtime `1f6f59df9a7a` services debugger heartbeats during SHA verification,
+and the host allows a longer scene-load control window. Its cross-build and
+six-place SD package/hash checks pass, but it has not been installed or retested
+because the console remains unreachable. The prior pole/performance captures
+above remain evidence only for `a447441aebd0`. DSP initialization also remains
+unresolved from that earlier run. Vita was not used.

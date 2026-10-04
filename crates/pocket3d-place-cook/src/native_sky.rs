@@ -124,7 +124,8 @@ pub(crate) fn sun_occluder(scene: &crate::source::Scene) -> Option<crate::occlus
     let mut tris = Vec::new();
     for d in &m.draws {
         let mat = &m.materials[d.material as usize];
-        if d.node.is_some()
+        if !d.cast_shadow
+            || d.node.is_some()
             || d.skin.is_some()
             || mat.kind == pc::Kind::Glass
             || mat.kind == pc::Kind::Water

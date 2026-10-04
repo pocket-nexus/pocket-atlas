@@ -25,11 +25,11 @@ describe("PSP mailbox boundary", () => {
     expect(encodeControl({ muted: true }, 8)).toBe("-1 -1 0 1 1 8 1\n");
   });
   test("camera table requires matching magic, version, length and bounded span", () => {
-    const bytes = Buffer.alloc(160 + 76);
+    const bytes = Buffer.alloc(176 + 76);
     bytes.write("PLPS");
-    bytes.writeUInt32LE(2, 4);
+    bytes.writeUInt32LE(4, 4);
     bytes.writeUInt32LE(bytes.length, 8);
-    bytes.writeUInt32LE(160, 48);
+    bytes.writeUInt32LE(176, 48);
     bytes.writeUInt32LE(1, 52);
     expect(shotCount(bytes)).toBe(1);
     bytes.writeUInt32LE(2, 52);
@@ -37,20 +37,22 @@ describe("PSP mailbox boundary", () => {
     bytes.writeUInt32LE(1, 52);
     bytes.writeUInt32LE(1, 4);
     expect(() => shotCount(bytes)).toThrow();
-    bytes.writeUInt32LE(2, 4);
+    bytes.writeUInt32LE(4, 4);
     bytes.writeUInt32LE(16, 48);
     expect(() => shotCount(bytes)).toThrow();
   });
   test("runtime identity rejects an old build, another pack and stale telemetry", () => {
     const dir = mkdtempSync(join(tmpdir(), "atlas-psp-status-"));
     const path = join(dir, "status.json");
-    const expected = { build: "native-build", packVersion: 2, packHash: 0xe1234567 };
+    const expected = { build: "native-build", packVersion: 4, packHash: 0xe1234567, packSha256: "a".repeat(64), runtimeBuild: "b".repeat(32) };
     const status = { target: "psp", ...expected, frame: 1, shot: "Crossing", shotIndex: 0, time: 25, fps: 30, workMs: 20, maxWorkMs: 21, draws: 10, triangles: 100, controlNonce: 2, muted: false, audioReady: true };
     try {
       writeFileSync(path, JSON.stringify(status));
       expect(readStatus(path, expected).packHash).toBe(0xe1234567);
       expect(() => readStatus(path, { ...expected, build: "old" })).toThrow("Another PSP build");
       expect(() => readStatus(path, { ...expected, packHash: 1 })).toThrow("Another PSP build");
+      expect(() => readStatus(path, { ...expected, packSha256: "c".repeat(64) })).toThrow("Another PSP build");
+      expect(() => readStatus(path, { ...expected, runtimeBuild: "c".repeat(32) })).toThrow("Another PSP build");
       writeFileSync(path, JSON.stringify({ ...status, packVersion: 1 }));
       expect(() => readStatus(path, expected)).toThrow("Incomplete");
       writeFileSync(path, JSON.stringify(status));

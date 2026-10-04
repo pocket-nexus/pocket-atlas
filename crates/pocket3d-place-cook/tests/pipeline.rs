@@ -29,10 +29,16 @@ fn ok(args: &[&str]) {
     );
 }
 fn fixture(root: &Path, width: u32, height: u32) {
+    fixture_material(root, width, height, None, "night-street");
+}
+fn fixture_material(root: &Path, width: u32, height: u32, roughness: Option<f32>, kind: &str) {
     std::fs::create_dir_all(root).unwrap();
-    // A non-power-of-two source texture ensures native targets apply their own fit.
+    // A non-power-of-two, nonconstant source verifies target sizing rather
+    // than the lossless minimum-size encoding for constant GE textures.
     let mut png = std::io::Cursor::new(Vec::new());
-    image::RgbaImage::from_pixel(width, height, image::Rgba([170, 120, 70, 255]))
+    image::RgbaImage::from_fn(width, height, |x, _| {
+        image::Rgba(if x < width / 2 { [170, 120, 70, 255] } else { [204, 154, 104, 255] })
+    })
         .write_to(&mut png, image::ImageFormat::Png)
         .unwrap();
     let pos = [0.1234567f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
@@ -40,10 +46,10 @@ fn fixture(root: &Path, width: u32, height: u32) {
     let image_start = bin.len();
     bin.extend(png.into_inner());
     let shot = json!({"pos":[0,1,3],"target":[0,0,0],"fov":45});
-    let document = json!({
+    let mut document = json!({
         "asset":{"version":"2.0"}, "scene":0,
         "scenes":[{"nodes":[0],"extras":{"pocketAtlas":{
-            "kind":"night-street", "camera":{"shots":[{"name":"Front","from":shot,"to":shot,"duration":12}]}
+            "kind":kind, "camera":{"shots":[{"name":"Front","from":shot,"to":shot,"duration":12}]}
         }}}], "nodes":[{"mesh":0}],
         "meshes":[{"primitives":[{"attributes":{"POSITION":0},"material":0}]}],
         "materials":[{"pbrMetallicRoughness":{"baseColorTexture":{"index":0}}, "extensions":{"KHR_materials_unlit":{}}}],
@@ -53,6 +59,11 @@ fn fixture(root: &Path, width: u32, height: u32) {
         "bufferViews":[{"buffer":0,"byteLength":36},{"buffer":0,"byteOffset":image_start,"byteLength":bin.len()-image_start}],
         "accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}]
     });
+    if let Some(roughness) = roughness {
+        document["materials"][0]["pbrMetallicRoughness"]["roughnessFactor"] = json!(roughness);
+        document["materials"][0].as_object_mut().unwrap().remove("extensions");
+        document.as_object_mut().unwrap().remove("extensionsUsed");
+    }
     let glb = gltf::binary::Glb {
         header: gltf::binary::Header {
             magic: *b"glTF",
@@ -299,6 +310,30 @@ fn pica_does_not_treat_an_ordinary_2k_source_texture_as_a_text_atlas() {
     let table = word(section + 4) as usize;
     assert_eq!(word(table + 4), 1, "one texture");
     assert_eq!((word(table + 120), word(table + 124)), (256, 256));
+}
+
+#[test]
+fn psp_glossy_colour_preserves_source_precision_and_native_mip_layout() {
+    let temp = Temp(std::env::temp_dir().join(format!("atlas-gloss-{}", std::process::id())));
+    for (roughness, kind, format, bpp) in [(0.2, "daytime-street", pocket3d_place_psp::RGBA8888, 4),
+        (0.8, "daytime-street", pocket3d_place_psp::RGBA4444, 2),
+        (0.2, "night-street", pocket3d_place_psp::RGBA4444, 2)] {
+        let source = temp.0.join("surface");
+        fixture_material(&source, 32, 16, Some(roughness), kind);
+        let output = temp.0.join("surface.place");
+        ok(&["--in", source.to_str().unwrap(), "--target", "psp", "--out", output.to_str().unwrap()]);
+        let bytes = std::fs::read(output).unwrap();
+        let h = pocket3d_place_psp::validate(&bytes).unwrap();
+        let t = &pocket3d_place_psp::slice::<pocket3d_place_psp::Texture>(&bytes, h.textures).unwrap()[0];
+        assert_eq!(t.format, format);
+        assert_eq!(t.mips, 2);
+        assert_eq!(t.pixels.count, (32 * 16 + 16 * 8) * bpp);
+        if format == pocket3d_place_psp::RGBA8888 {
+            let pixel = t.pixels.offset as usize;
+            assert_eq!(&bytes[pixel..pixel + 4], &[170, 120, 70, 255]);
+            assert_eq!(&bytes[pixel + 32 * 16 * 4..pixel + 32 * 16 * 4 + 4], &[170, 120, 70, 255]);
+        }
+    }
 }
 
 #[test]
@@ -565,6 +600,70 @@ fn pica_runtime_animation_and_skin_bounds_contracts() {
 }
 
 #[test]
+fn psp_sun_is_refined_before_lods_and_not_added_twice() {
+    use pocket3d_place_psp as pp;
+    let temp = Temp(std::env::temp_dir().join(format!("atlas-sun-lod-{}", std::process::id())));
+    for vertical in [false, true] {
+        let export = temp.0.join(if vertical { "wall" } else { "ground" });
+        std::fs::create_dir_all(&export).unwrap();
+        let rotate = |[x, y, z]: [f32; 3]| if vertical { [x, -z, y] } else { [x, y, z] };
+        let mut positions = Vec::new();
+        for (height, right) in [(0.0, 4.0), (2.0, -1.0)] {
+            let q = [[-4.0,height,-4.0],[-4.0,height,4.0],[right,height,4.0],[right,height,-4.0]];
+            for i in [0,1,2,0,2,3] { positions.extend(rotate(q[i])); }
+        }
+        let normal = rotate([0.0,1.0,0.0]);
+        let mut bin: Vec<u8> = positions.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let normals = bin.len();
+        for _ in 0..12 { bin.extend(normal.iter().flat_map(|v| v.to_le_bytes())); }
+        let key = json!({"pos":[0,4,6],"target":[0,0,0],"fov":45});
+        let doc = json!({
+            "asset":{"version":"2.0"},"scene":0,
+            "scenes":[{"nodes":[0],"extras":{"pocketAtlas":{
+                "kind":"daytime-street",
+                "directionalLights":[{"color":[1,1,1],"intensity":3,"direction":normal,"castShadow":true,
+                    "shadow":{"position":[0,8,0],"ortho":[-8,8,-8,8,0.1,20]}}],
+                "camera":{"shots":[{"name":"Surface","from":key,"to":key,"duration":12}]}
+            }}}],"nodes":[{"mesh":0}],
+            "meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1},"material":0}]}],
+            "materials":[{"pbrMetallicRoughness":{"baseColorFactor":[0.5,0.5,0.5,1],"metallicFactor":0,"roughnessFactor":0.8}}],
+            "buffers":[{"byteLength":bin.len()}],
+            "bufferViews":[{"buffer":0,"byteLength":normals},{"buffer":0,"byteOffset":normals,"byteLength":bin.len()-normals}],
+            "accessors":[{"bufferView":0,"componentType":5126,"count":12,"type":"VEC3","min":[-4,-4,-4],"max":[4,4,4]},
+                {"bufferView":1,"componentType":5126,"count":12,"type":"VEC3"}]
+        });
+        let glb = gltf::binary::Glb { header: gltf::binary::Header { magic: *b"glTF",version:2,length:0 }, json:Cow::Owned(serde_json::to_vec(&doc).unwrap()),bin:Some(Cow::Owned(bin)) };
+        std::fs::write(export.join("scene.glb"),glb.to_vec().unwrap()).unwrap();
+        let output = temp.0.join("sun.place");
+        ok(&["--in",export.to_str().unwrap(),"--target","psp","--out",output.to_str().unwrap()]);
+        let bytes = std::fs::read(output).unwrap();
+        let h = pp::validate(&bytes).unwrap();
+        let draws = pp::slice::<pp::Draw>(&bytes,h.draws).unwrap();
+        let mut floor = Vec::new();
+        let mut count = 0;
+        for d in draws {
+            let vertices: Vec<pp::Vertex> = match d.vertex_format {
+                0 => pp::slice::<pp::Vertex>(&bytes, d.vertices).unwrap().to_vec(),
+                1 => pp::slice::<pp::PackedVertex>(&bytes, d.vertices).unwrap()
+                    .iter().map(|v| pp::decode_vertex(d, v)).collect(),
+                other => panic!("unexpected vertex format {other}"),
+            };
+            let indices = pp::slice::<u16>(&bytes,d.indices).unwrap();
+            count += indices.len()/3;
+            for &i in indices {
+                let v = &vertices[i as usize];
+                if v.pos[if vertical {2} else {1}].abs() < 1e-4 { floor.push(*v); }
+            }
+        }
+        assert!(count > 4, "sun boundary must drive refinement even without sky AO (vertical={vertical}, triangles={count})");
+        let shadow = pocket3d_place::color::tone([0.0;3],&Default::default())[0]*255.0;
+        assert!(floor.iter().any(|v| v.pos[0] < -2.0 && (v.color.to_le_bytes()[0] as f32-shadow).abs() < 3.0), "building shadow must remain; dark={shadow}, samples={:?}", floor.iter().map(|v|(v.pos,v.color.to_le_bytes()[0])).collect::<Vec<_>>());
+        let expected = pocket3d_place::color::tone([0.5*3.0/std::f32::consts::PI;3],&Default::default())[0]*255.0;
+        assert!(floor.iter().any(|v| v.pos[0] > 2.0 && (v.color.to_le_bytes()[0] as f32-expected).abs() < 3.0), "sunlight must be added exactly once");
+    }
+}
+
+#[test]
 fn semantic_texture_intent_overrides_legacy_size_and_luminance_in_each_backend() {
     let temp = Temp(std::env::temp_dir().join(format!("atlas-intent-{}",std::process::id())));
     let export = temp.0.join("strip");
@@ -606,9 +705,94 @@ fn profile_budget_failure_preserves_old_artifact_and_receipts_are_repeatable() {
     let custom=temp.0.join("tiny.json");std::fs::write(&custom,serde_json::to_vec(&profile).unwrap()).unwrap();
     let rejected=run(&["--in",export.to_str().unwrap(),"--profile",custom.to_str().unwrap(),"--out",dest.to_str().unwrap(),"--json"]);
     assert!(!rejected.status.success());assert!(String::from_utf8_lossy(&rejected.stderr).contains("GEOM budget exceeded"));
+    let failure:serde_json::Value=serde_json::from_slice(&rejected.stderr).unwrap();
+    assert_eq!(failure["validation"]["published"],false);
+    assert_eq!(failure["passes"].as_array().unwrap().last().unwrap()["result"]["status"],"failed");
+    assert_eq!(failure["diagnostics"].as_array().unwrap().last().unwrap()["code"],"ATLAS_STRUCTURAL_BUDGET");
     assert_eq!(pack,std::fs::read(&dest).unwrap());assert_eq!(receipt,std::fs::read(dest.with_extension("compile.json")).unwrap());
     let conflict=run(&["check","--in",export.to_str().unwrap(),"--profile","old3ds30","--target","psp","--json"]);
     assert!(!conflict.status.success());assert!(String::from_utf8_lossy(&conflict.stderr).contains("conflicts"));
+}
+
+fn hash(bytes: &[u8]) -> String {
+    use sha2::{Digest,Sha256};
+    format!("{:x}",Sha256::digest(bytes))
+}
+fn authored_fixture(root: &Path, kind: &str, layout: usize) {
+    fixture(root,13,7);
+    let raw=std::fs::read(root.join("scene.glb")).unwrap();
+    let mut glb=gltf::binary::Glb::from_slice(&raw).unwrap();
+    let mut doc:serde_json::Value=serde_json::from_slice(&glb.json).unwrap();
+    let authoring=json!({"version":1,"id":format!("test-{kind}-{layout}"),"kind":kind,"seed":42,
+        "geometry":"full","resources":[],"sampling":{"startSeconds":0,"durationSeconds":1,"fps":15}});
+    let meta=&mut doc["scenes"][0]["extras"]["pocketAtlas"];
+    meta["kind"]=kind.into();meta["authoring"]=authoring.clone();
+    meta["tracks"]=json!({"fps":15,"frames":15});
+    if kind.starts_with("daytime") {meta["sky"]=json!({"model":"test-daylight","horizon":[0.6,0.7,0.8],"zenith":[0.2,0.3,0.5]});}
+    // The second layout moves and duplicates geometry; the same recipes must handle both.
+    doc["nodes"][0]["extras"]=json!({"pocketAtlas":{"sourceId":"layout/road"}});
+    if layout==1 {
+        doc["nodes"].as_array_mut().unwrap().push(json!({"mesh":0,"translation":[3.0,0.4,-2.0],"extras":{"pocketAtlas":{"sourceId":"layout/shop"}}}));
+        doc["scenes"][0]["nodes"]=json!([0,1]);
+    }
+    doc["materials"][0]["extras"]=json!({"pocketAtlas":{"textureUsage":{"albedo":"surface"}}});
+    glb.json=Cow::Owned(serde_json::to_vec(&doc).unwrap());
+    let bytes=glb.to_vec().unwrap();
+    std::fs::write(root.join("scene.glb"),&bytes).unwrap();
+    let files=json!([{"path":"src/test.ts","sha256":hash(b"synthetic layout fixture")}]);
+    let receipt=json!({"schemaVersion":1,"authoring":authoring,"source":{"sha256":hash(&serde_json::to_vec(&files).unwrap()),"files":files},
+        "resources":[{"path":"scene.glb","sha256":hash(&bytes)}],"toolchain":{"fixture":true}});
+    std::fs::write(root.join("export.json"),serde_json::to_vec(&receipt).unwrap()).unwrap();
+}
+
+#[test]
+fn two_layouts_per_family_keep_source_ownership_through_each_supported_recipe() {
+    let temp=Temp(std::env::temp_dir().join(format!("atlas-families-{}",std::process::id())));
+    for family in ["night-street","daytime-street"] {
+        for layout in 0..2 {
+            let export=temp.0.join(format!("{family}-{layout}"));authored_fixture(&export,family,layout);
+            for target in ["vita","3ds","psp"] {
+                let output=temp.0.join("result.place");
+                let result=run(&["--in",export.to_str().unwrap(),"--out",output.to_str().unwrap(),"--target",target,"--json"]);
+                assert!(result.status.success(),"{}",String::from_utf8_lossy(&result.stderr));
+                let report:serde_json::Value=serde_json::from_slice(&result.stdout).unwrap();
+                assert_eq!(report["export"]["authoring"]["id"],format!("test-{family}-{layout}"));
+                assert_eq!(report["passes"].as_array().unwrap().len(),report["recipe"]["passes"].as_array().unwrap().len());
+                let owners=&report["artifact"]["textures"][0]["sources"];
+                assert!(owners.as_array().unwrap().contains(&json!("layout/road")));
+                if layout==1 {assert!(owners.as_array().unwrap().contains(&json!("layout/shop")));}
+                let again=run(&["--in",export.to_str().unwrap(),"--out",output.to_str().unwrap(),"--target",target,"--json"]);
+                assert_eq!(result.stdout,again.stdout);
+            }
+        }
+    }
+}
+
+#[test]
+fn partial_or_tampered_authoring_exports_fail_before_replacing_a_sealed_ir() {
+    let temp=Temp(std::env::temp_dir().join(format!("atlas-export-seal-{}",std::process::id())));
+    let export=temp.0.join("export");let ir=temp.0.join("place.ir");
+    authored_fixture(&export,"night-street",0);
+    let args=["import","--in",export.to_str().unwrap(),"--out",ir.to_str().unwrap(),"--json"];
+    ok(&args);
+    let sealed=std::fs::read(ir.join("manifest.json")).unwrap();
+    let original=std::fs::read(export.join("export.json")).unwrap();
+    for mode in ["identity","resource","sampling","source","missing"] {
+        let mut receipt:serde_json::Value=serde_json::from_slice(&original).unwrap();
+        match mode {
+            "identity"=>receipt["authoring"]["id"]="another-place".into(),
+            "resource"=>receipt["resources"][0]["sha256"]="0".repeat(64).into(),
+            "sampling"=>receipt["authoring"]["sampling"]["durationSeconds"]=20.into(),
+            "source"=>receipt["source"]["files"][0]["sha256"]="1".repeat(64).into(),
+            _=>receipt["resources"]=json!([]),
+        }
+        std::fs::write(export.join("export.json"),serde_json::to_vec(&receipt).unwrap()).unwrap();
+        assert!(!run(&args).status.success(),"accepted {mode}");
+        assert_eq!(sealed,std::fs::read(ir.join("manifest.json")).unwrap());
+        ok(&["check","--in",ir.to_str().unwrap(),"--target","psp"]);
+    }
+    std::fs::remove_file(export.join("export.json")).unwrap();
+    assert!(!run(&args).status.success());
 }
 
 fn annotate_texture(root: &Path, usage: &str) {

@@ -492,6 +492,8 @@ static void enter(void) {
     return;
   if (p->flags & 1)
     snprintf(enter_id, sizeof enter_id, "%s", str(p, ID));
+  else if (p->flags & 4)
+    notify("Not available on Nintendo 3DS");
   else
     notify("This place is coming soon");
 }
@@ -1018,7 +1020,7 @@ void browser_hud(void) {
                native_name(item));
       fit(short_text, sizeof short_text, text, 268);
       browser_ui_text(14, y + 16, short_text, 0x94a8bf);
-      browser_ui_text(275, y + 2, item->flags & 1 ? "Open" : "Soon",
+      browser_ui_text(275, y + 2, item->flags & 1 ? "Open" : item->flags & 4 ? "N/A" : "Soon",
                       item->flags & 1 ? 0x90dcc4 : 0x8793a5);
       if (saved_index(str(item, ID)) >= 0)
         browser_ui_text(296, y + 17, "★", 0xffd28a);
@@ -1251,8 +1253,12 @@ void browser_render(C3D_RenderTarget *top) {
   start = ui_count;
   gpu_text(12, 8, "Pocket Atlas", 0xf3f6ff, 1.45f);
   char text[256];
+  unsigned available = 0;
+  for (unsigned i = 0; i < head->count; i++)
+    if (places[i].flags & 1)
+      available++;
   snprintf(text, sizeof text, "%u places · %u open", (unsigned)head->count,
-           (unsigned)head->texture_count - 3);
+           available);
   gpu_text(13, 30, text, 0x95aac6, 1);
   if (p) {
     if (p->preview < 0) {
@@ -1265,7 +1271,7 @@ void browser_render(C3D_RenderTarget *top) {
     gpu_wrap(226, y + 2, 158, 1, native_name(p), p->accent);
     fit(text, sizeof text, str(p, LOCALITY), 158);
     gpu_text(226, y + 21, text, 0xa9bdd4, 1);
-    gpu_text(226, 201, p->flags & 1 ? "A  Visit this place" : "Coming soon",
+    gpu_text(226, 201, p->flags & 1 ? "A  Visit this place" : p->flags & 4 ? "Unavailable on 3DS" : "Coming soon",
              p->flags & 1 ? 0xa1e0cf : 0x99a6bb, 1);
     if (saved_index(str(p, ID)) >= 0)
       gpu_text(370, 201, "★", 0xffd28a, 1);
@@ -1377,6 +1383,8 @@ void browser_status(char *out, size_t cap) {
   append(out, cap, &n, text);
   Place *p = selected();
   quoted(out, cap, &n, p ? str(p, ID) : "");
+  append(out, cap, &n, ",\"availability\":");
+  quoted(out, cap, &n, !p ? "none" : p->flags & 1 ? "available" : p->flags & 4 ? "unsupported" : "planned");
   append(out, cap, &n, ",\"query\":");
   quoted(out, cap, &n, query);
   append(out, cap, &n, ",\"list\":[");

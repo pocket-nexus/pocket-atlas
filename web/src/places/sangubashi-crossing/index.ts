@@ -1,7 +1,7 @@
 import { Vector3 } from "three";
 import type { PlaceDef, Progress, StageContext } from "../../core/types";
 import type { Box6, Shot } from "../shared/camera";
-import { DayStage } from "../shared/daylight/DayStage";
+import { createDefinedStage, defineDayPlace } from "../shared/authoring";
 import { AUDIO_RECIPE, SpringAudio } from "./sound";
 import { buildGardens, buildGround, buildNeighbourhood, buildStreetDetails, roadY } from "./world";
 import { buildPassingTrain, PASS } from "./rail";
@@ -19,20 +19,21 @@ const WALKABLE: Box6[] = Array.from({ length: 21 }, (_, i) => {
   return [-2.55, Math.max(roadY(z), roadY(z + 3.5)) + 0.4, z, 2.55, 13, z + 3.5];
 });
 
-export function createStage(ctx: StageContext, place: PlaceDef, progress: Progress) {
-  return DayStage.create(ctx, place, progress, {
-    kind: "daytime-street", season: "spring", shots: SHOTS, walkable: WALKABLE, loopSeconds: PASS.period,
+export const definition = defineDayPlace({
+    id: "sangubashi-crossing", seed: 20160826,
+    sampling: { startSeconds: 0, durationSeconds: PASS.period, fps: 15 },
+    kind: "daytime-street", season: "spring", shots: SHOTS, walkable: WALKABLE,
     focus: [-28, -5, -65, 28, 22, 48],
     intro: { pos: [-0.5, 5.5, 24], target: [-1.7, 2.5, -18], fov: 42 }, introSeconds: 5,
     sunDirection: new Vector3(0.58, 0.7, 0.34).normalize(), sunIntensity: 7.2,
     sunCenter: [0, 1, -8], shadowBounds: [-18, -4, -36, 18, 13, 25],
     envPosition: [0, 2.1, -2], envIntensity: 0.95, fogDensity: 0.009,
     metadata: {
-      geo: { lat: place.lat, lon: place.lon, bearing: 276, note: "Approximate photo-based layout; −Z looks down the western lane. Not a measured survey." },
+      geo: { lat: 35.67528, lon: 139.69175, bearing: 276, note: "Approximate photo-based layout; −Z looks down the western lane. Not a measured survey." },
       season: "spring", railway: { gauge: 1.067, tracks: 2, skew: 0.105, pass: PASS, rollingStock: "Odakyu 1000, photo-based 1081 eight-car formation" },
       references: ["https://fujisyuu01.hatenablog.jp/entry/14371167", "https://shinkaifan.com/past/5-centimeters-per-second/"],
     },
-    audio: new SpringAudio(ctx.audio),
+    createAudio: ctx => new SpringAudio(ctx.audio),
     audioRecipe: AUDIO_RECIPE,
     build: async (world, progress) => {
       await progress(0.28, "Laying the double tracks"); buildGround(world);
@@ -41,5 +42,8 @@ export function createStage(ctx: StageContext, place: PlaceDef, progress: Progre
       await progress(0.62, "Opening the cherry blossoms"); buildGardens(world);
       await progress(0.68, "Preparing the passing local"); buildPassingTrain(world);
     },
-  });
+});
+
+export function createStage(ctx: StageContext, place: PlaceDef, progress: Progress) {
+  return createDefinedStage(definition, ctx, place, progress);
 }

@@ -1324,7 +1324,7 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
     Ok(Artifact {
         bytes: out, summary,
         sections: sections.iter().map(|(tag,data,_)| (std::str::from_utf8(tag).unwrap().into(), data.len())).collect(),
-        textures: textures.iter().enumerate().map(|(id,t)|serde_json::json!({"id":id,"width":t[0],"height":t[1],"format":t[2],"levels":t[3],"bytes":t[5]})).collect(),
+        textures: textures.iter().enumerate().map(|(id,t)|serde_json::json!({"id":id,"sourceTextures":texkeys.iter().filter(|(_,output)|**output as usize==id).filter_map(|(key,_)|key.0).collect::<std::collections::BTreeSet<_>>(),"sources":texkeys.iter().filter(|(_,output)|**output as usize==id).filter_map(|(key,_)|key.0).flat_map(|source|crate::provenance::texture_sources(scene,source as usize)).collect::<std::collections::BTreeSet<_>>(),"width":t[0],"height":t[1],"format":t[2],"levels":t[3],"bytes":t[5]})).collect(),
     })
 }
 

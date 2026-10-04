@@ -1,8 +1,8 @@
 // Atlas's PSPLINK mailbox contract; no device ownership or SDK provisioning.
 import { readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 
-export const PSP_PACK_VERSION = 2;
-export interface Identity { build: string; packVersion: number; packHash: number }
+export const PSP_PACK_VERSION = 4;
+export interface Identity { build: string; packVersion: number; packHash: number; packSha256: string; runtimeBuild: string }
 
 export interface Status {
   target: "psp";
@@ -21,6 +21,8 @@ export interface Status {
   controlNonce: number;
   muted: boolean;
   audioReady: boolean;
+  packSha256: string;
+  runtimeBuild: string;
 }
 
 export function readStatus(path: string, expected?: Identity): Status {
@@ -34,6 +36,7 @@ export function readStatus(path: string, expected?: Identity): Status {
     value.packVersion !== PSP_PACK_VERSION ||
     !Number.isSafeInteger(value.packHash) || value.packHash < 0 || value.packHash > 0xffffffff ||
     typeof value.muted !== "boolean" || typeof value.audioReady !== "boolean" ||
+    !/^[a-f0-9]{64}$/.test(value.packSha256) || !/^[a-f0-9]{32}$/.test(value.runtimeBuild) ||
     typeof value.shot !== "string" ||
     [
       "frame",
@@ -49,7 +52,7 @@ export function readStatus(path: string, expected?: Identity): Status {
   ) {
     throw new Error("Incomplete PSP status");
   }
-  if (expected && (value.build !== expected.build || value.packVersion !== expected.packVersion || value.packHash !== expected.packHash))
+  if (expected && (value.build !== expected.build || value.packVersion !== expected.packVersion || value.packHash !== expected.packHash || value.packSha256 !== expected.packSha256 || value.runtimeBuild !== expected.runtimeBuild))
     throw new Error("Another PSP build or place is running; refusing to measure it");
   return value;
 }
@@ -103,18 +106,18 @@ export function writeControl(path: string, control: Control): number {
 }
 
 export function shotCount(bytes: Buffer): number {
-  // PLPS v2 Header.shots remains a Span at byte 48; Shot has 76 bytes.
+  // PLPS v4 Header.shots remains a Span at byte 48; Shot has 76 bytes.
   if (
-    bytes.length < 48 + 8 ||
+    bytes.length < 56 ||
     bytes.toString("ascii", 0, 4) !== "PLPS" ||
     bytes.readUInt32LE(4) !== PSP_PACK_VERSION ||
     bytes.readUInt32LE(8) !== bytes.length
   ) {
-    throw new Error("Invalid PLPS v2 pack");
+    throw new Error("Invalid PLPS v4 pack");
   }
   const offset = bytes.readUInt32LE(48);
   const count = bytes.readUInt32LE(52);
-  if (count === 0 || offset < 156 || offset % 16 !== 0 || offset + count * 76 > bytes.length) {
+  if (count === 0 || offset < 164 || offset % 16 !== 0 || offset + count * 76 > bytes.length) {
     throw new Error("Invalid PSP camera table");
   }
   return count;

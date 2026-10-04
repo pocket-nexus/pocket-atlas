@@ -1,13 +1,30 @@
 # Nintendo 3DS renderer
 
-Pocket Atlas opens on an interactive globe and runs five shared places on
+Pocket Atlas opens on an interactive globe and supports six shared places on
 an Old 3DS: Rainy Night Konbini, Suga Shrine Stairs, Radio Kaikan at Blue Hour,
-Kamakura-Kōkōmae Crossing, and Sangubashi in Bloom. The registry, globe maps, postcard previews,
+Kamakura-Kōkōmae Crossing, Sangubashi in Bloom and San Francisco Lombard Street.
+The registry, globe maps, postcard previews,
 font, material annotations, camera shots, geometry and motion come from the
 same web exports and lossless PlaceIR as the Vita. PICA cooks independently
 from source geometry and textures; it does not read a Vita device pack. Rendering contains no
 scene-name branches. PocketJS owns the unchanged paired debug transport and
 native installer; Atlas owns the application and its content-addressed packs.
+
+The native catalog uses explicit per-place `targets` eligibility in the web
+registry; PlaceIR validates the authored feature set before device lowering.
+Griffith Observatory's existing `dusk-vista` renderer requires light fields
+and distance/height-dependent vista haze that PICA does not yet implement.
+Its marker, details and preview remain visible, with **Unavailable on 3DS**;
+pressing A explains that it is unavailable instead of trying to load it.
+The browser reports `availability: unsupported` for that selection. Planned
+places retain their separate Coming soon state. The open-place count counts
+only supported live places.
+
+Cook, build, package, install and sync use the same supported subset. Their
+manifests/receipts list unsupported live entries separately. `cook --place`
+rejects an unsupported place explicitly, and the cooker rejects light-field and
+vista-haze features before treating any payload as triangle geometry; it does
+not omit those effects and publish an incomplete place.
 
 Default output is monoscopic 400 × 240 with a 30 fps target. The optional 4×
 antialias setting renders 800 × 480 and downsamples on display. Settings also
@@ -26,6 +43,8 @@ bun scripts/export-place.ts --place tokyo-konbini --seconds 20
 bun scripts/export-place.ts --place suga-shrine-stairs --seconds 1
 bun scripts/export-place.ts --place akihabara-radio-kaikan --seconds 20
 bun scripts/export-place.ts --place kamakura-koko-mae-crossing --seconds 120
+bun scripts/export-place.ts --place sangubashi-crossing --geometry handheld --seconds 64
+bun scripts/export-place.ts --place sf-lombard-street --seconds 120
 bun scripts/preview-place.ts
 bun scripts/export-atlas.ts
 cd ..
@@ -36,10 +55,14 @@ bun tools/atlas-3ds.ts build
 bun tools/atlas-3ds.ts install --host 192.168.8.159
 ```
 
+Sangubashi uses the shared `handheld` authoring geometry profile to fit native
+budgets while retaining all cars, equipment, window openings and its full
+animation cycle. Render/lighting quality is independent of this geometry choice.
+
 `cook --place ID` rebuilds one native pack. `build` produces
 `dist/3ds/pocket-atlas.3dsx`, with the small globe/browser pack in ROMFS and a
 compiled catalog of exact scene hashes. Scene packs live in
-`sdmc:/pocket-atlas/<sha256>.place`; four scenes exceed the native installer's
+`sdmc:/pocket-atlas/<sha256>.place`; the scenes exceed the native installer's
 32 MiB limit, so they are delivered separately.
 
 `install` replaces and restarts the application over the paired PocketJS
@@ -71,7 +94,7 @@ The upper screen shows a real rotating globe, location markers and a postcard.
 The lower screen contains the touchable place lists and details:
 
 - Circle pad rotates the globe. D-pad up/down selects a place; left/right zooms.
-- L/R changes Featured, Explore, Saved and Search. Explore sorts all 18 places
+- L/R changes Featured, Explore, Saved and Search. Explore sorts all 19 places
   by distance from the globe's facing point.
 - A enters an available place. Planned places remain browseable but cannot be entered.
 - X opens the system keyboard. Every search word must match a name, locality,
@@ -149,6 +172,8 @@ sun occlusion. It keeps only referenced animation tracks, deduplicates constants
 tracks, and stores compact translation/rotation/scale samples where possible.
 Quaternion interpolation retains rigid shape; the 64-second Sangubashi loop
 keeps all 15 Hz source samples. Non-TRS matrices retain an affine fallback.
+Skinned particles retain every joint track and use per-joint bounds; the
+compiler does not decimate their animation to meet the palette budget.
 
 Day/twilight skies use a cooked panorama and a separate drifting cloud layer.
 Cloud colors are premultiplied before bilinear filtering to avoid dark halos
@@ -179,6 +204,13 @@ geometry and reflection proxies retain their original coarse triangles.
 It starts conservatively on each scene entry, so a costly scene does not
 inherit a lighter scene's highest quality before its first measurements.
 
+An optional 128-byte `AUDI` record carries the shared procedural wind, bird
+and railway recipe. The NDSP mixer follows scene time and camera position,
+handles seek/pause/mute, and stops when leaving a scene. It does not contain
+recorded audio or a film soundtrack. Audio initialization failures retain
+visual rendering and report `audioReady`, `audioStage`, `audioResult` and
+`audioErrno`; an initialized mixer is separate from a person's listening check.
+
 ## Lifecycle and validation
 
 Every shader output is written in full exactly once. Attribute loaders consume
@@ -206,3 +238,8 @@ cc -std=c11 -Wall -Wextra -Werror n3ds/tests/navigation.c -lm \
 The reproducible C streaming/cache/HTTP failure test command is in
 `n3ds/tests/assets.c`. Host build, emulator behavior, physical device rendering,
 physical frame timing and a person's control/visual check are distinct evidence.
+
+The six-place catalog describes current release eligibility, not six new
+hardware acceptances. Existing captures and timings belong to their recorded
+pre-integration application and pack hashes. Re-exported packs and the merged
+runtime require fresh physical visual, interaction and performance checks.

@@ -50,6 +50,7 @@ export class Wear {
     if (!m) {
       m = base.clone();
       m.name = `${base.name}-shaded`;
+      m.userData.pocketAtlas = { ...m.userData.pocketAtlas, emissionShading: "indoor-wardrobe" };
       m.onBeforeCompile = (sh) => {
         sh.fragmentShader = sh.fragmentShader.replace(
           "#include <emissivemap_fragment>",
