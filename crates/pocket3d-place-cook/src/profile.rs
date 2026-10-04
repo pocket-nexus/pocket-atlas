@@ -44,6 +44,8 @@ pub struct Presentation {
 pub struct Recipe {
     pub revision: u32,
     pub texture_cap: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daylight_texture_cap: Option<u32>,
     pub detail_texture_cap: u32,
     pub emissive_texture_cap: u32,
     pub animation_palette_bytes: u32,
@@ -121,7 +123,7 @@ impl Profile {
             self.recipe.texture_cap,
             self.recipe.detail_texture_cap,
             self.recipe.emissive_texture_cap,
-        ] {
+        ].into_iter().chain(self.recipe.daylight_texture_cap) {
             if !cap.is_power_of_two() || !(min..=max).contains(&cap) {
                 return Err(format!(
                     "texture cap {cap} outside backend limits {min}..{max}"
@@ -209,14 +211,16 @@ impl Profile {
         &self,
         usage: Option<crate::source::TextureUsage>,
         luminous: bool,
+        daytime: bool,
     ) -> u32 {
         use crate::source::TextureUsage as U;
+        let surface = if daytime { self.recipe.daylight_texture_cap.unwrap_or(self.recipe.texture_cap) } else { self.recipe.texture_cap };
         match usage {
-            Some(U::Surface) => self.recipe.texture_cap,
+            Some(U::Surface) => surface,
             Some(U::TextAtlas | U::Flipbook) => self.recipe.detail_texture_cap,
             Some(U::EmissiveStrip) => self.recipe.emissive_texture_cap,
             None if luminous => self.recipe.emissive_texture_cap,
-            None => self.recipe.texture_cap,
+            None => surface,
         }
     }
     pub fn check_artifact(&self, a: &Artifact) -> Result<(), String> {
@@ -246,6 +250,18 @@ impl Profile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ge_surface_caps_follow_daylight_and_explicit_texture_intent() {
+        use crate::source::TextureUsage as U;
+        let p = Profile::builtin(Target::Psp);
+        assert_eq!(p.psp_texture_cap(Some(U::Surface), true, false), 128);
+        assert_eq!(p.psp_texture_cap(Some(U::Surface), true, true), 256);
+        assert_eq!(p.psp_texture_cap(None, false, true), 256);
+        assert_eq!(p.psp_texture_cap(Some(U::TextAtlas), false, true), 512);
+        let mut invalid = p;
+        invalid.recipe.daylight_texture_cap = Some(1024);
+        assert!(invalid.validate().is_err());
+    }
     #[test]
     fn profiles_cannot_claim_unimplemented_devices_or_relax_reader_limits() {
         for target in [Target::Vita, Target::Pica, Target::Psp] {

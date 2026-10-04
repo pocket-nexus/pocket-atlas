@@ -23,7 +23,7 @@ jobs:
       - run: cargo test --locked --workspace
       - run: bun install --frozen-lockfile
         working-directory: web
-      - run: bun test tools/*.test.ts web/scripts/*.test.ts web/src/places/shared/daylight/geometry.test.ts
+      - run: bun test tools/*.test.ts web/scripts/*.test.ts web/src/places/shared/daylight/*.test.ts web/src/places/sf-lombard-street/world/*.test.ts
       - run: bun web/node_modules/typescript/bin/tsc -p tsconfig.tools.json
       - name: Shadow receiver bounds
         run: |

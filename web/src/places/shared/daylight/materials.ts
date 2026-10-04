@@ -29,10 +29,12 @@ function withMaps(maps: SurfaceMaps, params: ConstructorParameters<typeof MeshSt
 export class DayLib {
   private baker: Baker;
   private size: number;
+  private relief: number;
   private maps = new Map<string, SurfaceMaps>();
   private cache = new Map<string, MeshStandardMaterial | MeshBasicMaterial>();
 
-  constructor(baker: Baker, quality: Quality) {
+  constructor(baker: Baker, quality: Quality, options: { relief?: number } = {}) {
+    this.relief = options.relief ?? 1;
     this.baker = baker;
     this.size = Math.min(1024, quality.textureSize);
   }
@@ -54,6 +56,7 @@ export class DayLib {
     let m = this.cache.get(key) as T | undefined;
     if (!m) {
       m = make();
+      if (m instanceof MeshStandardMaterial) m.normalScale.multiplyScalar(this.relief);
       m.name = key;
       this.cache.set(key, m);
     }
@@ -114,6 +117,11 @@ export class DayLib {
       m.userData.worldUV = true;
       return m;
     });
+  }
+
+  /** Dry brick paving with metre-scaled joints; local ribbon UVs follow a street. */
+  brickPaving(): MeshStandardMaterial {
+    return this.memo("brick-paving", () => withMaps(this.surf("brick-paving", SURF.BRICK_PAVING, 1024, 2.4, 1.4), { normalScale: new Vector2(0.7, 0.7) }));
   }
 
   // ---------------------------------------------------------- ground

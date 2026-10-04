@@ -288,3 +288,22 @@ Surface surface(vec2 uv) {
   col = mix(col, vec3(0.1, 0.17, 0.04), weed);
   return S(col, n * 0.6 + leaf * 0.25 + leaf2 * 0.15 + weed * 0.2, 0.9, 0.75 + 0.25 * n, 0.0);
 }`;
+
+/** 2.4 m of staggered fired-clay paving: 200 x 100 mm bricks with worn mortar. */
+export const BRICK_PAVING = /* glsl */ `
+Surface surface(vec2 uv) {
+  vec2 q=uv.yx*vec2(12.0,24.0);
+  float row=floor(q.y); q.x+=mod(row,2.0)*0.5;
+  vec2 id=floor(q),f=fract(q);
+  float tone=hash12(id);
+  vec2 edge=min(f,1.0-f)*vec2(0.2,0.1);
+  float mortar=1.0-smoothstep(0.002,0.0045,min(edge.x,edge.y));
+  float grain=fbm(uv*70.0,vec2(70.0),4);
+  float stain=fbm(uv*4.0,vec2(4.0),4);
+  vec3 clay=mix(vec3(0.095,0.029,0.021),vec3(0.205,0.070,0.047),tone);
+  clay*=0.75+grain*0.32+stain*0.18;
+  vec3 joint=vec3(0.23,0.22,0.19)*(0.86+0.16*grain);
+  float worn=smoothstep(0.83,0.98,tone)*smoothstep(0.007,0.015,min(edge.x,edge.y));
+  clay=mix(clay,clay*1.35,worn*0.25);
+  return S(mix(clay,joint,mortar),grain*0.06-mortar*0.12,0.80+grain*0.12,1.0-mortar*0.20,0.0);
+}`;

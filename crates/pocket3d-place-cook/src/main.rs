@@ -90,6 +90,9 @@ fn args() -> Args {
         profile.recipe.texture_cap = cap
             .parse()
             .unwrap_or_else(|_| fail("--tex must be an integer"));
+        if profile.recipe.daylight_texture_cap.is_some() {
+            profile.recipe.daylight_texture_cap = Some(profile.recipe.texture_cap);
+        }
         profile.recipe.detail_texture_cap = profile
             .recipe
             .detail_texture_cap

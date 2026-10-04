@@ -1,4 +1,5 @@
-import { BufferAttribute, BufferGeometry, Sphere, Vector3, type SkinnedMesh } from "three";
+import { Vector3 } from "three";
+import { thinFigure } from "../../shared/people/thin";
 import { stand, walk, wander, type Gait } from "../../shared/people/motion";
 import { mapPath, patrol } from "../../shared/people/paths";
 import { Figure, type Build, type Look } from "../../shared/people/rig";
@@ -22,82 +23,6 @@ const CELL = 0.05;
 /** Sidewalk height above the rail (road 0.06 + kerb 0.15). */
 const WALK_Y = 0.21;
 
-/**
- * Thins a figure to handheld size by vertex clustering in the bind pose:
- * vertices of every garment that fall in the same `cell` merge to the
- * cell's mean (shared across garments, so seams stay closed), keeping the
- * first vertex's skin weights and colour; collapsed and repeated triangles
- * drop out and normals are rebuilt.
- */
-function thin(f: Figure, cell: number): void {
-  const meshes = f.meshes as SkinnedMesh[];
-  const keyOf = (x: number, y: number, z: number) => `${Math.floor(x / cell)},${Math.floor(y / cell)},${Math.floor(z / cell)}`;
-  const sum = new Map<string, [number, number, number, number]>();
-  for (const m of meshes) {
-    const p = m.geometry.getAttribute("position");
-    for (let i = 0; i < p.count; i++) {
-      const k = keyOf(p.getX(i), p.getY(i), p.getZ(i));
-      const e = sum.get(k) ?? [0, 0, 0, 0];
-      e[0] += p.getX(i);
-      e[1] += p.getY(i);
-      e[2] += p.getZ(i);
-      e[3]++;
-      sum.set(k, e);
-    }
-  }
-  for (const m of meshes) {
-    const g = m.geometry;
-    const p = g.getAttribute("position");
-    const keep = ["skinIndex", "skinWeight", "color", "uv"].filter((n) => g.getAttribute(n));
-    const slot = new Map<string, number>();
-    const remap: number[] = [];
-    const src: number[] = [];
-    for (let i = 0; i < p.count; i++) {
-      const k = keyOf(p.getX(i), p.getY(i), p.getZ(i));
-      let j = slot.get(k);
-      if (j === undefined) {
-        j = src.length;
-        slot.set(k, j);
-        src.push(i);
-      }
-      remap.push(j);
-    }
-    const index = g.index ? Array.from(g.index.array) : Array.from({ length: p.count }, (_, i) => i);
-    const tris: number[] = [];
-    const seen = new Set<string>();
-    for (let t = 0; t < index.length; t += 3) {
-      const a = remap[index[t]];
-      const b = remap[index[t + 1]];
-      const c = remap[index[t + 2]];
-      if (a === b || b === c || a === c) continue;
-      const key = [a, b, c].sort((x, y) => x - y).join(",");
-      if (seen.has(key)) continue;
-      seen.add(key);
-      tris.push(a, b, c);
-    }
-    const out = new BufferGeometry();
-    const pos = new Float32Array(src.length * 3);
-    src.forEach((i, j) => {
-      const e = sum.get(keyOf(p.getX(i), p.getY(i), p.getZ(i)))!;
-      pos.set([e[0] / e[3], e[1] / e[3], e[2] / e[3]], j * 3);
-    });
-    out.setAttribute("position", new BufferAttribute(pos, 3));
-    for (const n of keep) {
-      const a = g.getAttribute(n) as BufferAttribute;
-      const Arr = a.array.constructor as new (n: number) => Float32Array;
-      const arr = new Arr(src.length * a.itemSize);
-      src.forEach((i, j) => {
-        for (let c = 0; c < a.itemSize; c++) arr[j * a.itemSize + c] = a.array[i * a.itemSize + c];
-      });
-      out.setAttribute(n, new BufferAttribute(arr, a.itemSize, a.normalized));
-    }
-    out.setIndex(tris);
-    out.computeVertexNormals();
-    out.boundingSphere = (g.boundingSphere ?? new Sphere()).clone();
-    g.dispose();
-    m.geometry = out;
-  }
-}
 
 export function buildPeople(w: KamakuraWorld): void {
   const root = w.group();
@@ -122,7 +47,7 @@ export function buildPeople(w: KamakuraWorld): void {
     const t = COAST.tangent(-7, new Vector3());
     f.root.rotation.y = Math.atan2(-t.z, t.x) - 0.45;
     root.add(f.root);
-    thin(f, CELL);
+    thinFigure(f, CELL);
     const s = f.d.s;
     const feet: [Vector3, Vector3] = [new Vector3(0.11, 0.075 * s, 0.02), new Vector3(-0.1, 0.075 * s, -0.03)];
     const k = (2 * Math.PI) / LOOP;
@@ -157,7 +82,7 @@ export function buildPeople(w: KamakuraWorld): void {
     };
     const f = new Figure(build, look, wear);
     root.add(f.root);
-    thin(f, CELL);
+    thinFigure(f, CELL);
     // Out along s = 4.3 m of the coast line, back along 5.1 m.
     const path = mapPath(patrol("x", -14, 40, 4.3, 5.1), (u, s, out) => COAST.offset(u, s, out));
     // One circuit per loop, a whole number of gait cycles in it.

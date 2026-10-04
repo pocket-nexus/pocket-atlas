@@ -295,7 +295,8 @@ impl<'a> Cook<'a> {
             damp,
             drops: x.get("glass").map(|g| f(g, "drops", 0.0)).unwrap_or(0.0),
             clearcoat,
-            polygon_offset: x.get("polygonOffset").filter(|p| p.is_array()).map(|p| extras::arr(p, [0.0; 2])),
+            polygon_offset: x.get("polygonOffset").filter(|p| p.is_array()).map(|p| extras::arr(p, [0.0; 2]))
+                .or_else(|| (self.profile.target == ir::Target::Psp && x["window"].is_string()).then_some([-1.0, -4.0])),
             emissive_track: None,
             uv_anim,
             water,
@@ -1068,6 +1069,26 @@ pub fn analyze(a: &Args, name: &str, pipeline: &mut crate::recipe::Pipeline) -> 
 
     pipeline.record("scene-lighting", json!({"lights":out_lights.len(),"environment":environment}));
 
+    let sun = sx["directionalLights"].as_array().and_then(|a| a.first()).map(|d| {
+        let c = v3(&d["color"]);
+        let i = f(d, "intensity", 1.0);
+        let sh = &d["shadow"];
+        pc::Sun {
+            direction: v3(&d["direction"]),
+            radiance: [c[0] * i, c[1] * i, c[2] * i],
+            shadow: (d["castShadow"].as_bool() == Some(true) && sh.is_object()).then(|| {
+                let o: Vec<f32> = sh["ortho"].as_array().map(|a| a.iter().map(|x| x.as_f64().unwrap_or(0.0) as f32).collect()).unwrap_or_default();
+                pc::SunShadow {
+                    position: v3(&sh["position"]),
+                    ortho: [o[0], o[1], o[2], o[3], o[4], o[5]],
+                    map_size: sh["mapSize"].as_u64().unwrap_or(2048) as u32,
+                    bias: f(sh, "bias", 0.0),
+                    normal_bias: f(sh, "normalBias", 0.0),
+                    radius: f(sh, "radius", 1.0),
+                }
+            }),
+        }
+    });
     // ---- static lighting baked into lit static surfaces
     let t_bake = Instant::now();
     let hemi = &sx["hemisphere"];
@@ -1081,7 +1102,9 @@ pub fn analyze(a: &Args, name: &str, pipeline: &mut crate::recipe::Pipeline) -> 
     // Sky occlusion (`extras.bake.skyOcclusion`): every static surface that is
     // not glass or blended blocks the sky; cut-out foliage blocks part of it.
     let so = &sx["bake"]["skyOcclusion"];
-    let occluder = so.is_object().then(|| {
+    let baked_sun = a.target == ir::Target::Psp
+        && sx["kind"].as_str().is_some_and(|k| k.starts_with("daytime-")) && sun.is_some();
+    let occluder = (so.is_object() || (baked_sun && sun.as_ref().is_some_and(|s| s.shadow.is_some()))).then(|| {
         let t_occ = Instant::now();
         let mut tris = Vec::new();
         for p in prims.iter() {
@@ -1102,7 +1125,7 @@ pub fn analyze(a: &Args, name: &str, pipeline: &mut crate::recipe::Pipeline) -> 
     });
     // Occlusion varies everywhere a surface meets another; split for it
     // only down to a coarser edge than for lamp pools.
-    let tolerance = if occluder.is_some() {
+    let mut tolerance = if so.is_object() {
         // Where the camera goes: the walkable boxes and every shot's ends.
         let cam = &sx["camera"];
         let mut lo = Vec3::splat(f32::MAX);
@@ -1132,6 +1155,7 @@ pub fn analyze(a: &Args, name: &str, pipeline: &mut crate::recipe::Pipeline) -> 
     } else {
         bake::LIGHTS
     };
+    if baked_sun { tolerance = crate::psp::daylight_tolerance(tolerance.focus); }
     let (mut baked_prims, mut tris_before, mut tris_after) = (0usize, 0usize, 0usize);
     for p in prims.iter_mut() {
         let m = &cook.materials[p.material as usize];
@@ -1146,8 +1170,12 @@ pub fn analyze(a: &Args, name: &str, pipeline: &mut crate::recipe::Pipeline) -> 
             std::mem::take(&mut p.verts),
             std::mem::take(&mut p.tris),
             &|pos, n| {
-                let sky = occluder.as_ref().map_or(1.0, |o| o.visibility(pos, n));
-                baker.irradiance(pos, n, env_k, direct, sky)
+                let sky = if so.is_object() { occluder.as_ref().map_or(1.0, |o| o.visibility(pos, n)) } else { 1.0 };
+                let mut light = baker.irradiance(pos, n, env_k, direct, sky);
+                if baked_sun && !m.interior {
+                    light += crate::psp::static_sun_light(sun.as_ref(), occluder.as_ref(), pos, n);
+                }
+                light
             },
             tolerance,
         );
@@ -1164,7 +1192,7 @@ pub fn analyze(a: &Args, name: &str, pipeline: &mut crate::recipe::Pipeline) -> 
     crate::progress!("baked {baked_prims} primitives: {tris_before} → {tris_after} triangles ({} ms)", t_bake.elapsed().as_millis());
     cook.log.push(format!("bake {baked_prims} primitives, {tris_before} → {tris_after} triangles"));
 
-    pipeline.record("bake-lighting", json!({"primitives":baked_prims,"inputTriangles":tris_before,"outputTriangles":tris_after,"skyOcclusion":so}));
+    pipeline.record("bake-lighting", json!({"primitives":baked_prims,"inputTriangles":tris_before,"outputTriangles":tris_after,"skyOcclusion":so,"directionalSun":baked_sun}));
 
     // ---- static chunking and draw building
     let mut draws: Vec<pc::Draw> = Vec::new();
@@ -1237,7 +1265,10 @@ pub fn analyze(a: &Args, name: &str, pipeline: &mut crate::recipe::Pipeline) -> 
                 base_error = error;
             }
         }
-        let bounds: Vec<f32> = bounds.iter().map(|e| e / metric_scale).collect();
+        // Preserve the GE daylight solid-surface budget without coarsening pane outlines.
+        let ge_static = baked_sun && node.is_none() && skin.is_none()
+            && m.kind == pc::Kind::Standard && m.alpha_test == 0.0 && m.polygon_offset.is_none();
+        let bounds: Vec<f32> = bounds.iter().map(|e| e * if ge_static { 2.0 } else { 1.0 } / metric_scale).collect();
         for (v, t) in geometry::split(&verts, &tris) {
             let mut locked: Vec<bool> = v.iter().map(|v| locks.is_some_and(|l| l.contains(&geometry::pos_bits(v.pos)))).collect();
             if m.vertex_pbr {
@@ -1504,26 +1535,6 @@ pub fn analyze(a: &Args, name: &str, pipeline: &mut crate::recipe::Pipeline) -> 
         "fogLights": fog_lights.len(),
     });
     // ---- sun, daytime sky, post
-    let sun = sx["directionalLights"].as_array().and_then(|a| a.first()).map(|d| {
-        let c = v3(&d["color"]);
-        let i = f(d, "intensity", 1.0);
-        let sh = &d["shadow"];
-        pc::Sun {
-            direction: v3(&d["direction"]),
-            radiance: [c[0] * i, c[1] * i, c[2] * i],
-            shadow: (d["castShadow"].as_bool() == Some(true) && sh.is_object()).then(|| {
-                let o: Vec<f32> = sh["ortho"].as_array().map(|a| a.iter().map(|x| x.as_f64().unwrap_or(0.0) as f32).collect()).unwrap_or_default();
-                pc::SunShadow {
-                    position: v3(&sh["position"]),
-                    ortho: [o[0], o[1], o[2], o[3], o[4], o[5]],
-                    map_size: sh["mapSize"].as_u64().unwrap_or(2048) as u32,
-                    bias: f(sh, "bias", 0.0),
-                    normal_bias: f(sh, "normalBias", 0.0),
-                    radius: f(sh, "radius", 1.0),
-                }
-            }),
-        }
-    });
     let sky_day = &sx["sky"];
     let day_sky = (sky_day["model"] == "gradient-sun-cloudpanorama").then(|| {
         let cl = &sky_day["clouds"];
@@ -1625,6 +1636,7 @@ pub fn analyze(a: &Args, name: &str, pipeline: &mut crate::recipe::Pipeline) -> 
         beacons,
         effects,
         sun,
+        baked_sun,
         day_sky,
         post,
         vista_haze: extras::vista_haze(&sx["haze"]),

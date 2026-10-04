@@ -14,6 +14,7 @@ import {
 import { resolve, join } from "node:path";
 import { crc32 } from "node:zlib";
 import { PLACES } from "../web/src/places/registry";
+import { native3dsPlaces, unsupported3dsPlaces, validate3dsBrowserCatalog } from "./atlas-3ds-support";
 import { syncAssets } from "./atlas-3ds-delivery";
 import { readPack, PICA_PACK_VERSION } from "./place-container";
 import {
@@ -46,7 +47,10 @@ const place = option("--place", "tokyo-konbini"),
   dir = join(root, ".pocket-build/3ds"),
   romfs = join(dir, "atlas-romfs");
 const nativePlaces = join(dir, "places");
-const livePlaces = PLACES.filter((p) => p.status === "live" && p.load && p.targets?.includes("3ds"));
+const livePlaces = native3dsPlaces(PLACES);
+const unsupportedPlaces = unsupported3dsPlaces(PLACES);
+if (["cook", "build", "package", "install", "sync"].includes(command) && unsupportedPlaces.length)
+  console.log(`3DS catalog unavailable: ${unsupportedPlaces.map((p) => `${p.id} (${p.kind})`).join(", ")}`);
 const receipts = join(root, ".pocket-build/validation/3ds");
 mkdirSync(receipts, { recursive: true });
 const thin = args.includes("--thin");
@@ -75,6 +79,7 @@ async function build() {
   const atlasPath = join(dir, "romfs/atlas.3ds");
   if (!existsSync(atlasPath))
     throw new Error("cook the atlas: bun tools/atlas-3ds-assets.ts");
+  validate3dsBrowserCatalog(readFileSync(atlasPath), PLACES);
   cpSync(atlasPath, join(romfs, "atlas.3ds"));
   const atlasHash = sha(atlasPath);
   const pocketjsRevision = (
@@ -109,6 +114,7 @@ async function build() {
         version: 1,
         atlasSha256: atlasHash,
         places: entries.map(({ path, ...e }) => e),
+        unsupportedPlaces,
       },
       null,
       2,
@@ -139,6 +145,7 @@ cp /tmp/atlas-build/*.shbin /tmp/atlas-build/atlas.elf /tmp/atlas-build/atlas.ma
     sha256: sha(artifact),
     atlasSha256: atlasHash,
     places: entries.map(({ path, ...e }) => e),
+    unsupportedPlaces,
   };
   if (receipt.bytes > 32 * 1024 * 1024)
     throw new Error("native install limit: artifact exceeds 32 MiB");

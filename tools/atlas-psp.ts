@@ -162,7 +162,7 @@ else if (command === "serve") {
       rows.push(row);
       console.log(JSON.stringify({ ...row, samples: undefined }));
       const file = `shot-${shot}.bmp`;
-      await shell(`scrshot ${file}`);
+      await shell(`scrshot host0:/${file}`);
       cpSync(`${share}/${file}`, `${directory}/shot-${shot}.bmp`);
       evidence.observe(identity(await waitStatus(s => s.controlNonce === nonce && s.shotIndex === shot)),
         { kind: "capture", shot, file: `shot-${shot}.bmp`, sha256: fileSha256(`${directory}/shot-${shot}.bmp`), visualReview: "not-recorded" });
@@ -187,7 +187,7 @@ else if (command === "serve") {
   );
   mkdirSync(resolve(out, ".."), { recursive: true });
   const file = `capture-${Date.now()}.bmp`;
-  await shell(`scrshot ${file}`);
+  await shell(`scrshot host0:/${file}`);
   if (!existsSync(`${share}/${file}`))
     throw new Error("PSPLINK did not write the screenshot");
   cpSync(`${share}/${file}`, out);

@@ -84,14 +84,14 @@ export function writeControl(path: string, control: Control): number {
 }
 
 export function shotCount(bytes: Buffer): number {
-  // PLPS v1 Header.shots is a Span at byte 48; Shot has 76 bytes.
+  // PLPS v3 Header.shots is a Span at byte 48; Shot has 76 bytes.
   if (
     bytes.length < 48 + 8 ||
     bytes.toString("ascii", 0, 4) !== "PLPS" ||
-    bytes.readUInt32LE(4) !== 1 ||
+    bytes.readUInt32LE(4) !== 3 ||
     bytes.readUInt32LE(8) !== bytes.length
   ) {
-    throw new Error("Invalid PLPS v1 pack");
+    throw new Error("Invalid PLPS v3 pack");
   }
   const offset = bytes.readUInt32LE(48);
   const count = bytes.readUInt32LE(52);

@@ -154,13 +154,13 @@ impl Manifest {
                     target.name()
                 ));
             }
-            if target == Target::Psp && matches!(feature.as_str(), "material:water" | "day-sky") {
+            if target == Target::Psp && feature == "material:water" {
                 return Err(format!("{}: {feature} has no PSP lowering", self.name));
             }
         }
-        if target == Target::Psp && self.kind != "night-street" {
+        if target == Target::Psp && !matches!(self.kind.as_str(), "night-street" | "daytime-slope" | "daytime-street") {
             return Err(format!(
-                "{}: PSP currently supports the night-street effect set, got {}",
+                "{}: PSP currently supports night streets and dry daytime streets/slopes, got {}",
                 self.name, self.kind
             ));
         }
@@ -467,6 +467,16 @@ mod tests {
             .unwrap_err()
             .contains("no 3ds lowering"));
         assert!(m.check_target(Target::Psp).is_err());
+    }
+    #[test]
+    fn psp_daylight_admission_keeps_water_and_vista_effects_explicit() {
+        for kind in ["daytime-street", "daytime-slope"] {
+            let mut m = Manifest { version: VERSION, name: "day".into(),
+                kind: kind.into(), features: ["day-sky".into()].into(), files: vec![] };
+            assert!(m.check_target(Target::Psp).is_ok());
+            m.features.insert("material:water".into());
+            assert!(m.check_target(Target::Psp).is_err());
+        }
     }
     #[test]
     fn resources_cannot_escape_the_ir() {

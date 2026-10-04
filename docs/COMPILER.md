@@ -35,9 +35,9 @@ It contains no device version, byte ranges or GPU vertex layouts.
 readers re-export those types for compatibility. `analysis.rs` applies scene
 passes, while `vita.rs`, `pica.rs` and `psp.rs` own their encodings. `main.rs`
 handles the CLI. The analysis representation is not a serialized interchange
-format or a shared scene language for OpenStrike. Device format names/versions remain
-unchanged so this step does not require a runtime format migration. PICA pins
-its PLCE envelope to v5 and its binary table to v3 independently of Vita v6.
+format or a shared scene language for OpenStrike. Vita uses PLCE/ATLS v7 and META v7. PICA pins its PLCE envelope to v5 and
+its binary table to v3 independently. PSP uses PLPS v3 with explicit texture
+precision; all packs require their matching target readers.
 Previously a Vita version bump leaked into PICA output and the C reader rejected
 it; the integration test now checks cooked output using the runtime's C format
 header and header validator.
@@ -110,7 +110,7 @@ is never a compiler input. The removed `--pica-from` and `psp --in <pack>` forms
 fail with a migration message.
 
 `--tex` overrides the selected profile's surface texture cap. PSP defaults to
-128-pixel surfaces and 512-pixel emissive/detail maps. PICA defaults to 256.
+128-pixel night surfaces, 256-pixel daytime surfaces and 512-pixel emissive/detail maps. PICA defaults to 256.
 Profiles validate overrides against the selected backend's limits. Output suffixes do not identify a universal pack:
 PICA has its own table and geometry layout; PSP uses the separate PLPS header.
 PICA's higher-resolution exceptions inspect the authored 4K text-atlas
@@ -124,8 +124,15 @@ need device headroom measurements.
 ## Capability, release eligibility and evidence
 
 `check --target` rejects known missing lowerings before cooking. Currently
-PICA/GE reject city-light fields and vista height haze. GE also rejects daytime
-sky, water and kinds outside the supported night-street effect set. It does not
+PICA/GE reject city-light fields and vista height haze. GE also rejects water
+and kinds outside night streets and dry daytime
+streets/slopes. Its shared daytime lowering bakes the sky and sun from the IR.
+The GE analysis includes static sunlight before refinement/LOD, with an explicit
+transient `baked_sun` marker to avoid applying it twice. Its contact guard and
+intact source-window overlays are native sampling policies; the authored IR and
+Vita/PICA sunlight paths remain independent (see `psp/README.md`).
+PLPS v3 records per-texture precision (RGBA8888 gradients/glossy maps, compact
+RGBA4444 for other surfaces) and a bounded sky mesh. It does not
 silently treat light-field point records as triangle records. Unsupported
 material annotations fail rather than falling back to a standard material.
 This is an initial capability gate, not an exhaustive Three.js feature checker.

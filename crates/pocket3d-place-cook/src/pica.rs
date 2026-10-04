@@ -450,7 +450,7 @@ fn recover_structural_details(
 
 // Display-referred panoramas preserve authored day/twilight colour, sunlight
 // and clouds without spending fragment instructions or an HDR target on PICA.
-fn sky_radiance(s: &pc::DaySky, d: Vec3) -> Vec3 {
+pub(super) fn sky_radiance(s: &pc::DaySky, d: Vec3) -> Vec3 {
     let h = d.y;
     let mut color =
         Vec3::from(s.horizon).lerp(Vec3::from(s.zenith), h.max(0.0).powf(s.gradient_power));
@@ -486,7 +486,7 @@ fn sky_radiance(s: &pc::DaySky, d: Vec3) -> Vec3 {
     color
 }
 // Match a filtered GPU panorama sample (repeat azimuth, clamp elevation).
-fn bilinear(image: &Rgba, u: f32, v: f32) -> [f32; 4] {
+pub(super) fn bilinear(image: &Rgba, u: f32, v: f32) -> [f32; 4] {
     let x = u * image.w as f32 - 0.5;
     let y = v * image.h as f32 - 0.5;
     let (ix, iy) = (x.floor() as i32, y.floor() as i32);
@@ -592,14 +592,15 @@ fn push_texture(src: &Rgba, alpha: bool, tex: &mut Vec<u8>, textures: &mut Vec<[
     ]);
     textures.len() as u32 - 1
 }
-fn sun_occluder(scene: &crate::source::Scene) -> Option<crate::occlusion::Occluder> {
+pub(super) fn sun_occluder(scene: &crate::source::Scene) -> Option<crate::occlusion::Occluder> {
     let m = scene;
     assert!(m.materials.iter().all(|m| !m.vertex_pbr), "PICA lowering requires source materials, not Vita PBR palettes");
     m.sun.as_ref()?.shadow.as_ref()?;
     let mut tris = Vec::new();
     for d in &m.draws {
         let mat = &m.materials[d.material as usize];
-        if d.node.is_some()
+        if !d.cast_shadow
+            || d.node.is_some()
             || d.skin.is_some()
             || mat.kind == pc::Kind::Glass
             || mat.kind == pc::Kind::Water

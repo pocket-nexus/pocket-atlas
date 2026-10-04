@@ -143,6 +143,8 @@ pub struct MaterialTrack {
 }
 
 pub struct Scene {
+    /// Target analysis included direct sun before LOD selection.
+    pub baked_sun: bool,
     pub provenance: serde_json::Value,
     pub name: String,
     pub kind: String,
