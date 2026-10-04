@@ -91,10 +91,16 @@ bun scripts/export-place.ts --place sangubashi-crossing --seconds 64 \
 The default web geometry remains the full reference. `geometry=handheld`
 selects the shared daytime geometry profile: the train retains all eight
 cars, 32 rotating wheelsets, cab, interior and equipment, with fewer radial
-segments and without hidden edges on thin plates. Its train geometry is
-79,536 triangles instead of 365,224. Foliage card density and railway hardware
-tessellation also scale down. Lighting and texture authoring quality remain
-independent of this geometry choice.
+segments and without hidden edges on thin plates. Foliage card density and
+railway hardware tessellation also scale down. Lighting and texture authoring
+quality remain independent of this geometry choice.
+
+Window and door openings are cut through the shared house facades and train
+shells. Glass therefore has no nearly coplanar opaque backing, and adjacent
+train panels do not duplicate the same surface. Printed railway signs and
+train notices use the shared decal material's explicit depth offset. These
+authoring rules keep the details stable on native depth buffers without
+removing windows, equipment or lettering.
 
 Windborne petals use ordinary glTF skins with at most 24 joints per batch;
 260 petals take 11 draws. Their size is baked into the vertices and their
@@ -231,12 +237,34 @@ These encodings are produced from source floats, independently of Vita packing.
 The PSP daytime recipe uses 8 m static cells so long rails and distant planting
 do not keep unrelated geometry visible. Batch welding shares byte-identical
 GE vertices without changing geometry or reducing the train's detail.
+Untextured PSP batches canonicalize unused UVs before welding; textured
+batches retain their original UVs. The renderer keeps each batch's index
+buffer while its ordered visible spans are unchanged, with separate storage
+for the main, reflection and wet-mask passes. Animation uses elapsed time
+even below 10 fps, so a slow frame does not stretch the railway cycle.
+
+The PSP GE rejects a whole triangle when its projected vertices leave the
+hardware's 0–4096 coordinate range. A long roof face crossing the near plane
+can hit that limit even while part of it is visible. The renderer clips those
+triangles before submission, interpolating UVs and colour in the original
+3D coordinate frame and preserving triangle order. Unchanged triangles keep
+their resident index buffers. Cached local bounds for 16-triangle blocks skip
+safe geometry; cache admission is bounded at 256 KiB and falls back to complete
+scanning when full. Generated vertices use stable scratch blocks that are only
+reused after GE completion. This also covers other long near-camera surfaces,
+without a train-specific renderer branch or a pack-format change.
+
+The PICA middle LOD retains nearby thin structural poles and opaque textured
+sign faces in bounded local cells. This keeps signal supports and warning
+signs present without forcing the whole scene to its finest LOD.
 
 The optional audio record describes wind, birds, railway timing, position and
 gain. Both native renderers synthesize it from the scene clock, including seek,
 pause and mute; no recordings or film soundtrack are included. 3DS offers
 Sound in settings; Circle toggles PSP sound. A failed audio initialization is
-reported as `audioReady: false` while rendering remains available.
+reported as `audioReady: false` while rendering remains available. The 3DS
+status also records the initialization stage, libctru result and file errno
+to distinguish DSP setup failures from scene or synthesis failures.
 
 After exporting the handheld source above:
 
@@ -264,27 +292,60 @@ to match the staged SHA-256 receipt. Captures are taken after timing samples;
 ### Native validation status (2026-10-04)
 
 Host builds and format/runtime regression tests pass. Both formats retain
-960 samples over 64 seconds. PICA's scene pack is 32.25 MiB; the optimized PSP
-pack is 17.87 MiB, below its 18 MiB reader limit. The 3DS SD archive includes
+960 samples over 64 seconds. PICA's scene pack is 34,278,160 bytes; the PSP
+pack is 18,686,040 bytes, below its 18 MiB reader limit. The 3DS SD archive includes
 all five eligible scenes and its packaged files were verified against their
 SHA-256 manifest.
 
-An actual PSP release (`20b87b39ec9fc671`, first unoptimized pack) rendered the
-train and crossing correctly in captured frames, with `audioReady: true`.
-Five fixed Crossing windows at t=19.73 measured 7.49 fps; the first Train
-window measured 6.0 fps. Another task then replaced the running app with
-Lombard, and identity checks stopped the remaining measurements. Those
-numbers do not measure the subsequent LOD and spatial-cell fixes.
+PSP release `af6b69c77fad228d`, pack SHA-256
+`1bd48a45a655ac13173c042fcd75a95ae2a6f75cf194cec021943cdb42029d06`,
+was launched through the existing PSPLINK host. Six fixed captures confirm
+the warning sign, facade window openings and recovered roof in both diagonal
+railway views. Five 30-frame measurement windows per camera at t=19.73 give:
 
-Offline replay of the optimized PSP recipe reduces the six camera-path peak
-triangle counts by 7–26%, with identical moving-geometry counts. The PICA
-world-AABB culling fix reduces its step-0 Train peak from 138,190 to 129,017
-triangles without changing geometry. These are geometry counts, not device
-timings or a 30 fps claim.
+| Camera | PSP fps | PSP work ms |
+| --- | ---: | ---: |
+| Crossing | 8.57 | 102.71 |
+| Blossom | 9.79 | 99.95 |
+| Tracks | 8.57 | 108.71 |
+| Train | 7.50 | 117.22 |
+| Lane | 8.57 | 105.94 |
+| Spring | 8.57 | 113.96 |
 
-All five 3DS asset transfers were verified, but the machine became network
-unreachable before the new runtime installation could be confirmed. A later
-network check succeeded while another workspace was installing to that 3DS;
-the shared PSP was still running Lombard. Final
-3DS launch, PSP retest, six-view capture, live-loop performance, controls and
-listening checks remain pending device availability. Vita was not used.
+PSP does not meet the 30 fps target. Compared with committed build
+`ee094d76a825d1cd` at the same cameras and time, total work is 3–7% lower while
+the missing and overlapping surfaces are corrected. The guard fallback adds
+17.6–30.7 ms of CPU processing/submission in these views; this overlaps GE
+execution and must not be added to `workMs`. Its scratch allocation is
+49,152 bytes. The fixed-view block-cache accounting reaches 171,784 bytes.
+Offline replay over six cameras and all 960 animation samples preserves the
+unoptimized clipping results and stays within the hardware guard bounds.
+The final Train capture is pixel-identical to the initial correct clipping
+implementation. A 146-second live tour visits all six cameras and advances
+145.31 scene seconds during 145.32 seconds between the first and last status
+samples. Its sampled rates range from 8.53 to 12 fps; these moving views are
+distinct from the fixed passing-train measurements above. Pause, mute and
+resume controls pass. Block-cache accounting peaks at 188,952 bytes.
+
+The standalone Memory Stick files were copied back and matched byte-for-byte:
+`EBOOT.PBP` is 475,645 bytes, SHA-256
+`714b55ecbc1925f276d854f2f4163dd39d7e0e631020b54d4251dfd41ea59fd9`;
+`scene.place` matches the pack hash above. This is installation/readback proof,
+separate from the PSPLINK release-runtime tests. An XMB launch and listening
+check have not been performed. PSP reports `audioReady: true`.
+
+The current 3DS runtime `a447441aebd0` and all five asset hashes were verified
+on `192.168.8.159:8131`. One transfer heartbeat timed out; the retry completed.
+Six fixed step-0 cameras at t=19.73 averaged 33.34–33.57 ms per frame, with
+20.63–25.51 ms PICA time. A 146-second automatic tour covered all six camera
+paths without reconnection: 4,380 measured frames, 33.43 ms mean, a 35 ms
+histogram p95 bound and 40.65 ms maximum. The quality governor started at
+step 4 and returned to step 0; 218 of 242 status samples were at step 0.
+Remaining linear memory stayed at 3,198,976 bytes.
+
+Eleven native captures cover all cameras and t=0, 8, 25, 37 and 63.93 crossing
+phases. They confirm the middle-LOD poles and signs remain present. The 3DS
+audio stage still reports `ndsp-init`, result `0xD880A7FA`; DSP initialization
+has not succeeded, and no 3DS listening acceptance is claimed. Remote mute
+controls were checked independently of audio readiness. Physical button feel
+and listening remain human checks. Vita was not used.

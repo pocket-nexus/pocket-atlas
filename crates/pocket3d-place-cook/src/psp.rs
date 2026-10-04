@@ -253,7 +253,14 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
             let index = *remap.entry(old).or_insert_with(|| {
                 let v = scene.vertex(draw, old as usize);
                 let pos = rebase.transform_point3(v.pos).to_array();
-                let uv = v.uv.to_array();
+                // The GE renderer disables Texture2D for this final material.
+                // Canonicalize its dead UVs before exact vertex welding so
+                // authoring seams do not duplicate otherwise identical data.
+                let uv = if materials[draw.material as usize].texture == pp::NONE {
+                    [0.0; 2]
+                } else {
+                    v.uv.to_array()
+                };
                 let vc = core::array::from_fn::<_, 3, _>(|i| {
                     pc::color::decode(v.color[i] as f32 / 255.0)
                 });

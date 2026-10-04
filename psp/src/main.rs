@@ -4,6 +4,7 @@ extern crate alloc;
 
 mod audio;
 mod camera;
+mod clip;
 mod dev;
 mod renderer;
 mod scene;
@@ -98,10 +99,13 @@ unsafe fn run() {
     let mut work_sum = 0u64;
     let mut gpu_sum = 0u64;
     let mut max_work = 0u32;
+    // control, pose, bounds/skin, audio, prepare, LOD, pass, copy, draw, effects.
+    // Copy and draw are nested within pass; all values are elapsed wall time.
+    let mut stage_sum = [0u64; 11];
     let mut sample_start = now;
     loop {
         let start = sceKernelGetSystemTimeLow();
-        let dt = (start.wrapping_sub(now) as f32 / 1e6).min(0.1);
+        let dt = scene::frame_seconds(start.wrapping_sub(now));
         now = start;
         sceCtrlPeekBufferPositive(&mut pad, 1);
         let pressed = pad.buttons & !previous;
@@ -165,17 +169,23 @@ unsafe fn run() {
         let x = axis(pad.lx);
         let y = axis(pad.ly);
         let b = |flag| if pad.buttons.contains(flag) { 1.0 } else { 0.0 };
+        let look = (
+            b(CtrlButtons::RIGHT) - b(CtrlButtons::LEFT),
+            b(CtrlButtons::DOWN) - b(CtrlButtons::UP),
+        );
+        let navigating = !rig.cinematic || x != 0.0 || y != 0.0 || look.0 != 0.0 || look.1 != 0.0;
         rig.update(
-            if frozen >= 0.0 || paused { 0.0 } else { dt },
+            scene::camera_seconds(dt, frozen >= 0.0 || paused, navigating),
             (x, y),
-            (
-                b(CtrlButtons::RIGHT) - b(CtrlButtons::LEFT),
-                b(CtrlButtons::DOWN) - b(CtrlButtons::UP),
-            ),
+            look,
             scene.shots,
             scene.walkable,
         );
-        scene.update(time, rig.pos);
+        let pose_begin = sceKernelGetSystemTimeLow();
+        scene.update_pose(time, rig.pos);
+        let bounds_begin = sceKernelGetSystemTimeLow();
+        scene.update_bounds();
+        let audio_begin = sceKernelGetSystemTimeLow();
         let right = (rig.target - rig.pos)
             .normalize()
             .cross(glam::Vec3::Y)
@@ -206,10 +216,26 @@ unsafe fn run() {
             audio::CHIME.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         }
         was_open = open;
+        let render_begin = sceKernelGetSystemTimeLow();
         let stats = gpu.frame(&scene, &rig, time, rain && h.rain != 0, reflection);
         let work = sceKernelGetSystemTimeLow().wrapping_sub(start);
         work_sum += work as u64;
         gpu_sum += stats.gpu_us as u64;
+        for (sum, value) in stage_sum.iter_mut().zip([
+            pose_begin.wrapping_sub(start),
+            bounds_begin.wrapping_sub(pose_begin),
+            audio_begin.wrapping_sub(bounds_begin),
+            render_begin.wrapping_sub(audio_begin),
+            stats.prepare_us,
+            stats.lod_us,
+            stats.pass_us,
+            stats.copy_us,
+            stats.draw_us,
+            stats.effects_us,
+            stats.clip_us,
+        ]) {
+            *sum += value as u64;
+        }
         max_work = max_work.max(work);
         // One vblank wait if work already consumed a refresh, two otherwise.
         sceDisplayWaitVblankStart();
@@ -244,6 +270,14 @@ unsafe fn run() {
                 reflection,
                 paused,
                 free_camera: !rig.cinematic,
+                stage_ms: stage_sum.map(|v| v as f32 / 30000.0),
+                clip_scan_triangles: stats.clip_scan_triangles,
+                clip_input_triangles: stats.clip_input_triangles,
+                clip_vertices: stats.clip_vertices,
+                clip_extra_draws: stats.clip_extra_draws,
+                clip_scratch_bytes: stats.clip_scratch_bytes,
+                clip_block_bytes: stats.clip_block_bytes,
+                clip_block_skipped: stats.clip_block_skipped,
             });
             if hud {
                 psp::dprintln!("{} {:.1} fps / {} tris", shot, 1000.0 / ms, stats.triangles);
@@ -251,6 +285,7 @@ unsafe fn run() {
             work_sum = 0;
             gpu_sum = 0;
             max_work = 0;
+            stage_sum = [0; 11];
             sample_start = sceKernelGetSystemTimeLow();
         }
         core::hint::black_box(&storage);

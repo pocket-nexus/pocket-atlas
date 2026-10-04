@@ -300,10 +300,29 @@ fn principal_extents(points: &[Vec3]) -> Vec3 {
 }
 
 fn structural_detail(extent: Vec3, fine: usize, coarse: usize) -> bool {
+    // Slim rings and tubes retain the existing near-detail policy. Thicker
+    // posts qualify only with a compact, roughly round cross-section, so a
+    // 16 cm striped support is not mistaken for an expendable distant wire.
+    let section = (0.008..=0.12).contains(&extent.x)
+        || ((0.12..=0.24).contains(&extent.x) && extent.y <= extent.x * 1.5);
     fine >= 24
         && coarse * 100 < fine * 45
-        && (0.008..=0.12).contains(&extent.x)
+        && section
         && (0.1..=2.0).contains(&extent.z)
+}
+
+fn planar_detail(extent: Vec3, fine: usize, coarse: usize) -> bool {
+    // Opaque textured markers are already close to their minimal topology.
+    // Preserve their image-bearing face locally, rather than leaving only
+    // the surrounding sign frame. Material eligibility excludes alpha cards.
+    (1..=12).contains(&fine) && coarse < fine
+        && extent.x <= 0.005 && (0.08..=2.0).contains(&extent.y)
+        && extent.z <= 4.0
+}
+
+fn planar_material(mat: &pc::Material) -> bool {
+    mat.albedo.is_some() && mat.alpha_test == 0.0
+        && mat.kind == pc::Kind::Standard && mat.blend == pc::Blend::Opaque
 }
 
 /// Preserve compact tubes/rings that canonical distance LODs partly erase.
@@ -314,6 +333,7 @@ fn recover_structural_details(
     geom: &mut Vec<u8>,
     draws: Vec<Vec<u8>>,
     eligible_materials: &[bool],
+    planar_materials: &[bool],
 ) -> Vec<Vec<u8>> {
     let get = |r: &[u8], o: usize| u32::from_le_bytes(r[o..o + 4].try_into().unwrap()) as usize;
     let put =
@@ -397,13 +417,11 @@ fn recover_structural_details(
             used.sort_unstable();
             used.dedup();
             let points: Vec<Vec3> = used.iter().map(|&i| positions[i as usize]).collect();
-            if points.is_empty()
-                || !structural_detail(
-                    principal_extents(&points),
-                    part[0].len() / 3,
-                    part[2].len() / 3,
-                )
-            {
+            let extent = if points.is_empty() { Vec3::ZERO } else { principal_extents(&points) };
+            let marker = planar_materials[get(&d, 0)]
+                && planar_detail(extent, part[0].len() / 3, part[2].len() / 3);
+            if points.is_empty() || (!marker && !structural_detail(
+                extent, part[0].len() / 3, part[2].len() / 3)) {
                 for k in 0..4 {
                     retained[k].extend(&part[k]);
                 }
@@ -411,7 +429,7 @@ fn recover_structural_details(
             }
             // The middle LOD removes tessellation, never whole components.
             // UV and display colour still constrain collapses at material seams.
-            let simplified = meshopt::simplify_with_attributes_and_locks(
+            let simplified = if marker { part[0].clone() } else { meshopt::simplify_with_attributes_and_locks(
                 &part[0],
                 &adapter,
                 &attrs,
@@ -422,7 +440,7 @@ fn recover_structural_details(
                 0.008,
                 meshopt::SimplifyOptions::ErrorAbsolute,
                 None,
-            );
+            ) };
             part[1] = if simplified.is_empty() {
                 part[0].clone()
             } else {
@@ -1035,7 +1053,8 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
                 && mat.emissive.iter().all(|&v| v <= 0.0)
         })
         .collect();
-    let draws = recover_structural_details(&mut geom, draws, &eligible_materials);
+    let planar_materials: Vec<bool> = m.materials.iter().map(planar_material).collect();
+    let draws = recover_structural_details(&mut geom, draws, &eligible_materials, &planar_materials);
     // Canonical street chunks are broad. Subdivide detail-only chunks so
     // approaching one rail does not restore all thin geometry across 32 m.
     let get = |r: &[u8], o: usize| u32::from_le_bytes(r[o..o + 4].try_into().unwrap());
@@ -1371,15 +1390,71 @@ mod tests {
         assert!(!structural_detail(Vec3::new(0.004, 0.004, 0.6), 32, 0));
         assert!(!structural_detail(Vec3::new(0.02, 0.4, 0.6), 12, 0));
         assert!(!structural_detail(extents, 32, 24));
+        assert!(structural_detail(Vec3::new(0.16, 0.16, 0.38), 40, 0));
+        assert!(!structural_detail(Vec3::new(0.16, 0.6, 1.0), 40, 0));
+        assert!(!structural_detail(Vec3::new(0.3, 0.3, 0.8), 40, 0));
+    }
+
+    #[test]
+    fn textured_marker_retains_its_face_but_cutout_foliage_does_not() {
+        let mut material = pc::Material {
+            name: "marker".into(), kind: pc::Kind::Standard, blend: pc::Blend::Opaque,
+            double_sided: false, depth_write: true, alpha_test: 0.0,
+            color: [1.0;4], emissive: [0.0;3], roughness: 0.5, metalness: 0.0,
+            normal_scale: 1.0, ao_strength: 1.0, env_strength: 1.0,
+            albedo: Some(0), normal: None, orm: None, emission: None,
+            vertex_color: false, vertex_pbr: false, interior: false, fog: true,
+            wet: None, damp: None, drops: 0.0, clearcoat: 0.0, polygon_offset: None,
+            emissive_track: None, uv_anim: None, water: None, lights: None, tint: None,
+        };
+        assert!(planar_material(&material));
+        material.polygon_offset = Some([-1.0, -1.0]);
+        assert!(planar_material(&material), "depth-biased printed decals retain their face");
+        material.alpha_test = 0.5;
+        assert!(!planar_material(&material));
+        material.alpha_test = 0.0;
+        material.blend = pc::Blend::Alpha;
+        assert!(!planar_material(&material));
+        assert!(planar_detail(Vec3::new(0.0, 0.25, 0.88), 2, 0));
+        assert!(!planar_detail(Vec3::new(0.0, 0.03, 0.88), 2, 0));
+        assert!(!planar_detail(Vec3::new(0.0, 20.0, 30.0), 2, 0));
+        let mut geometry = Vec::new();
+        for (position, uv) in [([-0.44,0.0,0.0],[0.1,0.2]),([0.44,0.0,0.0],[0.3,0.2]),
+                              ([-0.44,0.25,0.0],[0.1,0.4]),([0.44,0.25,0.0],[0.3,0.4])] {
+            fs(&mut geometry, &position);
+            fs(&mut geometry, &uv);
+            geometry.extend([50,100,150,255]);
+        }
+        let original = geometry.clone();
+        let mut draw = Vec::new();
+        u32s(&mut draw, &[0,0,4,u32::MAX,u32::MAX,u32::MAX,0,0]);
+        fs(&mut draw, &[0.0,0.125,0.0,0.46]);
+        for lod in 0..4 {
+            u32s(&mut draw, &[geometry.len() as u32, if lod==0 {6} else {0}]);
+            fs(&mut draw, &[if lod==0 {0.0} else {0.25}]);
+            if lod==0 {for index in [0u16,1,2,2,1,3] {geometry.extend(index.to_le_bytes());}}
+        }
+        let get = |r: &[u8], at:usize| u32::from_le_bytes(r[at..at+4].try_into().unwrap()) as usize;
+        let excluded = recover_structural_details(&mut geometry.clone(), vec![draw.clone()], &[true], &[false]);
+        assert_eq!(get(&excluded[0],64),0);
+        let recovered = recover_structural_details(&mut geometry, vec![draw], &[true], &[true]);
+        assert_eq!(recovered.len(),1);
+        let r=&recovered[0];
+        assert_eq!(get(r,28),1);
+        assert_eq!((get(r,52),get(r,64),get(r,76)),(6,6,0));
+        let vertices=get(r,4);let mut actual:Vec<_>=geometry[vertices..vertices+96].chunks_exact(24).collect();
+        let mut expected:Vec<_>=original.chunks_exact(24).collect();actual.sort();expected.sort();
+        assert_eq!(actual,expected,"marker UVs, display colours and positions stay exact");
     }
 
     #[test]
     fn partial_tube_lod_gets_local_complete_middle_mesh_without_changing_coarse() {
+        for radius in [0.02, 0.08] {
         let mut geom = Vec::new();
         let mut fine = Vec::<u32>::new();
         // A structural tube and an equally tessellated subpixel wire share
         // one canonical draw. Both have a few surviving coarse triangles.
-        for (part, radius) in [0.02, 0.002].into_iter().enumerate() {
+        for (part, radius) in [radius, 0.002].into_iter().enumerate() {
             for i in 0..16 {
                 let a = i as f32 * std::f32::consts::TAU / 16.0;
                 for y in [0.0, 0.6] {
@@ -1411,14 +1486,15 @@ mod tests {
                 geom.extend((i as u16).to_le_bytes());
             }
         }
-        let result = recover_structural_details(&mut geom, vec![d], &[true]);
+        let result = recover_structural_details(&mut geom, vec![d], &[true], &[false]);
         assert_eq!(result.len(), 2);
         let get = |r: &[u8], o: usize| u32::from_le_bytes(r[o..o + 4].try_into().unwrap()) as usize;
         let detail = result.iter().find(|r| get(r, 28) == 1).unwrap();
         assert_eq!(get(detail, 52), 96);
         assert!(get(detail, 64) > 3 && get(detail, 64) <= 96);
         assert_eq!(get(detail, 76), 3);
-        assert!(readf(detail, 44) < 0.31);
+        let expected_radius = (0.3_f32.powi(2) + 2.0 * radius * radius).sqrt();
+        assert!((readf(detail, 44) - expected_radius).abs() < 1e-5);
         assert_eq!(result.iter().map(|r| get(r, 52)).sum::<usize>(), fine.len());
         assert_eq!(
             result.iter().map(|r| get(r, 76)).sum::<usize>(),
@@ -1440,6 +1516,7 @@ mod tests {
         expected.sort();
         coarse_positions.sort();
         assert_eq!(coarse_positions, expected);
+        }
     }
 
     #[test]

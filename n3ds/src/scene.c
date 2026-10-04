@@ -1480,7 +1480,8 @@ void scene_status(char *out, size_t capacity) {
       "\"culled\":%lu,\"reflection\":%s,\"rain\":%s,\"haze\":%s,\"position\":[%"
       ".3f,%.3f,%.3f],"
       "\"textureBytes\":%lu,\"geometryBytes\":%lu,\"animationBytes\":%lu,"
-      "\"audioReady\":%s,\"muted\":%s,\"linearFree\":%lu,"
+      "\"audioReady\":%s,\"audioStage\":\"%s\",\"audioResult\":%lu,\"audioErrno\":%d,"
+      "\"muted\":%s,\"linearFree\":%lu,"
       "\"vramFree\":%lu,\"measuredFrames\":%u,\"frameMean\":%.3f,\"frameP95\":%"
       ".3f,\"frameMax\":%.3f,\"workMax\":%.3f,\"inputLock\":%s,\"stick\":[%d,%"
       "d]}",
@@ -1498,6 +1499,7 @@ void scene_status(char *out, size_t capacity) {
       atlas.position[2], (unsigned long)atlas.texture_bytes,
       (unsigned long)atlas.geom_bytes, (unsigned long)atlas.animation_bytes,
       atlas_audio_ready() ? "true" : "false",
+      atlas_audio_stage(), (unsigned long)atlas_audio_result(), atlas_audio_errno(),
       audio_muted ? "true" : "false",
       (unsigned long)linearSpaceFree(), (unsigned long)vramSpaceFree(),
       measured_frames, measured_frames ? measured_ms / measured_frames : 0,

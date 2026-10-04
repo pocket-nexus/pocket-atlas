@@ -57,6 +57,14 @@ pub struct Status<'a> {
     pub reflection: bool,
     pub paused: bool,
     pub free_camera: bool,
+    pub stage_ms: [f32; 11],
+    pub clip_scan_triangles: u32,
+    pub clip_input_triangles: u32,
+    pub clip_vertices: u32,
+    pub clip_extra_draws: u32,
+    pub clip_scratch_bytes: u32,
+    pub clip_block_bytes: u32,
+    pub clip_block_skipped: u32,
 }
 pub struct Session {
     enabled: bool,
@@ -115,7 +123,10 @@ impl Session {
                 "\"time\":{:.2},\"fps\":{:.2},\"frameMs\":{:.2},\"workMs\":{:.2},",
                 "\"gpuWaitMs\":{:.2},\"maxWorkMs\":{:.2},\"draws\":{},\"triangles\":{},",
                 "\"packBytes\":{},\"rain\":{},\"reflection\":{},\"paused\":{},",
-                "\"freeCamera\":{},\"controlNonce\":{},\"packHash\":{},\"packVersion\":{},\"audioReady\":{},\"muted\":{},\"build\":\"{}\"}}\n"
+                "\"freeCamera\":{},\"controlNonce\":{},\"packHash\":{},\"packVersion\":{},\"audioReady\":{},\"muted\":{},\"build\":\"{}\",",
+                "\"controlMs\":{:.3},\"poseMs\":{:.3},\"boundsSkinMs\":{:.3},\"audioMs\":{:.3},",
+                "\"prepareMs\":{:.3},\"lodMs\":{:.3},\"passMs\":{:.3},\"indexCopyMs\":{:.3},\"drawSubmitMs\":{:.3},\"effectsMs\":{:.3},\"clipMs\":{:.3},",
+                "\"clipScanTriangles\":{},\"clipInputTriangles\":{},\"clipVertices\":{},\"clipExtraDraws\":{},\"clipScratchBytes\":{},\"clipBlockBytes\":{},\"clipBlockSkippedTriangles\":{}}}\n"
             ),
             s.frame,
             shot,
@@ -138,7 +149,10 @@ impl Session {
             s.pack_version,
             s.audio_ready,
             s.muted,
-            option_env!("ATLAS_BUILD_ID").unwrap_or("unknown")
+            option_env!("ATLAS_BUILD_ID").unwrap_or("unknown"),
+            s.stage_ms[0], s.stage_ms[1], s.stage_ms[2], s.stage_ms[3], s.stage_ms[4],
+            s.stage_ms[5], s.stage_ms[6], s.stage_ms[7], s.stage_ms[8], s.stage_ms[9], s.stage_ms[10],
+            s.clip_scan_triangles, s.clip_input_triangles, s.clip_vertices, s.clip_extra_draws, s.clip_scratch_bytes, s.clip_block_bytes, s.clip_block_skipped
         );
         let fd = sceIoOpen(
             b"host0:/status.json\0".as_ptr(),

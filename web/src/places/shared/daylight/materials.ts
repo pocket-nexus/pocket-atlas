@@ -262,6 +262,16 @@ export class DayLib {
     });
   }
 
+  /** A printed label fixed to an opaque backing. This explicit overlay uses
+   * the existing polygon-offset export contract on low-precision depth GPUs. */
+  decal(key: string, tex: Texture, rough = 0.55): MeshStandardMaterial {
+    return this.memo(`decal-${key}`, () => {
+      const m = new MeshStandardMaterial({ map: tex, roughness: rough, metalness: 0 });
+      m.polygonOffset = true; m.polygonOffsetFactor = -1; m.polygonOffsetUnits = -1;
+      return m;
+    });
+  }
+
   /** Light-emitting surface (unlit, HDR colour). */
   glow(hex: number, intensity: number): MeshBasicMaterial {
     return this.memo(`glow-${hex.toString(16)}-${intensity}`, () => {

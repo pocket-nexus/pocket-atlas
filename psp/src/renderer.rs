@@ -1,7 +1,11 @@
 //! Native PSP GE renderer. Geometry and textures stay in main RAM; VRAM
 //! holds two 8888 framebuffers and depth. Reflection uses the wet surfaces'
 //! stencil, so reflected buildings never bleed onto the dry pavement.
-use crate::{camera::Rig, scene::Scene};
+use crate::{
+    camera::Rig,
+    clip::{self, Guard},
+    scene::{BatchSelection, Scene},
+};
 use core::{ffi::c_void, ptr};
 use glam::{Mat4, Vec3, Vec4};
 use pocket3d_place_psp as pp;
@@ -14,14 +18,117 @@ pub struct Renderer {
     hot_address: *const u8,
     bound_texture: u32,
     indices: alloc::vec::Vec<Align16<[u16; 8]>>,
-    index_cursor: usize,
+    index_stride: usize,
+    batch_offsets: alloc::vec::Vec<usize>,
+    batch_selections: alloc::vec::Vec<BatchSelection>,
     selected: alloc::vec::Vec<pp::Span>,
     sky_vertices: alloc::vec::Vec<pp::Vertex>,
+    clip_ranges: alloc::vec::Vec<(usize, usize)>,
+    clip_candidates: alloc::vec::Vec<(usize, pp::Span)>,
+    clip_blocks: clip::BlockCache,
+    clip_scratch: ClipScratch,
 }
 pub struct Stats {
     pub draws: u32,
     pub triangles: u32,
     pub gpu_us: u32,
+    pub prepare_us: u32,
+    pub lod_us: u32,
+    pub pass_us: u32,
+    /// Subsets of pass_us, not additional frame work.
+    pub copy_us: u32,
+    pub draw_us: u32,
+    pub effects_us: u32,
+    /// Guard processing including split submissions; subset of draw_us/pass_us.
+    pub clip_us: u32,
+    pub clip_scan_triangles: u32,
+    pub clip_input_triangles: u32,
+    pub clip_vertices: u32,
+    pub clip_extra_draws: u32,
+    pub clip_scratch_bytes: u32,
+    pub clip_block_bytes: u32,
+    pub clip_block_skipped: u32,
+}
+// Boxed blocks stay at stable addresses even if the block list grows while
+// GE is consuming an earlier block. Cursors reset only after the prior frame's
+// sceGuSync. No per-triangle allocation and no copy of a whole risky draw.
+const CLIP_BLOCK_PAIRS: usize = 512; // 24 KiB, 1024 tightly packed vertices.
+#[derive(Default)]
+struct ClipScratch {
+    blocks: alloc::vec::Vec<alloc::boxed::Box<[Align16<[pp::Vertex; 2]>]>>,
+    block: usize,
+    used: usize,
+}
+impl ClipScratch {
+    fn reset(&mut self) {
+        self.block = 0;
+        self.used = 0;
+    }
+    fn append(&mut self, vertices: &[pp::Vertex], new_run: bool) -> *const pp::Vertex {
+        if new_run {
+            self.used = (self.used + 1) & !1; // Each submitted run starts at 16-byte alignment.
+        }
+        if self.used + vertices.len() > CLIP_BLOCK_PAIRS * 2 {
+            self.block += 1;
+            self.used = 0;
+        }
+        if self.block == self.blocks.len() {
+            self.blocks.push(
+                alloc::vec![Align16([pp::Vertex::default(); 2]); CLIP_BLOCK_PAIRS]
+                    .into_boxed_slice(),
+            );
+        }
+        let start =
+            unsafe { (self.blocks[self.block].as_mut_ptr() as *mut pp::Vertex).add(self.used) };
+        for (i, &vertex) in vertices.iter().enumerate() {
+            unsafe {
+                start.add(i).write(vertex);
+            }
+        }
+        self.used += vertices.len();
+        start
+    }
+    fn bytes(&self) -> u32 {
+        (self.blocks.len() * CLIP_BLOCK_PAIRS * 48) as u32
+    }
+}
+unsafe fn submit_original(
+    count: usize,
+    indices: *const u16,
+    vertex: *const c_void,
+    format: VertexType,
+    stats: &mut Stats,
+) {
+    if count == 0 {
+        return;
+    }
+    sceGuDrawArray(
+        GuPrimitive::Triangles,
+        format,
+        count as i32,
+        indices as _,
+        vertex,
+    );
+    stats.draws += 1;
+    stats.triangles += count as u32 / 3;
+}
+unsafe fn submit_clipped(count: usize, vertex: *const pp::Vertex, stats: &mut Stats) {
+    if count == 0 {
+        return;
+    }
+    pocket_psp_ge::cache::writeback_range(vertex as _, count * core::mem::size_of::<pp::Vertex>());
+    sceGuDrawArray(
+        GuPrimitive::Triangles,
+        VertexType::TEXTURE_32BITF
+            | VertexType::COLOR_8888
+            | VertexType::VERTEX_32BITF
+            | VertexType::TRANSFORM_3D,
+        count as i32,
+        ptr::null(),
+        vertex as _,
+    );
+    stats.draws += 1;
+    stats.triangles += count as u32 / 3;
 }
 /// Each pass owns one purpose; stencil/reflection state is set by frame().
 #[derive(Clone, Copy, PartialEq)]
@@ -167,14 +274,48 @@ impl Renderer {
         } else {
             1
         };
+        // Fixed regions keep unchanged batches resident across frames. Each
+        // reflective/wet pass owns its own region, so one visibility set can
+        // never overwrite another pass's in-flight index stream.
+        let mut index_stride = 0usize;
+        let batch_offsets = scene
+            .batches
+            .iter()
+            .map(|group| {
+                let offset = index_stride;
+                let capacity: usize = group
+                    .iter()
+                    .map(|&i| {
+                        let d = &scene.draws[i];
+                        d.lods
+                            .iter()
+                            .map(|l| l.indices.count)
+                            .chain([d.indices.count])
+                            .max()
+                            .unwrap() as usize
+                    })
+                    .sum();
+                index_stride += (capacity + 7) & !7;
+                offset
+            })
+            .collect();
+        let batch_selections = (0..passes)
+            .flat_map(|_| scene.batches.iter().map(|g| BatchSelection::new(g.len())))
+            .collect();
         Self {
             hot_texture,
             hot_address,
             bound_texture: pp::NONE,
-            indices: alloc::vec![Align16([0u16;8]);scene.draws.iter().map(|d|d.indices.count as usize).sum::<usize>()*passes/8+scene.batches.len()*passes+8],
-            index_cursor: 0,
+            indices: alloc::vec![Align16([0u16;8]);index_stride*passes/8],
+            index_stride,
+            batch_offsets,
+            batch_selections,
             selected: scene.draws.iter().map(|d| d.indices).collect(),
             sky_vertices: sky_dome(),
+            clip_ranges: alloc::vec::Vec::new(),
+            clip_candidates: alloc::vec::Vec::new(),
+            clip_blocks: clip::BlockCache::default(),
+            clip_scratch: ClipScratch::default(),
         }
     }
     unsafe fn bind_texture(&mut self, s: &Scene, id: u32) {
@@ -296,7 +437,9 @@ impl Renderer {
         reflect: bool,
         stats: &mut Stats,
         indices: (u32, *const c_void),
+        vp: Mat4,
     ) {
+        let begin = sceKernelGetSystemTimeLow();
         let d = &s.draws[index];
         let mat = &s.materials[d.material as usize];
         if d.indices.count == 0 {
@@ -396,32 +539,117 @@ impl Renderer {
         } else {
             s.bytes.as_ptr().add(d.vertices.offset as usize) as *const c_void
         };
-        sceGuDrawArray(
-            GuPrimitive::Triangles,
-            (if d.vertex_format == 1 {
-                VertexType::TEXTURE_16BIT | VertexType::VERTEX_16BIT
-            } else {
-                VertexType::TEXTURE_32BITF | VertexType::VERTEX_32BITF
-            }) | VertexType::COLOR_8888
-                | VertexType::INDEX_16BIT
-                | VertexType::TRANSFORM_3D,
-            indices.0 as i32,
-            indices.1,
-            vertex,
-        );
-        stats.draws += 1;
-        stats.triangles += indices.0 / 3;
+        let format = (if d.vertex_format == 1 {
+            VertexType::TEXTURE_16BIT | VertexType::VERTEX_16BIT
+        } else {
+            VertexType::TEXTURE_32BITF | VertexType::VERTEX_32BITF
+        }) | VertexType::COLOR_8888
+            | VertexType::INDEX_16BIT
+            | VertexType::TRANSFORM_3D;
+        if self.clip_candidates.is_empty() {
+            submit_original(indices.0 as usize, indices.1 as _, vertex, format, stats);
+        } else {
+            let clip_begin = sceKernelGetSystemTimeLow();
+            let draws_before = stats.draws;
+            let source = core::slice::from_raw_parts(indices.1 as *const u16, indices.0 as usize);
+            let mvp = vp * model;
+            let decode = |i: u16| {
+                if d.vertex_format == 1 {
+                    clip::packed_vertex(&*(vertex as *const pp::PackedVertex).add(i as usize))
+                } else {
+                    *(vertex as *const pp::Vertex).add(i as usize)
+                }
+            };
+            let position = |i: u16| {
+                if d.vertex_format == 1 {
+                    let v = &*(vertex as *const pp::PackedVertex).add(i as usize);
+                    Vec3::new(v.pos[0] as f32, v.pos[1] as f32, v.pos[2] as f32) * (1.0 / 32768.0)
+                } else {
+                    Vec3::from_array((*(vertex as *const pp::Vertex).add(i as usize)).pos)
+                }
+            };
+            self.clip_ranges.clear();
+            let local_guard = Guard::new(mvp);
+            for &(offset, span) in &self.clip_candidates {
+                if d.weights.count != 0 {
+                    self.clip_ranges.push((offset, span.count as usize));
+                } else {
+                    stats.clip_block_skipped += self.clip_blocks.append_ranges(
+                        [d.vertices.offset, d.vertex_format, span.offset, span.count],
+                        pp::slice::<u16>(s.bytes, span).unwrap(),
+                        offset,
+                        &local_guard,
+                        position,
+                        &mut self.clip_ranges,
+                    );
+                }
+            }
+            // Submit each original run as soon as the ordered walk reaches
+            // it, so GE can draw while the CPU clips later triangles. Only
+            // adjacent generated fans share a pending scratch submission.
+            let mut clipped: *const pp::Vertex = ptr::null();
+            let mut clipped_count = 0;
+            let work = clip::walk(
+                source,
+                &self.clip_ranges,
+                mvp,
+                position,
+                decode,
+                |run| match run {
+                    clip::Run::Original(range) => {
+                        submit_clipped(clipped_count, clipped, stats);
+                        clipped_count = 0;
+                        submit_original(
+                            range.len(),
+                            source.as_ptr().add(range.start),
+                            vertex,
+                            format,
+                            stats,
+                        );
+                    }
+                    clip::Run::Clipped(vertices) => {
+                        let added = self.clip_scratch.append(vertices, clipped_count == 0);
+                        if clipped_count != 0 && clipped.add(clipped_count) != added {
+                            submit_clipped(clipped_count, clipped, stats);
+                            clipped_count = 0;
+                        }
+                        if clipped_count == 0 {
+                            clipped = added;
+                        }
+                        clipped_count += vertices.len();
+                    }
+                },
+            );
+            submit_clipped(clipped_count, clipped, stats);
+            stats.clip_scan_triangles += work.scanned;
+            stats.clip_input_triangles += work.replaced;
+            stats.clip_vertices += work.vertices;
+            stats.clip_extra_draws += stats.draws.saturating_sub(draws_before + 1);
+            stats.clip_us += sceKernelGetSystemTimeLow().wrapping_sub(clip_begin);
+        }
+        stats.draw_us += sceKernelGetSystemTimeLow().wrapping_sub(begin);
     }
     unsafe fn pass(
         &mut self,
         s: &Scene,
         clip: &[Vec4; 6],
+        vp: Mat4,
         time: f32,
         pass: Pass,
         reflect: bool,
         stats: &mut Stats,
     ) {
-        for group in &s.batches {
+        let guard = Guard::new(if pass == Pass::Reflection {
+            vp * Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0))
+        } else {
+            vp
+        });
+        let lane = match pass {
+            Pass::Reflection => 1,
+            Pass::WetMask => 2,
+            _ => 0,
+        };
+        for (batch, group) in s.batches.iter().enumerate() {
             let d = &s.draws[group[0]];
             let m = &s.materials[d.material as usize];
             if !pass.includes(d, m) {
@@ -431,17 +659,26 @@ impl Renderer {
                 let (lo, hi) = s.bounds[i];
                 visible(clip, lo, hi)
             };
-            let count: u32 = group
-                .iter()
-                .filter(|&&i| is_visible(i))
-                .map(|&i| self.selected[i].count)
-                .sum();
+            let selection = &mut self.batch_selections[lane * s.batches.len() + batch];
+            let changed = selection.update(group.iter().map(|&i| {
+                if is_visible(i) {
+                    self.selected[i]
+                } else {
+                    pp::Span::default()
+                }
+            }));
+            let count = selection.count as u32;
             if count == 0 {
                 continue;
             }
             if group.len() == 1 || count as usize > pp::MAX_INDICES {
                 for &i in group {
-                    if is_visible(i) {
+                    if is_visible(i) && self.selected[i].count != 0 {
+                        self.clip_candidates.clear();
+                        let (lo, hi) = s.bounds[i];
+                        if !guard.contains(lo, hi) {
+                            self.clip_candidates.push((0, self.selected[i]));
+                        }
                         self.draw(
                             s,
                             i,
@@ -453,24 +690,37 @@ impl Renderer {
                                 self.selected[i].count,
                                 s.bytes.as_ptr().add(self.selected[i].offset as usize) as _,
                             ),
+                            vp,
                         );
                     }
                 }
             } else {
-                let indices = (self.indices.as_mut_ptr() as *mut u16).add(self.index_cursor);
-                self.index_cursor += (count as usize + 7) & !7;
-                let mut at = 0;
-                for &i in group {
-                    if is_visible(i) {
-                        ptr::copy_nonoverlapping(
-                            s.bytes.as_ptr().add(self.selected[i].offset as usize) as *const u16,
-                            indices.add(at),
-                            self.selected[i].count as usize,
-                        );
-                        at += self.selected[i].count as usize;
-                    }
+                let indices = (self.indices.as_mut_ptr() as *mut u16)
+                    .add(lane * self.index_stride + self.batch_offsets[batch]);
+                if changed {
+                    let copy_begin = sceKernelGetSystemTimeLow();
+                    selection.copy_into(
+                        s.bytes,
+                        core::slice::from_raw_parts_mut(indices, count as usize),
+                    );
+                    pocket_psp_ge::cache::writeback_range(
+                        indices as *const c_void,
+                        count as usize * 2,
+                    );
+                    stats.copy_us += sceKernelGetSystemTimeLow().wrapping_sub(copy_begin);
                 }
-                pocket_psp_ge::cache::writeback_range(indices as *const c_void, count as usize * 2);
+                self.clip_candidates.clear();
+                let mut offset = 0;
+                for (&i, span) in group.iter().zip(&selection.spans) {
+                    if span.count == 0 {
+                        continue;
+                    }
+                    let (lo, hi) = s.bounds[i];
+                    if !guard.contains(lo, hi) {
+                        self.clip_candidates.push((offset, *span));
+                    }
+                    offset += span.count as usize;
+                }
                 self.draw(
                     s,
                     group[0],
@@ -479,6 +729,7 @@ impl Renderer {
                     reflect,
                     stats,
                     (count, indices as _),
+                    vp,
                 );
             }
         }
@@ -491,12 +742,27 @@ impl Renderer {
         rain: bool,
         reflect: bool,
     ) -> Stats {
+        let begin = sceKernelGetSystemTimeLow();
         let mut stats = Stats {
             draws: 0,
             triangles: 0,
             gpu_us: 0,
+            prepare_us: 0,
+            lod_us: 0,
+            pass_us: 0,
+            copy_us: 0,
+            draw_us: 0,
+            effects_us: 0,
+            clip_us: 0,
+            clip_scan_triangles: 0,
+            clip_input_triangles: 0,
+            clip_vertices: 0,
+            clip_extra_draws: 0,
+            clip_scratch_bytes: 0,
+            clip_block_bytes: 0,
+            clip_block_skipped: 0,
         };
-        self.index_cursor = 0;
+        self.clip_scratch.reset();
         sceKernelDcacheWritebackAll();
         sceGuStart(GuContextType::Direct, ptr::addr_of_mut!(LIST.0) as *mut _);
         sceGuDepthMask(0);
@@ -523,15 +789,20 @@ impl Renderer {
         let clip = planes(vp);
         let mirror_clip = planes(vp * Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0)));
         let projection_pixels = 272.0 / (2.0 * libm::tanf(rig.fov * core::f32::consts::PI / 360.0));
+        let select_begin = sceKernelGetSystemTimeLow();
         for (i, d) in s.draws.iter().enumerate() {
             let (lo, hi) = s.bounds[i];
             let near = (rig.pos - rig.pos.clamp(lo, hi)).length().max(0.5);
             self.selected[i] = pp::select_lod(d, s.header.lod_pixels * near / projection_pixels);
         }
+        let select_end = sceKernelGetSystemTimeLow();
+        stats.lod_us = select_end.wrapping_sub(select_begin);
         self.sky(s, rig, time, &mut stats);
         sceGuEnable(GuState::Fog);
         sceGuFog(s.header.fog_near, s.header.fog_far, s.header.fog_color);
         sceGuEnable(GuState::DepthTest);
+        let pass_begin = sceKernelGetSystemTimeLow();
+        stats.prepare_us = pass_begin.wrapping_sub(begin) - stats.lod_us;
         if reflect && s.materials.iter().any(|m| m.flags & pp::WET != 0) {
             sceGuEnable(GuState::StencilTest);
             sceGuStencilFunc(StencilFunc::Always, 1, 255);
@@ -541,7 +812,7 @@ impl Renderer {
                 StencilOperation::Replace,
             );
             sceGuPixelMask(0x00ffffff);
-            self.pass(s, &clip, time, Pass::WetMask, reflect, &mut stats);
+            self.pass(s, &clip, vp, time, Pass::WetMask, reflect, &mut stats);
             sceGuPixelMask(0);
             sceGuDepthMask(0);
             sceGuClear(ClearBuffer::DEPTH_BUFFER_BIT);
@@ -551,14 +822,24 @@ impl Renderer {
                 StencilOperation::Keep,
                 StencilOperation::Keep,
             );
-            self.pass(s, &mirror_clip, time, Pass::Reflection, reflect, &mut stats);
+            self.pass(
+                s,
+                &mirror_clip,
+                vp,
+                time,
+                Pass::Reflection,
+                reflect,
+                &mut stats,
+            );
             sceGuDisable(GuState::StencilTest);
             sceGuDepthMask(0);
             sceGuClear(ClearBuffer::DEPTH_BUFFER_BIT);
         }
-        self.pass(s, &clip, time, Pass::WetSurface, reflect, &mut stats);
-        self.pass(s, &clip, time, Pass::Opaque, reflect, &mut stats);
-        self.pass(s, &clip, time, Pass::Transparent, reflect, &mut stats);
+        self.pass(s, &clip, vp, time, Pass::WetSurface, reflect, &mut stats);
+        self.pass(s, &clip, vp, time, Pass::Opaque, reflect, &mut stats);
+        self.pass(s, &clip, vp, time, Pass::Transparent, reflect, &mut stats);
+        let effects_begin = sceKernelGetSystemTimeLow();
+        stats.pass_us = effects_begin.wrapping_sub(pass_begin);
         sceGuDepthOffset(0);
         self.halos(s, rig, time);
         if rain {
@@ -569,8 +850,11 @@ impl Renderer {
         sceGuDisable(GuState::Fog);
         sceGuFinish();
         let wait = sceKernelGetSystemTimeLow();
+        stats.effects_us = wait.wrapping_sub(effects_begin);
         sceGuSync(GuSyncMode::Finish, GuSyncBehavior::Wait);
         stats.gpu_us = sceKernelGetSystemTimeLow().wrapping_sub(wait);
+        stats.clip_scratch_bytes = self.clip_scratch.bytes();
+        stats.clip_block_bytes = self.clip_blocks.bytes();
         stats
     }
     unsafe fn rain(&self, s: &Scene, rig: &Rig, time: f32) {

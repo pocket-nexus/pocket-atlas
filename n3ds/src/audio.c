@@ -7,6 +7,7 @@
 #include <string.h>
 #ifndef ATLAS_AUDIO_TEST
 #include <3ds.h>
+#include <errno.h>
 #include <stdatomic.h>
 #endif
 
@@ -107,8 +108,12 @@ static atomic_uint sequence,clock_data[9];
 static atomic_bool running,ready;
 static Thread worker;
 static bool dsp_live;
+static const char *init_stage="none";
+static uint32_t init_result;
+static int init_errno;
 static ndspWaveBuf waves[SLOTS];
 static Synth synth;
+static void release_audio(void);
 static uint32_t bits(float f){uint32_t u;memcpy(&u,&f,4);return u;}
 static float number(uint32_t u){float f;memcpy(&f,&u,4);return f;}
 static bool snapshot(uint32_t out[9]){
@@ -142,14 +147,28 @@ static void mix(void *unused){
     clear_queue();
 }
 bool atlas_audio_load(const float *r,size_t count){
-    atlas_audio_stop();if(!r && count==0)return true;if(!valid(r,count))return false;memcpy(recipe,r,sizeof(recipe));
-    if(R_FAILED(ndspInit()))return true;
+    release_audio();init_stage="none";init_result=0;init_errno=0;
+    if(!r && count==0)return true;
+    init_stage="recipe";if(!valid(r,count))return false;memcpy(recipe,r,sizeof(recipe));
+    /* libctru searches SD:/3ds/dspfirm.cdc, then the hb:ndsp loader handle.
+     * Keep its actual Result: not-found can mean missing/unreadable component
+     * or a component allocation failure, so ready=false alone is insufficient. */
+    init_stage="ndsp-init";Result result=ndspInit();init_result=(uint32_t)result;
+    if(R_FAILED(result))return true;
+    init_result=0;
     dsp_live=true;
     ndspSetOutputMode(NDSP_OUTPUT_STEREO);ndspChnReset(0);ndspChnSetInterp(0,NDSP_INTERP_LINEAR);ndspChnSetRate(0,RATE);ndspChnSetFormat(0,NDSP_FORMAT_STEREO_PCM16);
     float volume[12]={0};volume[0]=volume[1]=0.75f;ndspChnSetMix(0,volume);
-    for(unsigned i=0;i<SLOTS;i++){waves[i].data_vaddr=linearMemAlign(FRAMES*4,0x80);if(!waves[i].data_vaddr){atlas_audio_stop();return true;}waves[i].status=NDSP_WBUF_FREE;}
+    init_stage="pcm-alloc";
+    for(unsigned i=0;i<SLOTS;i++){
+        errno=0;waves[i].data_vaddr=linearMemAlign(FRAMES*4,0x80);
+        if(!waves[i].data_vaddr){init_errno=errno;release_audio();return true;}
+        waves[i].status=NDSP_WBUF_FREE;
+    }
     atomic_store(&sequence,0);atomic_store(&clock_data[8],3);atomic_store(&running,true);
-    worker=threadCreate(mix,NULL,16*1024,0x3e,-2,false);if(!worker){atlas_audio_stop();return true;}
+    init_stage="worker-create";errno=0;worker=threadCreate(mix,NULL,16*1024,0x3e,-2,false);
+    if(!worker){init_errno=errno;release_audio();return true;}
+    init_stage="ready";
     atomic_store(&ready,true);return true;
 }
 void atlas_audio_update(float time,const float eye[3],const float right[3],bool muted,bool paused){
@@ -158,12 +177,16 @@ void atlas_audio_update(float time,const float eye[3],const float right[3],bool 
     for(unsigned i=0;i<3;i++){atomic_store(&clock_data[1+i],bits(eye[i]));atomic_store(&clock_data[4+i],bits(right[i]));}
     atomic_store(&clock_data[7],(uint32_t)osGetTime());atomic_store(&clock_data[8],(muted || !sane) | (paused<<1));atomic_fetch_add(&sequence,1);
 }
-void atlas_audio_stop(void){
+static void release_audio(void){
     atomic_store(&ready,false);atomic_store(&running,false);if(worker){threadJoin(worker,U64_MAX);threadFree(worker);worker=NULL;}
     if(dsp_live){ndspChnWaveBufClear(0);ndspChnReset(0);ndspExit();dsp_live=false;}
     for(unsigned i=0;i<SLOTS;i++){if(waves[i].data_vaddr)linearFree((void *)waves[i].data_vaddr);memset(&waves[i],0,sizeof(waves[i]));}
 }
+void atlas_audio_stop(void){release_audio();init_stage="stopped";init_result=0;init_errno=0;}
 bool atlas_audio_ready(void){return atomic_load(&ready);}
+const char *atlas_audio_stage(void){return init_stage;}
+uint32_t atlas_audio_result(void){return init_result;}
+int atlas_audio_errno(void){return init_errno;}
 #else
 #include <assert.h>
 #include <stdio.h>

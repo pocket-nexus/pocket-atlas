@@ -64,6 +64,107 @@ fn fixture(root: &Path, width: u32, height: u32) {
     };
     std::fs::write(root.join("scene.glb"), glb.to_vec().unwrap()).unwrap();
 }
+
+#[test]
+fn psp_welds_dead_uv_seams_but_preserves_textured_uv_seams() {
+    use pocket3d_place_psp as pp;
+    let temp = Temp(std::env::temp_dir().join(format!("atlas-psp-dead-uv-{}", std::process::id())));
+    let export = temp.0.join("uv-seams");
+    // Two adjacent triangles share positions but use independent UV islands.
+    let positions = [
+        [0.0f32, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0],
+    ];
+    let uvs = [
+        [0.0f32, 0.0],
+        [1.0, 0.0],
+        [0.0, 1.0],
+        [0.0, 0.0],
+        [1.0, 0.0],
+        [1.0, 1.0],
+    ];
+    let mut reference_colors = Vec::new();
+    for textured in [false, true] {
+        fixture(&export, 8, 8);
+        let source = std::fs::read(export.join("scene.glb")).unwrap();
+        let glb = gltf::binary::Glb::from_slice(&source).unwrap();
+        let mut doc: serde_json::Value = serde_json::from_slice(&glb.json).unwrap();
+        let mut bin = glb.bin.unwrap().into_owned();
+        while bin.len() % 4 != 0 {
+            bin.push(0);
+        }
+        let pos_offset = bin.len();
+        bin.extend(positions.iter().flatten().flat_map(|v| v.to_le_bytes()));
+        let uv_offset = bin.len();
+        bin.extend(uvs.iter().flatten().flat_map(|v| v.to_le_bytes()));
+        doc["buffers"][0]["byteLength"] = json!(bin.len());
+        doc["bufferViews"].as_array_mut().unwrap().extend([
+            json!({"buffer":0,"byteOffset":pos_offset,"byteLength":72}),
+            json!({"buffer":0,"byteOffset":uv_offset,"byteLength":48}),
+        ]);
+        doc["accessors"][0] = json!({"bufferView":2,"componentType":5126,"count":6,"type":"VEC3","min":[0,0,0],"max":[1,1,0]});
+        doc["accessors"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"bufferView":3,"componentType":5126,"count":6,"type":"VEC2"}));
+        doc["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_0"] = json!(1);
+        if !textured {
+            doc["materials"][0]["pbrMetallicRoughness"]
+                .as_object_mut()
+                .unwrap()
+                .remove("baseColorTexture");
+        }
+        let changed = gltf::binary::Glb {
+            header: glb.header,
+            json: Cow::Owned(serde_json::to_vec(&doc).unwrap()),
+            bin: Some(Cow::Owned(bin)),
+        };
+        std::fs::write(export.join("scene.glb"), changed.to_vec().unwrap()).unwrap();
+        let output = temp.0.join("target.place");
+        ok(&[
+            "--target",
+            "psp",
+            "--in",
+            export.to_str().unwrap(),
+            "--out",
+            output.to_str().unwrap(),
+        ]);
+        let bytes = std::fs::read(output).unwrap();
+        let header = pp::validate(&bytes).unwrap();
+        let draws = pp::slice::<pp::Draw>(&bytes, header.draws).unwrap();
+        let materials = pp::slice::<pp::Material>(&bytes, header.materials).unwrap();
+        assert_eq!(draws.len(), 1);
+        assert_eq!(
+            materials[draws[0].material as usize].texture == pp::NONE,
+            !textured
+        );
+        let vertices = pp::slice::<pp::Vertex>(&bytes, draws[0].vertices).unwrap();
+        let indices = pp::slice::<u16>(&bytes, draws[0].indices).unwrap();
+        assert_eq!(vertices.len(), if textured { 6 } else { 4 });
+        assert_eq!(indices.len(), 6);
+        for (corner, &index) in indices.iter().enumerate() {
+            let vertex = &vertices[index as usize];
+            assert_eq!(
+                vertex.pos, positions[corner],
+                "position and winding stay exact"
+            );
+            if textured {
+                assert_eq!(
+                    vertex.color, reference_colors[corner],
+                    "baked colour stays exact"
+                );
+            } else {
+                reference_colors.push(vertex.color);
+            }
+            assert_eq!(vertex.uv, if textured { uvs[corner] } else { [0.0; 2] });
+        }
+    }
+}
+
 #[test]
 fn one_ir_builds_three_repeatable_packs_without_web_export_or_vita_intermediate() {
     let temp = Temp(std::env::temp_dir().join(format!("atlas-pipeline-{}", std::process::id())));
@@ -255,13 +356,19 @@ fn vita_palette_encoding_does_not_replace_native_uvs_or_material_factors() {
             let h = pocket3d_place_psp::validate(&bytes).unwrap();
             assert_eq!(h.materials.count, 2, "GE must receive authored materials");
             let draws = pocket3d_place_psp::slice::<pocket3d_place_psp::Draw>(&bytes, h.draws).unwrap();
+            let mut colors = [None; 2];
             for d in draws {
                 let vertices = pocket3d_place_psp::slice::<pocket3d_place_psp::Vertex>(&bytes, d.vertices).unwrap();
                 for v in vertices {
                     let source = usize::from(v.pos[0] >= 2.0);
-                    assert_eq!(v.uv.map(f32::to_bits), uv[source].map(f32::to_bits));
+                    // These materials have no texture: GE drops dead UVs,
+                    // while Vita uses that space for roughness/metalness.
+                    assert_eq!(v.uv, [0.0; 2]);
+                    colors[source] = Some(v.color);
                 }
             }
+            assert!(colors.iter().all(Option::is_some));
+            assert_ne!(colors[0], colors[1], "authored tints reach the GE bake");
         } else if target == "3ds" {
             let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
             let section = |tag: &[u8]| (0..word(8) as usize).map(|i| 16 + i * 16)
