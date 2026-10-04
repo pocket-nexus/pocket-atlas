@@ -13,6 +13,29 @@ use crate::{artifact::Artifact, profile::Profile};
 const CONTAINER_VERSION: u32 = 5;
 const TABLE_VERSION: u32 = 3;
 
+fn fit_cloud_overlay(cloud: &Rgba, cap: u32) -> Rgba {
+    // Preserve the panorama's aspect ratio. pow2_fit alone clamps both axes
+    // independently and would turn a 1024x512 sky into a wasteful 256x256 one.
+    // Panorama/cap dimensions are powers of two. Filter the premultiplied
+    // display RGB consumed by PICA; the ordinary texture resizer expects
+    // straight alpha and would multiply this overlay a second time.
+    let divisor = cloud.w.max(cloud.h).div_ceil(cap).max(1);
+    let (w, h) = (cloud.w / divisor, cloud.h / divisor);
+    let px = (0..h).flat_map(|y| (0..w).map(move |x| {
+        let mut sum = [0.0; 4];
+        for dy in 0..divisor {
+            for dx in 0..divisor {
+                let p = cloud.px[((y * divisor + dy) * cloud.w + x * divisor + dx) as usize];
+                for c in 0..3 { sum[c] += srgb(p[c]); }
+                sum[3] += p[3];
+            }
+        }
+        for c in &mut sum { *c /= (divisor * divisor) as f32; }
+        [linear(sum[0]), linear(sum[1]), linear(sum[2]), sum[3]]
+    })).collect();
+    Rgba { w, h, px }
+}
+
 fn u32s(out: &mut Vec<u8>, v: &[u32]) {
     for n in v {
         out.extend(n.to_le_bytes());
@@ -1337,8 +1360,15 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         );
         if let Some(id) = sky.clouds {
             let cloud = m.textures[id as usize].image();
+            let cloud = panorama(sky, &m.post, Some(&cloud));
+            // Filter the premultiplied graded overlay, retaining smooth alpha
+            // instead of spending two MiB on a 1024-wide sky at 400px output.
+            let cloud = fit_cloud_overlay(
+                &cloud,
+                profile.recipe.cloud_texture_cap.expect("checked PICA cloud policy"),
+            );
             cloud_texture = push_texture(
-                &panorama(sky, &m.post, Some(&cloud)),
+                &cloud,
                 true,
                 &mut tex,
                 &mut textures,
@@ -1422,7 +1452,21 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         fs(&mut table, &b[1]);
     }
     table.extend(&skin_data);
-    let summary = serde_json::json!({"target":"3ds","version":TABLE_VERSION,"name":m.name,"kind":m.kind,"sourceMaterials":m.materials.len(),"textures":textures.len(),"draws":draws.len(),"textureBytes":tex.len(),"geometryBytes":geom.len(),"animationBytes":anim.len(),"matrices":matrices,"sourceMatrices":source_matrices,"uncompactGeometryBytes":uncompact_geometry_bytes,"frames":frames,"fps":fps,"features":features,"sourceNodes":m.nodes.len(),"camera":m.camera});
+    let skin_buffers: usize = draws.iter().filter(|d| get(d, 12) != u32::MAX)
+        .map(|d| get(d, 8) as usize * 24 * 2).sum();
+    let arenas = env!("ATLAS_BATCH_INDICES").parse::<usize>().unwrap() * 2 * 2
+        + env!("ATLAS_MAX_FX").parse::<usize>().unwrap() * 24;
+    let sky_buffer = if m.day_sky.is_some() {
+        env!("ATLAS_SKY_SEGMENTS").parse::<usize>().unwrap()
+            * env!("ATLAS_SKY_RINGS").parse::<usize>().unwrap() * 6 * 24
+    } else { 0 };
+    // Reflection colour/depth are VRAM; the puddle mask is linear memory.
+    let effect_textures = 8320 + if features & 4 != 0 { 8192 } else { 0 };
+    let reserve = env!("ATLAS_CAPTURE_BYTES").parse::<usize>().unwrap()
+        + env!("ATLAS_LINEAR_RESERVE").parse::<usize>().unwrap();
+    let resident = geom.len() + tex.len() + skin_buffers + arenas + sky_buffer + effect_textures + reserve;
+    let summary = serde_json::json!({"target":"3ds","version":TABLE_VERSION,"name":m.name,"kind":m.kind,"sourceMaterials":m.materials.len(),"textures":textures.len(),"draws":draws.len(),"textureBytes":tex.len(),"geometryBytes":geom.len(),"animationBytes":anim.len(),"matrices":matrices,"sourceMatrices":source_matrices,"uncompactGeometryBytes":uncompact_geometry_bytes,"frames":frames,"fps":fps,"features":features,"sourceNodes":m.nodes.len(),"camera":m.camera,
+        "residentLinearBytes":resident,"residency":{"geometry":geom.len(),"textures":tex.len(),"skinDoubleBuffers":skin_buffers,"indexAndEffectArenas":arenas,"skyBuffer":sky_buffer,"effectTextures":effect_textures,"captureAndAllocatorReserve":reserve}});
     let meta = serde_json::to_vec(&summary).unwrap();
     let out = pc::write_versioned(pc::MAGIC, CONTAINER_VERSION, &[
         (pc::TAG_META, &meta, 16),
@@ -1659,6 +1703,18 @@ mod tests {
             }
         }
         assert_eq!(cloud_overlay(Vec3::ONE, Vec3::ZERO, 0.0, &post), Vec3::ZERO);
+    }
+    #[test]
+    fn cloud_cap_preserves_aspect_and_premultiplied_edges() {
+        let cloud = Rgba { w: 1024, h: 512,
+            px: (0..1024 * 512).map(|i| if i % 2 == 0 { [linear(0.8), linear(0.4), linear(0.2), 1.0] } else { [0.0; 4] }).collect() };
+        let fitted = fit_cloud_overlay(&cloud, 256);
+        assert_eq!((fitted.w, fitted.h), (256, 128));
+        for pixel in fitted.px {
+            for (actual, expected) in pixel.into_iter().zip([linear(0.4), linear(0.2), linear(0.1), 0.5]) {
+                assert!((actual - expected).abs() < 1e-6);
+            }
+        }
     }
     #[test]
     fn rgba8_upload_has_pica_abgr_channels_and_preserves_alpha() {

@@ -19,6 +19,7 @@ fn main() {
         "Cargo.lock",
         "Cargo.toml",
         "profiles",
+        "n3ds/src/memory.h",
         "vendor/pocketjs/devices/psp/pocket-psp-ge/Cargo.toml",
         "vendor/pocketjs/devices/psp/pocket-psp-ge/src",
         "crates/pocket-atlas-model/src",
@@ -36,6 +37,16 @@ fn main() {
         collect(&p, &mut files);
     }
     files.sort();
+    // Native arena sizes are compiler inputs, rather than separately copied
+    // constants that can silently drift from the runtime allocation plan.
+    let memory = std::fs::read_to_string(root.join("n3ds/src/memory.h")).unwrap();
+    for line in memory.lines().filter(|l| l.starts_with("#define ATLAS_")) {
+        let words: Vec<_> = line.split_whitespace().collect();
+        if words.len() == 3 {
+            let _: usize = words[2].parse().expect("literal Atlas memory constant");
+            println!("cargo:rustc-env={}={}", words[1], words[2]);
+        }
+    }
     let mut digest = Sha256::new();
     for f in files {
         let name = f.strip_prefix(root).unwrap().to_str().unwrap();

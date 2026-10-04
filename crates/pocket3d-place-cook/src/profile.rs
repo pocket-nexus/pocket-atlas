@@ -53,6 +53,8 @@ pub struct Recipe {
     pub max_field_points: usize,
     #[serde(default)]
     pub geometry_error_meters: GeometryErrors,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_texture_cap: Option<u32>,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -61,6 +63,8 @@ pub struct GeometryErrors { pub structure: f32, pub detail: f32, pub background:
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Budgets {
     pub max_pack_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_resident_linear_bytes: Option<usize>,
     pub sections: BTreeMap<String, usize>,
 }
 
@@ -96,6 +100,16 @@ impl Profile {
     }
     pub fn validate(&self) -> Result<(), String> {
         let base = Self::builtin(self.target);
+        if self.target == Target::Pica {
+            if !self.recipe.cloud_texture_cap.is_some_and(|v|v.is_power_of_two() && (64..=1024).contains(&v)) {
+                return Err("PICA requires a cloudTextureCap in 64..1024".into());
+            }
+            if !self.budgets.max_resident_linear_bytes.is_some_and(|n|n>0 && n<=base.budgets.max_resident_linear_bytes.unwrap()) {
+                return Err("profile cannot relax the PICA resident linear-memory budget".into());
+            }
+        } else if self.recipe.cloud_texture_cap.is_some() || self.budgets.max_resident_linear_bytes.is_some() {
+            return Err("PICA residency/cloud policy is not applicable to this target".into());
+        }
         let errors = &self.recipe.geometry_error_meters;
         if [errors.structure,errors.detail,errors.background].iter().any(|v|!v.is_finite() || !(0.0..=1.0).contains(v)) {
             return Err("invalid geometry error policy".into());
@@ -233,6 +247,10 @@ impl Profile {
         }
     }
     pub fn check_artifact(&self, a: &Artifact) -> Result<(), String> {
+        if let Some(limit)=self.budgets.max_resident_linear_bytes {
+            let bytes=a.summary["residentLinearBytes"].as_u64().ok_or("missing PICA residency estimate")? as usize;
+            if bytes>limit {return Err(format!("resident linear-memory budget exceeded: {bytes} > {limit} bytes (geometry, textures, skin, arenas and capture reserve)"));}
+        }
         if self
             .budgets
             .max_pack_bytes
@@ -282,6 +300,16 @@ mod tests {
         let mut p = Profile::builtin(Target::Psp);
         p.budgets.max_pack_bytes = None;
         assert!(p.validate().is_err());
+        for cap in [None, Some(0), Some(257), Some(2048)] {
+            let mut p = Profile::builtin(Target::Pica);
+            p.recipe.cloud_texture_cap = cap;
+            assert!(p.validate().is_err());
+        }
+        for budget in [None, Some(0), Some(32 * 1024 * 1024)] {
+            let mut p = Profile::builtin(Target::Pica);
+            p.budgets.max_resident_linear_bytes = budget;
+            assert!(p.validate().is_err());
+        }
         let mut p = Profile::builtin(Target::Vita);
         p.gpu = "pica200".into();
         assert!(p.validate().is_err());

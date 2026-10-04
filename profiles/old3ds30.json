@@ -31,7 +31,8 @@
       "structure": 0.006,
       "detail": 0.075,
       "background": 0.05
-    }
+    },
+    "cloudTextureCap": 256
   },
   "budgets": {
     "maxPackBytes": null,
@@ -40,7 +41,8 @@
       "TEXD": 12582912,
       "GEOM": 25165824,
       "ANIM": 16777216
-    }
+    },
+    "maxResidentLinearBytes": 29360128
   },
   "disabledFeatures": []
 }

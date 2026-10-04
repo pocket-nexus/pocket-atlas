@@ -173,6 +173,16 @@ their duration even if matrix sampling must be reduced to fit memory.
 Day/twilight skies use a cooked panorama and a separate drifting cloud layer.
 Cloud colors are premultiplied before bilinear filtering to avoid dark halos
 at transparent edges; their HDR values retain the shared tone mapping.
+The `old3ds30` recipe fits clouds to a 256 × 128 panorama with premultiplied
+display-space averaging. The compiler checks combined linear residency against
+28 MiB, including native-resolution screenshot and allocator reserves; section
+ceilings alone do not establish that a scene can load. Compiler/native arena
+sizes share `src/memory.h`. The two index gather buffers each hold 131,072
+indices; exhausted gathering falls back to individual draws and preserves
+all selected geometry. SHA verification and bulk reads poll the debug server;
+status during loading cannot access a partially initialized renderer.
+Loading replies with status only; resend renderer/navigation controls once the
+phase becomes `running` or `browser`.
 Signs retain their flipbook/scroll transforms and animated emission; surf uses
 scrolling alpha artwork. Open water uses two wave layers and a Fresnel/TEV
 approximation. Night scenes retain rain, local light glow and wet planar

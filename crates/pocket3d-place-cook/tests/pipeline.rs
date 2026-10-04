@@ -564,6 +564,17 @@ fn profile_budget_failure_preserves_old_artifact_and_receipts_are_repeatable() {
     assert_eq!(failure["passes"].as_array().unwrap().last().unwrap()["result"]["status"],"failed");
     assert_eq!(failure["diagnostics"].as_array().unwrap().last().unwrap()["code"],"ATLAS_STRUCTURAL_BUDGET");
     assert_eq!(pack,std::fs::read(&dest).unwrap());assert_eq!(receipt,std::fs::read(dest.with_extension("compile.json")).unwrap());
+    // All individual sections still fit; reject the combined residency before
+    // replacing a previously valid pack or its publication receipt.
+    let mut profile = report["profile"]["definition"].clone();
+    profile["id"] = "tiny-residency".into();
+    profile["budgets"]["maxResidentLinearBytes"] = 1.into();
+    std::fs::write(&custom, serde_json::to_vec(&profile).unwrap()).unwrap();
+    let rejected = run(&["--in", export.to_str().unwrap(), "--profile", custom.to_str().unwrap(), "--out", dest.to_str().unwrap(), "--json"]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("resident linear-memory budget exceeded"));
+    assert_eq!(pack, std::fs::read(&dest).unwrap());
+    assert_eq!(receipt, std::fs::read(dest.with_extension("compile.json")).unwrap());
     let conflict=run(&["check","--in",export.to_str().unwrap(),"--profile","old3ds30","--target","psp","--json"]);
     assert!(!conflict.status.success());assert!(String::from_utf8_lossy(&conflict.stderr).contains("conflicts"));
 }

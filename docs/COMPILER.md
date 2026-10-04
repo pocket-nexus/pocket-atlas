@@ -124,8 +124,15 @@ convention, animation grids and emissive strips. Ordinary 2K source maps obey
 the texture cap; their original size must not be mistaken for a previously
 resized Vita atlas. The writer checks the reader's per-section limits (4 MiB
 table, 12 MiB textures, 24 MiB geometry, 16 MiB animation) before publishing.
-These are structural ceilings; combined allocations and render targets still
-need device headroom measurements.
+PICA also rejects a combined linear-memory estimate above 28 MiB: geometry,
+tiled textures, double-buffered skin vertices and index arenas, effects, sky,
+native-resolution capture buffers and an allocator reserve. Arena constants
+come from `n3ds/src/memory.h`, which is part of the compiler fingerprint.
+Animation/table data use ordinary heap memory; render targets use VRAM. This
+estimate is a static gate, and still needs device headroom measurements.
+The PICA cloud policy fits its premultiplied panorama to 256 × 128, preserving
+aspect ratio and filtering display RGB/alpha together. It does not resize
+landmark text using the cloud policy.
 
 ## Capability, release eligibility and evidence
 
@@ -196,7 +203,9 @@ read-source -> select-geometry -> resolve-materials -> texture-sampling
 This is an internal staged compiler, not a runtime pass/plugin registry.
 `Source`, `GeometryPlan`, `Resolved`, `Motion`, `Lighting`, `Baked`, `Geometry`
 and `Scene` keep explicit typed boundaries. Target policy remains visible.
-Custom profiles must migrate to recipe revision 2 explicitly.
+Custom profiles must migrate to recipe revision 2 explicitly. PICA profiles
+also specify `cloudTextureCap` and `maxResidentLinearBytes`; the latter cannot
+exceed the built-in 28 MiB residency ceiling.
 
 Geometry selection runs before instance expansion or Web batching can erase
 intent. `reduce-geometry` applies the smaller of authored and target role

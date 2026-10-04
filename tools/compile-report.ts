@@ -28,7 +28,8 @@ export function explainCompile(report: any, limit = 12) {
   };
   return {
     source: report.source.name, target: report.profile.definition.target,
-    artifact: { sha256: report.artifact.sha256, bytes: report.artifact.bytes, sections: report.artifact.sections },
+    artifact: { sha256: report.artifact.sha256, bytes: report.artifact.bytes, sections: report.artifact.sections,
+      residentLinearBytes: report.artifact.summary?.residentLinearBytes, residency: report.artifact.summary?.residency },
     validation: report.validation, diagnostics: (report.diagnostics ?? []).map(contributors),
     representations: report.provenance?.sourceGraph?.alternatives ?? [],
     passes: (report.passes ?? []).map((p: any) => ({ id: p.id, version: p.version, result: passResult(p) })),

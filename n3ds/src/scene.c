@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <mbedtls/sha256.h>
+#include "memory.h"
 AtlasStats atlas = {.reflection = true,
                     .rain = true,
                     .haze = true,
@@ -60,8 +61,8 @@ static bool hud_first = true, hud_last_connected;
 static int hud_previous_shot = -1;
 static unsigned hud_previous_effects = UINT32_MAX;
 static AtlasVertex *sky_vertices;
-#define SKY_SEGMENTS 32
-#define SKY_RINGS 16
+#define SKY_SEGMENTS ATLAS_SKY_SEGMENTS
+#define SKY_RINGS ATLAS_SKY_RINGS
 #define SKY_VERTICES (SKY_SEGMENTS * SKY_RINGS * 6)
 static bool reflection_enabled(void) {
   return atlas.reflection && head && (head->features & SCENE_REFLECTION);
@@ -119,7 +120,7 @@ static uint32_t visible_draws[4096], visible_count;
 static uint16_t opaque_draws[4096], mirror_draws[4096];
 static unsigned opaque_count, mirror_count;
 static int8_t main_lods[4096], mirror_lods[4096];
-#define BATCH_INDICES 393216
+#define BATCH_INDICES ATLAS_BATCH_INDICES
 static uint16_t *batch_indices[2];
 static unsigned batch_frame, batch_used;
 static uint16_t draw_group[4096], group_first[4096];
@@ -129,7 +130,7 @@ typedef struct {
 } DrawPlan;
 static DrawPlan main_plan[4096], mirror_plan[4096];
 static unsigned main_plan_count, mirror_plan_count;
-#define MAX_FX 10000
+#define MAX_FX ATLAS_MAX_FX
 static AtlasVertex *fx;
 static unsigned fx_count;
 static float clampf(float v, float lo, float hi) {
@@ -143,7 +144,19 @@ static void point(float *out, const float *m, const float *p) {
     out[i] = dot3(m + 4 * i, p) + m[4 * i + 3];
 }
 static bool read_at(FILE *f, uint32_t off, void *out, size_t n) {
-  return fseek(f, off, SEEK_SET) == 0 && fread(out, 1, n, f) == n;
+  if (fseek(f, off, SEEK_SET) != 0)
+    return false;
+  uint8_t *p = out;
+  while (n) {
+    size_t chunk = n < 256 * 1024 ? n : 256 * 1024;
+    if (fread(p, 1, chunk, f) != chunk)
+      return false;
+    p += chunk;
+    n -= chunk;
+    if (n)
+      atlas_loading_poll();
+  }
+  return true;
 }
 static bool range(uint32_t off, uint64_t size, uint32_t limit) {
   return (uint64_t)off + size <= limit;
@@ -156,7 +169,7 @@ static uint32_t rgba(float r, float g, float b, float a) {
 }
 static void send_progress(const char *s) {
   atlas_diagnostic(s);
-  devserver_poll();
+  atlas_loading_poll();
 }
 static bool make_effect_textures(void) {
   if (!C3D_TexInit(&white, 8, 8, GPU_RGBA4) ||
@@ -197,9 +210,18 @@ bool scene_load(const char *path, const char *expected_sha256, char *error, size
   mbedtls_sha256_init(&hash);
   bool valid = mbedtls_sha256_starts_ret(&hash, 0) == 0;
   unsigned char buffer[4096], digest[32];
-  size_t n;
-  while (valid && (n = fread(buffer, 1, sizeof buffer, file)) != 0)
+  size_t n, hashed = 0;
+  send_progress("Verifying place SHA-256");
+  while (valid && (n = fread(buffer, 1, sizeof buffer, file)) != 0) {
     valid = mbedtls_sha256_update_ret(&hash, buffer, n) == 0;
+    hashed += n;
+    // Large SD assets can take longer than a debug heartbeat. Loading status
+    // is safe to inspect; renderer controls wait until publication completes.
+    if (hashed >= 256 * 1024) {
+      atlas_loading_poll();
+      hashed = 0;
+    }
+  }
   valid = valid && !ferror(file) && mbedtls_sha256_finish_ret(&hash, digest) == 0;
   mbedtls_sha256_free(&hash);
   char actual[65];
@@ -381,7 +403,7 @@ bool scene_load(const char *path, const char *expected_sha256, char *error, size
     if (!pocket_pica_texture_publish(&textures[i], t->bytes))
       goto invalid;
     if (i % 8 == 0)
-      devserver_poll();
+      atlas_loading_poll();
   }
   for (unsigned i = 0; i < head->materials; i++) {
     AtlasMaterial *m = &materials[i];
