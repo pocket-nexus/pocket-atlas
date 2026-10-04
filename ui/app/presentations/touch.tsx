@@ -65,7 +65,7 @@ function Atlas(props: { host: Host; browser: Browser }) {
       </Show>
       <View class="absolute flex-col overflow-hidden rounded-lg" style={{ insetL: PANEL.x, insetT: PANEL.y, width: PANEL.w, height: PANEL.h, bgColor: GLASS, borderWidth: 1, borderColor: HAIRLINE }}>
         <Show when={browser.focused()} fallback={<View style={{ width: PANEL.w, height: CARD_H }} />}>
-          {(place) => <Postcard place={place()} width={PANEL.w} saved={browser.saved(place().id)} closed={browser.open(place()) ? "" : browser.closed(place())} />}
+          {(place) => <Postcard place={place()} width={PANEL.w} under={34} saved={browser.saved(place().id)} closed={browser.open(place()) ? "" : browser.closed(place())} />}
         </Show>
         <View class="absolute bg-gradient-to-b from-[#000000c0] to-[#00000000]" style={{ insetL: 0, insetT: 0, width: PANEL.w, height: 40 }} />
         <View class="absolute" style={{ insetL: 0, insetT: 0 }}>

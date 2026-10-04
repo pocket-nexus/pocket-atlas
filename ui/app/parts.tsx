@@ -73,7 +73,7 @@ export function Picture(props: { place: Place; width: number; height: number }) 
 }
 
 /** A place as a postcard: its picture with the name over it. */
-export function Postcard(props: { place: Place; width: number; saved: boolean; closed: string; children?: JSX.Element }) {
+export function Postcard(props: { place: Place; width: number; saved: boolean; closed: string; /** What lies over the card's top edge (the tabs), px. */ under?: number; children?: JSX.Element }) {
   const height = () => props.width / 2;
   // The "not on this device" badge shares the last line with the locality,
   // which gives way on a narrow card.
@@ -94,7 +94,7 @@ export function Postcard(props: { place: Place; width: number; saved: boolean; c
         </View>
       </Show>
       <Show when={props.saved}>
-        <View class="absolute rounded px-2" style={{ insetR: 8, insetT: 8, bgColor: "#000000a0" }}>
+        <View class="absolute rounded px-2" style={{ insetR: 8, insetT: 8 + (props.under ?? 0), bgColor: "#000000a0" }}>
           <Text class="text-xs font-bold" style={{ textColor: props.place.accent }}>SAVED</Text>
         </View>
       </Show>
