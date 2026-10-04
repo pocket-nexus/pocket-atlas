@@ -1,5 +1,6 @@
 /** Atlas' native PICA200 pipeline. PocketJS owns the authenticated wire and
- * .3dsx install/launch; this tool adds renderer controls and measurements. */
+ * .3dsx install/launch, and the pieces the interface (ui/) runs on; this tool
+ * adds renderer controls and measurements. */
 import { $ } from "bun";
 import { createHash } from "node:crypto";
 import {
@@ -14,10 +15,13 @@ import {
 import { resolve, join } from "node:path";
 import { crc32 } from "node:zlib";
 import { PLACES } from "../web/src/places/registry";
-import { native3dsPlaces, unsupported3dsPlaces, validate3dsBrowserCatalog } from "./atlas-3ds-support";
+import { native3dsPlaces, unsupported3dsPlaces } from "./atlas-3ds-support";
+import { cookGlobe } from "./atlas-3ds-assets";
+import { compileInterface } from "./atlas-ui";
 import { syncAssets } from "./atlas-3ds-delivery";
 import { readPack, PICA_PACK_VERSION } from "./place-container";
 import {
+  ensureQuickJs,
   runContainer,
   THREE_DS_CONTAINER_IMAGE,
 } from "../vendor/pocketjs/tools/3ds-toolchain.ts";
@@ -73,15 +77,38 @@ function assets() {
     };
   });
 }
+/** PocketJS's UI core for the 3DS: a Rust static library, built on the host
+ * with the compiler its crate pins. */
+async function interfaceCore() {
+  const crate = join(root, "vendor/pocketjs/hosts/3ds/core");
+  const { RUSTUP_TOOLCHAIN: _, RUSTC: __, ...environment } = process.env;
+  await $`cargo build --release --locked`.cwd(crate).env({
+    ...environment,
+    CARGO_TARGET_DIR: join(dir, "ui-core"),
+  });
+  return join(dir, "ui-core/armv6k-nintendo-3ds/release/libpocketjs_3ds_core.a");
+}
 async function build() {
   const entries = assets();
   mkdirSync(romfs, { recursive: true });
-  const atlasPath = join(dir, "romfs/atlas.3ds");
-  if (!existsSync(atlasPath))
-    throw new Error("cook the atlas: bun tools/atlas-3ds-assets.ts");
-  validate3dsBrowserCatalog(readFileSync(atlasPath), PLACES);
-  cpSync(atlasPath, join(romfs, "atlas.3ds"));
-  const atlasHash = sha(atlasPath);
+  // What the app carries: the interface, and the globe it is drawn over.
+  const ui = await compileInterface("3ds");
+  for (const name of ["atlas.js", "atlas.pak"])
+    cpSync(join(ui.directory, name), join(romfs, name));
+  rmSync(join(romfs, "atlas.3ds"), { force: true });
+  cookGlobe(join(romfs, "globe.3ds"));
+  const mounts = [{ hostPath: root, containerPath: "/atlas" }];
+  const core = await interfaceCore();
+  await ensureQuickJs(join(dir, "quickjs"), THREE_DS_CONTAINER_IMAGE, mounts);
+  const carried = ["atlas.js", "atlas.pak", "globe.3ds"].map((name) => ({
+    name,
+    sha256: sha(join(romfs, name)),
+    bytes: readFileSync(join(romfs, name)).length,
+  }));
+  const atlasHash = createHash("sha256")
+    .update(JSON.stringify(carried))
+    .update(readFileSync(core))
+    .digest("hex");
   const pocketjsRevision = (
     await $`git -C ${join(root, "vendor/pocketjs")} rev-parse HEAD`.text()
   ).trim();
@@ -113,6 +140,7 @@ async function build() {
       {
         version: 1,
         atlasSha256: atlasHash,
+        interface: carried,
         places: entries.map(({ path, ...e }) => e),
         unsupportedPlaces,
       },
@@ -130,7 +158,7 @@ tar -xf /atlas/.pocket-build/3ds/source-${buildId}.tar -C /tmp/atlas-source
 cp /tmp/atlas-source/.pocket-build/3ds/build/config.h /tmp/atlas-build/config.h
 make -f /tmp/atlas-source/n3ds/Makefile -j8 BUILD=/tmp/atlas-build SOURCE=/tmp/atlas-source/n3ds/src ROMFS=/atlas/.pocket-build/3ds/atlas-romfs OUT=/atlas/dist/3ds/${thin ? "pocket-atlas-dev.3dsx" : "pocket-atlas.3dsx"}
 cp /tmp/atlas-build/*.shbin /tmp/atlas-build/atlas.elf /tmp/atlas-build/atlas.map /atlas/.pocket-build/3ds/build/`,
-    [{ hostPath: root, containerPath: "/atlas" }],
+    mounts,
     "/atlas",
     {},
     "Atlas native build",
@@ -259,7 +287,7 @@ else if (command === "install") {
         let running = await status(c);
         if (
           running.build === receipt.buildId &&
-          ["running", "browser"].includes(String(running.phase))
+          ["running", "atlas"].includes(String(running.phase))
         ) {
           const assetReceipts = thin
             ? []
@@ -275,8 +303,9 @@ else if (command === "install") {
           running = await status(c);
           if (
             running.build !== receipt.buildId ||
-            !["running", "browser"].includes(String(running.phase)) ||
+            !["running", "atlas"].includes(String(running.phase)) ||
             running.error ||
+            running.interfaceError ||
             Number(running.frame) <= Number(before.frame)
           )
             throw new Error(
@@ -347,7 +376,7 @@ else if (command === "install") {
       });
       const running = await status(c);
       if (
-        !["browser", "running"].includes(String(running.phase)) ||
+        !["atlas", "running"].includes(String(running.phase)) ||
         running.error
       )
         throw new Error(
@@ -410,6 +439,7 @@ else if (command === "install") {
             lodFloor: Number(option("--lod", "3")),
             hold: true,
             inputLock: true,
+            interface: !args.includes("--no-interface"),
             ...(args.includes("--live")
               ? { play: true, cameraHold: true }
               : { time: Number(option("--time", "10")) }),
@@ -483,7 +513,7 @@ else if (command === "install") {
         writeFileSync(evidencePath, JSON.stringify({ ...evidence.receipt(), compilation, complete, allCameras: names.length === available.length && new Set(names).size === available.length, budgetMs: compilation.budgetMs }, null, 2));
         const ending = await status(c);
         if (ending.build === expected.buildId && ending.packSha256 === pack.sha256)
-          await status(c, { hold: false, inputLock: false, cameraHold: false, play: true });
+          await status(c, { hold: false, inputLock: false, cameraHold: false, play: true, interface: true });
       }
     } else if (command === "tour") {
       let previous = await status(c, {
@@ -493,6 +523,7 @@ else if (command === "install") {
         cameraHold: false,
         inputLock: true,
         measure: true,
+        interface: !args.includes("--no-interface"),
       });
       const samples: Record<string, any>[] = [];
       const reconnects: object[] = [];
@@ -554,6 +585,7 @@ else if (command === "install") {
           hold: false,
           play: true,
           cameraHold: false,
+          interface: true,
         });
       } catch {}
     }

@@ -1,22 +1,38 @@
+// Pocket Atlas on the 3DS: the globe and the places on the top screen, and
+// the interface, a PocketJS guest (`ui/`), over them and on the whole touch
+// screen. It draws every 2D pixel and says what the buttons and the stylus
+// mean; this file owns the frame, the files and the debug wire.
 #include "assets.h"
-#include "browser.h"
 #include "control.h"
 #include "devserver.h"
 #include "frame_guard.h"
+#include "globe.h"
+#include "guest.h"
 #include "hbldr.h"
+#include "input.h"
+#include "interface.h"
 #include "native.h"
+#include "navigation.h"
 #include "scene.h"
 #include "settings.h"
 #include "soc.h"
 #include <3ds.h>
 #include <citro3d.h>
+#include <malloc.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
-unsigned int __stacksize__ = 256 * 1024;
+// The guest's parser and its mount recurse.
+unsigned int __stacksize__ = 1024 * 1024;
+// libctru would halve the application's memory between malloc and the
+// linear heap. Everything large a place owns is linear (scene.c) and the
+// largest place (Tokyo, 36 MiB) no longer fits a half beside the
+// interface's textures; malloc holds the interface (6 MiB) and a place's
+// tables, so it gets 14 MiB and the linear heap the rest.
+u32 __ctru_heap_size = 14 * 1024 * 1024;
 extern int __system_argc;
 extern char **__system_argv;
 const char *atlas_stage = "boot";
@@ -28,17 +44,7 @@ static const u32 transfer = GX_TRANSFER_FLIP_VERT(0) |
                             GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
                             GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
 
-static void flush_console(void) {
-  GSPGPU_FlushDataCache(gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, NULL, NULL),
-                        320 * 240 * 2);
-}
-
 void atlas_diagnostic(const char *message) {
-  if (strcmp(atlas_stage, "running") != 0 &&
-      strcmp(atlas_stage, "browser") != 0) {
-    printf("%s\n", message);
-    flush_console();
-  }
   if (boot_log) {
     fprintf(boot_log, "%llu %s\n", (unsigned long long)osGetTime(), message);
     fflush(boot_log);
@@ -46,6 +52,7 @@ void atlas_diagnostic(const char *message) {
   devserver_report_log("info", message);
 }
 
+static C3D_RenderTarget *bottom_target;
 static bool capture(C3D_RenderTarget *target) {
   uint8_t *top = NULL, *bottom = NULL;
   unsigned width = target->frameBuf.height, height = target->frameBuf.width;
@@ -56,20 +63,10 @@ static bool capture(C3D_RenderTarget *target) {
                           GX_BUFFER_DIM(height, width), (u32 *)top,
                           GX_BUFFER_DIM(height, width), transfer);
   GSPGPU_InvalidateDataCache(top, width * height * 3);
-  u16 w, h;
-  const uint16_t *fb =
-      (const uint16_t *)gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &w, &h);
-  if (w != 240 || h != 320) {
-    devserver_screenshot_cancel();
-    return false;
-  }
-  // consoleInit selects RGB565; the debug wire carries BGR8 on both surfaces.
-  for (unsigned i = 0; i < 320 * 240; i++) {
-    unsigned p = fb[i];
-    bottom[3 * i] = (p & 31) * 255 / 31;
-    bottom[3 * i + 1] = ((p >> 5) & 63) * 255 / 63;
-    bottom[3 * i + 2] = ((p >> 11) & 31) * 255 / 31;
-  }
+  C3D_SyncDisplayTransfer(bottom_target->frameBuf.colorBuf,
+                          GX_BUFFER_DIM(240, 320), (u32 *)bottom,
+                          GX_BUFFER_DIM(240, 320), transfer);
+  GSPGPU_InvalidateDataCache(bottom, 320 * 240 * 3);
   return true;
 }
 
@@ -83,52 +80,100 @@ static const PlaceAsset places[] = {ATLAS_CATALOG(ENTRY)};
 static bool in_place, loaded;
 static char current_place[80], pending_place[80], app_error[256],
     asset_request[1024];
-static bool pending_atlas;
-static char pending_browser_control[2048];
+static bool pending_atlas, held;
+static unsigned loading_turns;
+static float look_drag[2];
 static const PlaceAsset *find_place(const char *id) {
   for (unsigned i = 0; i < sizeof places / sizeof *places; i++)
     if (!strcmp(id, places[i].id))
       return &places[i];
   return NULL;
 }
+// The places whose pack is on the SD card.
+static void list_installed(void) {
+  interface.installed[0] = 0;
+  for (unsigned i = 0; i < sizeof places / sizeof *places; i++) {
+    char path[192];
+    struct stat st;
+    if (assets_path(places[i].sha, path, sizeof path) && !stat(path, &st) &&
+        (unsigned long)st.st_size == places[i].bytes)
+      interface_append(interface.installed, sizeof interface.installed,
+                       places[i].id);
+  }
+}
 static void report_status(void) {
-  char detail[3072], response[4096], escaped[512];
-  if (in_place)
-    scene_status(detail, sizeof detail);
-  else
-    browser_status(detail, sizeof detail);
+  static const char *const scenes[] = {"atlas", "loading", "place", "error"};
+  char detail[3072], response[4096], escaped[512], guest[320];
+  float cost[4];
   control_escape(escaped, sizeof escaped, app_error);
+  control_escape(guest, sizeof guest, guest_error());
+  unsigned long turns = guest_cost(cost);
   // Preserve the scene's flat telemetry for existing profiling tools.
-  if (in_place && detail[0] == '{') {
+  if (in_place) {
+    scene_status(detail, sizeof detail);
     size_t n = strlen(detail);
     if (n && detail[n - 1] == '}')
       detail[n - 1] = 0;
     snprintf(response, sizeof response,
-             "%s,\"place\":\"%s\",\"sheet\":%s,\"targetFps\":%u,\"antialias\":%"
-             "s,\"error\":\"%s\",\"packSha256\":\"%s\"}",
-             detail, current_place, settings_open() ? "true" : "false",
-             settings_fps(), settings_antialias() ? "true" : "false", escaped,
+             "%s,\"place\":\"%s\",\"scene\":\"%s\",\"interface\":%s,"
+             "\"interfaceMs\":[%.2f,%.2f,%.2f,%.2f],\"interfaceTurns\":%lu,"
+             "\"heapUsed\":%lu,\"heapSize\":%lu,\"held\":%s,\"targetFps\":%u,"
+             "\"antialias\":%s,\"error\":\"%s\",\"interfaceError\":\"%s\","
+             "\"packSha256\":\"%s\"}",
+             detail, current_place, scenes[interface.scene & 3],
+             guest_shown() ? "true" : "false", cost[0], cost[1], cost[2], cost[3],
+             turns, (unsigned long)mallinfo().uordblks, (unsigned long)__ctru_heap_size,
+             held ? "true" : "false", settings_fps(),
+             settings_antialias() ? "true" : "false", escaped, guest,
              loaded && find_place(current_place) ? find_place(current_place)->sha : "");
   } else {
     snprintf(response, sizeof response,
              "{\"t\":\"atlas.status\",\"build\":\"" ATLAS_BUILD_ID
-             "\",\"phase\":\"%s\",\"frame\":%lu,\"place\":null,\"frameMs\":%."
-             "3f,\"cpuMs\":%.3f,\"gpuMs\":%.3f,\"linearFree\":%lu,\"vramFree\":"
-             "%lu,\"browser\":%s,\"error\":\"%s\"}",
-             atlas_stage, (unsigned long)atlas.frame, atlas.frame_ms,
-             atlas.cpu_ms, atlas.gpu_ms, (unsigned long)linearSpaceFree(),
-             (unsigned long)vramSpaceFree(), detail[0] ? detail : "{}",
-             escaped);
+             "\",\"phase\":\"%s\",\"scene\":\"%s\",\"frame\":%lu,\"place\":null,"
+             "\"frameMs\":%.3f,\"cpuMs\":%.3f,\"gpuMs\":%.3f,\"linearFree\":%lu,"
+             "\"vramFree\":%lu,\"interfaceMs\":[%.2f,%.2f,%.2f,%.2f],"
+             "\"interfaceTurns\":%lu,\"heapUsed\":%lu,\"heapSize\":%lu,"
+             "\"installed\":[%s],\"error\":\"%s\",\"interfaceError\":\"%s\"}",
+             atlas_stage, scenes[interface.scene & 3], (unsigned long)atlas.frame,
+             atlas.frame_ms, atlas.cpu_ms, atlas.gpu_ms,
+             (unsigned long)linearSpaceFree(), (unsigned long)vramSpaceFree(),
+             cost[0], cost[1], cost[2], cost[3], turns,
+             (unsigned long)mallinfo().uordblks, (unsigned long)__ctru_heap_size,
+             interface.installed, escaped, guest);
   }
   devserver_send_ctrl(response, strlen(response));
 }
+// A control message can press the interface's buttons and hold the stylus on
+// the touch screen: "press":"down,a" and "touch":[x,y] (or false).
+static void drive(const char *json) {
+  static const struct {
+    const char *name;
+    uint32_t button;
+  } buttons[] = {{"select", 0x1},  {"start", 0x8},    {"up", 0x10},
+                 {"right", 0x20},  {"down", 0x40},    {"left", 0x80},
+                 {"l", 0x100},     {"r", 0x200},      {"x", 0x1000},
+                 {"a", 0x2000},    {"b", 0x4000},     {"y", 0x8000}};
+  char press[160];
+  if (control_string(json, "press", press, sizeof press)) {
+    char *save = NULL;
+    for (char *name = strtok_r(press, ",", &save); name;
+         name = strtok_r(NULL, ",", &save))
+      for (unsigned i = 0; i < sizeof buttons / sizeof *buttons; i++)
+        if (!strcmp(name, buttons[i].name))
+          guest_press(buttons[i].button);
+  }
+  const char *touch = control_field(json, "touch");
+  int x, y;
+  if (touch)
+    guest_touch(sscanf(touch, " [%d ,%d", &x, &y) == 2, x, y);
+  bool shown;
+  if (control_bool(json, "interface", &shown))
+    guest_show(shown);
+}
 static void controls(const char *json) {
   bool home = false;
-  if (control_bool(json, "atlas", &home) && home) {
+  if (control_bool(json, "atlas", &home) && home)
     pending_atlas = true;
-    snprintf(pending_browser_control, sizeof pending_browser_control, "%s",
-             json);
-  }
   char id[80];
   if (control_string(json, "place", id, sizeof id)) {
     if (find_place(id))
@@ -142,32 +187,41 @@ static void controls(const char *json) {
     else
       snprintf(app_error, sizeof app_error, "Asset request too large");
   }
+  drive(json);
   if (in_place) {
     settings_control(json);
     scene_control(json);
-  } else
-    browser_control(json);
+  }
 }
 static void release_view(void) {
   atlas_gpu_park();
   if (in_place)
     scene_free();
   else
-    browser_free();
+    globe_free();
   loaded = false;
-  settings_close();
+  held = false;
 }
-static bool open_browser(void) {
-  app_error[0] = 0;
+static bool open_atlas(void) {
   in_place = false;
   current_place[0] = 0;
   atlas_stage = "loading";
-  loaded = browser_load("romfs:/atlas.3ds", app_error, sizeof app_error);
-  atlas_stage = loaded ? "browser" : "load-error";
+  char error[256] = "";
+  loaded = globe_load("romfs:/globe.3ds", error, sizeof error);
+  atlas_stage = loaded ? "atlas" : "load-error";
   C3D_FrameRate(30);
-  if (loaded && pending_browser_control[0])
-    browser_control(pending_browser_control);
-  pending_browser_control[0] = 0;
+  list_installed();
+  interface.place[0] = interface.shots[0] = interface.options[0] = 0;
+  interface.stats[0] = 0;
+  // A place that would not open is said so until the visitor leaves it.
+  if (app_error[0]) {
+    interface.scene = SCENE_ERROR;
+    snprintf(interface.message, sizeof interface.message, "%.159s", app_error);
+  } else if (!loaded) {
+    interface.scene = SCENE_ERROR;
+    snprintf(interface.message, sizeof interface.message, "%.159s", error);
+  } else
+    interface.scene = SCENE_ATLAS;
   return loaded;
 }
 // Called only after FrameBegin has retired the preceding GPU work.
@@ -188,6 +242,13 @@ static void change_view(void) {
         snprintf(current_place, sizeof current_place, "%s", pending_place);
         settings_apply();
         atlas_stage = "first-frame";
+        interface.scene = SCENE_PLACE;
+        snprintf(interface.place, sizeof interface.place, "%.63s", current_place);
+        interface.paused = false;
+        interface.shots[0] = 0;
+        for (unsigned i = 0; i < scene_shot_count(); i++)
+          interface_append(interface.shots, sizeof interface.shots,
+                           scene_shot_name(i));
       } else
         scene_free();
     } else
@@ -195,14 +256,61 @@ static void change_view(void) {
                "Assets missing. Install the SD bundle or run atlas-3ds sync.");
     pending_place[0] = 0;
   }
-  if (!loaded) {
-    char error[256];
-    snprintf(error, sizeof error, "%s", app_error);
-    open_browser();
-    if (error[0])
-      snprintf(app_error, sizeof app_error, "%s", error);
-  }
+  if (!loaded)
+    open_atlas();
   pending_atlas = false;
+}
+// What the interface asked for.
+static void obey(const Command *c) {
+  switch (c->type) {
+  case COMMAND_GLOBE:
+    globe_place(c->x, c->y, c->r);
+    globe_turn(c->lat, c->lon, c->pin);
+    break;
+  case COMMAND_PINS: globe_pins(c->text); break;
+  case COMMAND_SPIN: globe_spin(-c->dx * 0.5f, c->dy * 0.5f); break;
+  case COMMAND_ENTER:
+    if (find_place(c->text)) {
+      snprintf(pending_place, sizeof pending_place, "%.79s", c->text);
+      snprintf(interface.place, sizeof interface.place, "%.63s", c->text);
+      interface.scene = SCENE_LOADING;
+      interface.message[0] = 0;
+      loading_turns = 0;
+    }
+    break;
+  case COMMAND_LEAVE:
+    if (in_place)
+      pending_atlas = true;
+    else {
+      app_error[0] = 0;
+      interface.scene = loaded ? SCENE_ATLAS : SCENE_ERROR;
+    }
+    break;
+  case COMMAND_SHOT: scene_select_shot(c->index); break;
+  case COMMAND_TOUR: scene_tour(c->on); break;
+  case COMMAND_PAUSE: {
+    // The place's clock and its camera stand still together.
+    char json[80];
+    snprintf(json, sizeof json, "{\"cameraHold\":%s,\"time\":%.3f}",
+             c->on ? "true" : "false", c->on ? atlas.time : -1.0f);
+    scene_control(json);
+    interface.paused = c->on;
+    break;
+  }
+  case COMMAND_OPTION: settings_set(c->text, c->value); break;
+  case COMMAND_LOOK: look_drag[0] += c->dx, look_drag[1] += c->dy; break;
+  case COMMAND_HOLD: held = c->on; break;
+  case COMMAND_PREFS: {
+    snprintf(interface.prefs, sizeof interface.prefs, "%.*s", (int)sizeof interface.prefs - 1, c->text);
+    FILE *f = fopen("sdmc:/pocket-atlas/interface.json", "w");
+    if (f) {
+      fputs(c->text, f);
+      fclose(f);
+    }
+    break;
+  }
+  default: break;
+  }
 }
 static void fetch_asset(void) {
   release_view();
@@ -217,10 +325,6 @@ static void fetch_asset(void) {
       control_string(asset_request, "token", token, sizeof token) &&
       control_string(asset_request, "sha256", sha, sizeof sha) && port &&
       port <= 65535) {
-    browser_ui_clear(0x0c1522);
-    browser_ui_text(12, 30, "Updating place assets...", 0x66dfc7);
-    browser_ui_text(12, 55, "Keep the console connected.", 0xc1d0dc);
-    flush_console();
     ok = assets_fetch(host, port, token, sha, bytes, crc, &cached, error,
                       sizeof error);
   }
@@ -231,9 +335,9 @@ static void fetch_asset(void) {
            "s,\"error\":\"%s\"}",
            sha, ok ? "true" : "false", cached ? "true" : "false", escaped);
   asset_request[0] = 0;
-  open_browser();
   if (!ok)
     snprintf(app_error, sizeof app_error, "%s", error);
+  open_atlas();
   devserver_send_ctrl(response, strlen(response));
   devserver_poll();
 }
@@ -250,8 +354,6 @@ static C3D_RenderTarget *make_top(bool antialias) {
 int main(void) {
   gfxInitDefault();
   gfxSet3D(false);
-  gfxSetDoubleBuffering(GFX_BOTTOM, false);
-  consoleInit(GFX_BOTTOM, NULL);
   mkdir("sdmc:/pocket-atlas", 0777);
   boot_log = fopen("sdmc:/pocket-atlas/boot.log", "w");
   atlas_diagnostic("Pocket Atlas " ATLAS_BUILD_ID);
@@ -272,25 +374,40 @@ int main(void) {
     gpu_ok = false;
   }
   settings_init();
-  if (!gpu_ok || !top)
+  if (gpu_ok) {
+    bottom_target = C3D_RenderTargetCreate(240, 320, GPU_RB_RGBA8, -1);
+    if (bottom_target)
+      C3D_RenderTargetSetOutput(bottom_target, GFX_BOTTOM, GFX_LEFT, transfer);
+  }
+  if (!gpu_ok || !top || !bottom_target) {
     snprintf(app_error, sizeof app_error, "PICA initialization failed");
-  else if (R_FAILED(romfs))
+    gpu_ok = false;
+  } else if (R_FAILED(romfs))
     snprintf(app_error, sizeof app_error, "romfsInit failed: %08lx",
              (unsigned long)romfs);
-  else
-    open_browser();
+  else {
+    // The interface, then what it kept from last time (the saved places).
+    if (!guest_boot(error, sizeof error))
+      atlas_diagnostic(error);
+    FILE *kept = fopen("sdmc:/pocket-atlas/interface.json", "r");
+    if (kept) {
+      interface.prefs[fread(interface.prefs, 1, sizeof interface.prefs - 1, kept)] = 0;
+      fclose(kept);
+    }
+    open_atlas();
+  }
   if (!loaded) {
     atlas_stage = "load-error";
     atlas_diagnostic(app_error);
   }
   devserver_set_runtime(&state, NULL, atlas_stage, 0);
   u64 last = svcGetSystemTick(), next_retry = 0;
-  unsigned hud = 0;
+  unsigned published = 0;
   bool shot = false, capture_pending = false;
   while (aptMainLoop()) {
     hidScanInput();
-    uint32_t held = hidKeysHeld(), down = hidKeysDown();
-    if ((held & (KEY_L | KEY_R | KEY_START)) == (KEY_L | KEY_R | KEY_START))
+    uint32_t keys = hidKeysHeld();
+    if ((keys & (KEY_L | KEY_R | KEY_START)) == (KEY_L | KEY_R | KEY_START))
       break;
     if (!capture_pending)
       devserver_poll();
@@ -330,8 +447,7 @@ int main(void) {
         report_status();
       }
     }
-    if (native_receiving() || gpu_stalled || !gpu_ok || !top ||
-        (!loaded && !asset_request[0] && !pending_place[0] && !pending_atlas)) {
+    if (native_receiving() || gpu_stalled || !gpu_ok) {
       svcSleepThread(1000000);
       continue;
     }
@@ -342,27 +458,52 @@ int main(void) {
       dt = 1.0f / 30;
     u32 pace = C3D_FrameCounter(0);
     u64 update_start = svcGetSystemTick();
+    // The interface's turn: it is shown where things stand and says what
+    // the visitor asked for.
+    if (in_place && loaded) {
+      interface.shot = atlas.shot;
+      interface.tour = atlas.cinematic;
+      if (published++ % 15 == 0) {
+        settings_list();
+        if (settings_stats())
+          snprintf(interface.stats, sizeof interface.stats,
+                   "%.0f fps · %luk triangles", 1000.0f / fmaxf(atlas.frame_ms, 1),
+                   (unsigned long)(atlas.triangles + atlas.reflect_triangles) / 1000);
+        else
+          interface.stats[0] = 0;
+      }
+    }
+    guest_turn(dt);
+    for (Command c; interface_next(&c);)
+      obey(&c);
+    // A place is read once the interface has had two turns to say so.
+    bool entering = pending_place[0] && (interface.scene != SCENE_LOADING || ++loading_turns > 4);
+    // The Circle Pad walks (or spins the globe); the d-pad, the C-stick and
+    // a stylus on the interface's pad look: unless a menu has the pad.
+    circlePosition pad = {0, 0};
+    int right = 0x8080;
+    if (!held) {
+      hidCircleRead(&pad);
+      right = input_right_analog();
+    }
+    float move[2], look[2], cstick[2];
+    atlas_stick(pad.dx, pad.dy, &move[0], &move[1]);
+    atlas_stick(((right >> 8) - 128) * 156 / 127, (128 - (right & 255)) * 156 / 127, &cstick[0], &cstick[1]);
+    look[0] = cstick[0] + (held ? 0 : ((keys & KEY_DRIGHT) ? 1 : 0) - ((keys & KEY_DLEFT) ? 1 : 0));
+    look[1] = cstick[1] + (held ? 0 : ((keys & KEY_DUP) ? 1 : 0) - ((keys & KEY_DDOWN) ? 1 : 0));
     if (loaded && in_place) {
-      if (down & KEY_START)
-        pending_atlas = true;
-      bool was_open = settings_open();
-      if (settings_update(down))
-        pending_atlas = true;
-      scene_input_block(settings_open() || was_open);
-      scene_update(dt, settings_open() || was_open ? 0 : down & ~KEY_SELECT,
-                   settings_open() || was_open ? 0 : held & ~KEY_SELECT);
+      scene_update(dt, move, look, look_drag);
       atlas.update_ms =
           (svcGetSystemTick() - update_start) * 1000.0f / SYSCLOCK_ARM11;
       scene_prepare();
     } else if (loaded) {
-      browser_update(dt, down, held);
-      const char *enter = browser_take_enter();
-      if (enter && find_place(enter))
-        snprintf(pending_place, sizeof pending_place, "%s", enter);
+      if (move[0] || move[1])
+        globe_spin(move[0] * 60 * dt, move[1] * 60 * dt);
+      float lat, lon;
+      if (globe_update(dt, &lat, &lon))
+        interface.lat = lat, interface.lon = lon;
     }
-    if (!in_place)
-      atlas.update_ms =
-          (svcGetSystemTick() - update_start) * 1000.0f / SYSCLOCK_ARM11;
+    look_drag[0] = look_drag[1] = 0;
     u64 wait_start = svcGetSystemTick();
     while (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
       if (!capture_pending)
@@ -386,17 +527,16 @@ int main(void) {
       devserver_screenshot_ready();
       capture_pending = false;
     }
-    bool changing = asset_request[0] || pending_atlas || pending_place[0];
+    bool changing = asset_request[0] || pending_atlas || entering;
     bool maintenance = changing ||
-                       (in_place && settings_antialias()) != antialias ||
-                       (!in_place && browser_wants_keyboard());
+                       (in_place && settings_antialias()) != antialias;
     // FrameBegin above retired the GPU. End this empty frame before freeing
     // targets: citro3d explicitly forbids deletion while inside a frame.
     if (maintenance)
       C3D_FrameEnd(GX_CMDLIST_FLUSH);
     if (asset_request[0])
       fetch_asset();
-    else if (pending_atlas || pending_place[0])
+    else if (pending_atlas || entering)
       change_view();
     bool desired_aa = in_place && settings_antialias();
     if (desired_aa != antialias) {
@@ -405,22 +545,14 @@ int main(void) {
         C3D_RenderTargetDelete(top);
         top = replacement;
         antialias = desired_aa;
-      } else {
-        settings_control("{\"settings\":{\"antialias\":false}}");
-        snprintf(app_error, sizeof app_error,
-                 "Not enough video memory for antialiasing");
-      }
+      } else
+        settings_set("smoothing", 0); // not enough video memory for it
     }
     if (changing) {
       last = svcGetSystemTick();
       dt = 1.0f / 30;
       if (in_place)
         scene_prepare();
-    }
-    if (!in_place && browser_wants_keyboard()) {
-      browser_keyboard();
-      C3D_RenderTargetSetOutput(top, GFX_TOP, GFX_LEFT, transfer);
-      last = svcGetSystemTick();
     }
     if (maintenance) {
       u64 deadline = svcGetSystemTick() + SYSCLOCK_ARM11 * 4ULL;
@@ -458,12 +590,13 @@ int main(void) {
     if (delay_ms > 0 && atlas.frame > 1)
       svcSleepThread((s64)(delay_ms * 1000000));
     gpu_wait += svcGetSystemTick() - pace_start;
-    if (loaded) {
-      if (in_place)
-        scene_render(top);
-      else
-        browser_render(top);
-    }
+    guest_prepare();
+    if (loaded && in_place)
+      scene_render(top);
+    else
+      globe_render(top);
+    guest_draw_top(antialias ? 2 : 1);
+    guest_draw_bottom(bottom_target);
     C3D_FrameEnd(GX_CMDLIST_FLUSH);
     atlas.cpu_ms =
         (float)(svcGetSystemTick() - now - gpu_wait) * 1000.0f / SYSCLOCK_ARM11;
@@ -478,19 +611,6 @@ int main(void) {
     devserver_set_frame_timing(0, 0, 0, (uint32_t)(atlas.cpu_ms * 1000),
                                (uint32_t)(atlas.frame_ms * 1000));
     shot = shot || devserver_take_screenshot_request();
-    if (!in_place || settings_open() || hud++ % 15 == 0 || changing) {
-      if (!in_place)
-        browser_hud();
-      else if (settings_open())
-        settings_draw();
-      else
-        scene_hud();
-      if (app_error[0]) {
-        browser_ui_rect(0, 204, 320, 36, 0x4b2020);
-        browser_ui_wrap(6, 205, 308, app_error, 0xffdfd0);
-      }
-      flush_console();
-    }
   }
   // Retire captures and leave the frame before deleting render targets.
   if (gpu_ok && !gpu_stalled && !atlas_gpu_idle(4000, !capture_pending))
@@ -499,6 +619,8 @@ int main(void) {
     release_view();
     if (top)
       C3D_RenderTargetDelete(top);
+    if (bottom_target)
+      C3D_RenderTargetDelete(bottom_target);
     C3D_Fini();
     atlas_gpu_park_shutdown();
   }
