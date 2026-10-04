@@ -59,24 +59,19 @@ pub struct Budgets {
     pub sections: BTreeMap<String, usize>,
 }
 
-const BUILTINS: [&str; 3] = [
+const BUILTINS: [&str; 4] = [
     include_str!("../../../profiles/vita30.json"),
     include_str!("../../../profiles/old3ds30.json"),
     include_str!("../../../profiles/psp30.json"),
+    include_str!("../../../profiles/ipod30.json"),
 ];
+pub const TARGETS: [Target; 4] = [Target::Vita, Target::Pica, Target::Psp, Target::Ipod];
 impl Profile {
     pub fn builtin(target: Target) -> Self {
-        serde_json::from_str(
-            BUILTINS[match target {
-                Target::Vita => 0,
-                Target::Pica => 1,
-                Target::Psp => 2,
-            }],
-        )
-        .unwrap()
+        serde_json::from_str(BUILTINS[TARGETS.iter().position(|t| *t == target).unwrap()]).unwrap()
     }
     pub fn load(name: &str) -> Result<Self, String> {
-        for target in [Target::Vita, Target::Pica, Target::Psp] {
+        for target in TARGETS {
             let p = Self::builtin(target);
             if p.id == name {
                 return Ok(p);
@@ -116,7 +111,7 @@ impl Profile {
         }
         let (min, max) = match self.target {
             Target::Vita => (4, 4096),
-            Target::Pica => (64, 1024),
+            Target::Pica | Target::Ipod => (64, 1024),
             Target::Psp => (8, 512),
         };
         for cap in [
@@ -138,7 +133,7 @@ impl Profile {
         if self.recipe.max_mesh_vertices != 65535
             || !(1..=16384).contains(&self.recipe.max_field_points)
             || self.recipe.animation_palette_bytes == 0
-            || self.recipe.animation_palette_bytes > 16 * 1024 * 1024
+            || self.recipe.animation_palette_bytes > if self.target == Target::Ipod { 64 } else { 16 } * 1024 * 1024
         {
             return Err("recipe exceeds vertex, point or animation limits".into());
         }
@@ -162,8 +157,9 @@ impl Profile {
         }
         for (tag, n) in &self.budgets.sections {
             if *n == 0
-                || !matches!(tag.as_str(), "META" | "PICA" | "TEXD" | "GEOM" | "ANIM")
-                || (tag == "PICA" && self.target != Target::Pica)
+                || !matches!(tag.as_str(), "META" | "PICA" | "TEXD" | "GEOM" | "ANIM" | "FELD")
+                || (tag == "PICA" && !matches!(self.target, Target::Pica | Target::Ipod))
+                || (tag == "FELD" && self.target != Target::Ipod)
                 || self.target == Target::Psp
             {
                 return Err(format!("invalid section budget {tag}"));
@@ -264,7 +260,7 @@ mod tests {
     }
     #[test]
     fn profiles_cannot_claim_unimplemented_devices_or_relax_reader_limits() {
-        for target in [Target::Vita, Target::Pica, Target::Psp] {
+        for target in TARGETS {
             Profile::builtin(target).validate().unwrap();
         }
         let mut p = Profile::builtin(Target::Pica);

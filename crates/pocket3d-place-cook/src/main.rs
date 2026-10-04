@@ -69,7 +69,7 @@ fn args() -> Args {
     let input =
         PathBuf::from(get("--in").unwrap_or_else(|| ".pocket-build/places/tokyo-konbini".into()));
     if a.iter().any(|v| v == "--pica-from") || a.get(1).is_some_and(|v| v == "psp") {
-        fail("device packs are no longer compiler inputs; use --in <PlaceIR or web export directory> --target <vita|3ds|psp>");
+        fail("device packs are no longer compiler inputs; use --in <PlaceIR or web export directory> --target <vita|3ds|psp|ipod>");
     }
     let output = get("--out").map(PathBuf::from).unwrap_or_else(|| {
         if a.get(1).is_some_and(|v| v == "import") {
@@ -126,9 +126,7 @@ fn main() {
         return;
     }
     if cli.get(1).is_some_and(|s| s == "profiles") {
-        let profiles: Vec<_> = [ir::Target::Vita, ir::Target::Pica, ir::Target::Psp]
-            .map(profile::Profile::builtin)
-            .into();
+        let profiles: Vec<_> = profile::TARGETS.map(profile::Profile::builtin).into();
         println!("{}", serde_json::to_string_pretty(&profiles).unwrap());
         return;
     }
@@ -187,6 +185,7 @@ fn main() {
             ir::Target::Vita => "",
             ir::Target::Pica => ".3ds",
             ir::Target::Psp => ".psp",
+            ir::Target::Ipod => ".ipod",
         };
         a.output = a.input.join(format!("{}{suffix}.place", manifest.name));
     }
@@ -197,7 +196,7 @@ fn main() {
     let (scene, log) = analysis::analyze(&a, &manifest.name, &mut pipeline);
     let artifact = match a.target {
         ir::Target::Vita => vita::cook(&scene, &a.profile),
-        ir::Target::Pica => pica::cook(&scene, &a.profile),
+        ir::Target::Pica | ir::Target::Ipod => pica::cook(&scene, &a.profile),
         ir::Target::Psp => psp::cook(&scene, &a.profile),
     }
     .unwrap_or_else(|e| fail(e));

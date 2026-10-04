@@ -88,7 +88,7 @@ fn one_ir_builds_three_repeatable_packs_without_web_export_or_vita_intermediate(
     std::fs::remove_dir_all(export).unwrap();
     let manifest = std::fs::read(ir.join("manifest.json")).unwrap();
     // Deliberately compile Vita last; every target only sees the sealed source.
-    for target in ["psp", "3ds", "vita"] {
+    for target in ["psp", "3ds", "ipod", "vita"] {
         let output = temp.0.join("target.place");
         let args = [
             "--in",
@@ -142,6 +142,17 @@ fn one_ir_builds_three_repeatable_packs_without_web_export_or_vita_intermediate(
             wrong_version[4..8].copy_from_slice(&pocket3d_place::VERSION.to_le_bytes());
             std::fs::write(&output, wrong_version).unwrap();
             assert!(!Command::new(&reader)
+                .arg(&output)
+                .status()
+                .unwrap()
+                .success());
+        } else if target == "ipod" {
+            // The GLES pack carries the PICA table under its own container
+            // version, with the light fields' section: not a pack for a 3DS.
+            assert_eq!(&first[..4], b"PLCE");
+            assert_eq!(first[4..12], [1u32.to_le_bytes(), 6u32.to_le_bytes()].concat());
+            assert!(first[16..16 + 6 * 16].chunks(16).any(|s| &s[..4] == b"FELD"));
+            assert!(!Command::new(temp.0.join("pica-contract"))
                 .arg(&output)
                 .status()
                 .unwrap()
@@ -444,7 +455,7 @@ fn skin_without_joints_is_rejected_for_every_target() {
     skin_fixture(&export, 0);
     ok(&["import", "--in", export.to_str().unwrap(), "--out", ir.to_str().unwrap()]);
     std::fs::remove_dir_all(export).unwrap();
-    for target in ["psp", "3ds", "vita"] {
+    for target in ["psp", "3ds", "ipod", "vita"] {
         let output = temp.0.join(format!("{target}.place"));
         let result = run(&["--in", ir.to_str().unwrap(), "--out", output.to_str().unwrap(), "--target", target]);
         assert!(!result.status.success(), "{target} accepted an empty skin");
@@ -601,7 +612,7 @@ fn two_layouts_per_family_keep_source_ownership_through_each_supported_recipe() 
     for family in ["night-street","daytime-street"] {
         for layout in 0..2 {
             let export=temp.0.join(format!("{family}-{layout}"));authored_fixture(&export,family,layout);
-            for target in ["vita","3ds","psp"] {
+            for target in ["vita","3ds","psp","ipod"] {
                 let output=temp.0.join("result.place");
                 let result=run(&["--in",export.to_str().unwrap(),"--out",output.to_str().unwrap(),"--target",target,"--json"]);
                 assert!(result.status.success(),"{}",String::from_utf8_lossy(&result.stderr));

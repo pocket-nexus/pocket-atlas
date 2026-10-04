@@ -75,6 +75,9 @@ enum {
   MAT_GLASS = 32,
   MAT_ADD = 64,
   MAT_DEPTH = 128,
-  MAT_WATER = 256
+  MAT_WATER = 256,
+  // GLES packs only (ipod/): texture (unsigned)waves[0] is an emission map,
+  // added to the lit texture at the strength in the vertex alpha.
+  MAT_GLOW = 512
 };
 #endif
