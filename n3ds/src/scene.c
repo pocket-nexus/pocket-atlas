@@ -12,6 +12,7 @@
 #include <string.h>
 #include <mbedtls/sha256.h>
 #include "memory.h"
+#include "visibility.h"
 AtlasStats atlas = {.reflection = true,
                     .rain = true,
                     .haze = true,
@@ -815,12 +816,17 @@ static bool visible(unsigned i, bool mirror, float *distance) {
   float r = world_bounds[i][3];
   if (mirror)
     c[1] = -c[1];
+  const float *extent = world_bounds[i] + 4;
+  // Skinning and the water vertex shader deform outside the rigid rest box.
+  bool rigid_bounds = draws[i].skin == UINT32_MAX &&
+                      !(materials[draws[i].material].flags & MAT_WATER);
   for (int p = 0; p < 6; p++)
-    if (dot3(planes[p], c) + planes[p][3] < -r)
+    if (rigid_bounds
+            ? atlas_box_outside_plane(planes[p], c, extent)
+            : dot3(planes[p], c) + planes[p][3] < -r)
       return false;
   // Sphere distance becomes zero beside large street chunks. Nearest AABB
   // distance keeps their 6 cm / 25 cm LOD errors meaningful at screen scale.
-  const float *extent = world_bounds[i] + 4;
   float x = fmaxf(0, fabsf(c[0] - atlas.position[0]) - extent[0]);
   float y = fmaxf(0, fabsf(c[1] - atlas.position[1]) - extent[1]);
   float z = fmaxf(0, fabsf(c[2] - atlas.position[2]) - extent[2]);

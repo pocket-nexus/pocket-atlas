@@ -183,6 +183,11 @@ all selected geometry. SHA verification and bulk reads poll the debug server;
 status during loading cannot access a partially initialized renderer.
 Loading replies with status only; resend renderer/navigation controls once the
 phase becomes `running` or `browser`.
+Rigid draws use their world AABBs for conservative frustum rejection, avoiding
+the loose spheres of long or thin street chunks. Skinned people and displaced
+water retain their existing deformation bounds. The host visibility test
+checks the plane test against an eight-corner oracle and keeps boundary contact
+visible.
 Signs retain their flipbook/scroll transforms and animated emission; surf uses
 scrolling alpha artwork. Open water uses two wave layers and a Fresnel/TEV
 approximation. Night scenes retain rain, local light glow and wet planar
