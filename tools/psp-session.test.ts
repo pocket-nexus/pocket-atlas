@@ -18,6 +18,9 @@ describe("PSP mailbox boundary", () => {
     expect(encodeControl({ shot: 2, time: 10, rain: false }, 7)).toBe(
       "2 10 0 0 1 7\n",
     );
+    expect(encodeControl({ place: "tokyo-konbini", press: ["down", "circle"] }, 8)).toBe("-1 -1 0 1 1 8 place=tokyo-konbini press=down,circle\n");
+    expect(encodeControl({ capture: true }, 9)).toBe("-1 -1 0 1 1 9 capture=1\n");
+    for (const command of [{ place: "../x" }, { press: ["home"] }, { press: "down" }]) expect(() => encodeControl(command as any, 1)).toThrow();
   });
   test("camera table requires matching magic, version, length and bounded span", () => {
     const bytes = Buffer.alloc(160 + 76);

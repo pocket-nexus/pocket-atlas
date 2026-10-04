@@ -1,14 +1,15 @@
 //! Native PSP GE renderer. Geometry and textures stay in main RAM; VRAM
 //! holds two 8888 framebuffers and depth. Reflection uses the wet surfaces'
 //! stencil, so reflected buildings never bleed onto the dry pavement.
-use crate::{camera::Rig, scene::Scene};
+use crate::{camera::Rig, interface::Ui, scene::Scene};
 use core::{ffi::c_void, ptr};
 use glam::{Mat4, Vec3, Vec4};
 use pocket3d_place_psp as pp;
 use psp::{sys::*, Align16};
 
 static mut LIST: Align16<[u32; 262144]> = Align16([0; 262144]);
-const FB: usize = 512 * 272 * 4;
+/// One 8888 frame of video memory; the two buffers are at 0 and at this.
+pub const FB: usize = 512 * 272 * 4;
 pub struct Renderer {
     hot_texture: u32,
     hot_address: *const u8,
@@ -82,30 +83,64 @@ fn texture_format(t: &pp::Texture) -> TexturePixelFormat {
     }
 }
 
+/// Sets the GE up, once: two 8888 buffers and depth in video memory.
+pub unsafe fn init() {
+    sceGuInit();
+    sceGuStart(GuContextType::Direct, ptr::addr_of_mut!(LIST.0) as *mut _);
+    sceGuDrawBuffer(DisplayPixelFormat::Psm8888, ptr::null_mut(), 512);
+    sceGuDispBuffer(480, 272, FB as *mut c_void, 512);
+    sceGuDepthBuffer((FB * 2) as *mut c_void, 512);
+    sceGuOffset(2048 - 240, 2048 - 136);
+    sceGuViewport(2048, 2048, 480, 272);
+    sceGuDepthRange(65535, 0);
+    sceGuDepthFunc(DepthFunc::GreaterOrEqual);
+    sceGuScissor(0, 0, 480, 272);
+    sceGuEnable(GuState::ScissorTest);
+    sceGuEnable(GuState::DepthTest);
+    sceGuEnable(GuState::ClipPlanes);
+    sceGuFrontFace(FrontFaceDirection::CounterClockwise);
+    sceGuShadeModel(ShadingModel::Smooth);
+    sceGuFinish();
+    sceGuSync(GuSyncMode::Finish, GuSyncBehavior::Wait);
+    sceDisplayWaitVblankStart();
+    sceGuDisplay(true);
+}
+/// Opens the frame's display list, cleared, with the texture state every
+/// pass here starts from (the interface's pass leaves its own behind).
+pub unsafe fn begin(clear: u32) {
+    sceKernelDcacheWritebackAll();
+    sceGuStart(GuContextType::Direct, ptr::addr_of_mut!(LIST.0) as *mut _);
+    sceGuTexFilter(TextureFilter::LinearMipmapNearest, TextureFilter::Linear);
+    sceGuTexLevelMode(TextureLevelMode::Auto, -0.5);
+    sceGuTexFunc(TextureEffect::Modulate, TextureColorComponent::Rgba);
+    sceGuDepthMask(0);
+    sceGuPixelMask(0);
+    sceGuDisable(GuState::StencilTest);
+    sceGuClearColor(clear);
+    sceGuClearDepth(0);
+    sceGuClearStencil(0);
+    sceGuClear(ClearBuffer::COLOR_BUFFER_BIT | ClearBuffer::DEPTH_BUFFER_BIT | ClearBuffer::STENCIL_BUFFER_BIT);
+}
+/// Lays the interface over the frame, closes the list and waits for the GE:
+/// the time it still needed, in microseconds.
+pub unsafe fn end(ui: &Ui) -> u32 {
+    sceGuDepthOffset(0);
+    sceGuDisable(GuState::Fog);
+    sceGuDisable(GuState::DepthTest);
+    sceGuDisable(GuState::AlphaTest);
+    sceGuDisable(GuState::CullFace);
+    ui.draw();
+    sceGuEnable(GuState::DepthTest);
+    sceGuFinish();
+    let wait = sceKernelGetSystemTimeLow();
+    sceGuSync(GuSyncMode::Finish, GuSyncBehavior::Wait);
+    // The interface's vertices are free again once the GE has read them.
+    pocketjs_psp::ge::reset_pool();
+    sceKernelGetSystemTimeLow().wrapping_sub(wait)
+}
+
 impl Renderer {
     pub unsafe fn new(scene: &Scene) -> Self {
-        sceGuInit();
-        sceGuStart(GuContextType::Direct, ptr::addr_of_mut!(LIST.0) as *mut _);
-        sceGuDrawBuffer(DisplayPixelFormat::Psm8888, ptr::null_mut(), 512);
-        sceGuDispBuffer(480, 272, FB as *mut c_void, 512);
-        sceGuDepthBuffer((FB * 2) as *mut c_void, 512);
-        sceGuOffset(2048 - 240, 2048 - 136);
-        sceGuViewport(2048, 2048, 480, 272);
-        sceGuDepthRange(65535, 0);
-        sceGuDepthFunc(DepthFunc::GreaterOrEqual);
-        sceGuScissor(0, 0, 480, 272);
-        sceGuEnable(GuState::ScissorTest);
-        sceGuEnable(GuState::DepthTest);
-        sceGuEnable(GuState::ClipPlanes);
-        sceGuFrontFace(FrontFaceDirection::CounterClockwise);
-        sceGuShadeModel(ShadingModel::Smooth);
-        sceGuTexFilter(TextureFilter::LinearMipmapNearest, TextureFilter::Linear);
-        sceGuTexLevelMode(TextureLevelMode::Auto, -0.5);
-        sceGuTexFunc(TextureEffect::Modulate, TextureColorComponent::Rgba);
-        sceGuFinish();
-        sceGuSync(GuSyncMode::Finish, GuSyncBehavior::Wait);
-        sceDisplayWaitVblankStart();
-        sceGuDisplay(true);
         // Keep the most frequently referenced atlas in the remaining EDRAM.
         let mut uses = alloc::vec![0usize;scene.textures.len()];
         for d in scene.draws {
@@ -369,6 +404,7 @@ impl Renderer {
         time: f32,
         rain: bool,
         reflect: bool,
+        ui: &Ui,
     ) -> Stats {
         let mut stats = Stats {
             draws: 0,
@@ -376,19 +412,8 @@ impl Renderer {
             gpu_us: 0,
         };
         self.index_cursor = 0;
-        sceKernelDcacheWritebackAll();
-        sceGuStart(GuContextType::Direct, ptr::addr_of_mut!(LIST.0) as *mut _);
-        sceGuDepthMask(0);
-        sceGuPixelMask(0);
-        sceGuDisable(GuState::StencilTest);
-        sceGuClearColor(s.header.sky_color);
-        sceGuClearDepth(0);
-        sceGuClearStencil(0);
-        sceGuClear(
-            ClearBuffer::COLOR_BUFFER_BIT
-                | ClearBuffer::DEPTH_BUFFER_BIT
-                | ClearBuffer::STENCIL_BUFFER_BIT,
-        );
+        self.bound_texture = pp::NONE;
+        begin(s.header.sky_color);
         let projection = glam::camera::rh::proj::opengl::perspective(
             rig.fov * core::f32::consts::PI / 180.0,
             480.0 / 272.0,
@@ -441,11 +466,7 @@ impl Renderer {
         }
         sceGuDepthMask(0);
         sceGuDisable(GuState::Blend);
-        sceGuDisable(GuState::Fog);
-        sceGuFinish();
-        let wait = sceKernelGetSystemTimeLow();
-        sceGuSync(GuSyncMode::Finish, GuSyncBehavior::Wait);
-        stats.gpu_us = sceKernelGetSystemTimeLow().wrapping_sub(wait);
+        stats.gpu_us = end(ui);
         stats
     }
     unsafe fn sky(&mut self, s: &Scene, rig: &Rig, stats: &mut Stats) {

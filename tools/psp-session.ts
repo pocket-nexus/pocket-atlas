@@ -49,7 +49,15 @@ export interface Control {
   pause?: boolean;
   rain?: boolean;
   reflection?: boolean;
+  /** The place to be in; absent leaves whichever is on screen. */
+  place?: string;
+  /** Buttons to press on the interface, in order (up, circle, l, start…). */
+  press?: string[];
+  /** Write the frame on the screen to the share as `capture.raw` (480x272 RGBA). */
+  capture?: boolean;
 }
+
+const BUTTONS = ["select", "start", "up", "right", "down", "left", "l", "r", "triangle", "circle", "cross", "square"];
 
 export function encodeControl(c: Control, nonce: number): string {
   if (c === null || typeof c !== "object" || Array.isArray(c))
@@ -61,15 +69,18 @@ export function encodeControl(c: Control, nonce: number): string {
   if (!Number.isFinite(time) || (time < 0 && time !== -1) || time > 86400)
     throw new Error("Time must be -1 (live) or 0..86400 seconds");
   for (const [key, value] of Object.entries(c)) {
-    if (!["shot", "time", "pause", "rain", "reflection"].includes(key))
+    if (!["shot", "time", "pause", "rain", "reflection", "place", "press", "capture"].includes(key))
       throw new Error(`Unknown control: ${key}`);
     if (
-      ["pause", "rain", "reflection"].includes(key) &&
+      ["pause", "rain", "reflection", "capture"].includes(key) &&
       typeof value !== "boolean"
     )
       throw new Error(`${key} must be boolean`);
   }
-  return `${shot} ${time} ${Number(c.pause ?? false)} ${Number(c.rain ?? true)} ${Number(c.reflection ?? true)} ${nonce}\n`;
+  if (c.place !== undefined && !/^[a-z0-9-]+$/.test(c.place)) throw new Error("Invalid place id");
+  if (c.press !== undefined && (!Array.isArray(c.press) || c.press.some((name) => !BUTTONS.includes(name)))) throw new Error(`press takes ${BUTTONS.join(", ")}`);
+  const more = [c.place ? `place=${c.place}` : "", c.press?.length ? `press=${c.press.join(",")}` : "", c.capture ? "capture=1" : ""].filter(Boolean);
+  return [shot, time, Number(c.pause ?? false), Number(c.rain ?? true), Number(c.reflection ?? true), nonce, ...more].join(" ") + "\n";
 }
 
 let nonce = Date.now() >>> 0;

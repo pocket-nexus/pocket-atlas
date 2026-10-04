@@ -27,6 +27,15 @@ impl Rig {
         *self = Self::new(shots[k]);
         self.shot = k;
     }
+    /// Hands the camera to the visitor where the shot has it.
+    pub fn release(&mut self) {
+        if self.cinematic {
+            let d = (self.target - self.pos).normalize();
+            self.yaw = libm::atan2f(d.x, -d.z);
+            self.pitch = libm::asinf(d.y);
+            self.cinematic = false;
+        }
+    }
     pub fn update(
         &mut self,
         dt: f32,
@@ -35,12 +44,8 @@ impl Rig {
         shots: &[Shot],
         walk: &[[f32; 6]],
     ) {
-        if movement.0.abs() + movement.1.abs() + look.0.abs() + look.1.abs() > 0.0 && self.cinematic
-        {
-            let d = (self.target - self.pos).normalize();
-            self.yaw = libm::atan2f(d.x, -d.z);
-            self.pitch = libm::asinf(d.y);
-            self.cinematic = false;
+        if movement.0.abs() + movement.1.abs() + look.0.abs() + look.1.abs() > 0.0 {
+            self.release();
         }
         if self.cinematic {
             self.shot_time += dt;
