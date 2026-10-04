@@ -2,6 +2,7 @@
 //! host control file, frames never perform host0 I/O. No scene rules live here.
 use alloc::{format, string::String};
 use psp::sys::*;
+use sha2::{Digest, Sha256};
 
 pub struct Command {
     pub shot: i32,
@@ -55,9 +56,10 @@ pub struct Status<'a> {
 pub struct Session {
     enabled: bool,
     nonce: Option<u32>,
+    pack_sha256: String,
 }
 impl Session {
-    pub unsafe fn connect() -> Self {
+    pub unsafe fn connect(bytes: &[u8]) -> Self {
         let fd = sceIoOpen(b"host0:/control.txt\0".as_ptr(), IoOpenFlags::RD_ONLY, 0);
         let enabled = fd.0 >= 0;
         if enabled {
@@ -66,6 +68,7 @@ impl Session {
         Self {
             enabled,
             nonce: None,
+            pack_sha256: format!("{:x}", Sha256::digest(bytes)),
         }
     }
     pub unsafe fn poll(&mut self) -> Option<Command> {
@@ -109,7 +112,7 @@ impl Session {
                 "\"time\":{:.2},\"fps\":{:.2},\"frameMs\":{:.2},\"workMs\":{:.2},",
                 "\"gpuWaitMs\":{:.2},\"maxWorkMs\":{:.2},\"draws\":{},\"triangles\":{},",
                 "\"packBytes\":{},\"rain\":{},\"reflection\":{},\"paused\":{},",
-                "\"freeCamera\":{},\"controlNonce\":{}}}\n"
+                "\"freeCamera\":{},\"controlNonce\":{},\"packSha256\":\"{}\",\"runtimeBuild\":\"{}\"}}\n"
             ),
             s.frame,
             shot,
@@ -127,7 +130,9 @@ impl Session {
             s.reflection,
             s.paused,
             s.free_camera,
-            self.nonce.unwrap_or(0)
+            self.nonce.unwrap_or(0),
+            self.pack_sha256,
+            option_env!("ATLAS_BUILD_ID").unwrap_or("unidentified")
         );
         let fd = sceIoOpen(
             b"host0:/status.json\0".as_ptr(),

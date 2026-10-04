@@ -381,7 +381,7 @@ pub fn cook(scene: &source::Scene, profile: &Profile) -> Result<Artifact, String
         sidecars: Vec::new(),
         bytes: pack, summary: stats,
         sections: [("META",meta_json.len()),("TEXD",blobs.tex.len()),("GEOM",blobs.geom.len()),("ANIM",blobs.anim.len())].into_iter().map(|(k,v)|(k.into(),v)).collect(),
-        textures: meta.textures.iter().enumerate().map(|(id,t)|serde_json::json!({"id":id,"name":t.name,"width":t.width,"height":t.height,"levels":t.mips,"bytes":t.data.size,"format":t.format})).collect(),
+        textures: meta.textures.iter().enumerate().map(|(id,t)|serde_json::json!({"id":id,"sourceTextures":[id],"sources":crate::provenance::texture_sources(scene,id),"name":t.name,"width":t.width,"height":t.height,"levels":t.mips,"bytes":t.data.size,"format":t.format})).collect(),
     })
 }
 

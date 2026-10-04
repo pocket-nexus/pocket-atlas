@@ -1,4 +1,5 @@
 import type { QualityLevel } from "./quality";
+import type { Sampling } from "../places/shared/authoring";
 
 /** Authoring density is independent of lighting, textures and render quality. */
 export type GeometryProfile = "full" | "handheld";
@@ -14,6 +15,7 @@ export type GeometryProfile = "full" | "handheld";
  *   #/place/<id>               deep-link straight into a place
  */
 export interface Params {
+  authoring?: { seed?: number; sampling?: Partial<Sampling> };
   quality: QualityLevel | null;
   geometry: GeometryProfile;
   shot: boolean;
@@ -34,6 +36,14 @@ export function readParams(search = location.search): Params {
     level === "low" || level === "medium" || level === "high" || level === "ultra" ? level : null;
   const t = Number(q.get("t"));
   return {
+    authoring: {
+      ...(q.has("seed") ? { seed: Number(q.get("seed")) } : {}),
+      sampling: {
+        ...(q.has("sample-start") ? { startSeconds: Number(q.get("sample-start")) } : {}),
+        ...(q.has("sample-seconds") ? { durationSeconds: Number(q.get("sample-seconds")) } : {}),
+        ...(q.has("sample-fps") ? { fps: Number(q.get("sample-fps")) } : {}),
+      },
+    },
     quality,
     geometry: q.get("geometry") === "handheld" ? "handheld" : "full",
     shot: q.has("shot"),

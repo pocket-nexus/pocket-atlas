@@ -98,7 +98,9 @@ pub fn cook(
     colors.rebind(&bytes)?;
     let clusters = gles_clusters::adapt(&bytes)?;
     let p = pc::ipod::parse(&bytes).map_err(|e| e.to_string())?;
-    let meta = p.meta().map_err(|e| e.to_string())?;
+    let pc::ipod::Metadata { scene: meta, ipod_recipes } =
+        serde_json::from_slice(p.section(pc::TAG_META).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
     let sections = [
         pc::TAG_META,
         pc::TAG_TEXTURES,
@@ -116,7 +118,22 @@ pub fn cook(
         )
     })
     .collect();
-    let textures=meta.textures.iter().enumerate().map(|(id,t)|serde_json::json!({"id":id,"name":t.name,"width":t.width,"height":t.height,"levels":t.mips,"bytes":t.data.size,"format":t.format})).collect();
+    let textures = meta.textures.iter().enumerate().map(|(id, t)| {
+        let mut inputs = std::collections::BTreeSet::new();
+        if id < source.textures.len() { inputs.insert(id as u32); }
+        for (&draw, mapping) in &recipe.draws {
+            if mapping.texture as usize == id {
+                inputs.extend(source.materials[source.draws[draw].material as usize].albedo);
+            }
+        }
+        if ipod_recipes.steam_coverage == Some(id as u32) {
+            inputs.extend(source.effects.puddles);
+        }
+        let owners: std::collections::BTreeSet<_> = inputs.iter()
+            .flat_map(|&i| crate::provenance::texture_sources(source, i as usize)).collect();
+        serde_json::json!({"id":id,"sourceTextures":inputs,"sources":owners,"name":t.name,
+            "width":t.width,"height":t.height,"levels":t.mips,"bytes":t.data.size,"format":t.format})
+    }).collect();
     let mut summary = meta.stats.clone();
     summary["displayDraws"] = colors.draws.into();
     summary["displayBytes"] = colors.bytes.len().into();

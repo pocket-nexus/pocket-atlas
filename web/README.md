@@ -228,6 +228,17 @@ bun scripts/shot.ts "/?shot&stats&q=high&cam=Puddles#/place/tokyo-konbini" out.p
 - **Sound.** Surf in sets, the road, cicadas, the electronic bell while the
   crossing rings, the train's motor (`audio.ts`).
 
+## How Lombard Street is put together
+
+`sf-lombard-street` recreates the eight-turn Hyde–Leavenworth block on a clear July morning. The road follows 157 OpenStreetMap way vertices, the footways and 283 nearby buildings retain their surveyed plans, and five USGS elevation samples give a 32.843 m rise. Facade openings, road widths, cross-street grades and the distant skyline are estimates checked against dated photographs. Sources and coordinate conventions are documented in [the scene notes](src/places/sf-lombard-street/README.md).
+
+Shared `daylight/` materials bake brick, concrete, stucco and siding with PBR maps. The scene adds inset bay windows, garages, cable-car tracks at Hyde, signs, railings, one foliage atlas for hydrangeas/hedges/trees/bougainvillea, and six cameras. Three ordinary visitors and three downhill vehicles use the existing skeletal/rigid export paths in a deterministic 120-second loop.
+
+```sh
+bun scripts/export-place.ts --place sf-lombard-street --seconds 120
+bun scripts/preview-place.ts --place sf-lombard-street
+```
+
 ## How Sangubashi in Bloom is put together
 
 Open `/?q=high&cam=Crossing#/place/sangubashi-crossing`. The six camera buttons,

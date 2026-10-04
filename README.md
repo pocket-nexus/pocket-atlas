@@ -2,13 +2,13 @@
 
 A world map of places people remember. A place is a small, self-contained 3D scene of one real spot — a street corner, a stairway, a café — pinned to its location on a shared globe. People will publish their own places (publicly or privately) and download other people's places to visit them.
 
-This repository holds the first-party places, the pipeline that turns a place into a pack for a handheld GPU, and native PS Vita, Nintendo 3DS and PSP renderers. Publishing and downloading are not built yet. Vita and 3DS target 30 fps; PSP currently supports the Rainy Night Konbini place through its fixed-function GE pipeline.
+This repository holds the first-party places, the pipeline that turns a place into a pack for a handheld GPU, and native PS Vita, Nintendo 3DS and PSP renderers. Publishing and downloading are not built yet. Vita and 3DS target 30 fps; PSP supports night streets and daytime slopes/streets through its fixed-function GE pipeline.
 
 Places share their assets across the reference and handheld renderers:
 
 - **`web/`** is the reference renderer: a standalone three.js + Vite app with no PocketJS dependency, with a night-side globe to pick a place. Every asset is generated at load time.
 - **`vita/`** renders the same place on a PS Vita with its own GXM pipeline: Cg programs compiled on the device by SceShaccCg, 4× MSAA HDR targets and the effect set the place needs.
-- **`n3ds/`** renders the shared globe, place browser and all four scenes on an Old 3DS, using a PICA200 cook of the same assets, native 400 × 240 output and a 30fps quality budget. See [the 3DS build and debug workflow](n3ds/README.md).
+- **`n3ds/`** renders the shared globe, place browser and five supported scenes on an Old 3DS, using a PICA200 cook of the same assets, native 400 × 240 output and a 30fps quality budget. Unsupported kinds remain visible with an unavailable label. See [the 3DS build and debug workflow](n3ds/README.md).
 
 The web app exports glTF 2.0 with `extras.pocketAtlas`. The cooker seals a lossless PlaceIR, then independently lowers it into Vita, PICA or GE assets. See [the compiler boundaries, commands and migration plan](docs/COMPILER.md).
 
@@ -22,6 +22,7 @@ The web app exports glTF 2.0 with `extras.pocketAtlas`. The cooker seals a lossl
 | Kamakura-Kōkōmae Crossing | `kamakura-koko-mae-crossing` | Shichirigahama, Kamakura (鎌倉高校前1号踏切 on the Enoden) | open water (wave layers, Fresnel sky reflection, glitter path) to a 16 km horizon in FogExp2 haze, scrolling surf strips, flashing crossing lamps and gates driven by material and node tracks, a train, Route 134 traffic |
 | Sangubashi in Bloom | `sangubashi-crossing` | Yoyogi, Tokyo (参宮橋３号踏切) | spring foliage, animated petals, an eight-car commuter train, synchronised barriers and moving sunlight shadows; Vita picture quality accepted; recorded frame-rate limits documented |
 | Griffith Observatory at Blue Hour | `griffith-observatory` | Mount Hollywood, Los Angeles, over the basin (September 2015) | light fields of GXM point sprites (52k city lights, 5k moving), height haze with an inversion layer to a 71 km horizon, floodlit masonry baked into vertices, parallax windows, a resolution boost to 640×362 |
+| Lombard Street in Bloom | `sf-lombard-street` | Hyde to Leavenworth, Russian Hill, San Francisco | eight surveyed switchbacks, stepped footways, red brick paving, hydrangeas and bougainvillea, bay-window houses, a clear daytime sky, a Waymo I-PACE, a Tesla Cybercab and three visitors in a 120 s loop; shared daylight adaptation for PSP |
 
 Real places fall into a finite set of kinds; the registry names them (`PlaceKind` in `web/src/core/types.ts`): `night-street`, `daytime-slope`, `dusk-street`, `daytime-coast`, `daytime-street`, `dusk-vista` for the places built so far, and `night-slope`, `dusk-coast`, `night-coast`, `interior` and `rooftop` for the places still to come. Each first-party place brings its kind's rendering to the best quality the handheld holds, and the work goes into the shared renderer and cooker so later places of the same kind reuse it. Glass (`places/shared/glass.ts`) blends premultiplied on the web as on the device. The workflow and quality bar for making a place are in the `pocket-atlas-place` skill (`.claude/skills/pocket-atlas-place/`).
 
@@ -35,7 +36,7 @@ Real places fall into a finite set of kinds; the registry names them (`PlaceKind
 | `vendor/pocketjs/devices/vita/pocket-vita-gxm` | Shared GXM memory/program/target/texture mechanisms, optional runtime SceShaccCg; no scene or material policy |
 | `vita/` | Vita app: place loader (`scene.rs`), frame renderer (`frame.rs`), atlas globe (`atlas.rs`), place browser (`browser.rs`), settings sheet (`settings.rs`), interface drawing and text (`ui.rs`), file locations (`paths.rs`), Cg programs (`vita/shaders`), LiveArea art |
 | `psp/` | Native PSP place viewer: GE rendering, animated nodes and skinning, camera controls, procedural rain audio, PSPLINK telemetry |
-| `crates/pocket3d-place-psp` | Validated `PLPS` payload: shared GE vertex buffers, spatial index chunks, swizzled RGBA4444 mip chains, animation and camera data; no JSON on the device |
+| `crates/pocket3d-place-psp` | Validated `PLPS` payload: shared GE vertex buffers, spatial index chunks, swizzled RGBA4444/RGBA8888 mip chains, animation and camera data; no JSON on the device |
 | `n3ds/`, `tools/atlas-3ds.ts` | PICA renderer, native cooker, paired wireless deployment, capture and performance measurement |
 | `tools/atlas.ts` | cook (places and the atlas with its font), build, deploy over USB, status/capture/profile/sweep/shots, shader lint, standalone VPK |
 | `tools/atlas-psp.ts` | PSP cook/build, PSPLINK serve/run/control/capture/shot measurements, standalone EBOOT package |
@@ -56,6 +57,8 @@ Controls and URL switches are listed in `web/README.md`.
 The native GLES2 app includes the live globe, all current places and UIKit navigation, settings, About and touch controls. See [the iPod build and device workflow](ipod/README.md) for assets, IPA installation, quality modes and hardware limits.
 
 ## PSP
+
+Lombard Street uses the same viewer and controls, with a graded sky panorama, baked directional light and static shadows. Rain and wet-road reflections are disabled by the pack's features. Export its full 120-second loop, then pass `--place sf-lombard-street` to `cook`, `build` and `package`; see [the PSP daylight details and limitations](psp/README.md). Runtime and frame budgets for Lombard still require physical hardware measurement.
 
 Rainy Night Konbini runs locally at **480×272**, with baked lighting, alpha-tested shelf facings, planar reflections of lit surfaces and moving objects, rain, lamp halos, the six authored camera shots, the taxi and skinned pedestrians. The analog stick moves; the D-pad looks. L/R change shots, START resumes the camera sequence, × pauses, □ toggles rain, △ toggles reflections, ○ mutes sound, and SELECT toggles the diagnostic readout. Walking near the entrance opens the doors and plays the door chime; the rain bed quiets indoors. HOME exits.
 
@@ -259,3 +262,10 @@ MIT
 ### Shaded emission
 
 A standard material may export `emissionShade: { normal: [x, y, z, bias], height: [low, high, lowGain, highGain] }` in `extras.pocketAtlas`. Its emission is multiplied by `dot([abs(N.x), N.y, abs(N.z), 1], normal)`, the smooth height gain and linear vertex colour when present. This preserves the shared indoor wardrobe shading on native renderers; it is an optional material feature and older packs retain their previous appearance. The cooker rejects non-finite coefficients and empty height ranges.
+
+## Creator toolchain
+
+See [Authoring a place](docs/AUTHORING.md) for `defineDayPlace`, the compatible
+`createStage` adapter, unified export/IR/recipe commands, reproducibility limits
+and identity-bound device evidence. Start from the typechecked
+[daytime template](web/examples/day-place.ts); keep scene-family changes in Atlas.

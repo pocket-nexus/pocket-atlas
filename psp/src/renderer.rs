@@ -75,6 +75,13 @@ fn hash(mut n: u32) -> f32 {
     ((n >> 22) ^ n) as f32 / 4294967296.0
 }
 
+fn texture_format(t: &pp::Texture) -> TexturePixelFormat {
+    match t.format {
+        pp::RGBA8888 => TexturePixelFormat::Psm8888,
+        _ => TexturePixelFormat::Psm4444, // Pack validation rejects other encodings.
+    }
+}
+
 impl Renderer {
     pub unsafe fn new(scene: &Scene) -> Self {
         sceGuInit();
@@ -210,7 +217,7 @@ impl Renderer {
             sceGuEnable(GuState::Texture2D);
             if self.bound_texture != mat.texture {
                 self.bound_texture = mat.texture;
-                sceGuTexMode(TexturePixelFormat::Psm4444, t.mips as i32 - 1, 0, 1);
+                sceGuTexMode(texture_format(t), t.mips as i32 - 1, 0, 1);
                 let levels = [
                     MipmapLevel::None,
                     MipmapLevel::Level1,
@@ -235,7 +242,7 @@ impl Renderer {
                         w as i32,
                         base.add(offset) as _,
                     );
-                    offset += (w * h * 2) as usize;
+                    offset += (w * h * t.bytes_per_pixel().unwrap()) as usize;
                 }
                 sceGuTexWrap(
                     if t.wrap & 1 != 0 {
@@ -391,6 +398,7 @@ impl Renderer {
         let view = glam::camera::rh::view::look_at_mat4(rig.pos, rig.target, Vec3::Y);
         matrix(MatrixMode::Projection, projection);
         matrix(MatrixMode::View, view);
+        self.sky(s, rig, &mut stats);
         let vp = projection * view;
         let clip = planes(vp);
         let mirror_clip = planes(vp * Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0)));
@@ -425,7 +433,9 @@ impl Renderer {
         self.pass(s, &clip, time, Pass::Opaque, reflect, &mut stats);
         self.pass(s, &clip, time, Pass::Transparent, reflect, &mut stats);
         sceGuDepthOffset(0);
-        self.halos(s, rig, time);
+        if !s.lights.is_empty() {
+            self.halos(s, rig, time);
+        }
         if rain {
             self.rain(s, rig, time);
         }
@@ -437,6 +447,50 @@ impl Renderer {
         sceGuSync(GuSyncMode::Finish, GuSyncBehavior::Wait);
         stats.gpu_us = sceKernelGetSystemTimeLow().wrapping_sub(wait);
         stats
+    }
+    unsafe fn sky(&mut self, s: &Scene, rig: &Rig, stats: &mut Stats) {
+        let vertices = s.header.sky_vertices;
+        if vertices.count == 0 {
+            return;
+        }
+        let texture = &s.textures[s.header.sky_texture as usize];
+        // The dome follows position but keeps world orientation, so looking
+        // downhill and uphill sees the same authored horizon and sunlight.
+        matrix(MatrixMode::Model, Mat4::from_translation(rig.pos));
+        sceGuDisable(GuState::DepthTest);
+        sceGuDepthMask(1);
+        sceGuDepthOffset(0);
+        sceGuDisable(GuState::Fog);
+        sceGuDisable(GuState::Blend);
+        sceGuDisable(GuState::AlphaTest);
+        sceGuDisable(GuState::CullFace);
+        sceGuEnable(GuState::Texture2D);
+        sceGuTexMode(texture_format(texture), 0, 0, 1);
+        sceGuTexImage(
+            MipmapLevel::None,
+            texture.width as i32,
+            texture.height as i32,
+            texture.width as i32,
+            s.bytes.as_ptr().add(texture.pixels.offset as usize) as _,
+        );
+        sceGuTexWrap(GuTexWrapMode::Repeat, GuTexWrapMode::Clamp);
+        sceGuTexScale(1.0, 1.0);
+        sceGuTexOffset(0.0, 0.0);
+        sceGuDrawArray(
+            GuPrimitive::Triangles,
+            VertexType::TEXTURE_32BITF
+                | VertexType::COLOR_8888
+                | VertexType::VERTEX_32BITF
+                | VertexType::TRANSFORM_3D,
+            vertices.count as i32,
+            ptr::null(),
+            s.bytes.as_ptr().add(vertices.offset as usize) as _,
+        );
+        self.bound_texture = pp::NONE;
+        sceGuDepthMask(0);
+        sceGuEnable(GuState::DepthTest);
+        stats.draws += 1;
+        stats.triangles += vertices.count / 3;
     }
     unsafe fn rain(&self, s: &Scene, rig: &Rig, time: f32) {
         const COUNT: usize = 850;

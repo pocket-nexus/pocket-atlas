@@ -34,6 +34,8 @@ mod analysis;
 mod artifact;
 mod profile;
 mod vita;
+mod recipe;
+mod provenance;
 
 use std::path::PathBuf;
 
@@ -90,6 +92,9 @@ fn args() -> Args {
         profile.recipe.texture_cap = cap
             .parse()
             .unwrap_or_else(|_| fail("--tex must be an integer"));
+        if profile.recipe.daylight_texture_cap.is_some() {
+            profile.recipe.daylight_texture_cap = Some(profile.recipe.texture_cap);
+        }
         profile.recipe.detail_texture_cap = profile
             .recipe
             .detail_texture_cap
@@ -122,6 +127,11 @@ fn args() -> Args {
 
 fn main() {
     let cli: Vec<String> = std::env::args().collect();
+    if cli.get(1).is_some_and(|s| s == "recipe") {
+        let a = args();
+        println!("{}", serde_json::to_string_pretty(&recipe::Pipeline::describe(&a.profile)).unwrap());
+        return;
+    }
     if cli.get(1).is_some_and(|s| s == "profiles") {
         let profiles: Vec<_> = [
             ir::Target::Vita,
@@ -196,7 +206,8 @@ fn main() {
     std::fs::create_dir_all(a.output.parent().unwrap_or(std::path::Path::new(".")))
         .expect("output directory");
     a.input = root;
-    let (scene, log) = analysis::analyze(&a, &manifest.name);
+    let mut pipeline = recipe::Pipeline::new(&a.profile);
+    let (scene, log) = analysis::analyze(&a, &manifest.name, &mut pipeline);
     let artifact = match a.target {
         ir::Target::Vita => vita::cook(&scene, &a.profile),
         ir::Target::Pica => pica::cook(&scene, &a.profile),
@@ -204,16 +215,37 @@ fn main() {
         ir::Target::Ipod => gles::cook(&scene, &a.profile, &a.output, a.ipod_pvrtctool.as_deref()),
     }
     .unwrap_or_else(|e| fail(e));
-    a.profile
-        .check_artifact(&artifact)
-        .unwrap_or_else(|e| fail(e));
+    pipeline.record(&format!("{}-lowering",a.target.name()), serde_json::json!({"bytes":artifact.bytes.len(),"sections":artifact.sections,"textures":artifact.textures}));
     let diagnostics:Vec<_> = scene.textures.iter().enumerate().filter(|(_,t)|matches!(t.pixels,source::Pixels::Image{..}) && t.usage.is_none()).map(|(id,t)|serde_json::json!({
         "code":"ATLAS_LEGACY_TEXTURE_USAGE","severity":"warning","resource":id,"name":t.name,
+        "pass":"texture-sampling@1","sources":provenance::texture_sources(&scene,id),
         "message":"Texture purpose inferred by the versioned compatibility recipe; annotate material textureUsage for explicit sizing."
     })).collect();
     let mut report = artifact.report(&manifest, &a.profile, a.cell, &diagnostics);
     report["sourceTextures"]=scene.textures.iter().enumerate().map(|(id,t)|serde_json::json!({"id":id,"name":t.name,"width":t.width,"height":t.height,"role":t.role,"usage":t.usage})).collect();
+    report["provenance"]=scene.provenance.clone();
+    report["recipe"]=recipe::Pipeline::describe(&a.profile);
+    if a.input.join("export.json").exists() {
+        report["export"]=serde_json::from_slice(&std::fs::read(a.input.join("export.json")).unwrap()).unwrap();
+    }
+    let budget=a.profile.check_artifact(&artifact);
+    pipeline.record("structural-budgets",serde_json::json!({"status":if budget.is_ok(){"passed"}else{"failed"},"limits":a.profile.budgets}));
+    report["passes"]=serde_json::to_value(&pipeline.completed).unwrap();
+    if let Err(message)=budget {
+        if cli.iter().any(|s|s=="--json") {
+            report["validation"]["structuralBudgets"]="failed".into();
+            report["validation"]["published"]=false.into();
+            report["diagnostics"].as_array_mut().unwrap().push(serde_json::json!({"code":"ATLAS_STRUCTURAL_BUDGET","severity":"error","pass":"structural-budgets@1","message":message}));
+            eprintln!("{}",report);
+            std::process::exit(2);
+        }
+        fail(message);
+    }
     // All backend and profile checks precede publication. A rejected cook leaves an old pack intact.
+    let still_sealed = ir::open(&a.input).unwrap_or_else(|e| fail(format!("source changed during compilation: {e}")));
+    if serde_json::to_vec(&still_sealed).unwrap() != serde_json::to_vec(&manifest).unwrap() {
+        fail("source manifest changed during compilation; refusing to publish mixed inputs");
+    }
     artifact
         .publish_sidecars(&a.output)
         .unwrap_or_else(|e| fail(e));

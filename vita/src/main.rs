@@ -18,6 +18,7 @@ mod paths;
 mod profile;
 mod provision;
 mod scene;
+mod pack_io;
 mod settings;
 mod shaders;
 mod sun_bounds;
@@ -819,6 +820,8 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                     "stage": "running",
                     "place": id,
                     "pack": pack_path,
+                    "packSha256": scene.pack_sha256,
+                    "shaderSourceSha256": gpu.service.source_sha256.lock().ok().map(|s| s.clone()),
                     "fps": fps, "frameMs": frame_ms, "cpuSubmitMs": st.cpu_submit_us as f32 / 1000.0, "waitMs": wait_ms, "swapMs": swap_ms,
                     "time": time,
                     "reflection": pass(&st.reflection), "main": pass(&st.main), "fxQuads": st.fx_quads,
@@ -835,6 +838,7 @@ unsafe fn run_place(app: &mut App, place: PlaceRef, first: Option<Value>) -> Nex
                     "view": {"pos": view.pos.to_array(), "target": view.target.to_array(), "fov": view.fov_y, "mode": if rig.mode == Mode::Cinematic { "cinematic" } else { "free" }, "shot": rig.shot_name()},
                     "settings": {"msaa": s.msaa == Msaa::X4, "reflection": s.reflection, "haze": s.haze, "bloom": s.bloom, "rain": s.rain, "cullCw": s.cull_cw, "exposure": s.exposure, "maxLights": s.max_lights, "flat": s.flat, "scale": s.scale, "level": renderer.level(), "profile": renderer.profile.name, "step": renderer.governor.step, "boost": renderer.governor.boost, "gpuMs": renderer.governor.gpu_ms, "steps": renderer.profile.steps.len(), "hold": renderer.governor.hold, "budgetMs": renderer.profile.budget_ms, "fx": s.fx, "amortize": s.amortize, "reflSize": s.reflection_size, "hazeSize": renderer.step().haze_size, "hazeLights": renderer.step().haze_lights, "bloomFull": renderer.step().bloom_full, "streaks": s.streaks, "steam": s.steam, "detailMaps": s.detail_maps, "vertexLights": s.vertex_lights, "detailM": renderer.step().detail_m, "lodPixels": renderer.step().lod_pixels},
                     "uptime": started.elapsed().as_secs(),
+                    "profiling": renderer.timeline.on,
                     "passes": renderer.timeline.passes.iter().map(|(n, ms)| json!([n, ms])).collect::<Vec<_>>(),
                     "cpuPasses": renderer.timeline.cpu.iter().map(|(n, rec, end)| json!([n, rec, end])).collect::<Vec<_>>(),
                     "heavy": heavy,

@@ -296,7 +296,8 @@ impl<'a> Cook<'a> {
             damp,
             drops: x.get("glass").map(|g| f(g, "drops", 0.0)).unwrap_or(0.0),
             clearcoat,
-            polygon_offset: x.get("polygonOffset").filter(|p| p.is_array()).map(|p| extras::arr(p, [0.0; 2])),
+            polygon_offset: x.get("polygonOffset").filter(|p| p.is_array()).map(|p| extras::arr(p, [0.0; 2]))
+                .or_else(|| (self.profile.target == ir::Target::Psp && x["window"].is_string()).then_some([-1.0, -4.0])),
             emissive_track: None,
             uv_anim,
             water,
@@ -550,7 +551,7 @@ fn push_draw(verts: &[Vertex], tris: &[[u32; 3]], lods: Vec<(Vec<[u32; 3]>, f32)
     });
 }
 
-pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
+pub fn analyze(a: &Args, name: &str, pipeline: &mut crate::recipe::Pipeline) -> (pc::Scene, Vec<String>) {
     let t0 = Instant::now();
     let glb = a.input.join("scene.gltf");
     // EXT_mesh_gpu_instancing is listed as required; the crate does not know
@@ -562,6 +563,8 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
     crate::progress!("loaded {} ({} nodes, {} images) in {} ms", glb.display(), doc.nodes().count(), images.len(), t0.elapsed().as_millis());
     let scene = doc.default_scene().or_else(|| doc.scenes().next()).expect("scene");
     let sx = pc_of(scene.extras());
+
+    pipeline.record("read-source", json!({"nodes":doc.nodes().count(),"images":images.len()}));
 
     // ---- which nodes move
     let mut animated: HashSet<usize> = HashSet::new();
@@ -703,6 +706,8 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
     }
     crate::progress!("walked scene: {} primitives, {} materials, {} textures ({} ms)", prims.len(), cook.materials.len(), cook.textures.len(), t0.elapsed().as_millis());
 
+    pipeline.record("resolve-materials", json!({"primitives":prims.len(),"materials":cook.materials.len(),"textures":cook.textures.len()}));
+
     // ---- `lodBias` (materials that ask for it): a number, or "auto" — a
     // texture whose mapping lays more texels per metre one way than the
     // other (mean over the area it covers) gets a negative bias, so the
@@ -734,7 +739,7 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
                 continue;
             }
             let tex = &cook.textures[t as usize];
-            let (w, h) = if cook.profile.target == ir::Target::Vita {
+            let (w, h) = if pipeline.solid_pbr() {
                 let cap = cook.profile.vita_texture_cap(tex);
                 textures::pow2_fit(tex.width, tex.height, cap)
             } else { (tex.width, tex.height) };
@@ -762,16 +767,21 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
         cook.log.push(format!("texture {}: LOD bias {:.2}", tex.name, tex.lod_bias));
     }
 
+    pipeline.record("texture-sampling", json!({"targetResolutionAnisotropy":pipeline.solid_pbr()}));
+
     // Solid PBR palettes are a Vita vertex encoding, not shared source
     // analysis: PICA/GE need the authored UVs, tint and material reflectance.
     // Keep named animated materials on their own path.
-    if a.target == ir::Target::Vita {
+    let palette_before = prims.len();
+    if pipeline.solid_pbr() {
         let material_animation: HashSet<String> = sx["tracks"]["materials"].as_array().into_iter().flatten()
             .filter_map(|t| t["material"].as_str().map(str::to_owned)).collect();
         let before = prims.len();
         palette::batch(&mut prims, &mut cook.materials, &parent, &animated, &world_of, &material_animation);
         crate::progress!("solid PBR palette: {before} → {} primitives", prims.len());
     }
+
+    pipeline.record("solid-pbr-palette", json!({"enabled":pipeline.solid_pbr(),"inputPrimitives":palette_before,"outputPrimitives":prims.len(),"reason":if pipeline.solid_pbr(){"GXM vertex PBR encoding"}else{"retain authored UVs and reflectance for fixed-function GPU"}}));
 
     // ---- node table for moving content (ancestors included for hierarchy)
     let mut node_ids: BTreeMap<usize, u32> = BTreeMap::new();
@@ -901,6 +911,8 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
         skins.push(pc::Skin { joints, inverse_bind: ibm.chunks_exact(16).map(|v| v.try_into().unwrap()).collect() });
         skin_ids.insert(s.index(), (skins.len() - 1) as u32);
     }
+
+    pipeline.record("sample-motion", json!({"fps":fps,"frames":frames,"nodes":nodes.len(),"skins":skins.len()}));
 
     // ---- skyline boxes become static geometry
     if let Some(boxes) = sx.get("skyline").and_then(|s| s.get("boxes")).and_then(|b| b.as_array()) {
@@ -1057,6 +1069,28 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
         None
     };
 
+    pipeline.record("scene-lighting", json!({"lights":out_lights.len(),"environment":environment}));
+
+    let sun = sx["directionalLights"].as_array().and_then(|a| a.first()).map(|d| {
+        let c = v3(&d["color"]);
+        let i = f(d, "intensity", 1.0);
+        let sh = &d["shadow"];
+        pc::Sun {
+            direction: v3(&d["direction"]),
+            radiance: [c[0] * i, c[1] * i, c[2] * i],
+            shadow: (d["castShadow"].as_bool() == Some(true) && sh.is_object()).then(|| {
+                let o: Vec<f32> = sh["ortho"].as_array().map(|a| a.iter().map(|x| x.as_f64().unwrap_or(0.0) as f32).collect()).unwrap_or_default();
+                pc::SunShadow {
+                    position: v3(&sh["position"]),
+                    ortho: [o[0], o[1], o[2], o[3], o[4], o[5]],
+                    map_size: sh["mapSize"].as_u64().unwrap_or(2048) as u32,
+                    bias: f(sh, "bias", 0.0),
+                    normal_bias: f(sh, "normalBias", 0.0),
+                    radius: f(sh, "radius", 1.0),
+                }
+            }),
+        }
+    });
     // ---- static lighting baked into lit static surfaces
     let t_bake = Instant::now();
     let hemi = &sx["hemisphere"];
@@ -1070,7 +1104,9 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
     // Sky occlusion (`extras.bake.skyOcclusion`): every static surface that is
     // not glass or blended blocks the sky; cut-out foliage blocks part of it.
     let so = &sx["bake"]["skyOcclusion"];
-    let occluder = so.is_object().then(|| {
+    let baked_sun = a.target == ir::Target::Psp
+        && sx["kind"].as_str().is_some_and(|k| k.starts_with("daytime-")) && sun.is_some();
+    let occluder = (so.is_object() || (baked_sun && sun.as_ref().is_some_and(|s| s.shadow.is_some()))).then(|| {
         let t_occ = Instant::now();
         let mut tris = Vec::new();
         for p in prims.iter() {
@@ -1091,7 +1127,7 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
     });
     // Occlusion varies everywhere a surface meets another; split for it
     // only down to a coarser edge than for lamp pools.
-    let tolerance = if occluder.is_some() {
+    let mut tolerance = if so.is_object() {
         // Where the camera goes: the walkable boxes and every shot's ends.
         let cam = &sx["camera"];
         let mut lo = Vec3::splat(f32::MAX);
@@ -1121,6 +1157,7 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
     } else {
         bake::LIGHTS
     };
+    if baked_sun { tolerance = crate::psp::daylight_tolerance(tolerance.focus); }
     let (mut baked_prims, mut tris_before, mut tris_after) = (0usize, 0usize, 0usize);
     for p in prims.iter_mut() {
         let m = &cook.materials[p.material as usize];
@@ -1135,8 +1172,12 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
             std::mem::take(&mut p.verts),
             std::mem::take(&mut p.tris),
             &|pos, n| {
-                let sky = occluder.as_ref().map_or(1.0, |o| o.visibility(pos, n));
-                baker.irradiance(pos, n, env_k, direct, sky)
+                let sky = if so.is_object() { occluder.as_ref().map_or(1.0, |o| o.visibility(pos, n)) } else { 1.0 };
+                let mut light = baker.irradiance(pos, n, env_k, direct, sky);
+                if baked_sun && !m.interior {
+                    light += crate::psp::static_sun_light(sun.as_ref(), occluder.as_ref(), pos, n);
+                }
+                light
             },
             tolerance,
         );
@@ -1152,6 +1193,8 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
     }
     crate::progress!("baked {baked_prims} primitives: {tris_before} → {tris_after} triangles ({} ms)", t_bake.elapsed().as_millis());
     cook.log.push(format!("bake {baked_prims} primitives, {tris_before} → {tris_after} triangles"));
+
+    pipeline.record("bake-lighting", json!({"primitives":baked_prims,"inputTriangles":tris_before,"outputTriangles":tris_after,"skyOcclusion":so,"directionalSun":baked_sun}));
 
     // ---- static chunking and draw building
     let mut draws: Vec<pc::Draw> = Vec::new();
@@ -1224,7 +1267,10 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
                 base_error = error;
             }
         }
-        let bounds: Vec<f32> = bounds.iter().map(|e| e / metric_scale).collect();
+        // Preserve the GE daylight solid-surface budget without coarsening pane outlines.
+        let ge_static = baked_sun && node.is_none() && skin.is_none()
+            && m.kind == pc::Kind::Standard && m.alpha_test == 0.0 && m.polygon_offset.is_none();
+        let bounds: Vec<f32> = bounds.iter().map(|e| e * if ge_static { 2.0 } else { 1.0 } / metric_scale).collect();
         for (v, t) in geometry::split(&verts, &tris) {
             let mut locked: Vec<bool> = v.iter().map(|v| locks.is_some_and(|l| l.contains(&geometry::pos_bits(v.pos)))).collect();
             if m.vertex_pbr {
@@ -1235,7 +1281,7 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
             } else {
                 geometry::lods(&v, &t, layout, &locked, drop_parts, &bounds, uv_weight)
             }.into_iter().map(|(t, e)| (t, (e + base_error) * metric_scale)).collect();
-            push_draw(&v, &t, levels, material, layout, node, skin, no_reflect, a.target != ir::Target::Vita, draws);
+            push_draw(&v, &t, levels, material, layout, node, skin, no_reflect, pipeline.native_cache_order(), draws);
         }
     };
     // Shelf stock: groups of items near each other, full stand-ins plus the
@@ -1268,7 +1314,7 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
                 let cards = geometry::cache_order(&cards, verts.len());
                 // Cards replace items beyond a few metres (a small nominal
                 // error puts the switch at ~4 m at 640×362).
-                push_draw(&verts, &tris, vec![(cards, 0.012)], *material, pc::VertexClass::Static, None, None, true, a.target != ir::Target::Vita, draws);
+                push_draw(&verts, &tris, vec![(cards, 0.012)], *material, pc::VertexClass::Static, None, None, true, pipeline.native_cache_order(), draws);
                 start = end;
             }
         }
@@ -1328,6 +1374,8 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
         }
     }
     let field_draws = draws.len() - field_draws;
+
+    pipeline.record("chunk-and-lod", json!({"cellMeters":a.cell,"draws":draws.len(),"lods":draws.iter().map(|d|d.lods().len()).sum::<usize>(),"nativeCacheOrder":pipeline.native_cache_order()}));
 
     // ---- fog lights and scalar tracks
     let tracks = sx.get("tracks").cloned().unwrap_or(Value::Null);
@@ -1493,26 +1541,6 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
         "fogLights": fog_lights.len(),
     });
     // ---- sun, daytime sky, post
-    let sun = sx["directionalLights"].as_array().and_then(|a| a.first()).map(|d| {
-        let c = v3(&d["color"]);
-        let i = f(d, "intensity", 1.0);
-        let sh = &d["shadow"];
-        pc::Sun {
-            direction: v3(&d["direction"]),
-            radiance: [c[0] * i, c[1] * i, c[2] * i],
-            shadow: (d["castShadow"].as_bool() == Some(true) && sh.is_object()).then(|| {
-                let o: Vec<f32> = sh["ortho"].as_array().map(|a| a.iter().map(|x| x.as_f64().unwrap_or(0.0) as f32).collect()).unwrap_or_default();
-                pc::SunShadow {
-                    position: v3(&sh["position"]),
-                    ortho: [o[0], o[1], o[2], o[3], o[4], o[5]],
-                    map_size: sh["mapSize"].as_u64().unwrap_or(2048) as u32,
-                    bias: f(sh, "bias", 0.0),
-                    normal_bias: f(sh, "normalBias", 0.0),
-                    radius: f(sh, "radius", 1.0),
-                }
-            }),
-        }
-    });
     let sky_day = &sx["sky"];
     let day_sky = (sky_day["model"] == "gradient-sun-cloudpanorama").then(|| {
         let cl = &sky_day["clouds"];
@@ -1588,7 +1616,10 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
         pc::Post::default()
     };
     let place = name.to_string();
+    pipeline.record("scene-effects", json!({"effects":effects,"daySky":day_sky.is_some(),"materialTracks":material_tracks.len()}));
+    let provenance = crate::provenance::collect(&doc, &cook.mat_keys);
     let scene = pc::Scene {
+        provenance,
         name: place,
         kind: sx["kind"].as_str().unwrap_or("night-street").to_string(),
         min: scene_min.to_array(),
@@ -1611,6 +1642,7 @@ pub fn analyze(a: &Args, name: &str) -> (pc::Scene, Vec<String>) {
         beacons,
         effects,
         sun,
+        baked_sun,
         day_sky,
         post,
         vista_haze: extras::vista_haze(&sx["haze"]),

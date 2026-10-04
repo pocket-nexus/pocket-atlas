@@ -349,6 +349,8 @@ mod tests {
             cast_shadow: d.cast_shadow,
         };
         Scene {
+            provenance: Default::default(),
+            baked_sun: false,
             name: meta.name,
             kind: meta.kind,
             min: meta.min,

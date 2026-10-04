@@ -76,7 +76,9 @@ unsafe fn run() {
     let mut scene = scene::Scene::new(bytes, h);
     let mut rig = camera::Rig::new(scene.shots[0]);
     let mut gpu = renderer::Renderer::new(&scene);
-    audio::start();
+    if h.rain != 0 || h.doors.iter().any(|&node| node != pp::NONE) {
+        audio::start();
+    }
     sceCtrlSetSamplingCycle(0);
     sceCtrlSetSamplingMode(CtrlMode::Analog);
     let mut previous = CtrlButtons::empty();
@@ -85,12 +87,14 @@ unsafe fn run() {
     let mut clock = 0.0f32;
     let mut frozen = -1.0f32;
     let mut paused = false;
-    let mut rain = true;
-    let mut reflection = true;
+    let has_rain = h.rain != 0;
+    let has_reflection = scene.materials.iter().any(|m| m.flags & pp::WET != 0);
+    let mut rain = has_rain;
+    let mut reflection = has_reflection;
     let mut hud = false;
     let mut muted = false;
     let mut was_open = false;
-    let mut dev = dev::Session::connect();
+    let mut dev = dev::Session::connect(bytes);
     let mut frame = 0u32;
     let mut work_sum = 0u64;
     let mut gpu_sum = 0u64;
@@ -128,18 +132,18 @@ unsafe fn run() {
             );
             frozen = -1.0;
         }
-        if pressed.contains(CtrlButtons::SQUARE) {
+        if has_rain && pressed.contains(CtrlButtons::SQUARE) {
             rain = !rain;
         }
-        if pressed.contains(CtrlButtons::TRIANGLE) {
+        if has_reflection && pressed.contains(CtrlButtons::TRIANGLE) {
             reflection = !reflection;
         }
         if frame % 30 == 0 {
             if let Some(command) = dev.poll() {
                 frozen = command.time;
                 paused = command.pause;
-                rain = command.rain;
-                reflection = command.reflection;
+                rain = has_rain && command.rain;
+                reflection = has_reflection && command.reflection;
                 if command.shot >= 0 && (command.shot as usize) < scene.shots.len() {
                     rig.cut(command.shot as usize, scene.shots);
                     rig.shot_time = scene.shots[rig.shot].duration * 0.5;

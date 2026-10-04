@@ -1,13 +1,30 @@
 # Nintendo 3DS renderer
 
-Pocket Atlas opens on an interactive globe and runs all four shared places on
+Pocket Atlas opens on an interactive globe and supports five shared places on
 an Old 3DS: Rainy Night Konbini, Suga Shrine Stairs, Radio Kaikan at Blue Hour,
-and Kamakura-Kōkōmae Crossing. The registry, globe maps, postcard previews,
+Kamakura-Kōkōmae Crossing and daytime San Francisco Lombard Street.
+The registry, globe maps, postcard previews,
 font, material annotations, camera shots, geometry and motion come from the
 same web exports and lossless PlaceIR as the Vita. PICA cooks independently
 from source geometry and textures; it does not read a Vita device pack. Rendering contains no
 scene-name branches. PocketJS owns the unchanged paired debug transport and
 native installer; Atlas owns the application and its content-addressed packs.
+
+The native catalog uses explicit per-place `targets` eligibility in the web
+registry; PlaceIR validates the authored feature set before device lowering.
+Griffith Observatory's existing `dusk-vista` renderer requires light fields
+and distance/height-dependent vista haze that PICA does not yet implement.
+Its marker, details and preview remain visible, with **Unavailable on 3DS**;
+pressing A explains that it is unavailable instead of trying to load it.
+The browser reports `availability: unsupported` for that selection. Planned
+places retain their separate Coming soon state. The open-place count counts
+only supported live places.
+
+Cook, build, package, install and sync use the same supported subset. Their
+manifests/receipts list unsupported live entries separately. `cook --place`
+rejects an unsupported place explicitly, and the cooker rejects light-field and
+vista-haze features before treating any payload as triangle geometry; it does
+not omit those effects and publish an incomplete place.
 
 Default output is monoscopic 400 × 240 with a 30 fps target. The optional 4×
 antialias setting renders 800 × 480 and downsamples on display. Settings also
@@ -26,6 +43,7 @@ bun scripts/export-place.ts --place tokyo-konbini --seconds 20
 bun scripts/export-place.ts --place suga-shrine-stairs --seconds 1
 bun scripts/export-place.ts --place akihabara-radio-kaikan --seconds 20
 bun scripts/export-place.ts --place kamakura-koko-mae-crossing --seconds 120
+bun scripts/export-place.ts --place sf-lombard-street --seconds 120
 bun scripts/preview-place.ts
 bun scripts/export-atlas.ts
 cd ..
@@ -39,7 +57,7 @@ bun tools/atlas-3ds.ts install --host 192.168.8.159
 `cook --place ID` rebuilds one native pack. `build` produces
 `dist/3ds/pocket-atlas.3dsx`, with the small globe/browser pack in ROMFS and a
 compiled catalog of exact scene hashes. Scene packs live in
-`sdmc:/pocket-atlas/<sha256>.place`; four scenes exceed the native installer's
+`sdmc:/pocket-atlas/<sha256>.place`; the scenes exceed the native installer's
 32 MiB limit, so they are delivered separately.
 
 `install` replaces and restarts the application over the paired PocketJS
@@ -71,7 +89,7 @@ The upper screen shows a real rotating globe, location markers and a postcard.
 The lower screen contains the touchable place lists and details:
 
 - Circle pad rotates the globe. D-pad up/down selects a place; left/right zooms.
-- L/R changes Featured, Explore, Saved and Search. Explore sorts all 18 places
+- L/R changes Featured, Explore, Saved and Search. Explore sorts all 19 places
   by distance from the globe's facing point.
 - A enters an available place. Planned places remain browseable but cannot be entered.
 - X opens the system keyboard. Every search word must match a name, locality,

@@ -63,7 +63,7 @@ export class DayStage extends PlaceStage<DayWorld, DayAudio> {
     await progress(0.04, "Preparing daylight materials");
     this.baker = new Baker(renderer);
     const lib = new DayLib(this.baker, quality); lib.bakeAll();
-    this.world = new DayWorld(lib, new Atlas(1024, { pad: 2 }), quality, 20160826, this.ctx.params.geometry);
+    this.world = new DayWorld(lib, new Atlas(1024, { pad: 2 }), quality, this.ctx.authoring?.seed ?? 20160826, this.ctx.params.geometry);
     await progress(0.16, "Growing clouds");
     this.clouds = bakeClouds(this.baker, s.sunDirection);
     await s.build(this.world, progress);
@@ -111,7 +111,5 @@ export class DayStage extends PlaceStage<DayWorld, DayAudio> {
     for (const u of this.world.updaters) u(dt, time);
     this.sky.update(time, this.camera.position);
     this.audio.update(dt, this.camera, time);
-    if (this.world.shadowsDirty) this.ctx.renderer.shadowMap.needsUpdate = true;
-    this.world.shadowsDirty = false;
   }
 }

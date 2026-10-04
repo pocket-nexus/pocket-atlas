@@ -3,11 +3,13 @@ import type { AudioEngine } from "./audio";
 import type { Params } from "./params";
 import type { Quality } from "./quality";
 import type { Overlay } from "../ui/overlay";
+import type { EffectiveAuthoring, PlaceDefinition } from "../places/shared/authoring";
 
 /** Reports build progress in [0, 1]; resolves after the UI had a chance to paint. */
 export type Progress = (fraction: number, label?: string) => Promise<void>;
 
 export interface StageContext {
+  authoring?: EffectiveAuthoring;
   renderer: WebGLRenderer;
   canvas: HTMLCanvasElement;
   quality: Quality;
@@ -36,6 +38,7 @@ export interface Stage {
 }
 
 export interface PlaceModule {
+  definition?: PlaceDefinition;
   createStage(ctx: StageContext, place: PlaceDef, progress: Progress): Promise<Stage>;
 }
 
