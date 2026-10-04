@@ -57,6 +57,9 @@ export function commuter(w: DayWorld, spec: CommuterSpec) {
     { id: "reference", errorMeters: 0, object: full.root },
     { id: "surface", errorMeters: 0.075, object: compact.root },
   ]);
+  // The place moves this formation root; alternatives themselves need no
+  // motion marker when used for static authored objects.
+  root.userData.dynamic = true;
   return { root, wheels: [...full.wheels, ...compact.wheels] };
 }
 

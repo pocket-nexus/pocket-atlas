@@ -5,6 +5,7 @@ import { FORMATION } from "../src/places/sangubashi-crossing/rail";
 import { commuter } from "../src/places/shared/daylight/commuter";
 import type { DayWorld } from "../src/places/shared/daylight/context";
 import { Parts } from "../src/places/shared/shapes";
+import { record } from "../src/places/shared/export";
 
 function rollingStock(profile: GeometryProfile, compilerSource = false) {
   const materials = new Map<string, MeshStandardMaterial>();
@@ -69,6 +70,12 @@ describe("handheld authoring geometry", () => {
       expect(b.name).toBe(a.name); expect(b.position.toArray()).toEqual(a.position.toArray());
       expect(b.parent!.rotation.y).toBe(a.parent!.rotation.y);
     }
+    const motion = record({ root: source.root, fogLights: [], updaters: [(_dt, t) => {
+      source.root.position.x = t * 2;
+      for (const wheel of source.wheels) wheel.rotation.z = t;
+    }] }, 1, 4, 0);
+    expect(motion.tracks.find(t => t.node === source.root)?.pos).toEqual([0, 0, 0, 0.5, 0, 0, 1, 0, 0, 1.5, 0, 0]);
+    expect(motion.tracks.filter(t => source.wheels.includes(t.node as typeof source.wheels[number]))).toHaveLength(64);
     source.root.traverse(o => { if (o instanceof Mesh) o.geometry.dispose(); });
   });
   test("the full train stays unchanged; handheld retains every piece and all 32 wheelsets", () => {

@@ -181,9 +181,12 @@ compiler-certified mesh distance. The first alternative is the zero-error Web
 reference; the compiler selects the largest admissible error, falling back when
 a descendant's stricter intent forbids it. Review alternate silhouettes, labels,
 parts and articulation against the reference. Alternatives v1 accept static and
-rigid hierarchies; skin/joint subtrees are rejected. Put shared protected details
-outside a lossy alternative group, or provide them unchanged in each reviewed
-representation. Atlas's shared commuter builder exports both full and surface
+rigid hierarchies; skin/joint subtrees are rejected. Keep shared explicitly
+protected details outside a lossy alternative group: a protected descendant
+forces the zero-error reference even when duplicated. Static alternatives retain
+their visibility/UV boundaries without a motion marker. If an updater moves the
+group itself, mark that animated root with `userData.dynamic = true`, as for any
+other moving object. Atlas's shared commuter builder exports both full and surface
 representations with identical formation, label geometry and wheel articulation;
 PICA selects the surface recipe and preserves the complete 64-second motion.
 

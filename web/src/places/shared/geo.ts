@@ -135,6 +135,13 @@ function normalizeForMerge(g: BufferGeometry, color: 0 | 3 | 4): BufferGeometry 
 export function batchStatic(root: Object3D, options: { preserveObjects?: boolean } = {}): { before: number; after: number } {
   identifySources(root);
   root.updateMatrixWorld(true);
+  const retainWorldUV = (m: Mesh) => {
+    const world = m.geometry.clone().applyMatrix4(m.matrixWorld);
+    worldUV(world);
+    m.geometry = m.geometry.clone();
+    m.geometry.setAttribute("uv", world.getAttribute("uv").clone());
+    world.dispose();
+  };
   if (options.preserveObjects) {
     let count = 0;
     root.traverse(o => {
@@ -147,11 +154,7 @@ export function batchStatic(root: Object3D, options: { preserveObjects?: boolean
       let dynamic = false;
       for (let p: Object3D | null = m; p; p = p.parent) dynamic ||= !!p.userData.dynamic;
       if (!dynamic && !(m as unknown as { isInstancedMesh?: boolean }).isInstancedMesh && !Array.isArray(mat) && mat.userData.worldUV) {
-        const world = m.geometry.clone().applyMatrix4(m.matrixWorld);
-        worldUV(world);
-        m.geometry = m.geometry.clone();
-        m.geometry.setAttribute("uv", world.getAttribute("uv").clone());
-        world.dispose();
+        retainWorldUV(m);
       }
     });
     return { before: count, after: count };
@@ -168,6 +171,14 @@ export function batchStatic(root: Object3D, options: { preserveObjects?: boolean
     let skip = false;
     for (let p: Object3D | null = m.parent; p; p = p.parent) if (p.userData.dynamic) skip = true;
     if (skip) return;
+    let alternative = false;
+    for (let p: Object3D | null = m.parent; p; p = p.parent) alternative ||= !!p.userData.pocketAtlas?.lodGroup;
+    if (alternative) {
+      // Keep representation visibility/ownership without declaring static
+      // objects animated or moving their hidden geometry into a visible batch.
+      if (m.material.userData.worldUV) retainWorldUV(m);
+      return;
+    }
     before++;
     const mat = m.material as Material & { vertexColors?: boolean };
     const vc = !!mat.vertexColors;

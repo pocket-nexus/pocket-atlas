@@ -26,13 +26,31 @@ test("Web displays only the reference, export keeps both representations and str
     { id: "reference", errorMeters: 0, object: reference }, { id: "surface", errorMeters: 0.004, object: compact },
   ]);
   expect(reference.visible).toBe(true); expect(compact.visible).toBe(false);
-  expect(root.userData.dynamic).toBe(true);
+  expect(root.userData.dynamic).toBeUndefined();
   expect(root.children).toHaveLength(2);
   expect(() => validateExportObject(root)).not.toThrow();
   expect(() => geometryIntent(root, { role: "protected", maxErrorMeters: 0.1 })).toThrow();
   expect(() => geometryAlternatives("bad", { role: "detail", maxErrorMeters: 0.1 }, [
     { id: "reference", errorMeters: 0.1, object: new Group() }, { id: "surface", errorMeters: 0.2, object: new Group() },
   ])).toThrow();
+});
+
+test("static alternatives retain visibility and world UVs without acquiring motion intent", () => {
+  const build = () => {
+    const material = new MeshStandardMaterial(); material.userData.worldUV = true;
+    const reference = new Mesh(new BoxGeometry(), material), compact = new Mesh(new BoxGeometry(), material);
+    reference.position.x = compact.position.x = 4;
+    const root = geometryAlternatives("wall", { role: "structure", maxErrorMeters: 0.01 }, [
+      { id: "reference", errorMeters: 0, object: reference }, { id: "surface", errorMeters: 0.004, object: compact },
+    ]);
+    return { root, reference, compact };
+  };
+  const web = build(), exported = build();
+  batchStatic(web.root); batchStatic(exported.root, { preserveObjects: true });
+  expect(web.root.children).toEqual([web.reference, web.compact]);
+  expect(web.reference.visible).toBe(true); expect(web.compact.visible).toBe(false);
+  expect(web.root.userData.dynamic).toBeUndefined();
+  expect(Array.from(web.reference.geometry.getAttribute("uv").array)).toEqual(Array.from(exported.reference.geometry.getAttribute("uv").array));
 });
 
 test("unbatched export preserves the Web world-UV mapping and leaves moving/instanced UVs alone", () => {

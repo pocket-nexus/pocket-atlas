@@ -89,6 +89,11 @@ export async function run(args: string[]) {
 }
 function resolveIfReport(key: string, value: string) { return ["report", "telemetry"].includes(key) || (key === "cache" && value !== "off") ? resolve(value) : value; }
 if (import.meta.main) {
-  try { console.log(JSON.stringify(await run(Bun.argv.slice(2)), null, 2)); }
-  catch (error) { console.error(String(error)); process.exitCode = 1; }
+  try {
+    await Bun.write(Bun.stdout, JSON.stringify(await run(Bun.argv.slice(2)), null, 2) + "\n");
+    process.exit(0);
+  } catch (error) {
+    await Bun.write(Bun.stderr, String(error) + "\n");
+    process.exit(1);
+  }
 }

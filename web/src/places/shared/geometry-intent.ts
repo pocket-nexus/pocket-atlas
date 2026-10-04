@@ -31,7 +31,6 @@ export function geometryAlternatives(id: string, intent: GeometryIntent,
   let last = -1;
   const root = geometryIntent(new Group(), intent);
   root.name = id;
-  root.userData.dynamic = true; // preserve alternative boundaries in the Web draw optimiser
   root.userData.pocketAtlas.lodGroup = { version: 1 };
   for (const level of levels) {
     if (!/^[a-z0-9][a-z0-9-]*$/.test(level.id) || ids.has(level.id) || !Number.isFinite(level.errorMeters) ||
