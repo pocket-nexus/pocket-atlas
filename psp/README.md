@@ -1,4 +1,11 @@
-# PSP place viewer
+# Pocket Atlas on the PSP
+
+The app opens on the atlas and visits the places whose pack is beside it.
+[The interface](../README.md#the-interface) (`ui/`, shared with the other
+handhelds) draws the lists, cards, search, menus and hints: `interface.rs`
+runs it as a guest on PocketJS's PSP host library and lays its picture over
+the GE frame. The renderer draws the globe (`globe.rs`: a lit sphere with the
+city lights added, a halo and a sprite per place, all GE) and the places.
 
 The PSP cooker accepts `night-street`, `daytime-slope` and `daytime-street`.
 Place selection stays in the shared pipeline; the renderer has no place-ID
@@ -6,12 +13,15 @@ branches. Export the shared web scene; the wrapper imports PlaceIR and lowers
 it directly for PSP, without a Vita device pack as input:
 
 ```sh
-bun tools/atlas-psp.ts cook --place sf-lombard-street
-bun tools/atlas-psp.ts build --place sf-lombard-street
-bun tools/atlas-psp.ts package --place sf-lombard-street
+bun tools/atlas-psp.ts cook --place sf-lombard-street   # each place the PSP should carry
+bun tools/atlas-psp.ts build
+bun tools/atlas-psp.ts package
 ```
 
-The standalone package contains `EBOOT.PBP` and `scene.place`. The latter is
+`build` compiles the interface (`tools/atlas-ui.ts psp`) and writes the
+executable, `atlas.js`, `atlas.pak`, `globe.psp` and every cooked
+`<id>.place` to the USB share; `package` copies the same files to
+`dist/PSP/GAME/PocketAtlas`. A pack is
 **PLPS version 3**, separate from the Vita and PICA formats. Older packs
 must be re-cooked with this checkout. The 144-byte header and camera-table
 offset are retained. Each texture record now declares RGBA4444 or RGBA8888;
@@ -64,11 +74,24 @@ Vehicle glazing uses shared open-frame geometry; no closed painted cabin face
 sits behind a pane. This removes depth competition at the source for every
 backend rather than depending on a PSP-only depth bias.
 
+## Memory
+
+The 18 MiB pack buffer is reserved first, then the interface: QuickJS, the
+UI core, its fonts and the place cards (kept as 16-bit texels) take about
+5 MiB. `PARAM.SFO` asks for the large memory of a PSP-2000 or later
+(`MEMSIZE`), where both fit with room to spare. On a PSP-1000 the buffer is
+what is left, and a place whose pack does not fit it is listed as not on the
+device rather than failing to load.
+
+The guest is given a turn only when a button is down or was a moment ago,
+when the renderer's state changed or when its last turn drew something new;
+otherwise about once a second (`Rest` in `crates/pocket-atlas-interface`).
+
 ## Validation
 
 ```sh
-cargo test --locked -p pocket3d-place-cook -p pocket3d-place-psp
-bun test tools/psp-session.test.ts
+cargo test --locked -p pocket3d-place-cook -p pocket3d-place-psp -p pocket-atlas-interface
+bun test tools/psp-session.test.ts ui/test
 ```
 
 The host tests lower synthetic day/night shared analysis, verify sky and effect

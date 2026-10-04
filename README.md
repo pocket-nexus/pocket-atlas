@@ -2,14 +2,16 @@
 
 A world map of places people remember. A place is a small, self-contained 3D scene of one real spot — a street corner, a stairway, a café — pinned to its location on a shared globe. People will publish their own places (publicly or privately) and download other people's places to visit them.
 
-This repository holds the first-party places, the pipeline that turns a place into a pack for a handheld GPU, and native PS Vita, Nintendo 3DS, PSP and iPod touch 4 renderers. Publishing and downloading are not built yet. Vita and 3DS target 30 fps; PSP supports night streets and daytime slopes/streets through its fixed-function GE pipeline; the iPod touch draws five places from the 3DS's kind of pack.
+This repository holds the first-party places, the pipeline that turns a place into a pack for a handheld GPU, native PS Vita, Nintendo 3DS, PSP and iPod touch 4 renderers, and the one interface they all draw. Publishing and downloading are not built yet. Vita and 3DS target 30 fps; PSP supports night streets and daytime slopes/streets through its fixed-function GE pipeline; the iPod touch draws five places from the 3DS's kind of pack.
 
 Places share their assets across the reference and handheld renderers:
 
 - **`web/`** is the reference renderer: a standalone three.js + Vite app with no PocketJS dependency, with a night-side globe to pick a place. Every asset is generated at load time.
 - **`vita/`** renders the same place on a PS Vita with its own GXM pipeline: Cg programs compiled on the device by SceShaccCg, 4× MSAA HDR targets and the effect set the place needs.
-- **`n3ds/`** renders the shared globe, place browser and five supported scenes on an Old 3DS, using a PICA200 cook of the same assets, native 400 × 240 output and a 30fps quality budget. Unsupported kinds remain visible with an unavailable label. See [the 3DS build and debug workflow](n3ds/README.md).
-- **`ipod/`** lists and renders five places on an iPod touch 4 (iOS 6, SGX535, OpenGL ES 2) at 480 × 320, from the 3DS lowering with GLES texels and Griffith's lights and haze cooked for it. See [how it draws, builds and is measured](ipod/README.md).
+- **`n3ds/`** renders the globe and five supported scenes on an Old 3DS, using a PICA200 cook of the same assets, native 400 × 240 output and a 30fps quality budget. See [the 3DS build and debug workflow](n3ds/README.md).
+- **`psp/`** renders the globe and the places its GE pipeline supports on a PSP.
+- **`ipod/`** renders the globe and five places on an iPod touch 4 (iOS 6, SGX535, OpenGL ES 2) at 480 × 320, from the 3DS lowering with GLES texels and Griffith's lights and haze cooked for it. See [how it draws, builds and is measured](ipod/README.md).
+- **`ui/`** is what all four put on the screen in two dimensions: one PocketJS app with a presentation for each form of device. See [The interface](#the-interface).
 
 The web app exports glTF 2.0 with `extras.pocketAtlas`. The cooker seals a lossless PlaceIR, then independently lowers it into Vita, PICA, GE or GLES assets. See [the compiler boundaries, commands and migration plan](docs/COMPILER.md).
 
@@ -32,17 +34,44 @@ Real places fall into a finite set of kinds; the registry names them (`PlaceKind
 | Path | Contents |
 | --- | --- |
 | `web/` | three.js reference places (`src/places/<id>`, shared code in `src/places/shared`), globe, scripts: `export-place.ts`, `export-atlas.ts`, `preview-place.ts` |
-| `crates/pocket3d-place` | pack formats: `.place` (META JSON + texture, geometry and animation blobs) and `atlas.pack` (globe, place list, preview cards, interface font); sRGB helpers |
-| `crates/pocket3d-place-cook` | glTF → pack: BC1/BC3/BC5 textures with mips, quantized vertices, baked vertex lighting and sky occlusion, low-poly shelf stock, octahedral environment, effect textures; the atlas pack and its baked font (`atlas.rs`, `uifont.rs`); annotation readers (`extras.rs`) |
+| `crates/pocket3d-place` | pack formats: `.place` (META JSON + texture, geometry and animation blobs) and the Vita's `atlas.pack` (the globe and where its pins go); sRGB helpers |
+| `crates/pocket3d-place-cook` | glTF → pack: BC1/BC3/BC5 textures with mips, quantized vertices, baked vertex lighting and sky occlusion, low-poly shelf stock, octahedral environment, effect textures; the atlas pack (`atlas.rs`); annotation readers (`extras.rs`) |
+| `ui/`, `tools/atlas-ui.ts` | the interface: one PocketJS app (`ui/app`), its presentations (`ui/app/presentations`), the protocol it speaks with a renderer (`ui/app/protocol.ts`), host tests (`ui/test`); the tool compiles it for a device |
+| `crates/pocket-atlas-interface` | the renderer's side of that protocol for the Rust renderers (the C ones use `n3ds/src/interface.c`) |
 | `vendor/pocketjs/devices/vita/pocket-vita-gxm` | Shared GXM memory/program/target/texture mechanisms, optional runtime SceShaccCg; no scene or material policy |
-| `vita/` | Vita app: place loader (`scene.rs`), frame renderer (`frame.rs`), atlas globe (`atlas.rs`), place browser (`browser.rs`), settings sheet (`settings.rs`), interface drawing and text (`ui.rs`), file locations (`paths.rs`), Cg programs (`vita/shaders`), LiveArea art |
-| `psp/` | Native PSP place viewer: GE rendering, animated nodes and skinning, camera controls, procedural rain audio, PSPLINK telemetry |
+| `vita/` | Vita app: place loader (`scene.rs`), frame renderer (`frame.rs`), atlas globe (`atlas.rs`), the interface's guest (`interface.rs`), what a visitor can set (`settings.rs`), file locations (`paths.rs`), Cg programs (`vita/shaders`), LiveArea art |
+| `psp/` | PSP app: GE rendering of the places and the globe (`globe.rs`), animated nodes and skinning, the interface's guest (`interface.rs`), procedural rain audio, PSPLINK telemetry |
 | `crates/pocket3d-place-psp` | Validated `PLPS` payload: shared GE vertex buffers, spatial index chunks, swizzled RGBA4444/RGBA8888 mip chains, animation and camera data; no JSON on the device |
 | `n3ds/`, `tools/atlas-3ds.ts` | PICA renderer, native cooker, paired wireless deployment, capture and performance measurement |
-| `tools/atlas.ts` | cook (places and the atlas with its font), build, deploy over USB, status/capture/profile/sweep/shots, shader lint, standalone VPK |
+| `tools/atlas.ts` | cook (places and the atlas pack), build, deploy over USB, status/capture/profile/sweep/shots, shader lint, standalone VPK |
 | `tools/atlas-psp.ts` | PSP cook/build, PSPLINK serve/run/control/capture/shot measurements, standalone EBOOT package |
-| `ipod/`, `tools/atlas-ipod.ts` | iPod touch 4 app (two C files: the GLES 2 renderer and the UIKit shell) and its cook/build/install/control/capture/measure tool |
-| `vendor/pocketjs` | PocketJS: Vita dev host and wired debug transport; 3DS paired transport and native installer; pinned PSP toolchain resolver; iPod touch 4 sysroot, startup objects and installer |
+| `ipod/`, `tools/atlas-ipod.ts` | iPod touch 4 app (the GLES 2 renderer, the globe and the shell that hosts the interface) and its cook/build/install/control/capture/measure tool |
+| `vendor/pocketjs` | PocketJS: the interface's framework, UI core and per-device guest runtimes; Vita dev host and wired debug transport; 3DS paired transport and native installer; pinned PSP toolchain resolver; iPod touch 4 sysroot, startup objects and installer |
+
+## The interface
+
+Everything flat on a handheld's screen (the atlas screen's lists, cards and search, a place's shots, settings and hints, the loading and error screens) is one PocketJS app, `ui/`. A renderer draws the globe or the place and hosts the app as a guest: PocketJS's UI core and QuickJS on the device, the guest's picture laid over the frame. The two talk in JSON lines over PocketJS's overlay service, answered in the process (`ui/app/protocol.ts`): the renderer says where things stand (scene, the places on the device, shots, what can be set), the interface says what the visitor asked for (turn the globe, enter, leave, cut to a shot, set an option, drive the camera).
+
+`ui/pocket.json` declares a presentation per form of device, and PocketJS picks the one a device's modality asks for. They share every part (`ui/app/parts.tsx`) and all behaviour (`browse.ts`, `visit.ts`); a presentation decides where things go and which control means what:
+
+| Presentation | Devices | Atlas | In a place |
+| --- | --- | --- | --- |
+| `single.tsx`, 480 × 272, a pad | PSP, Vita (whose panel also takes taps) | globe at the left, a card and four rows at the right; d-pad moves, ○ visits, □ saves, △ searches, L/R change list, the stick spins the globe | the scene has the screen; title and shot name fade after a few seconds; × atlas, △ menu, L/R shot, START pause |
+| `dual.tsx`, 400 × 240 over 320 × 240 | 3DS | globe and card on the top screen; lists with pictures on the touch screen, scrolled by stylus or d-pad; A visits, Y saves, X searches | top: the scene; bottom: the shots as rows to tap, a pad to drag the view with, Pause, Menu and Atlas buttons |
+| `touch.tsx`, 480 × 320, touch only | iPod touch | a finger spins the globe and scrolls the list; Save and Visit are buttons | two sticks at fixed places in the lower corners (left walks, right looks); a tap calls up a bar (atlas, shots, tour, menu) |
+
+Featured, Explore (nearest where the globe faces), Saved and Search are the lists everywhere. Search types into PocketJS's own keyboard, which is a grid for a d-pad and keys for a finger. A place's menu lists what its renderer offers there (frame rate, quality, effects the place has, exposure, statistics).
+
+A renderer need not give the guest every turn: while no button or touch is down and neither the state nor the guest's picture has just changed, it looks in about once a second (`Rest` in `crates/pocket-atlas-interface`, `n3ds/src/guest.c`). The interface's own timers follow the wall clock for that reason (`ui/app/clock.ts`). A renderer sends only the fields of its state that changed.
+
+```sh
+bun tools/atlas-ui.ts <psp|vita|3ds|ipod>   # → .pocket-build/ui/<device>/atlas.js, atlas.pak (each device's build runs this)
+(cd vendor/pocketjs && bun install && bun tools/wasm.ts)   # once, for the host tests and previews
+bun test ui/test                            # each presentation on PocketJS's wasm core: presses and touches in, commands out
+bun ui/test/preview.ts <psp|3ds|ipod>       # pictures of the screens → .pocket-build/ui/preview/
+```
+
+Place cards come from each place's preview (`web/scripts/preview-place.ts`); a place without one shows a wash of its accent.
 
 ## Web
 
@@ -56,17 +85,21 @@ Controls and URL switches are listed in `web/README.md`.
 
 ## PSP
 
-Lombard Street uses the same viewer and controls, with a graded sky panorama, baked directional light and static shadows. Rain and wet-road reflections are disabled by the pack's features. Export its full 120-second loop, then pass `--place sf-lombard-street` to `cook`, `build` and `package`; see [the PSP daylight details and limitations](psp/README.md). Runtime and frame budgets for Lombard still require physical hardware measurement.
+The app opens on the atlas: a night globe drawn by the GE (a lit sphere with city lights, a halo and a pin per place) under [the interface](#the-interface), which lists the places and enters the ones whose pack is beside the executable. In a place the analog stick moves and the d-pad looks; L/R change shots, START pauses or resumes the tour, △ opens the place's menu (tour, rain, sound and reflections where the place has them, statistics) and × returns to the atlas. HOME exits.
 
-Rainy Night Konbini runs locally at **480×272**, with baked lighting, alpha-tested shelf facings, planar reflections of lit surfaces and moving objects, rain, lamp halos, the six authored camera shots, the taxi and skinned pedestrians. The analog stick moves; the D-pad looks. L/R change shots, START resumes the camera sequence, × pauses, □ toggles rain, △ toggles reflections, ○ mutes sound, and SELECT toggles the diagnostic readout. Walking near the entrance opens the doors and plays the door chime; the rain bed quiets indoors. HOME exits.
+Lombard Street has a graded sky panorama, baked directional light and static shadows; rain and wet-road reflections are disabled by the pack's features. Export its full 120-second loop, then `cook --place sf-lombard-street`; see [the PSP daylight details and limitations](psp/README.md). Runtime and frame budgets for Lombard still require physical hardware measurement.
+
+Rainy Night Konbini runs at **480×272**, with baked lighting, alpha-tested shelf facings, planar reflections of lit surfaces and moving objects, rain, lamp halos, the six authored camera shots, the taxi and skinned pedestrians. Walking near the entrance opens the doors and plays the door chime; the rain bed quiets indoors.
+
+The package asks for the large memory of a PSP-2000 or later (`MEMSIZE` in `PARAM.SFO`): there the 18 MiB pack buffer fits beside the interface (about 5 MiB with its runtime). On a PSP-1000 a place whose pack does not fit is listed as not on the device.
 
 Requirements: `usbhostfs_pc` and `pspsh`, PSPLINK running on the console, and PocketJS's pinned PSP toolchain. Run `bun tools/bootstrap.ts` in `vendor/pocketjs` to provision it. An existing SDK may be selected with `PSP_SDK=/absolute/path/to/mipsel-sony-psp`; the toolchain resolver checks that override. PocketJS's submodule stays unchanged.
 
 ```sh
 # Export and cook the current checkout, with the web dev server running.
 (cd web && bun scripts/export-place.ts --place tokyo-konbini --seconds 20)
-bun tools/atlas-psp.ts cook
-bun tools/atlas-psp.ts build
+bun tools/atlas-psp.ts cook                      # one place (--place ID); cook each place the PSP should carry
+bun tools/atlas-psp.ts build                     # the app, the interface, the globe and every cooked place → the USB share
 
 # Keep exactly one PSP USB host running in a terminal.
 bun tools/atlas-psp.ts serve
@@ -74,18 +107,19 @@ bun tools/atlas-psp.ts serve
 # In another terminal:
 bun tools/atlas-psp.ts run --no-build
 bun tools/atlas-psp.ts status
+bun tools/atlas-psp.ts ctl '{"place":"tokyo-konbini"}'   # enter a place; {"press":["down","circle"]} presses the interface's buttons
 bun tools/atlas-psp.ts ctl '{"shot":0,"time":10}'  # fixed halfway view
 bun tools/atlas-psp.ts capture --out .pocket-build/validation/psp/view.bmp
 bun tools/atlas-psp.ts shots                     # every authored shot, captures + measurements
 bun tools/atlas-psp.ts ctl '{}'                  # live clock
 
 # Standalone files beside each other; no USB host needed after installation.
-bun tools/atlas-psp.ts package                  # dist/PSP/GAME/PocketAtlas/{EBOOT.PBP,scene.place}
+bun tools/atlas-psp.ts package                  # dist/PSP/GAME/PocketAtlas/{EBOOT.PBP,atlas.js,atlas.pak,globe.psp,<id>.place}
 ```
 
 The PSP cook starts from the same PlaceIR as Vita and 3DS, and writes `<id>.psp.place` with separate `PLPS` magic/version. It rejects unsupported place kinds and packs above 18 MiB. It preserves rigid and skeletal tracks, uses the shared cooker's coarse geometry, bakes the Products material onto world-space shelf cards, shares static vertex buffers across spatial chunks, and combines only visible chunks at draw time. GPU pointers, indices, texture layouts and animation ranges are validated before upload. The current 20-second export follows the existing Vita workflow; it does not contain the web traffic simulation's full, longer schedule.
 
-This is a fixed-function adaptation: it does not reproduce Vita's HDR/PBR shaders, normal maps, volumetric haze, per-pixel wet ripples, dynamic per-pixel lights or bloom. The PSP's 16-bit depth and reduced texture sizes also limit fine facade detail and lettering. Reflection geometry is limited to lit surfaces and moving objects. The atlas globe and multi-place browser are not part of the PSP viewer. PSP `workMs` includes CPU submission and waiting for the GE; `gpuWaitMs` is only the wait after submission, **not** serialized GPU pass timing. Captures and USB transfers must be kept outside measurement windows. Host build, physical runtime, installed-file readback, manual control feel and listening to the sound are separate evidence.
+This is a fixed-function adaptation: it does not reproduce Vita's HDR/PBR shaders, normal maps, volumetric haze, per-pixel wet ripples, dynamic per-pixel lights or bloom. The PSP's 16-bit depth and reduced texture sizes also limit fine facade detail and lettering. Reflection geometry is limited to lit surfaces and moving objects. PSP `workMs` includes CPU submission and waiting for the GE; `gpuWaitMs` is only the wait after submission, **not** serialized GPU pass timing. Captures and USB transfers must be kept outside measurement windows. Host build, physical runtime, installed-file readback, manual control feel and listening to the sound are separate evidence.
 
 On the connected PSP (333 MHz CPU, 166 MHz bus, PSPLINK, 2026-10-01), five 30-frame windows per fixed halfway camera at t=10 with rain and reflections enabled measured: Konbini 19.9 fps, Puddles 15.0, Vending 15.0, Crossing 20.0, Inside 20.0, Wires 30.0. These are fixed-view measurements, not a claim that the live sequence or every free-camera position sustains 30 fps. The pack is 15.38 MiB with 68,206 triangles across the whole place, 38 textures, 111 animated nodes and 16 skinned chunks. PSP support remains a first port with performance and visual quality below the Vita renderer.
 
@@ -104,8 +138,7 @@ git submodule update --init
 (cd web && bun scripts/export-place.ts --place tokyo-konbini --seconds 20)  # → .pocket-build/places/tokyo-konbini/scene.glb (the device loops the 20 s of traffic)
 bun tools/atlas.ts cook --place tokyo-konbini  # → .pocket-build/places/tokyo-konbini/tokyo-konbini.place
 
-# The atlas: the globe, the place list, each place's preview card and the interface font
-# (cook-atlas fetches Noto Sans CJK JP Medium/Bold into .pocket-build/fonts once and checks their SHA-256)
+# The atlas: the globe, and each place's preview card for the interface
 (cd web && bun scripts/export-atlas.ts)       # → .pocket-build/atlas/globe/ (maps, view-ray bakes, places.json)
 (cd web && bun scripts/preview-place.ts)      # → .pocket-build/places/<id>/preview.png (the registry's `preview` shot)
 bun tools/atlas.ts cook-atlas                 # → .pocket-build/atlas/atlas.pack
@@ -124,26 +157,15 @@ bun tools/atlas.ts vpk                        # → dist/vita/pocket-atlas-PKAT0
 
 ### Atlas screen
 
-The app opens on the atlas: the web globe (sky, halo and atmosphere baked for the device's fixed camera; surface, clouds and city lights shaded per pixel at 720×408 with 4× MSAA) and the place browser beside it. L and R switch its lists:
+The app opens on the atlas: the web globe (sky, halo and atmosphere baked for the device's fixed camera; surface, clouds and city lights shaded per pixel at 720×408 with 4× MSAA) under [the interface](#the-interface), which says which place it faces and which pin is lit. Saved places are kept in `interface.json` in the data folder (`ux0:data/pocket-atlas`). Leaving a place frees its video memory before the next one loads.
 
-- **Featured**: the registry's `featured` places.
-- **Explore**: every place, nearest the point the globe faces first; the list re-sorts while the left stick spins the globe.
-- **Saved**: △ on a place; kept in `saved.json` in the data folder (`ux0:data/pocket-atlas`).
-- **Search**: □ opens the system keyboard; each word must match the name, native name, locality, country, tags, kind or author.
+### Settings
 
-Up/down moves through the list and turns the globe to the place; the focused row opens into a postcard with the place's preview (`scripts/preview-place.ts` captures it; the cooker crops it to 2:1 and stores 512×256 BC1 in `atlas.pack`), kind, tags and author. × or ○ enters an open place, START returns to the atlas. Leaving a place frees its video memory before the next one loads.
-
-### Interface text
-
-The interface's text is baked into `atlas.pack`: the cooker rasterizes Inter (from PocketJS) and Noto Sans CJK JP Medium/Bold at the styles of `pocket3d_place::atlas::STYLES` (13–34 px) 1:1 for the 960×544 display into one 8-bit coverage atlas (the `FONT` section; glyph table in `META.font`). The Vita draws each string as one draw on whole pixels. The charset is ASCII, Latin-1, Latin Extended-A, `UI_EXTRA` and every character in the places' strings; a cooker test fails when the Vita code writes a character outside it. A string with a character the atlas lacks (a search typed with the keyboard, scripts such as Devanagari) falls back to the system's vector fonts (PVF).
-
-### Settings sheet
-
-SELECT in a place opens the settings sheet: frame rate profile (`vita30`, `vita60`, `cinematic`), quality step (the governor's, or one held), resolution, 4× MSAA, bloom, the place's lit haze, reflections and rain when it has them, exposure (±2 EV), the camera shot and the performance overlay; △ resets the choices. A resolution whose targets do not fit in video memory is refused. While the sheet is on screen the governor holds its step: the sheet's own cost (about 1 ms at step 0 on Rainy Night Konbini) is in those frame times. Choices carry to the next place and are kept in `settings.json` in the data folder; the ones not made follow the renderer's profile.
+△ in a place opens its menu: frame rate profile (`vita30`, `vita60`, `cinematic`), quality step (the governor's, or one held), resolution, 4× MSAA, bloom, the place's lit haze, reflections and rain when it has them, exposure, and the statistics line. A resolution whose targets do not fit in video memory is refused. While the menu is on screen the governor holds its step. Choices carry to the next place and are kept in `settings.json` in the data folder; the ones not made follow the renderer's profile.
 
 ### Control messages
 
-`ctl` messages naming a `place` enter it; `{"atlas": true}` returns, and takes `tab` (`featured`, `explore`, `saved`, `search`), `search` (a query), `select` and `save` (place ids) and `keyboard: true` (opens the search keyboard). In a place, `sheet` (true or false) opens or closes the settings sheet, `sheetRow` focuses a row by its label (`"Resolution"`), and `sheetReset: true` drops the saved choices as △ does.
+`ctl` messages naming a `place` enter it and `{"atlas": true}` returns; `{"press": ["down", "circle"]}` presses buttons on the interface one after another, as a thumb would.
 
 Commands that cook, sync or measure take `--place ID` (default `tokyo-konbini`). Shader sources in `vita/shaders` hot-reload: `bun tools/atlas.ts sync` copies them to the USB share and the device recompiles the programs whose expanded source changed. Compiled programs are cached on the share by content hash; `vpk` packages the ones listed in the device's `gxp/manifest.txt`.
 
