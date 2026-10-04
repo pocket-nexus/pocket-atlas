@@ -16,6 +16,14 @@ export interface Shot {
 /** Walkable camera volumes: [minX, minY, minZ, maxX, maxY, maxZ]. */
 export type Box6 = [number, number, number, number, number, number];
 
+/** Small viewing volumes keep a named shot's eye path available in free mode too. */
+export function shotVolumes(shots: readonly Shot[], padding = 0.25): Box6[] {
+  return shots.map(({ from, to }) => [
+    ...from.pos.map((v, i) => Math.min(v, to.pos[i]) - padding),
+    ...from.pos.map((v, i) => Math.max(v, to.pos[i]) + padding),
+  ] as Box6);
+}
+
 const ease = (t: number) => t * t * (3 - 2 * t);
 const easeInOutCubic = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
 

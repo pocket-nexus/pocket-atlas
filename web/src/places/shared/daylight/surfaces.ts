@@ -28,6 +28,28 @@ Surface surface(vec2 uv) {
   return S(col, h, r, 1.0 - biot * 0.25, 0.0);
 }`;
 
+/** 1.84 × 1.8 m of fired brick: 8 × 24 staggered courses, neutral recessed lime mortar. */
+export function brickWallSurface(color: [number, number, number]): string {
+  return /* glsl */ `
+Surface surface(vec2 uv) {
+  vec2 grid = uv * vec2(8.0, 24.0);
+  grid.x += mod(floor(grid.y), 2.0) * 0.5;
+  vec2 cell = floor(grid), f = fract(grid);
+  vec2 edge = min(f, 1.0 - f) * vec2(0.23, 0.075);
+  float grit = fbm(uv * 160.0, vec2(160.0), 4);
+  float chip = smoothstep(0.58, 0.78, fbm(uv * 72.0, vec2(72.0), 3));
+  float distanceToJoint = min(edge.x, edge.y) - chip * 0.002;
+  float face = smoothstep(0.0035, 0.0065, distanceToJoint);
+  float fired = hash12(mod(cell, vec2(8.0, 24.0)) + 19.0);
+  float stain = smoothstep(0.48, 0.82, fbm(uv * vec2(16.0, 2.0), vec2(16.0, 2.0), 4));
+  vec3 brick = vec3(${color.map(v => v.toFixed(6)).join(", ")}) * (0.72 + 0.43 * fired) * (0.84 + 0.22 * grit);
+  brick *= 1.0 - 0.18 * stain;
+  vec3 mortar = vec3(0.23, 0.225, 0.205) * (0.85 + 0.18 * grit);
+  float height = face * 0.72 + grit * 0.075 - chip * face * 0.08;
+  return S(mix(mortar, brick, face), height, mix(0.96, 0.84 + 0.1 * grit, face), mix(0.58, 1.0, face), 0.0);
+}`;
+}
+
 /**
  * 2.4 m of rubble retaining wall (練積み): rounded field stones of mixed tone
  * bedded in grey mortar, lichen on the faces, moss low in the joints, water

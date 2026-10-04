@@ -47,6 +47,26 @@ checked construction/sampling contract and reuses an existing family runtime.
 The older `createStage` ABI still works in the web app; a reproducible export
 requires a definition. No universal Pocket3D scene API is introduced.
 
+`defineOutdoorPlace` uses that same lifecycle for `dusk-street` and `dusk-coast`
+as well as daytime places. Dusk requires an explicit `atmosphere`: the shared
+`SkySpec`, hemisphere fill and `PostLook`, with optional fog colour, exposure
+and sky-occlusion refinement. A below-horizon or zero-intensity sun creates no
+directional light or shadow pass. Panel and point lights retain the established
+export/light-bake contracts. `defineDayPlace` remains the daytime-only adapter;
+night streets and distant vistas keep their specialized effects and stages.
+
+An outdoor builder can call `world.water(spec, waveOptions)` for the existing
+coast water material. The world owns its baked normal texture and registers its
+clock for fixed-step export. Set each layer's
+`repeatsPerMetre * scrollComponent * loopSeconds` to an integer for a seamless
+wave loop. No new material kind, pack field or handheld shader is involved.
+
+Named views enter free-camera mode when selected. Include their eye paths in
+the allowed camera volumes (`shotVolumes(shots)` supplies small envelopes),
+and include their targets in `focus`; otherwise the orbit controller clamps
+the requested framing on the next frame. Keep these authored viewing positions
+separate from any claim that a historical location was publicly accessible.
+
 ## Build and inspect
 
 From the repository root after `cd web && bun install --frozen-lockfile`:
