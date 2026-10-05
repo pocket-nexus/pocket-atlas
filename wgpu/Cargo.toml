@@ -1,10 +1,11 @@
 # Pocket Atlas drawn with wgpu: in a browser tab over WebGPU (wasm32), and on
 # the machine that builds it (Metal), where a frame can be written to a file.
 #
-# This crate is the shell of the atlas screen: the globe (src/globe.rs, the
-# iPod touch's, in WGSL), the game's side of the interface channel
-# (crates/pocket-atlas-interface) and the seam a place's renderer plugs into
-# (src/place.rs). It draws no place. Everything that is not this game's is
+# This crate is the shell of the atlas screen (the globe, src/globe.rs, the
+# iPod touch's in WGSL; the game's side of the interface channel,
+# crates/pocket-atlas-interface) and the renderer of places (src/places/, the
+# PS Vita's passes and programs in WGSL, from the PS Vita's packs), which
+# plugs into the shell at src/place.rs. Everything that is not this game's is
 # PocketJS's browser kernel (vendor/pocketjs/devices/web/pocket-web-wgpu): the
 # GPU device and its screens, the interface's overlay pass, ranges of a pack.
 #
@@ -27,6 +28,10 @@ path = "src/bin/shot.rs"
 [dependencies]
 pocket-atlas-interface = { path = "../crates/pocket-atlas-interface" }
 pocket-web-wgpu = { path = "../vendor/pocketjs/devices/web/pocket-web-wgpu" }
+# The places: the PS Vita's pack (crates/pocket3d-place), its tone curve and its material model.
+pocket3d-place = { path = "../crates/pocket3d-place" }
+glam = "0.33"
+serde_json = "1"
 bytemuck = { version = "1", features = ["derive"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
