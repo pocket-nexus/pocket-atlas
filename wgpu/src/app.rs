@@ -114,6 +114,10 @@ pub struct App {
     frames: u32,
     turns: u32,
     triangles: u32,
+    /// When the visitor entered the place (the kernel's clock, ms), and how long after it the place's
+    /// first frame was drawn.
+    entered: f64,
+    arrival: Option<f32>,
     /// The last thing that went wrong, for the status.
     pub trouble: String,
 }
@@ -196,6 +200,8 @@ impl App {
             frames: 0,
             turns: 0,
             triangles: 0,
+            entered: 0.0,
+            arrival: None,
             trouble: String::new(),
         }
     }
@@ -318,6 +324,7 @@ impl App {
         let Some(renderer) = self.renderer else { return self.refuse("Places cannot be opened in the browser yet.") };
         let Some((_, at)) = self.packs.iter().find(|(id, _)| *id == place) else { return self.refuse("This place's pack is not here.") };
         self.interface.state.scene = Scene::Loading;
+        (self.entered, self.arrival) = (task::now(), None);
         let answer = Rc::new(RefCell::new(None));
         self.visiting = Visiting::Loading(answer.clone());
         let (at, gpu, format, shape) = (at.clone(), self.gpu.clone(), self.screen.format, self.shape);
@@ -397,6 +404,7 @@ impl App {
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
         if let Visiting::Place(place) = &mut self.visiting {
             self.triangles = place.draw(&self.gpu, &mut encoder, &frame)?;
+            self.arrival.get_or_insert((task::now() - self.entered) as f32);
         } else {
             let mut pass = frame.pass(&mut encoder, NIGHT);
             let logical = [self.shape.logical[0] as f32, self.shape.logical[1] as f32];
@@ -423,14 +431,19 @@ impl App {
         }
     }
 
-    /// Words a development host sends: `enter=<place>` and `leave`, as the interface would ask.
+    /// Words a development host sends: `enter=<place>` and `leave`, as the interface would ask. The rest
+    /// are the open place's (`Place::control`).
     pub fn control(&mut self, words: &str) {
+        let mut rest = Vec::new();
         for word in words.split_whitespace() {
             match word.split_once('=') {
                 Some(("enter", place)) => self.enter(place.into()),
                 None if word == "leave" => self.leave(),
-                _ => {}
+                _ => rest.push(word),
             }
+        }
+        if let (Visiting::Place(place), false) = (&mut self.visiting, rest.is_empty()) {
+            place.control(&rest.join(" "));
         }
     }
 
@@ -478,7 +491,7 @@ impl App {
         );
         let _ = write!(
             out,
-            "\"shape\":{{\"name\":\"{}\",\"width\":{},\"height\":{},\"samples\":{},\"hz\":{},\"logical\":[{},{}]}},\"adapter\":\"{}\",\"trouble\":\"{}\"}}",
+            "\"shape\":{{\"name\":\"{}\",\"width\":{},\"height\":{},\"samples\":{},\"hz\":{},\"logical\":[{},{}]}},\"adapter\":\"{}\",\"trouble\":\"{}\",",
             s.name,
             s.width,
             s.height,
@@ -489,6 +502,13 @@ impl App {
             escaped(&self.gpu.adapter),
             escaped(&self.trouble)
         );
+        // The open place: milliseconds from `enter` to its first frame, then what its renderer says of it.
+        match &self.visiting {
+            Visiting::Place(place) => {
+                let _ = write!(out, "\"visit\":{{\"arrival\":{:.1},{}}}}}", self.arrival.unwrap_or(-1.0), place.status());
+            }
+            _ => out.push_str("\"visit\":null}"),
+        }
         out
     }
 }

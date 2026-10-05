@@ -80,6 +80,15 @@ pub trait Place {
     /// when the screen has several samples, its depth). The shell lays the interface over `frame`, submits
     /// `encoder` and presents. Returns the triangles drawn.
     fn draw(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, frame: &Frame) -> Result<u32, String>;
+
+    /// Words a development host sends a place (a view held for a picture, a moment of its loop). A renderer
+    /// reads the ones it knows.
+    fn control(&mut self, _words: &str) {}
+
+    /// The run of the place as JSON members (`"draws":12,"triangles":3400`), for the shell's status.
+    fn status(&self) -> String {
+        String::new()
+    }
 }
 
 /// A place being opened: reads of its pack, then textures and buffers on the GPU.
@@ -97,5 +106,5 @@ pub struct Renderer {
     pub open: fn(Opening) -> Opened,
 }
 
-/// The renderer of places in this build: none yet.
-pub const RENDERER: Option<Renderer> = None;
+/// The renderer of places in this build: the PS Vita's, on wgpu (`places/`).
+pub const RENDERER: Option<Renderer> = Some(crate::places::RENDERER);

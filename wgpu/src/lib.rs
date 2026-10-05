@@ -12,5 +12,6 @@
 pub mod app;
 pub mod globe;
 pub mod place;
+pub mod places;
 #[cfg(target_arch = "wasm32")]
 mod web;
