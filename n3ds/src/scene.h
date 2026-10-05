@@ -8,7 +8,7 @@ typedef struct {
       step, lod_floor;
   float cpu_ms, gpu_ms, frame_ms, time, skin_ms, update_ms, submit_ms,
       prepare_ms;
-  uint32_t skinned_vertices;
+  uint32_t skinned_vertices, sprites;
   uint32_t geom_bytes, texture_bytes, animation_bytes;
   bool hold, reflection, rain, haze, cinematic;
   int shot;

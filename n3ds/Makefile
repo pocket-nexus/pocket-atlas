@@ -20,20 +20,26 @@ CFLAGS := -O3 -g -Wall -Wextra -std=gnu11 -ffunction-sections -fdata-sections -m
   -include $(BUILD)/config.h -I$(PICA_KERNEL) -I$(SOURCE) -I$(BUILD) -I$(POCKET)/src -I$(POCKET)/include -I$(QUICKJS) -I$(DEVKITPRO)/libctru/include -I$(DEVKITPRO)/portlibs/3ds/include
 LDFLAGS := -specs=3dsx.specs $(ARCH) -Wl,--gc-sections -Wl,-Map,$(BUILD)/atlas.map
 ATLAS := main.o scene.o globe.o settings.o assets.o frame_guard.o interface.o guest.o
-OBJECTS := $(addprefix $(BUILD)/,$(ATLAS) scene_shbin.o wet_shbin.o water_shbin.o globe_shbin.o vshader_shbin.o devserver.o dev_protocol.o native.o hbldr.o soc.o gfx.o qjs.o input.o)
+OBJECTS := $(addprefix $(BUILD)/,$(ATLAS) scene_shbin.o field_shbin.o wet_shbin.o water_shbin.o globe_shbin.o vshader_shbin.o devserver.o dev_protocol.o native.o hbldr.o soc.o gfx.o qjs.o input.o)
 .PHONY: all
 all: $(OUT)
 $(BUILD):
 	mkdir -p $@
 $(BUILD)/%.shbin: $(SOURCE)/%.v.pica | $(BUILD)
 	$(DEVKITPRO)/tools/bin/picasso -o $@ $<
+# Programs that are exchanged many times a frame are one binary: their code
+# is uploaded once, and they share their uniforms by name.
+$(BUILD)/scene.shbin: $(SOURCE)/scene.v.pica $(SOURCE)/glow.v.pica | $(BUILD)
+	$(DEVKITPRO)/tools/bin/picasso -o $@ $^
+$(BUILD)/field.shbin: $(SOURCE)/field.v.pica $(SOURCE)/traffic.v.pica | $(BUILD)
+	$(DEVKITPRO)/tools/bin/picasso -o $@ $^
 $(BUILD)/%_shbin.s $(BUILD)/%_shbin.h &: $(BUILD)/%.shbin
 	cd $(BUILD) && $(DEVKITPRO)/tools/bin/bin2s -a 4 -H $*_shbin.h $*.shbin > $*_shbin.s
 $(BUILD)/%_shbin.o: $(BUILD)/%_shbin.s
 	$(CC) $(ARCH) -c $< -o $@
 $(BUILD)/vshader.shbin: $(POCKET)/src/vshader.v.pica | $(BUILD)
 	$(DEVKITPRO)/tools/bin/picasso -o $@ $<
-$(addprefix $(BUILD)/,$(ATLAS)): $(BUILD)/%.o: $(SOURCE)/%.c $(wildcard $(SOURCE)/*.h) $(wildcard $(PICA_KERNEL)/*.h) $(BUILD)/config.h $(BUILD)/scene_shbin.h $(BUILD)/wet_shbin.h $(BUILD)/water_shbin.h $(BUILD)/globe_shbin.h | $(BUILD)
+$(addprefix $(BUILD)/,$(ATLAS)): $(BUILD)/%.o: $(SOURCE)/%.c $(wildcard $(SOURCE)/*.h) $(wildcard $(PICA_KERNEL)/*.h) $(BUILD)/config.h $(BUILD)/scene_shbin.h $(BUILD)/field_shbin.h $(BUILD)/wet_shbin.h $(BUILD)/water_shbin.h $(BUILD)/globe_shbin.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 $(addprefix $(BUILD)/,devserver.o dev_protocol.o native.o hbldr.o soc.o input.o): $(BUILD)/%.o: $(POCKET)/src/%.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@

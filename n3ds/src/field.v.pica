@@ -1,0 +1,67 @@
+; A vista's lights that stay where they are: one camera-facing quad a light,
+; sized in pixels. The light is `size` pixels wide at its distance; the quad
+; is that clamped to the field's sizes, and dimmer by as much as it is wider.
+; It is drawn a little towards the eye, clear of the surface the light is on.
+; clock.y turns once a twinkle; a triangle wave stands in for the sine.
+; Every mapped output component is written exactly once.
+.constf constants(0.0, 1.0, 0.75, 0.5)
+.constf limits(0.002, 0.0, 0.0, 0.0)
+.fvec projection[4]
+.fvec eye
+.fvec sizes
+.fvec clock
+.fvec pixel
+.in inpos v0
+.in insize v1
+.in inclr v2
+.in incorner v3
+.out outpos position
+.out outtex texcoord0
+.out outclr color
+.entry main
+.proc main
+    add r1.xyz, -eye.xyz, inpos.xyz
+    dp3 r2.x, r1, r1
+    rsq r2.y, r2.x
+    mul r2.x, r2.x, r2.y
+    ; r3: size, the quad's, and what the quad's colour is scaled by
+    mul r3.x, sizes.x, insize.x
+    mul r3.x, r3.x, r2.y
+    max r3.y, sizes.y, r3.x
+    min r3.y, sizes.z, r3.y
+    rcp r3.z, r3.y
+    mul r3.z, r3.x, r3.z
+    min r3.z, constants.y, r3.z
+    mul r3.z, r3.z, insize.y
+    add r5.x, clock.y, insize.z
+    flr r5.y, r5.x
+    add r5.x, r5.x, -r5.y
+    add r5.y, constants.y, -r5.x
+    max r5.x, r5.x, r5.y
+    add r5.x, -constants.z, r5.x
+    mul r5.x, r5.x, insize.w
+    add r5.x, constants.y, r5.x
+    mul r3.z, r3.z, r5.x
+    mul r3.z, clock.z, r3.z
+    mul r6.xyz, inclr.xyz, r3.zzz
+    mov r6.w, constants.y
+    mov outclr, r6
+    mul r2.z, sizes.w, r2.x
+    max r2.z, limits.x, r2.z
+    min r2.z, constants.w, r2.z
+    add r2.z, constants.y, -r2.z
+    mul r1.xyz, r1.xyz, r2.zzz
+    add r1.xyz, eye.xyz, r1.xyz
+    mov r1.w, constants.y
+    dp4 r7.x, projection[0], r1
+    dp4 r7.y, projection[1], r1
+    dp4 r7.z, projection[2], r1
+    dp4 r7.w, projection[3], r1
+    mul r8.xy, pixel.xy, incorner.xy
+    mul r8.xy, r8.xy, r3.yy
+    mul r8.xy, r8.xy, r7.ww
+    add r7.xy, r7.xy, r8.xy
+    mov outpos, r7
+    mov outtex, incorner.zwzw
+    end
+.end
