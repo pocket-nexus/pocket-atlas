@@ -263,6 +263,16 @@ fn fs(in: Varyings) -> @location(0) vec4<f32> {
 #ifdef EMISSION_MAP
   emission *= srgb_to_linear(emission_texel);
 #endif
+#ifdef INTERIOR
+#ifdef VERTEX_COLOR
+  // An interior surface's emission is its lighting, and its vertex colours are
+  // that light's palette (the people in a shop): the emission takes them, more
+  // from above than from the side and less toward the floor, as the 3DS's
+  // bake does (pica.rs) and the reference's indoor wardrobe. The PS Vita's
+  // program adds the emission as it is, which leaves these figures pale.
+  emission *= srgb_to_linear(in.color.rgb) * ((0.6 + 0.4 * Ng.y + 0.12 * abs(Ng.x)) * mix(0.62, 1.0, smoothstep(0.05, 1.45, in.world.y)));
+#endif
+#endif
   color += emission;
 #ifndef INTERIOR
   color = hazed(color, in.haze, dist);
