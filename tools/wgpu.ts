@@ -1,30 +1,38 @@
 #!/usr/bin/env bun
-// Pocket Atlas drawn with wgpu (wgpu/): the atlas screen in a browser tab over
-// WebGPU, and on this machine, where a frame goes to a file.
+// Pocket Atlas drawn with wgpu (wgpu/): the atlas screen and the places in a
+// browser tab over WebGPU, and on this machine, where a frame goes to a file.
 //
 //   bun tools/wgpu.ts build                        wasm32 + wasm-bindgen + the page + the interface for the four
 //                                                  devices (tools/atlas-ui.ts) on PocketJS's UI core + the globe's
-//                                                  surface (tools/atlas-globe.ts) → .pocket-build/wgpu/site
+//                                                  surface (tools/atlas-globe.ts) + the places' packs that are
+//                                                  here → .pocket-build/wgpu/site
 //   bun tools/wgpu.ts serve [--port 8788]          the site, with byte ranges
 //   bun tools/wgpu.ts dist [--piece 2]             the directory a static host serves → .pocket-build/wgpu/dist:
 //                                                  the page, the module under its build's name, and the globe's
-//                                                  surface cut into pieces of that many MiB with their manifest
+//                                                  surface and every pack cut into pieces of that many MiB with
+//                                                  their manifests
 //   bun tools/wgpu.ts serve --dist                 that directory as such a host serves it: no byte ranges
 //   bun tools/wgpu.ts shot [--out f.png] [--shape ipod] [--at x,y,r] [--face lat,lon] [--pin N] [--pins LIST]
 //                                                  the globe on this machine's GPU (Metal) → a PNG and the status
-//   bun tools/wgpu.ts check [--headed] [--seconds 3] [--dist]   the page in Chrome, driven by keys, pointer and
-//                                                  touch: each device's atlas screen, its lists, a place that is
-//                                                  not here, another device picked, what a frame and a redraw of
-//                                                  the interface cost, what the first frame needs on a slow line
+//   bun tools/wgpu.ts shot --place ID [--out f.png] [--shape vita] [--shot 0] [--part 0.5] [--time 25] [--tour S]
+//                                                  a place from one of its authored shots, or after S seconds of
+//                                                  its tour
+//   bun tools/wgpu.ts check [--headed] [--seconds 3] [--dist] [--quick]
+//                                                  the page in Chrome, driven by keys, pointer and touch: each
+//                                                  device's atlas screen and its lists, a place entered through
+//                                                  the interface and left again, every place's held view beside
+//                                                  this machine's own, another device picked, what a frame costs,
+//                                                  what a first frame needs on a slow line (--quick: of one place)
 //                                                  → .pocket-build/validation/web/
 //
 // `build` compiles the interface as tools/atlas-ui.ts does: it needs `bun install` in vendor/pocketjs and in
 // web/, the globe's export (.pocket-build/atlas/globe, web/scripts/export-atlas.ts) and, for the cards'
-// pictures, the places' previews (.pocket-build/places/<id>/preview.png).
+// pictures, the places' previews (.pocket-build/places/<id>/preview.png). A place can be entered when its pack
+// for the PS Vita is here: .pocket-build/places/<id>/<id>.place (`bun tools/atlas.ts place <id>`).
 // The site and the captures stay under the ignored .pocket-build/.
 
 import { $ } from "bun";
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 import { join, resolve } from "node:path";
 import { POCKET3D_ICON } from "../vendor/pocketjs/tools/pocket3d-icon.ts";
@@ -43,6 +51,16 @@ const SURFACE = 1024;
 // What the host a build is deployed to allows (Pocket Studio's site deployments): the size of a file, the
 // files and the bytes of a deployment, and the top-level names it keeps for itself.
 const HOST = { file: 32 << 20, files: 4000, bytes: 1 << 30, reserved: ["play", "runtime"] };
+// The places' packs as the PS Vita reads them: the browser draws the same file.
+const PACKS = join(ROOT, ".pocket-build/places");
+const pack = (id: string) => join(PACKS, id, `${id}.place`);
+const places = () => (existsSync(PACKS) ? readdirSync(PACKS).filter((id) => existsSync(pack(id))).sort() : []);
+/** The page with its packs named: a place's id to where its pack is, from the page. */
+function named(page: string, packs: Record<string, string>) {
+  const tag = /<meta name="pocket-places" content="[^"]*">/;
+  if (!tag.test(page)) throw new Error("wgpu/page/index.html has no pocket-places");
+  return page.replace(tag, `<meta name="pocket-places" content="${JSON.stringify(packs).replaceAll("&", "&amp;").replaceAll('"', "&quot;")}">`);
+}
 
 const [command, ...rest] = process.argv.slice(2);
 const option = (flag: string, fallback = "") => {
@@ -74,9 +92,19 @@ async function build() {
     for (const file of ["atlas.js", "atlas.pak", "plan.json"]) cpSync(join(built.directory, file), join(SITE, "ui", device, file));
   }
   writeFileSync(join(SITE, "globe.rgba"), globeSurface(SURFACE));
+  // The packs that are here, each one file the site's server answers byte ranges of: a link, not a copy.
+  const here = places();
+  mkdirSync(join(SITE, "places"));
+  for (const id of here) symlinkSync(realpathSync(pack(id)), join(SITE, "places", `${id}.place`));
+  writeFileSync(join(SITE, "index.html"), named(readFileSync(join(SITE, "index.html"), "utf8"), Object.fromEntries(here.map((id) => [id, `places/${id}.place`]))));
 
   const sizes: Record<string, { bytes: number; gzip: number }> = {};
   for (const file of files(SITE).sort()) {
+    // (a pack's blocks are compressed already)
+    if (file.startsWith("places/")) {
+      sizes[file] = { bytes: statSync(join(SITE, file)).size, gzip: 0 };
+      continue;
+    }
     const bytes = readFileSync(join(SITE, file));
     sizes[file] = { bytes: bytes.length, gzip: gzipSync(bytes, { level: 9 }).length };
   }
@@ -101,7 +129,7 @@ async function dist(pieceBytes: number) {
   await build();
   rmSync(DIST, { recursive: true, force: true });
   // (everything of the site but the page, its icon and the surface: the module, the scripts, the interface)
-  const app = files(SITE).filter((file) => !["index.html", "icon.png", "globe.rgba"].includes(file)).sort().map((file) => [file, readFileSync(join(SITE, file))] as const);
+  const app = files(SITE).filter((file) => !["index.html", "icon.png", "globe.rgba"].includes(file) && !file.startsWith("places/")).sort().map((file) => [file, readFileSync(join(SITE, file))] as const);
   const id = sha256(Buffer.concat(app.flatMap(([file, bytes]) => [Buffer.from(file), bytes]))).slice(0, 12);
   for (const [file, bytes] of app) {
     mkdirSync(join(DIST, "app", id, file, ".."), { recursive: true });
@@ -111,8 +139,15 @@ async function dist(pieceBytes: number) {
   // (pocket_web_wgpu::source::Manifest), named by the surface's: a host that answers no byte ranges serves it.
   const cut = cutPack(join(SITE, "globe.rgba"), join(DIST, "globe"), pieceBytes);
   const manifest = `globe/${cut.manifest}`;
-  // The page names its build and its surface.
-  let page = readFileSync(join(SITE, "index.html"), "utf8");
+  // Every pack the same way, under the place's id: a place's first frame fetches the pieces its table, its
+  // geometry and its animation lie in, and a texture's pieces as the texture is read.
+  const packs: Record<string, { manifest: string; pieces: number; bytes: number; sha256: string }> = {};
+  for (const id of places()) {
+    const cut = cutPack(pack(id), join(DIST, "places", id), pieceBytes);
+    packs[id] = { manifest: `places/${id}/${cut.manifest}`, pieces: cut.pieces.length, bytes: cut.bytes, sha256: cut.sha256 };
+  }
+  // The page names its build, its surface and its packs.
+  let page = named(readFileSync(join(SITE, "index.html"), "utf8"), Object.fromEntries(Object.entries(packs).map(([id, p]) => [id, p.manifest])));
   for (const [from, to] of [
     [`<meta name="pocket-globe" content="globe.rgba">`, `<meta name="pocket-globe" content="${manifest}">`],
     [`href="pocket3d-stage.css"`, `href="app/${id}/pocket3d-stage.css"`],
@@ -136,7 +171,7 @@ async function dist(pieceBytes: number) {
     ...readdirSync(DIST).filter((name) => HOST.reserved.includes(name)).map((name) => `${name}/ is the host's own`),
   ];
   if (refused.length) throw new Error(`the host would refuse the directory: ${refused.join("; ")}`);
-  const report = { directory: DIST, files: all.length, bytes: total, largest, build: id, page: part("index.html"), app: part("app/"), globe: { ...part("globe/"), manifest, pieces: cut.pieces.length, piece: pieceBytes, sha256: cut.sha256 } };
+  const report = { directory: DIST, files: all.length, bytes: total, largest, build: id, page: part("index.html"), app: part("app/"), globe: { ...part("globe/"), manifest, pieces: cut.pieces.length, piece: pieceBytes, sha256: cut.sha256 }, places: { ...part("places/"), packs } };
   writeFileSync(join(BUILD, "dist.json"), JSON.stringify(report, null, 1));
   return report;
 }
@@ -177,6 +212,13 @@ async function shot(out: string, extra: string[], from: string) {
   return JSON.parse(await $`${SHOT} --globe ${from} --out ${out} ${extra}`.text());
 }
 
+/** A place on this machine's GPU, from its pack or from a manifest of its pieces. */
+async function placeShot(id: string, out: string, extra: string[], from = pack(id)) {
+  await $`cargo build --release --locked --bin atlas-shot`.cwd(CRATE).quiet();
+  mkdirSync(resolve(out, ".."), { recursive: true });
+  return JSON.parse(await $`${SHOT} --place ${from} --out ${out} ${extra}`.text());
+}
+
 const stamp = () => new Date().toISOString().replace(/[:.]/g, "-");
 const validation = (run: string) => {
   const directory = join(ROOT, ".pocket-build/validation/web", run);
@@ -197,6 +239,13 @@ if (command === "build") {
   if (!built()) await build();
   const server = serve(SITE, Number(option("--port", "8788")), true);
   console.log(`http://127.0.0.1:${server.port}/   (${SITE})`);
+} else if (command === "shot" && option("--place")) {
+  const id = option("--place");
+  if (!existsSync(pack(id))) throw new Error(`${pack(id)} is not here: bun tools/atlas.ts place ${id}`);
+  const out = resolve(option("--out", join(validation(`shot-${stamp()}`), `${id}.png`)));
+  const passed = ["--shape", "--size", "--samples", "--shot", "--part", "--time", "--frames", "--tour", "--status"].flatMap((flag) => (option(flag) ? [flag, option(flag)] : []));
+  console.log(JSON.stringify(await placeShot(id, out, passed), null, 1));
+  console.log(out);
 } else if (command === "shot") {
   if (!existsSync(join(SITE, "globe.rgba"))) {
     mkdirSync(SITE, { recursive: true });
@@ -208,6 +257,10 @@ if (command === "build") {
   console.log(out);
 } else if (command === "check") {
   // (--dist: the deployable directory, served whole files only, with the surface in pieces)
+  const here = places();
+  if (!here.length) throw new Error(`no place's pack is under ${PACKS}: bun tools/atlas.ts place tokyo-konbini`);
+  // (the place that is entered through the interface and measured on a slow line when --quick asks for one)
+  const one = here.includes("tokyo-konbini") ? "tokyo-konbini" : here[0]!;
   const deployed = rest.includes("--dist") ? await dist(Math.round(Number(option("--piece", "2")) * (1 << 20))) : null;
   const sizes = deployed ? JSON.parse(readFileSync(join(BUILD, "site.json"), "utf8")).sizes : await build();
   // (the browser driver is the reference's: web/ has it)
@@ -233,6 +286,11 @@ if (command === "build") {
     page.on("pageerror", (error: unknown) => problems.push(String(error)));
     await page.goto(`${origin}/${address}`);
     const status = async () => JSON.parse((await page.evaluate("pocketAtlas.atlas.status()")) as string);
+    /** The shell's scene is one of `scenes`; with `settled`, every texture of the open place is on the GPU. */
+    const scene = async (scenes: string[], settled = false) => {
+      await page.waitForFunction(`(() => { const s = JSON.parse(pocketAtlas.atlas.status()); return ${JSON.stringify(scenes)}.includes(s.scene) && (${!settled} || s.scene !== "place" || s.visit.waiting === 0); })()`, undefined, { timeout: 180_000 });
+      return status();
+    };
     const at = async (screen: "upper" | "lower", size: number[], x: number, y: number) => {
       const box = (await page.locator(`[data-pocket-screen=${screen}]`).boundingBox())!;
       return [box.x + (x / size[0]!) * box.width, box.y + (y / size[1]!) * box.height] as const;
@@ -241,6 +299,7 @@ if (command === "build") {
       page,
       problems,
       status,
+      scene,
       /** The globe is drawn, the interface is up and has placed it and its pins, and the card has left. */
       async up() {
         await page.waitForFunction("window.pocketAtlas && ((pocketAtlas.firstGlobe && pocketAtlas.interface?.() && JSON.parse(pocketAtlas.atlas.status()).globe.pins > 0) || pocketAtlas.failure)", undefined, { timeout: 60_000 });
@@ -361,7 +420,7 @@ if (command === "build") {
       const p = await visit("?device=vita");
       await p.up();
       const first = await p.status();
-      expect(`vita: the interface has placed the globe and its pins (${JSON.stringify(first.globe)})`, first.scene === "atlas" && first.globe.surface === SURFACE && first.globe.pins >= 7 && first.globe.lit >= 0 && first.globe.at[2] === 100 && first.installed === 0);
+      expect(`vita: the interface has placed the globe and its pins (${JSON.stringify(first.globe)})`, first.scene === "atlas" && first.globe.surface === SURFACE && first.globe.pins >= 7 && first.globe.lit >= 0 && first.globe.at[2] === 100 && first.places === true && first.installed === here.length && first.visit === null);
       expect(`vita: the screen is the plan's (${JSON.stringify(first.shape)})`, first.shape.width === 960 && first.shape.height === 544 && first.shape.logical[0] === 480 && first.shape.logical[1] === 272);
       await p.save("vita-atlas");
       await p.key("ArrowDown");
@@ -369,12 +428,7 @@ if (command === "build") {
       const second = await p.status();
       expect(`vita: the d-pad moves down the list and the globe turns to the next place (pin ${first.globe.lit} to ${second.globe.lit})`, second.globe.lit !== first.globe.lit);
       await p.save("vita-second");
-      // ○: a visit to a place that is not here.
-      await p.key("KeyZ");
-      await p.page.waitForTimeout(400);
-      const asked = await p.status();
-      expect(`vita: a place whose pack is not here is not entered (${asked.scene}, "${asked.place}")`, asked.scene === "atlas" && asked.place === "");
-      await p.save("vita-not-here");
+      const asked = second;
       // The left stick spins the globe to the east, and Explore sorts from where it settles.
       await p.key("KeyE");
       await p.page.keyboard.down("KeyD");
@@ -391,11 +445,12 @@ if (command === "build") {
       expect(`vita: a saved place is kept by the page (${kept})`, Array.isArray(JSON.parse(kept ?? "{}").saved) && JSON.parse(kept!).saved.length === 1);
       report.kept = kept;
       report.devices.vita = await measure(p);
-      // A place entered all the same (a development host's word) is answered at once: why, and the way back.
-      await p.page.evaluate(`pocketAtlas.atlas.control("enter=tokyo-konbini")`);
+      // A place whose pack is not here (a development host's word for one) is answered at once: why, and the
+      // way back.
+      await p.page.evaluate(`pocketAtlas.atlas.control("enter=nowhere")`);
       await p.page.waitForTimeout(700);
       const refused = await p.status();
-      expect(`vita: no place opens in this build, and the shell says why (${refused.scene}: "${refused.message}")`, refused.scene === "error" && refused.message === "Places cannot be opened in the browser yet.");
+      expect(`vita: a place whose pack is not here does not open, and the shell says why (${refused.scene}: "${refused.message}")`, refused.scene === "error" && refused.message === "This place's pack is not here.");
       await p.save("vita-refused");
       await p.key("KeyX");
       await p.page.waitForTimeout(700);
@@ -423,11 +478,15 @@ if (command === "build") {
       await p.page.waitForTimeout(1500);
       const third = await p.status();
       expect(`psp: the list moves (pin ${first.globe.lit} to ${third.globe.lit})`, third.globe.lit !== first.globe.lit);
-      await p.key("Enter");
-      await p.page.waitForTimeout(400);
-      expect("psp: a place whose pack is not here is not entered", (await p.status()).scene === "atlas");
-      await p.save("psp-not-here");
       report.devices.psp = await measure(p);
+      // ○ enters the place the list is on; ✕ leaves it.
+      await p.key("Enter");
+      const inside = await p.scene(["place", "error"], true);
+      expect(`psp: ○ enters the place (${inside.scene} "${inside.message}", ${JSON.stringify(inside.visit?.size)})`, inside.scene === "place" && inside.visit.size[0] === 480 && inside.visit.size[1] === 272 && inside.visit.trouble === "");
+      await p.page.waitForTimeout(1500);
+      await p.save("psp-place");
+      await p.key("KeyX");
+      expect("psp: ✕ leaves the place", (await p.scene(["atlas"])).visit === null);
       expect(`psp: no error on the page (${p.problems.join("; ")})`, p.problems.length === 0);
       await p.page.close();
     }
@@ -455,11 +514,15 @@ if (command === "build") {
       expect(`3ds: the Circle Pad spins the globe (${tapped.globe.facing[1]} to ${spun.globe.facing[1]})`, round(spun.globe.facing[1], tapped.globe.facing[1]) > 20);
       await p.page.waitForTimeout(1500);
       await p.save("3ds-explore");
-      await p.key("KeyZ");
-      await p.page.waitForTimeout(400);
-      expect("3ds: A on a place whose pack is not here stays on the atlas", (await p.status()).scene === "atlas");
-      await p.save("3ds-not-here");
       report.devices["3ds"] = await measure(p);
+      // A enters the place: the upper screen is the place's, the lower one its controls.
+      await p.key("KeyZ");
+      const inside = await p.scene(["place", "error"], true);
+      expect(`3ds: A enters the place (${inside.scene} "${inside.message}", ${JSON.stringify(inside.visit?.size)})`, inside.scene === "place" && inside.visit.size[0] === 400 && inside.visit.size[1] === 240 && inside.visit.trouble === "");
+      await p.page.waitForTimeout(1500);
+      await p.save("3ds-place");
+      await p.key("KeyX");
+      expect("3ds: B leaves the place", (await p.scene(["atlas"])).visit === null);
       await p.page.screenshot({ path: join(directory, "page-3ds.png") });
       expect(`3ds: no error on the page (${p.problems.join("; ")})`, p.problems.length === 0);
       await p.page.close();
@@ -475,11 +538,6 @@ if (command === "build") {
       await p.page.waitForTimeout(1500);
       const tapped = await p.status();
       expect(`ipod: a row under a finger is the place the globe turns to (pin ${first.globe.lit} to ${tapped.globe.lit})`, tapped.globe.lit !== first.globe.lit);
-      // Visit, on a place whose pack is not here.
-      await p.tap("upper", ipod, 401, 146);
-      await p.page.waitForTimeout(400);
-      expect("ipod: Visit on a place whose pack is not here stays on the atlas", (await p.status()).scene === "atlas");
-      await p.save("ipod-not-here");
       // A finger drags the globe: the surface follows it.
       await p.drag("upper", ipod, [90, 170], [170, 150]);
       const dragged = await p.status();
@@ -488,12 +546,157 @@ if (command === "build") {
       await p.save("ipod-dragged");
       report.devices.ipod = await measure(p);
       // The shell's refusal on a touch panel has its own way back: a button under a finger.
-      await p.page.evaluate(`pocketAtlas.atlas.control("enter=tokyo-konbini")`);
+      await p.page.evaluate(`pocketAtlas.atlas.control("enter=nowhere")`);
       await p.page.waitForTimeout(700);
       expect("ipod: the refusal is shown", (await p.status()).scene === "error");
       await p.save("ipod-refused");
+      await p.page.evaluate(`pocketAtlas.atlas.control("leave")`);
+      await p.page.waitForTimeout(1200);
+      // Visit, under a finger, enters the place.
+      await p.tap("upper", ipod, 401, 146);
+      const inside = await p.scene(["place", "error"], true);
+      expect(`ipod: Visit enters the place (${inside.scene} "${inside.message}")`, inside.scene === "place" && inside.visit.trouble === "");
+      await p.page.waitForTimeout(1500);
+      await p.save("ipod-place");
       expect(`ipod: no error on the page (${p.problems.join("; ")})`, p.problems.length === 0);
       await p.page.close();
+    }
+
+    // ---- a place through the interface (PS Vita): entered from the list, its shots, its pause, its menu,
+    // and back to the atlas
+    {
+      const p = await visit("?device=vita");
+      await p.up();
+      let inside = await p.status();
+      for (let row = 0; row < here.length + 2; row++) {
+        await p.key("KeyZ");
+        inside = await p.scene(["place", "error"]);
+        if (inside.place === one) break;
+        await p.key("KeyX");
+        await p.scene(["atlas"]);
+        await p.key("ArrowDown");
+        await p.page.waitForTimeout(600);
+      }
+      expect(`${one} is entered from the list (${inside.scene}: "${inside.place}" "${inside.message}")`, inside.scene === "place" && inside.place === one);
+      await p.save("place-entering");
+      inside = await p.scene(["place"], true);
+      expect(`${one}: every texture is on the GPU and nothing went wrong (${JSON.stringify(inside.visit)})`, inside.visit.waiting === 0 && inside.visit.trouble === "" && inside.visit.draws > 50 && inside.visit.tour === true);
+      await p.page.waitForTimeout(1000);
+      await p.save("place-tour");
+      // R: the next shot. START: the tour pauses and goes on. △: the menu, which holds the pad. ✕ closes it.
+      await p.key("KeyE");
+      const cut = await p.status();
+      expect(`R cuts to the next shot (${inside.visit.shot} to ${cut.visit.shot})`, cut.visit.shot !== inside.visit.shot);
+      await p.key("Space");
+      const paused = await p.status();
+      await p.key("Space");
+      const resumed = await p.status();
+      expect(`START pauses the tour and resumes it (${paused.visit.paused}, ${resumed.visit.paused})`, paused.visit.paused === true && resumed.visit.paused === false);
+      await p.key("KeyV");
+      await p.page.waitForTimeout(400);
+      const menu = await p.status();
+      await p.save("place-menu");
+      await p.key("KeyX");
+      await p.page.waitForTimeout(400);
+      const closed = await p.status();
+      expect(`△ opens the menu, which holds the pad, and ✕ closes it (${menu.held}, ${closed.held}, ${closed.scene})`, menu.held === true && closed.held === false && closed.scene === "place");
+      // The left stick walks: the tour ends and the camera is the visitor's.
+      await p.page.keyboard.down("KeyW");
+      await p.page.waitForTimeout(900);
+      await p.page.keyboard.up("KeyW");
+      const walked = await p.status();
+      expect(`the stick takes the camera from the tour (${walked.visit.tour}, ${closed.visit.eye} to ${walked.visit.eye})`, walked.visit.tour === false);
+      await p.save("place-walked");
+      await p.key("KeyX");
+      const back = await p.scene(["atlas"]);
+      expect(`✕ leaves the place (${back.scene}, "${back.place}")`, back.place === "" && back.visit === null);
+      await p.page.waitForTimeout(800);
+      await p.save("place-left");
+      report.entered = { place: one, arrival: inside.visit.arrival, openMs: inside.visit.openMs, completeMs: inside.visit.completeMs };
+      expect(`no error on the page (${p.problems.join("; ")})`, p.problems.length === 0);
+      await p.page.close();
+    }
+
+    // ---- every place: a held view in the tab beside this machine's own, and what the place costs, on the PS
+    // Vita's screen and on the PSP's
+    report.places = {};
+    for (const id of here) {
+      const of: Record<string, any> = {};
+      for (const device of ["vita", "psp"]) {
+        const p = await visit(`?device=${device}`);
+        await p.up();
+        await p.page.evaluate(`pocketAtlas.atlas.control("enter=${id}")`);
+        const inside = await p.scene(["place", "error"], true);
+        expect(`${id} on ${device} opens (${inside.scene}: "${inside.message}" "${inside.visit?.trouble}")`, inside.scene === "place" && inside.visit.trouble === "");
+        // (the tour, for what a frame costs while everything moves)
+        const from = (await p.page.evaluate("({ frames: pocketAtlas.frames, at: performance.now() })")) as { frames: number; at: number };
+        await p.page.waitForTimeout(seconds * 1000);
+        const to = (await p.page.evaluate("({ frames: pocketAtlas.frames, at: performance.now() })")) as typeof from;
+        const frameMs = (await p.page.evaluate("pocketAtlas.burst(200)")) as number;
+        // The view held for a picture, once the interface shows nothing over it.
+        await p.page.evaluate(`pocketAtlas.atlas.control("shot=0 part=0.5 time=25")`);
+        await p.page.waitForFunction("JSON.parse(pocketAtlas.atlas.status()).quiet", undefined, { timeout: 30_000 });
+        await p.page.waitForTimeout(400);
+        const tab = await p.save(`${id}-${device}`);
+        const held = await p.status();
+        const v = held.visit;
+        of[device] = { fps: +((to.frames - from.frames) / ((to.at - from.at) / 1000)).toFixed(2), frameMs: +frameMs.toFixed(3), size: v.size, draws: v.draws, mirrorDraws: v.mirrorDraws, shadowDraws: v.shadowDraws, points: v.points, particles: v.particles, triangles: v.triangles, variants: v.variants, pipelines: v.pipelines, textureBytes: v.textureBytes, geometryBytes: v.geometryBytes, targetBytes: v.targetBytes, firstFrameRead: v.headRead, read: v.read, arrival: v.arrival, completeMs: v.completeMs };
+        if (device === "vita") {
+          const mine = join(directory, `${id}-here.png`);
+          const native = await placeShot(id, mine, ["--shape", "vita", "--shot", "0", "--part", "0.5", "--time", "25"], deployed ? join(DIST, deployed.places.packs[id].manifest) : pack(id));
+          of.here = { frameMs: native.frameMs, frameMsWorst: native.frameMsWorst, firstFrameMs: native.firstFrameMs, variants: native.variants, pipelines: native.pipelines };
+          of.tabAgainstHere = await compare(tab, mine);
+          expect(`${id}: the tab's frame is this machine's (${JSON.stringify(of.tabAgainstHere)})`, of.tabAgainstHere.mean < 3);
+        }
+        expect(`${id} on ${device}: no error on the page (${p.problems.join("; ")})`, p.problems.length === 0);
+        await p.page.close();
+      }
+      report.places[id] = of;
+    }
+
+    // ---- what a place's first frame needs: the place entered on a line of 16 Mbit/s, in a browser that has
+    // nothing of it yet
+    report.slow = {};
+    for (const id of rest.includes("--quick") ? [one] : here) {
+      const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+      const p = await visit("?device=vita", context);
+      await p.up();
+      const cdp = await context.newCDPSession(p.page);
+      await cdp.send("Network.enable");
+      await cdp.send("Network.emulateNetworkConditions", { offline: false, latency: 20, downloadThroughput: 2_000_000, uploadThroughput: 1_000_000 });
+      let received = 0;
+      cdp.on("Network.dataReceived", (event: { encodedDataLength: number; dataLength: number }) => (received += event.encodedDataLength || event.dataLength));
+      await p.page.evaluate(`pocketAtlas.atlas.control("enter=${id}")`);
+      await p.page.waitForTimeout(1500);
+      await p.save(`${id}-loading`);
+      const first = await p.scene(["place", "error"]);
+      expect(`${id} opens on a slow line (${first.scene}: "${first.message}")`, first.scene === "place");
+      await p.page.waitForFunction("JSON.parse(pocketAtlas.atlas.status()).visit.arrival >= 0", undefined, { timeout: 60_000 });
+      const arrived = (await p.status()).visit;
+      const firstBytes = received;
+      await p.save(`${id}-first-frame`);
+      const whole = (await p.scene(["place"], true)).visit;
+      report.slow[id] = { bytesPerSecond: 2_000_000, firstFrameMs: Math.round(arrived.arrival), firstFrameBytes: firstBytes, firstFrameRead: arrived.read, waitingAtFirstFrame: arrived.waiting, completeMs: Math.round(whole.completeMs), completeBytes: received, read: whole.read };
+      expect(`${id}: no error on the page (${p.problems.join("; ")})`, p.problems.length === 0);
+      await context.close();
+    }
+
+    // ---- a GPU that reads no BC blocks is told so in one sentence, where a place would be
+    {
+      const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+      await context.addInitScript(`{
+        const features = Object.getOwnPropertyDescriptor(GPUAdapter.prototype, "features").get;
+        Object.defineProperty(GPUAdapter.prototype, "features", { get() { return new Set([...features.call(this)].filter((f) => !f.startsWith("texture-compression"))); } });
+      }`);
+      const p = await visit("?device=vita", context);
+      await p.up();
+      await p.page.evaluate(`pocketAtlas.atlas.control("enter=${one}")`);
+      const refused = await p.scene(["place", "error"]);
+      await p.page.waitForTimeout(600);
+      await p.save("no-bc");
+      report.withoutBC = refused.message;
+      expect(`a GPU without BC textures is told so (${refused.scene}: "${refused.message}")`, refused.scene === "error" && refused.message === "Places need a desktop browser for now.");
+      await context.close();
     }
 
     // ---- another device picked from the page's own text: the new guest places the globe again
