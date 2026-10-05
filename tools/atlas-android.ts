@@ -367,9 +367,9 @@ else if (command === "shots") {
       }
       const panel = cadence(), heat = thermal();
       await capture(join(directory, `${p.id}-${shot}.png`));
-      results.push({ place: p.id, shot, name: s.shotName, window: s.window, samples: s.samples, rate: s.rate, fps: s.fps, frames: s.marked, late: s.markedLate, worstMs: s.worstMs, shown: panel?.shown ?? null, celsius: heat.celsius, cores: heat.cores,
+      results.push({ place: p.id, shot, name: s.shotName, window: s.window, samples: s.samples, rate: s.rate, fps: s.fps, frames: s.marked, late: s.markedLate, worstMs: s.worstMs, drawnMs: s.drawnMs, shown: panel?.shown ?? null, celsius: heat.celsius, cores: heat.cores,
         workMs: s.workMs, swapMs: s.swapMs, intervalMs: s.intervalMs, prepareMs: s.prepareMs, ...(args.includes("--gpu") ? { gpuMs: s.gpuMs } : {}), draws: s.draws, triangles: s.triangles, mirrorTriangles: s.mirrorTriangles, sprites: s.sprites, build: s.build, glError: s.glError });
-      console.log(`${p.id}/${shot} ${s.shotName}: ${s.window.join("x")}, ${s.fps.toFixed(1)} fps, shown for ${panel ? Object.entries(panel.shown).map(([n, count]) => `${n} refresh${n === "1" ? "" : "es"} x${count}`).join(", ") : "?"}, ${s.markedLate} late in ${s.marked}, ${heat.celsius} °C on cores ${heat.cores}, worst ${s.worstMs.toFixed(1)} ms, work ${s.workMs.mean.toFixed(1)} ms${args.includes("--gpu") ? `, GPU ${s.gpuMs.mean.toFixed(1)} ms` : ""}, ${s.triangles + s.mirrorTriangles} triangles in ${s.draws} draws`);
+      console.log(`${p.id}/${shot} ${s.shotName}: ${s.window.join("x")}, ${s.fps.toFixed(1)} fps, shown for ${panel ? Object.entries(panel.shown).map(([n, count]) => `${n} refresh${n === "1" ? "" : "es"} x${count}`).join(", ") : "?"}, ${s.markedLate} late in ${s.marked}, ${heat.celsius} °C on cores ${heat.cores}, GPU ${s.drawnMs} ms to the last tile, worst ${s.worstMs.toFixed(1)} ms, work ${s.workMs.mean.toFixed(1)} ms${args.includes("--gpu") ? `, GPU ${s.gpuMs.mean.toFixed(1)} ms` : ""}, ${s.triangles + s.mirrorTriangles} triangles in ${s.draws} draws`);
       writeFileSync(join(directory, "receipt.json"), JSON.stringify({ scenario: "authored shot midpoints, loop frozen", frames, settings, results }, null, 2));
     }
   await control({ time: -1, shot: 0, profile: false });

@@ -404,7 +404,11 @@ static bool profile, loaded, statistics, quiet;
 static double refresh = 1 / 60.0, latch, streak_from, due;
 static unsigned streak, longest;
 static bool synced; // the driver's syncs, not the swap's returns
-static float swap_expected = 0.004f;
+// The fence ahead of the last swap, when that swap was called, and how long
+// the GPU took from there to the frame's last tile (smoothed).
+static GLsync drawn;
+static double swapped;
+static float gpu_expected = 0.012f;
 static void latched(double at) {
   if (at == latch)
     return;
@@ -480,10 +484,10 @@ static void status(void) {
   int at = snprintf(text, sizeof text,
                     "{\"build\":\"%s\",\"state\":\"%s\",\"error\":\"%s\",\"place\":\"%s\",\"shots\":%u,\"shot\":%u,\"shotName\":\"%s\","
                     "\"time\":%.3f,\"cinematic\":%s,\"paused\":%s,\"camera\":[%.3f,%.3f,%.3f],\"frame\":%u,\"fps\":%.3f,"
-                    "\"window\":[%d,%d],\"fixedLines\":%d,\"refreshMs\":%.4f,\"refreshes\":\"%s\",\"samples\":%d,\"rate\":%d,\"late\":%u,\"marked\":%u,\"markedLate\":%u,\"worstMs\":%.2f,",
+                    "\"window\":[%d,%d],\"fixedLines\":%d,\"refreshMs\":%.4f,\"refreshes\":\"%s\",\"drawnMs\":%.2f,\"samples\":%d,\"rate\":%d,\"late\":%u,\"marked\":%u,\"markedLate\":%u,\"worstMs\":%.2f,",
                     ATLAS_BUILD, scenes[interface.scene], error, interface.place, scene_shot_count(), atlas.shot,
                     loaded ? scene_shot_name(atlas.shot) : "", atlas.time, atlas.cinematic ? "true" : "false", atlas.paused ? "true" : "false",
-                    atlas.position[0], atlas.position[1], atlas.position[2], frames, fps(), width, height, fixed_lines, refresh * 1000, synced ? "driver" : "swap", samples, rate, late, marked, marked_late, worst);
+                    atlas.position[0], atlas.position[1], atlas.position[2], frames, fps(), width, height, fixed_lines, refresh * 1000, synced ? "driver" : "swap", rate == 30 && loaded ? gpu_expected * 1000 : 0.0f, samples, rate, late, marked, marked_late, worst);
   // The last 120 frames shown.
   at += summary(text + at, sizeof text - at, "workMs", timing[0], NULL);
   at += summary(text + at, sizeof text - at, "swapMs", timing[1], NULL);
@@ -655,13 +659,13 @@ static void graphics(void) {
 // The guard of a place's frame rate. The display processor scales a smaller
 // window buffer to the panel at no cost to the GPU, so the buffer's height is
 // what a place pays its frame rate with: 720 lines on entering, and one step
-// down (648, 576, 540) each time half of 30 frames took 4 % longer than the
-// rate allows. A frame the GPU cannot finish in time is shown when it is
-// done, so the guard reads intervals, and it asks for half the frames because
-// a place's first second has slow frames of its own (first uses of textures
-// and programs). It does not climb: a place keeps the size its heaviest view
+// down (648, 576, 540) each time half of 30 frames were slow: 4 % longer than
+// the rate allows from one swap to the next, or at 30 a GPU time within
+// 3.5 ms of two refreshes. It asks for half the frames because a place's
+// first second has slow frames of its own (first uses of textures and
+// programs). It does not climb: a place keeps the size its heaviest view
 // so far could hold.
-static void guard(float interval) {
+static void guard(bool slow_frame) {
   static unsigned judged, slow, settling;
   static int judged_lines;
   if (!loaded || fixed_lines || profile || lines != judged_lines) {
@@ -673,7 +677,7 @@ static void guard(float interval) {
     settling--;
     return;
   }
-  judged++, slow += interval > 1040.0f / rate;
+  judged++, slow += slow_frame;
   if (judged < 30)
     return;
   if (slow >= 15 && lines > LEAST_LINES)
@@ -691,6 +695,7 @@ static bool regraphics(void) {
     snprintf(back, sizeof back, "{\"view\":[%f,%f,%f,%f,%f,%f,%f],\"pause\":%s}", atlas.position[0], atlas.position[1], atlas.position[2], atlas.target[0],
              atlas.target[1], atlas.target[2], atlas.fov, atlas.paused ? "true" : "false");
   float time = atlas.time;
+  drawn = 0; // the old context's
   scene_free();
   drop_surface();
   eglDestroyContext(display, context);
@@ -931,31 +936,47 @@ static void run(void) {
     const GLenum unused[] = {GL_DEPTH, GL_STENCIL};
     glInvalidateFramebuffer(GL_FRAMEBUFFER, 2, unused);
     double submitted = now();
-    // At 30 frames a second in a place, a frame is queued in the middle of
-    // every second slot between two latches: the swap is called as long
-    // before that as the last swaps took.
+    // At 30 frames a second in a place, a frame is ready in the middle of
+    // every second slot between two refreshes. The swap returns once the
+    // frame is queued, long before the GPU has drawn it, and the display
+    // takes a frame at the first refresh after its last tile: a frame whose
+    // last tile falls beside a refresh is shown for one refresh or three by
+    // turns. So the swap is called as long before the slot as the GPU took
+    // over the frames before, which a fence set ahead of each swap tells.
     bool paced = rate == 30 && loaded;
     // A sync the driver timed within the last tenth of a second is where the refreshes fall.
     double sync = vertical_sync();
     synced = sync > 0 && submitted - sync < 0.1;
     if (synced)
       latched(sync);
+    if (drawn) {
+      // The frame before: its last tile is waited for, or was drawn while this frame was put together.
+      GLenum fence = glClientWaitSync(drawn, 0, paced ? 60000000 : 0);
+      float took = (float)(now() - swapped);
+      if (fence == GL_CONDITION_SATISFIED || (fence == GL_ALREADY_SIGNALED && took < gpu_expected))
+        gpu_expected += (took - gpu_expected) * 0.3f;
+      glDeleteSync(drawn);
+      drawn = 0;
+    }
     if (paced) {
-      if (due < submitted - refresh || due > submitted + 3 * refresh)
-        due = slot_after(submitted + swap_expected);
-      double wait = due - swap_expected - 0.001 - submitted;
+      double at = now();
+      if (due < at - refresh || due > at + 3 * refresh)
+        due = slot_after(at + gpu_expected);
+      double wait = due - gpu_expected - at;
       if (wait > 0)
         usleep((useconds_t)(wait * 1e6));
+      drawn = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
     }
     double swapping = now();
     eglSwapBuffers(display, surface);
     double presented = now();
     float took = (float)(presented - swapping);
-    swap_expected += (took - swap_expected) * 0.25f;
-    if (paced)
-      // Two refreshes on; a frame that came late keeps two from where it landed.
-      due = (presented > due + refresh * 0.5 ? slot_after(presented) : due) + 2 * refresh;
-    else if (!synced && !loaded && took > 0.003f)
+    swapped = swapping;
+    if (paced) {
+      // Two refreshes on; a frame that will be late keeps two from where it lands.
+      double ready = swapping + gpu_expected;
+      due = (ready > due + refresh * 0.5 ? slot_after(ready) : due) + 2 * refresh;
+    } else if (!synced && !loaded && took > 0.003f)
       latched(presented);
     float interval = (float)(presented - previous) * 1000;
     timing[0][frames % WINDOW] = (float)(submitted - start) * 1000;
@@ -968,7 +989,8 @@ static void run(void) {
       if (interval > worst)
         worst = interval;
     }
-    guard(interval);
+    // At 30 the GPU's own time says a frame cannot make every second refresh before the intervals do.
+    guard(interval > 1040.0f / rate || (paced && gpu_expected > 2 * refresh - 0.0035));
     frames++;
     previous = presented;
     if (presented - reported > 0.5) {
