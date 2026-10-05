@@ -86,4 +86,6 @@ On the phone: the atlas has the globe at the left (a finger spins it) and the li
 
 Status files are written into the app's directory world-readable and read with `adb pull`, which costs the app nothing. The receipt and captures stay in `.pocket-build/validation/android/`; device results belong in the pull request.
 
-Not verified by the tool: touch handling under real fingers, and thermal behaviour over a long session (the SoC read 57 – 60 °C with two or three of its four cores online during the measurements).
+`shots` records the SoC's hottest sensor and the cores online with each shot (`thermal`): above about 60 °C this phone runs on two cores at 1.0 GHz, so let it rest before a run that is to be kept. The GPU's governor lowers its clock when a frame leaves slack: `drawnMs` is how long a frame took, not what it costs at full clock (`profile: true` with the rate at 60 gives that). The results of the last run are in [the main README](../README.md#redmi-1s).
+
+Not verified by the tool: touch handling under real fingers, tours and walks (the guard does not climb back within a visit), and thermal behaviour over a long session (the SoC reached 77 °C after 25 minutes of sweeps).

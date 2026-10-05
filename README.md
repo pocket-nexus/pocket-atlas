@@ -308,6 +308,22 @@ Kamakura-Kōkōmae Crossing holds 30.0 fps at step 0 in every shot with the came
 
 Radio Kaikan at Blue Hour holds 30.0 fps at step 0 in every shot with the camera rig and governor running (`shots --seconds 130`): Arrival, Facade, Band, Vista, Corner and Clock draw 148–399 draws and 34k–61k triangles. Serialized GPU time (`profile --time 5`) is 17.9–19.5 ms: main pass 10.2–11.7 ms, bloom 4.2 ms, composite 2.1 ms, display scale 1.4 ms.
 
+### Redmi 1S
+
+All seven places on a Redmi 1S (Android 4.3, Adreno 305), the release build as installed, at the app's 30 frames a second with the window's height left to the guard (`bun tools/atlas-android.ts shots --rate 30`): each authored shot at its midpoint, the loop frozen at 25 s, 240 frames. "Shown" is the compositor's record of each shot's last 125 frames (`dumpsys SurfaceFlinger --latency`); "GPU" is the time from the swap's call to the frame's last tile, by a fence, at whatever clock the GPU's governor chose. The phone had rested to 41 °C and read 49 – 58 °C during the run, with one or two of its four cores online.
+
+| Place | Shots | Window lines | fps | Shown for two refreshes | GPU ms | CPU ms | Triangles | Draws |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Rainy Night Konbini | 6 | 720 | 29.9 – 30.0 | 748 of 752 frames (99.5 %) | 17.0 – 24.7 | 4.3 – 7.1 | 73 – 172k | 31 – 132 |
+| Suga Shrine Stairs | 5 | 648 → 576 | 30.0 | 623 of 627 frames (99.4 %) | 20.3 – 27.5 | 2.0 – 2.7 | 115 – 157k | 36 – 43 |
+| Radio Kaikan at Blue Hour | 6 | 720 | 29.9 – 30.0 | 748 of 755 frames (99.1 %) | 16.8 – 24.8 | 1.6 – 3.7 | 51 – 113k | 43 – 112 |
+| Kamakura-Kōkōmae Crossing | 6 | 720 | 29.9 – 30.0 | 752 of 755 frames (99.6 %) | 19.6 – 22.7 | 1.6 – 2.8 | 117 – 188k | 52 – 71 |
+| Sangubashi in Bloom | 6 | 576 | 30.0 | 753 of 753 frames (100.0 %) | 21.9 – 26.6 | 3.2 – 7.8 | 142 – 196k | 61 – 274 |
+| Griffith Observatory at Blue Hour | 6 | 720 | 30.0 | 740 of 752 frames (98.4 %) | 18.6 – 24.6 | 1.9 – 4.0 | 62 – 159k | 29 – 92 |
+| Lombard Street in Bloom | 6 | 720 | 30.0 – 30.1 | 754 of 754 frames (100.0 %) | 19.6 – 28.1 | 1.6 – 3.3 | 84 – 199k | 18 – 37 |
+
+At 60 frames a second (`shots --rate 60`, the phone at 58 – 68 °C) the guard takes the window to 540 – 648 lines: the konbini, Radio Kaikan, Kamakura and Griffith show 99.9 % of their frames for one refresh and Lombard Street 97.5 %; Suga Shrine Stairs (42.7 – 59.7 fps) and Sangubashi (41.9 – 50.4 fps) do not hold it. These are fixed views; tours and walks were not measured. See [android/README.md](android/README.md#measuring).
+
 ## License
 
 MIT
