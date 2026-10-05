@@ -44,6 +44,14 @@ as well: the same v3 table with texels in plain rows, surfaces up to 512, and
 a `FELD` section of light sprites, under PLCE v1 with six sections so that
 neither device loads the other's pack. A change to that lowering must leave
 the 3DS pack byte-identical unless the 3DS is meant to change.
+The Redmi 1S (`--target android`, GLES 3 on an Adreno 305) is the same table a
+third time, with what `adreno.rs` adds: opaque surfaces as ETC2 RGB8 (format 5)
+up to 1024 texels, each material's normal map lit once and multiplied into its
+texture, and for a place with an authored sun the `SUNL` section (the shadow
+camera, its bias, the shade's tint) with material flag 1024 on every surface
+whose vertex alpha is the share of its colour left in shadow. Its container is
+PLCE v0x201. The 3DS and iPod packs must stay byte-identical under a change to
+it as well.
 Previously a Vita version bump leaked into PICA output and the C reader rejected
 it; the integration test now checks cooked output using the runtime's C format
 header and header validator.
@@ -168,7 +176,7 @@ version/capability and resource integrity. Run `cargo test --locked --workspace`
 
 ## Profiles, recipes and compile receipts
 
-`profiles/vita30.json`, `old3ds30.json`, `psp30.json` and `ipod30.json` describe the existing
+`profiles/vita30.json`, `old3ds30.json`, `psp30.json`, `ipod30.json` and `redmi1s30.json` describe the existing
 runtimes: host OS/ABI, GPU family, render/display dimensions, auxiliary display,
 frame target, texture policies, animation palette budget and reader limits.
 `--profile` accepts a built-in ID or a JSON file. A custom profile can tune the

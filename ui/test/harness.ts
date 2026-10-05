@@ -6,12 +6,12 @@ import type { Canvas } from "@napi-rs/canvas";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { PROP } from "../../vendor/pocketjs/contracts/spec/spec.ts";
-import { __packTouch, createTouchHitFacts } from "../../vendor/pocketjs/framework/src/touch.ts";
+import { __packTouch, __packTouchWide, createTouchHitFacts } from "../../vendor/pocketjs/framework/src/touch.ts";
 import { createWasmUi } from "../../vendor/pocketjs/hosts/web/wasm-ops.js";
 import type { Command, HostState } from "../app/protocol.ts";
 
 const root = resolve(import.meta.dir, "../..");
-export type Device = "psp" | "vita" | "3ds" | "ipod";
+export type Device = "psp" | "vita" | "3ds" | "ipod" | "android";
 
 /** A device's renderer, reduced to the state the interface sees. */
 export class Mock {
@@ -74,6 +74,7 @@ const VIEW: Record<Device, { w: number; h: number; density: number; aux?: [numbe
   vita: { w: 480, h: 272, density: 2 },
   "3ds": { w: 400, h: 240, density: 1, aux: [320, 240] },
   ipod: { w: 480, h: 320, density: 2 },
+  android: { w: 640, h: 360, density: 2 },
 };
 
 export interface Rig {
@@ -118,7 +119,8 @@ export async function boot(device: Device, installed: string[]): Promise<Rig> {
   const ops = wasm.ops as any;
   const facts = createTouchHitFacts((x, y) => (view.aux ? ops.hitTestBoundsAuxiliary(x, y) : ops.hitTestBounds(x, y)));
   const frame = (buttons: number, touch: { x: number; y: number; id?: number }[]) => {
-    const packed = touch.map((t) => __packTouch(t.id ?? 1, t.x, t.y));
+    // Past 511 logical pixels a contact travels in the wire's wide form, as a host packs it.
+    const packed = touch.map((t) => (t.x > 511 || t.y > 511 ? __packTouchWide : __packTouch)(t.id ?? 1, t.x, t.y));
     const surface = view.aux ? 1 : 0;
     globals.frame(buttons, undefined, packed, facts(packed), packed.map(() => surface));
     for (const line of pending.splice(0)) mock.receive(JSON.parse(line));

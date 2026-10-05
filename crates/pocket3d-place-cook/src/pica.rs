@@ -7,6 +7,9 @@
 //! cooked, one texture times one vertex colour (`gles` below). That pack keeps
 //! its texels in plain rows.
 //!
+//! The Redmi 1S (GLES 3 on an Adreno 305, `android/`) draws that table too,
+//! from a container of its own with what `adreno.rs` adds.
+//!
 //! A dusk vista adds, on both, its haze in the vertex colours (`vista`) and
 //! its lights as sprites (`light_fields`, the `FELD` section), both cooked as
 //! seen from the middle of the camera shots.
@@ -765,7 +768,8 @@ fn main_lods<'a>(indices: &'a [u32], levels: &'a [crate::source::Lod]) -> impl I
 
 pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,String> {
     let m = scene;
-    let gles = profile.target == crate::ir::Target::Ipod;
+    let adreno = profile.target == crate::ir::Target::Android;
+    let gles = adreno || profile.target == crate::ir::Target::Ipod;
     // An emission map of its own is added to the lit surface (MAT_GLOW): a
     // second fetch on GLES, a second combiner stage on PICA. One texture
     // times one colour draws a floodlit wall white all over where the map
@@ -776,6 +780,13 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         (gles || m.vista_haze.is_some()) && mat.kind == pc::Kind::Standard && mat.emission.is_some() && mat.albedo != mat.emission
             && mat.blend == pc::Blend::Opaque && mat.alpha_test == 0.0 && !mat.interior
     };
+    // The Adreno reads the sun's shadows from a depth map (`adreno.rs`): a lit
+    // surface whose alpha carries nothing else keeps there how much of its
+    // colour is left in shadow.
+    let sunlit = |mat: &pc::Material| {
+        adreno && m.sun.as_ref().is_some_and(|sun| sun.shadow.is_some()) && crate::adreno::takes_sun(mat) && !glows(mat)
+    };
+    let mut shade = crate::adreno::Shade::default();
     let eye = m.camera.shots.iter().flat_map(|s| [s.from.pos, s.to.pos]).map(Vec3::from).sum::<Vec3>()
         / (2 * m.camera.shots.len().max(1)) as f32;
     let mut tex = Vec::new();
@@ -820,7 +831,10 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         let grid = mat
             .uv_anim
             .map_or([1, 1], |a| [a.cols.max(1), a.rows.max(1)]);
-        let mut texture = |ti: Option<u32>| {
+        // The Adreno has no arithmetic to spare for a normal map: its relief is
+        // lit once, in the texture (`adreno::relief`).
+        let relief = if adreno && mat.kind == pc::Kind::Standard { mat.normal } else { None };
+        let mut texture = |ti: Option<u32>, relief: Option<u32>| {
         let key = (
             ti,
             if proc || water {
@@ -829,13 +843,13 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
                 0
             },
             grid,
+            relief.map(|id| (id, mat.normal_scale.to_bits())),
         );
-        if ti.is_some() || proc {
+        if ti.is_some() || proc || relief.is_some() {
             *texkeys.entry(key).or_insert_with(|| {
                 let mut src = if proc {
                     procedural(mat.kind, gles)
-                } else {
-                    let id = ti.unwrap();
+                } else if let Some(id) = ti {
                     let d = decoded
                         .entry(id)
                         .or_insert_with(|| m.textures[id as usize].image());
@@ -844,7 +858,15 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
                         h: d.h,
                         px: d.px.clone(),
                     }
+                } else {
+                    // A surface of one colour: the relief alone is its texture.
+                    let t = &m.textures[relief.unwrap() as usize];
+                    Rgba { w: t.width, h: t.height, px: vec![[1.0; 4]; (t.width * t.height) as usize] }
                 };
+                if let Some(id) = relief {
+                    let normals = decoded.entry(id).or_insert_with(|| m.textures[id as usize].image());
+                    crate::adreno::relief(&mut src, normals, mat.normal_scale);
+                }
                 if water {
                     // Fixed TEV consumes the wave normals as a bounded luminance
                     // field; two independently scrolling layers modulate the
@@ -865,12 +887,14 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
                 let mut level = textures::resize(&src, w, h);
                 let alpha = src.px.iter().any(|p| p[3] < 0.98);
                 // GLES keeps eight bits behind an alpha channel; RGBA4 bands its gradients.
-                let format = if !alpha { 3 } else if gles { 0 } else { 4 };
+                // The Adreno reads an opaque surface as ETC2; type and flipbooks
+                // keep their 16-bit texels, whose edges a block would smear.
+                let format = if !alpha { if adreno && !detail { crate::adreno::FORMAT_ETC2_RGB } else { 3 } } else if gles { 0 } else { 4 };
                 align(&mut tex, 128);
                 let off = tex.len();
                 let mut levels = 0;
                 loop {
-                    tex.extend(texels(&level, format, gles));
+                    tex.extend(if format == crate::adreno::FORMAT_ETC2_RGB { crate::adreno::etc2_rgb(&level) } else { texels(&level, format, gles) });
                     levels += 1;
                     if level.w.min(level.h) <= 8 || level.w / grid[0] <= 4 || level.h / grid[1] <= 4
                     {
@@ -885,8 +909,8 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
                     levels,
                     off as u32,
                     (tex.len() - off) as u32,
-                    ti.map_or(0, |i| m.textures[i as usize].wrap_s as u32),
-                    ti.map_or(0, |i| m.textures[i as usize].wrap_t as u32),
+                    ti.or(relief).map_or(0, |i| m.textures[i as usize].wrap_s as u32),
+                    ti.or(relief).map_or(0, |i| m.textures[i as usize].wrap_t as u32),
                 ]);
                 textures.len() as u32 - 1
             })
@@ -894,7 +918,7 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
             u32::MAX
         }
         };
-        let (tx, glow) = if glows(mat) { (texture(mat.albedo), texture(mat.emission)) } else { (texture(ti), u32::MAX) };
+        let (tx, glow) = if glows(mat) { (texture(mat.albedo, relief), texture(mat.emission, None)) } else { (texture(ti, if water || proc { None } else { relief }), u32::MAX) };
         let mut flags = 0u32;
         if mat.blend != pc::Blend::Opaque {
             flags |= 1;
@@ -925,6 +949,9 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         }
         if glows(mat) {
             flags |= 512;
+        }
+        if sunlit(mat) {
+            flags |= crate::adreno::MAT_SUN;
         }
         let alpha = if mat.kind == pc::Kind::Glass {
             0.16
@@ -1097,16 +1124,18 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
             let world_n = d.node.map_or(n, |i| {
                 world0[i as usize].transform_vector3(n).normalize_or(n)
             });
+            let mut sun_light = Vec3::ZERO;
             if !mat.interior && !matches!(mat.kind, pc::Kind::Unlit | pc::Kind::Water) {
                 if let Some(sun) = &m.sun {
                     let direction = Vec3::from(sun.direction);
                     let visibility = occluder
                         .as_ref()
                         .map_or(1.0, |o| o.ray_visibility(world, world_n, direction, 2000.0));
-                    light += Vec3::from(sun.radiance)
+                    sun_light = Vec3::from(sun.radiance)
                         * (world_n.dot(direction).max(0.0)
                             * visibility
                             * std::f32::consts::FRAC_1_PI);
+                    light += sun_light;
                 }
             }
             let base = Vec3::new(mat.color[0], mat.color[1], mat.color[2]);
@@ -1181,7 +1210,13 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
                         strength = Some(byte(lit.max_element()));
                         emission = Vec3::ZERO;
                     }
-                    tone(albedo * irr + emission)
+                    let lit = tone(albedo * irr + emission);
+                    if sunlit(mat) {
+                        // The same surface with the sun taken away, as a share of the lit colour.
+                        let without = if light.max_element() > 0.0 { irr * ((light - sun_light) / light.max(Vec3::splat(1e-6))) } else { irr };
+                        strength = Some(shade.share(lit, tone(albedo * without + emission)));
+                    }
+                    lit
                 }
             };
             fs(&mut geom, &pos.to_array());
@@ -1614,10 +1649,14 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
     if fields {
         sections.push((*b"FELD", &field, 16));
     }
-    let out = pc::write_versioned(pc::MAGIC, if gles { GLES_CONTAINER_VERSION } else { CONTAINER_VERSION }, &sections);
+    let sunl = m.sun.as_ref().filter(|_| shade.any()).map(|sun| shade.section(sun));
+    if let Some(sunl) = &sunl {
+        sections.push((*b"SUNL", sunl, 16));
+    }
+    let out = pc::write_versioned(pc::MAGIC, if adreno { crate::adreno::CONTAINER_VERSION } else if gles { GLES_CONTAINER_VERSION } else { CONTAINER_VERSION }, &sections);
     Ok(Artifact {
         bytes: out, summary,
-        sections: [("META",meta.len()),("PICA",table.len()),("TEXD",tex.len()),("GEOM",geom.len()),("ANIM",anim.len())].into_iter().chain(fields.then_some(("FELD",field.len()))).map(|(k,v)|(k.into(),v)).collect(),
+        sections: [("META",meta.len()),("PICA",table.len()),("TEXD",tex.len()),("GEOM",geom.len()),("ANIM",anim.len())].into_iter().chain(fields.then_some(("FELD",field.len()))).chain(sunl.as_ref().map(|s| ("SUNL", s.len()))).map(|(k,v)|(k.into(),v)).collect(),
         textures: textures.iter().enumerate().map(|(id,t)|serde_json::json!({"id":id,"sourceTextures":texkeys.iter().filter(|(_,output)|**output as usize==id).filter_map(|(key,_)|key.0).collect::<std::collections::BTreeSet<_>>(),"sources":texkeys.iter().filter(|(_,output)|**output as usize==id).filter_map(|(key,_)|key.0).flat_map(|source|crate::provenance::texture_sources(scene,source as usize)).collect::<std::collections::BTreeSet<_>>(),"width":t[0],"height":t[1],"format":t[2],"levels":t[3],"bytes":t[5]})).collect(),
     })
 }

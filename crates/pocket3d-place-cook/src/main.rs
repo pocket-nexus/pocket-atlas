@@ -14,6 +14,7 @@ macro_rules! progress {
     ($($arg:tt)*) => { if !std::env::args().any(|a|a=="--json") { eprintln!($($arg)*); } };
 }
 
+mod adreno;
 mod atlas;
 mod bake;
 mod env;
@@ -68,7 +69,7 @@ fn args() -> Args {
     let input =
         PathBuf::from(get("--in").unwrap_or_else(|| ".pocket-build/places/tokyo-konbini".into()));
     if a.iter().any(|v| v == "--pica-from") || a.get(1).is_some_and(|v| v == "psp") {
-        fail("device packs are no longer compiler inputs; use --in <PlaceIR or web export directory> --target <vita|3ds|psp|ipod>");
+        fail("device packs are no longer compiler inputs; use --in <PlaceIR or web export directory> --target <vita|3ds|psp|ipod|android>");
     }
     let output = get("--out").map(PathBuf::from).unwrap_or_else(|| {
         if a.get(1).is_some_and(|v| v == "import") {
@@ -176,6 +177,7 @@ fn main() {
             ir::Target::Pica => ".3ds",
             ir::Target::Psp => ".psp",
             ir::Target::Ipod => ".ipod",
+            ir::Target::Android => ".android",
         };
         a.output = a.input.join(format!("{}{suffix}.place", manifest.name));
     }
@@ -186,7 +188,7 @@ fn main() {
     let (scene, log) = analysis::analyze(&a, &manifest.name, &mut pipeline);
     let artifact = match a.target {
         ir::Target::Vita => vita::cook(&scene, &a.profile),
-        ir::Target::Pica | ir::Target::Ipod => pica::cook(&scene, &a.profile),
+        ir::Target::Pica | ir::Target::Ipod | ir::Target::Android => pica::cook(&scene, &a.profile),
         ir::Target::Psp => psp::cook(&scene, &a.profile),
     }
     .unwrap_or_else(|e| fail(e));
