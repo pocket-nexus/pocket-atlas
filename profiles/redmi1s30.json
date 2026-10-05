@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "id": "redmi1s60",
+  "id": "redmi1s30",
   "revision": 1,
   "target": "android",
   "host": {
@@ -9,7 +9,7 @@
   },
   "gpu": "adreno305",
   "presentation": {
-    "targetFps": 60,
+    "targetFps": 30,
     "renderWidth": 1280,
     "renderHeight": 720,
     "displayWidth": 1280,

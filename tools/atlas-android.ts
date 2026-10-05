@@ -29,7 +29,7 @@ const ACTIVITY = `${PACKAGE}/android.app.NativeActivity`;
 /** Where the tool pushes what the app reads from outside its APK. */
 const PUSHED = `/data/local/tmp/${PACKAGE}`;
 const FILES = `/data/data/${PACKAGE}/files`;
-export const PROFILE = "redmi1s60";
+export const PROFILE = "redmi1s30";
 const profile = JSON.parse(readFileSync(join(root, `profiles/${PROFILE}.json`), "utf8"));
 /** A release build has no door for pushed code or packs and always plays the title card. */
 const release = args.includes("--release");
@@ -210,7 +210,7 @@ async function build(): Promise<{ libraries: string; ui: string; build: string }
   const sources = ["android/src/main.c", "android/src/scene.c", "android/src/globe.c", "n3ds/src/interface.c"].map((f) => join(root, f));
   const headers = ["android/src/scene.h", "android/src/shaders.h", "android/src/globe.h", "n3ds/src/format.h", "n3ds/src/control.h", "n3ds/src/interface.h"].map((f) => join(root, f));
   const id = createHash("sha256").update([...sources, ...headers, join(ui.directory, "atlas.js"), join(ui.directory, "atlas.pak"), core, title].map(sha).join()).digest("hex").slice(0, 12);
-  const settings = [`-DATLAS_PACKAGE="${PACKAGE}"`, `-DATLAS_SAMPLES=${profile.presentation.samples ?? 0}`, `-DATLAS_RATE=${profile.presentation.targetFps}`, ...(release ? [] : ["-DATLAS_DEV"])];
+  const settings = [`-DATLAS_PACKAGE="${PACKAGE}"`, `-DATLAS_RATE=${profile.presentation.targetFps}`, ...(release ? [] : ["-DATLAS_DEV"])];
   const strict = ["-std=gnu11", "-Wall", "-Wextra", "-Werror", `-DATLAS_BUILD="${id}"`, ...settings, ...includes];
   // The runtime is rebuilt with the interface: the plan's target, host ABI and density are compiled in.
   rmSync(join(objects, join(pocket, "engine/quickjs-c/pocket_runtime.c").replace(/[^A-Za-z0-9]/g, "_") + ".o"), { force: true });
@@ -311,10 +311,12 @@ else if (command === "capture") await capture(resolve(option("--out", join(valid
 else if (command === "shots") {
   // Every authored shot at its midpoint with the loop frozen at 25 s: frame
   // intervals as shown over 240 frames with no traffic to the phone, then a
-  // capture (outside the window).
+  // capture (outside the window). The settings are the profile's unless
+  // given; `--lines 0` leaves the window's size to the guard, and a shot is
+  // measured once the guard has stopped changing it.
   const directory = resolve(option("--out", join(validation, `shots-${Date.now()}`)));
   // --gpu also times the GPU with a timer query: a time below the refresh, at the cost of the frames' own pacing.
-  const settings = { ...(option("--samples") ? { samples: Number(option("--samples")) } : {}), ...(option("--rate") ? { rate: Number(option("--rate")) } : {}), ...(option("--lines") ? { lines: Number(option("--lines")) } : {}), profile: args.includes("--gpu") };
+  const settings = { samples: Number(option("--samples", "0")), rate: Number(option("--rate", String(profile.presentation.targetFps))), lines: Number(option("--lines", "0")), profile: args.includes("--gpu") };
   const frames = Number(option("--frames", "240"));
   const results: Record<string, unknown>[] = [];
   for (const p of places)
@@ -322,11 +324,16 @@ else if (command === "shots") {
       let s = await control({ place: p.id, shot, time: Number(option("--time", "25")), cinematic: true, pause: false, reflection: true, rain: true, glow: true, ...settings });
       count = s.shots;
       await Bun.sleep(1500);
-      s = await control({ mark: true });
-      do {
-        await Bun.sleep(Math.max(800, (frames + 5 - s.marked) * 1000 / Math.max(s.fps, 5)));
-        s = status();
-      } while (s.marked < frames);
+      for (let size = "", tries = 0; tries < 4; tries++) {
+        s = await control({ mark: true });
+        size = String(s.window);
+        do {
+          await Bun.sleep(Math.max(800, (frames + 5 - s.marked) * 1000 / Math.max(s.fps, 5)));
+          s = status();
+        } while (s.marked < frames && String(s.window) === size);
+        if (String(s.window) === size) break;
+        await Bun.sleep(1500); // the guard changed the window: measure the size it settled at
+      }
       await capture(join(directory, `${p.id}-${shot}.png`));
       results.push({ place: p.id, shot, name: s.shotName, window: s.window, samples: s.samples, rate: s.rate, fps: s.fps, frames: s.marked, late: s.markedLate, worstMs: s.worstMs,
         workMs: s.workMs, swapMs: s.swapMs, intervalMs: s.intervalMs, prepareMs: s.prepareMs, ...(args.includes("--gpu") ? { gpuMs: s.gpuMs } : {}), draws: s.draws, triangles: s.triangles, mirrorTriangles: s.mirrorTriangles, sprites: s.sprites, build: s.build, glError: s.glError });

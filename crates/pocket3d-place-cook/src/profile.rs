@@ -64,7 +64,7 @@ const BUILTINS: [&str; 5] = [
     include_str!("../../../profiles/old3ds30.json"),
     include_str!("../../../profiles/psp30.json"),
     include_str!("../../../profiles/ipod30.json"),
-    include_str!("../../../profiles/redmi1s60.json"),
+    include_str!("../../../profiles/redmi1s30.json"),
 ];
 pub const TARGETS: [Target; 5] = [Target::Vita, Target::Pica, Target::Psp, Target::Ipod, Target::Android];
 impl Profile {

@@ -39,12 +39,10 @@
 #ifndef ATLAS_PACKAGE
 #define ATLAS_PACKAGE "dev.pocketnexus.atlas"
 #endif
-// The settings a launch starts with: profiles/redmi1s60.json.
-#ifndef ATLAS_SAMPLES
-#define ATLAS_SAMPLES 2
-#endif
+// The frame rate a launch starts with: the profile's (profiles/redmi1s30.json).
+// The window starts without multisampling; a visitor may ask for it.
 #ifndef ATLAS_RATE
-#define ATLAS_RATE 60
+#define ATLAS_RATE 30
 #endif
 #define LOG(...) __android_log_print(ANDROID_LOG_INFO, "PocketAtlas", __VA_ARGS__)
 // What tools/atlas-android.ts pushes: commands in every build; the library,
@@ -67,9 +65,11 @@ static bool window_ready, resumed, lost;
 // The window as the panel shows it, and its buffer: the display processor
 // scales a smaller buffer to the panel.
 static int screen_width, screen_height, width, height;
-// What a visitor can set: samples a pixel (the window's EGL config), the
-// buffer's height, frames a second.
-static int samples = ATLAS_SAMPLES, lines = 720, rate = ATLAS_RATE;
+// What a visitor can set: samples a pixel (the window's EGL config) and
+// frames a second. The buffer's height is the guard's (`guard`), or pinned by
+// a command (`fixed_lines`).
+enum { FULL_LINES = 720, LEAST_LINES = 540 };
+static int samples, lines = FULL_LINES, fixed_lines, rate = ATLAS_RATE;
 static int context_samples = -1, surface_lines;
 static PocketContactLatch touches;
 static uint32_t pressed; // buttons for the guest's next turn: the back and menu keys
@@ -437,10 +437,10 @@ static void status(void) {
   int at = snprintf(text, sizeof text,
                     "{\"build\":\"%s\",\"state\":\"%s\",\"error\":\"%s\",\"place\":\"%s\",\"shots\":%u,\"shot\":%u,\"shotName\":\"%s\","
                     "\"time\":%.3f,\"cinematic\":%s,\"paused\":%s,\"camera\":[%.3f,%.3f,%.3f],\"frame\":%u,\"fps\":%.3f,"
-                    "\"window\":[%d,%d],\"samples\":%d,\"rate\":%d,\"late\":%u,\"marked\":%u,\"markedLate\":%u,\"worstMs\":%.2f,",
+                    "\"window\":[%d,%d],\"fixedLines\":%d,\"samples\":%d,\"rate\":%d,\"late\":%u,\"marked\":%u,\"markedLate\":%u,\"worstMs\":%.2f,",
                     ATLAS_BUILD, scenes[interface.scene], error, interface.place, scene_shot_count(), atlas.shot,
                     loaded ? scene_shot_name(atlas.shot) : "", atlas.time, atlas.cinematic ? "true" : "false", atlas.paused ? "true" : "false",
-                    atlas.position[0], atlas.position[1], atlas.position[2], frames, fps(), width, height, samples, rate, late, marked, marked_late, worst);
+                    atlas.position[0], atlas.position[1], atlas.position[2], frames, fps(), width, height, fixed_lines, samples, rate, late, marked, marked_late, worst);
   // The last 120 frames shown.
   at += summary(text + at, sizeof text - at, "workMs", timing[0], NULL);
   at += summary(text + at, sizeof text - at, "swapMs", timing[1], NULL);
@@ -498,6 +498,7 @@ static void publish(void) {
   interface_switch("stats", statistics);
 }
 static void leave(void) {
+  lines = fixed_lines ? fixed_lines : FULL_LINES;
   scene_free();
   loaded = false;
   frames = 0;
@@ -549,8 +550,10 @@ static void obey(const Command *c) {
       atlas.glow = c->value;
     else if (!strcmp(c->text, "stats"))
       statistics = c->value;
-    else if (!strcmp(c->text, "rate"))
+    else if (!strcmp(c->text, "rate")) {
       rate = c->value ? 30 : 60;
+      lines = fixed_lines ? fixed_lines : FULL_LINES;
+    }
     else if (!strcmp(c->text, "smoothing"))
       samples = c->value == 2 ? 4 : c->value == 1 ? 2 : 0;
     break;
@@ -605,6 +608,34 @@ static void graphics(void) {
   if (!globe_load(texels, (unsigned)size))
     snprintf(failure, sizeof failure, "globe.rgba is missing");
   free(texels);
+}
+// The guard of a place's frame rate. The display processor scales a smaller
+// window buffer to the panel at no cost to the GPU, so the buffer's height is
+// what a place pays its frame rate with: 720 lines on entering, and one step
+// down (648, 576, 540) each time 30 frames took 4 % longer than their rate
+// allows or 4 of them were late. A frame the GPU cannot finish in time is
+// shown when it is done, not a refresh later, so the mean says what the count
+// of late frames does not. It does not climb: a place keeps the size its
+// heaviest view so far could hold.
+static void guard(float interval, bool behind) {
+  static unsigned judged, judged_late, settling;
+  static float judged_ms;
+  static int judged_lines;
+  if (!loaded || fixed_lines || profile || lines != judged_lines) {
+    // A new size, or a new place: its first frames are the change's, not the place's.
+    judged = judged_late = 0, judged_ms = 0, settling = 12, judged_lines = lines;
+    return;
+  }
+  if (settling) {
+    settling--;
+    return;
+  }
+  judged++, judged_late += behind, judged_ms += interval;
+  if (judged < 30)
+    return;
+  if ((judged_late >= 4 || judged_ms > 30 * 1040.0f / rate) && lines > LEAST_LINES)
+    lines = lines > 648 ? 648 : lines > 576 ? 576 : LEAST_LINES;
+  judged = judged_late = 0, judged_ms = 0;
 }
 static uint64_t drawn_hash;
 // A change of samples: a new context, and everything on the GPU made again
@@ -707,8 +738,12 @@ static void run(void) {
       // frames around it their place in the refresh: a time, not a frame rate.
       control_bool(json, "profile", &profile);
       samples = (int)control_number(json, "samples", samples);
-      lines = (int)control_number(json, "lines", lines);
+      // `lines` pins the buffer's height; 0 gives it back to the guard.
+      int was = rate, pinned = fixed_lines;
+      fixed_lines = (int)control_number(json, "lines", fixed_lines);
       rate = control_number(json, "rate", rate) < 45 ? 30 : 60;
+      if (fixed_lines != pinned || rate != was)
+        lines = fixed_lines ? fixed_lines : FULL_LINES;
       // Counts frames and late frames from here on.
       bool mark = false;
       if (control_bool(json, "mark", &mark) && mark)
@@ -871,6 +906,7 @@ static void run(void) {
       if (interval > worst)
         worst = interval;
     }
+    guard(interval, behind);
     frames++;
     previous = presented;
     if (presented - reported > 0.5) {

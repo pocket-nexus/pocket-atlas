@@ -29,7 +29,9 @@ enum { MAX_DRAWS = 4096, MAX_FX = 12000 };
 enum { FORMAT_RGBA8 = 0, FORMAT_RGB565 = 3, FORMAT_RGBA4 = 4, FORMAT_ETC2 = 5 }; // AtlasTexture.format
 // The container of this target's pack: crates/pocket3d-place-cook/src/adreno.rs.
 #define PACK_VERSION 0x201
-static unsigned WIDTH = 1280, HEIGHT = 720, MIRROR_WIDTH = 640, MIRROR_HEIGHT = 360;
+// The window's buffer, which the shell may resize, and the mirror, which keeps its size.
+static unsigned WIDTH = 1280, HEIGHT = 720;
+enum { MIRROR_WIDTH = 640, MIRROR_HEIGHT = 360 };
 #define NEAR 0.1f
 typedef struct {
   uint32_t first, count;
@@ -313,7 +315,6 @@ static bool cast_shadows(void) {
 }
 void scene_size(unsigned width, unsigned height) {
   WIDTH = width, HEIGHT = height;
-  MIRROR_WIDTH = width / 2, MIRROR_HEIGHT = height / 2;
 }
 bool scene_load(int file, long long offset, size_t size, const char *path, char *error, size_t capacity) {
   // A rig's vertices get a copy of their joints numbered within the rig.
