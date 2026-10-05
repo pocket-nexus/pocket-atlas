@@ -363,6 +363,8 @@ struct SunPass {
 const MOVING_MAP: u32 = 1024;
 /// Depth bias of a caster in the sun's maps, in units of its depth slope a texel.
 const SUN_SLOPE: i32 = 2;
+/// Samples a texel the static sun map's casters are drawn with (`sun_resolve.wgsl`).
+const SUN_SAMPLES: u32 = 4;
 
 fn depth_target(gpu: &Gpu, label: &str, width: u32, height: u32, samples: u32, sampled: bool) -> wgpu::TextureView {
     gpu.device
@@ -1338,11 +1340,16 @@ impl Renderer {
     fn shadow_pass(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, scene: &Scene, moving: bool) {
         let Some(sun) = &self.sun else { return };
         let Some(map) = (if moving { sun.moving.clone() } else { Some(sun.map.clone()) }) else { return };
-        let (planes, error) = (sun.planes, sun.moving_error);
+        let (planes, error, size) = (sun.planes, sun.moving_error, sun.k[3] as u32);
+        // The static casters are drawn with several samples a texel into a target that lasts this pass, and
+        // the map takes the nearest of each texel's samples. The moving casters (cars, trains) are wider
+        // than a texel and are drawn into their map as they are.
+        let several = (!moving).then(|| depth_target(gpu, "sun map samples", size, size, SUN_SAMPLES, true));
+        let samples = if moving { 1 } else { SUN_SAMPLES };
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some(if moving { "moving casters" } else { "sun map" }),
+            label: Some(if moving { "moving casters" } else { "sun map samples" }),
             color_attachments: &[],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &map, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }), stencil_ops: None }),
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: several.as_ref().unwrap_or(&map), depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }), stencil_ops: None }),
             timestamp_writes: None,
             occlusion_query_set: None,
         });
@@ -1368,7 +1375,7 @@ impl Renderer {
                 Layout::Baked => &["BAKED"],
                 _ => &[],
             };
-            let Some(pipeline) = self.fixed(gpu, if cut { Program::ShadowCut } else { Program::Shadow }, defines, d.layout, Blend::Opaque, Depth::Sun, None, 1) else { continue };
+            let Some(pipeline) = self.fixed(gpu, if cut { Program::ShadowCut } else { Program::Shadow }, defines, d.layout, Blend::Opaque, Depth::Sun, None, samples) else { continue };
             let at = self.stage(&DrawData { model: scene.model_rows(d), dequant: d.dequant, uv: d.uv, base, emissive, ..Default::default() });
             if bound != Some(pipeline) {
                 pass.set_pipeline(self.programs.get(pipeline));
@@ -1385,6 +1392,20 @@ impl Renderer {
                 self.stats.shadow_draws += 1;
             }
         }
+        drop(pass);
+        let Some(several) = several else { return };
+        let Some(pipeline) = self.fixed(gpu, Program::SunResolve, &[], Layout::None, Blend::Opaque, Depth::Fill, None, 1) else { return };
+        let group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("sun map samples"), layout: &self.groups.resolve, entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&several) }] });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("sun map"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &map, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }), stencil_ops: None }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(self.programs.get(pipeline));
+        pass.set_bind_group(0, &group, &[]);
+        pass.draw(0..3, 0..1);
     }
 
     /// A pass over the whole of `target` with a screen program.

@@ -36,6 +36,8 @@ pub enum Program {
     Lights,
     Fx,
     Post,
+    /// The static sun map from its four samples a texel.
+    SunResolve,
 }
 
 impl Program {
@@ -56,6 +58,7 @@ impl Program {
             Program::Lights => format!("{COMMON}\n{}", include_str!("../shaders/place/lights.wgsl")),
             Program::Fx => format!("{COMMON}\n{}", include_str!("../shaders/place/fx.wgsl")),
             Program::Post => include_str!("../shaders/place/post.wgsl").to_string(),
+            Program::SunResolve => include_str!("../shaders/place/sun_resolve.wgsl").to_string(),
         }
     }
 }
@@ -100,6 +103,8 @@ pub enum Depth {
     TestWrite,
     /// A sun map: nearer the sun wins.
     Sun,
+    /// The fragment stage's depth, written whatever is there.
+    Fill,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -248,8 +253,11 @@ pub struct Groups {
     pub material: wgpu::BindGroupLayout,
     pub draw: wgpu::BindGroupLayout,
     pub post: wgpu::BindGroupLayout,
+    /// The sun map's samples, for [`Program::SunResolve`].
+    pub resolve: wgpu::BindGroupLayout,
     surface: wgpu::PipelineLayout,
     screen: wgpu::PipelineLayout,
+    resolving: wgpu::PipelineLayout,
 }
 
 /// Bytes of a draw's constants (`Draw` in common.wgsl) and of a skin's bones.
@@ -288,7 +296,9 @@ impl Groups {
         let post = layout("place screen pass", &[uniform(0, false, 0), texture(1, float), texture(2, float), texture(3, float), texture(4, float), texture(5, float), sampler(6, filtering), sampler(7, filtering), sampler(8, filtering)]);
         let surface = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("place"), bind_group_layouts: &[&pass, &material, &draw], push_constant_ranges: &[] });
         let screen = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("place screen pass"), bind_group_layouts: &[&post], push_constant_ranges: &[] });
-        Groups { pass, material, draw, post, surface, screen }
+        let resolve = layout("place sun map samples", &[wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: wgpu::TextureViewDimension::D2, multisampled: true }, count: None }]);
+        let resolving = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("place sun map samples"), bind_group_layouts: &[&resolve], push_constant_ranges: &[] });
+        Groups { pass, material, draw, post, resolve, surface, screen, resolving }
     }
 }
 
@@ -367,7 +377,11 @@ impl Programs {
         device.push_error_scope(wgpu::ErrorFilter::Validation);
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(&format!("{:?}{:?}", key.program, key.defines)),
-            layout: Some(if key.program == Program::Post { &groups.screen } else { &groups.surface }),
+            layout: Some(match key.program {
+                Program::Post => &groups.screen,
+                Program::SunResolve => &groups.resolving,
+                _ => &groups.surface,
+            }),
             vertex: wgpu::VertexState { module, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &buffers },
             fragment: has_fragment.then(|| wgpu::FragmentState { module, entry_point: Some("fs"), compilation_options: Default::default(), targets: if key.format.is_some() { &targets } else { &[] } }),
             primitive: wgpu::PrimitiveState {
@@ -385,6 +399,7 @@ impl Programs {
                 Depth::Test => depth(false, wgpu::CompareFunction::GreaterEqual),
                 Depth::TestWrite => depth(true, wgpu::CompareFunction::GreaterEqual),
                 Depth::Sun => depth(true, wgpu::CompareFunction::LessEqual),
+                Depth::Fill => depth(true, wgpu::CompareFunction::Always),
             },
             multisample: wgpu::MultisampleState { count: key.samples, ..Default::default() },
             multiview: None,
@@ -479,6 +494,7 @@ mod tests {
                 }
             }
         }
+        make(Program::SunResolve, &[], Layout::None, None, Depth::Fill);
         for layout in [Layout::Static, Layout::Baked] {
             make(Program::Shadow, &[], layout, None, Depth::Sun);
             make(Program::ShadowCut, &[], layout, None, Depth::Sun);
