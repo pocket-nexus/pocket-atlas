@@ -4,7 +4,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/pocket-atlas-interface", "crates/pocket-atlas-model", "crates/pocket3d-place", "crates/pocket3d-place-cook", "crates/pocket3d-place-psp"]
-exclude = ["vita", "psp", "vendor", "android"]
+exclude = ["vita", "psp", "vendor", "android", "wgpu"]
 
 [profile.release]
 debug = false

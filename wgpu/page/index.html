@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Pocket Atlas</title>
+<link rel="icon" href="icon.png">
+<!-- The globe's surface: its file, on a server that answers byte ranges, or the manifest of one cut into pieces. -->
+<meta name="pocket-globe" content="globe.rgba">
+<!-- The places' packs, a JSON object of a place's id to where its pack is: none, while the build draws no place. -->
+<meta name="pocket-places" content="{}">
+<!-- The stage, a device's buttons and the choice of device: PocketJS's browser kernel lays them out. -->
+<link rel="stylesheet" href="pocket3d-stage.css">
+<style>
+  /* The ground of the Pocket3D title card. */
+  html, body { height: 100%; margin: 0; background: #171226; color: #cfc8e6; font: 13px/1.5 ui-sans-serif, system-ui, sans-serif; }
+  body { display: grid; grid-template-rows: auto 1fr auto; overscroll-behavior: none; }
+  header, footer { padding: 8px 16px; display: flex; flex-wrap: wrap; gap: 4px 24px; justify-content: space-between; color: #8f87ab; }
+  header strong { color: #cfc8e6; font-weight: 600; }
+  footer { min-height: 1.5em; }
+  #say { position: fixed; inset: 0; display: grid; place-items: center; padding: 16px; text-align: center; pointer-events: none; }
+</style>
+</head>
+<body>
+<header><strong>Pocket Atlas</strong><nav id="devices" aria-label="Device"></nav></header>
+<main id="stage"><canvas id="scene" hidden></canvas></main>
+<div id="say" role="status"></div>
+<footer><span id="keys"></span></footer>
+<script type="module" src="main.js"></script>
+</body>
+</html>

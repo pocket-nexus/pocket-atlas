@@ -2,6 +2,7 @@
 /target/
 /vita/target/
 /psp/target/
+/wgpu/target/
 /dist/
 node_modules/
 /web/dist/
