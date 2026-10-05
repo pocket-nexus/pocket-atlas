@@ -103,7 +103,10 @@ async function build() {
   if (!existsSync(pack)) throw new Error("cook the PSP place first");
   const ui = await compileInterface("psp");
   const tc = resolvePspBuildToolchain();
-  const runtimeBuild = randomUUID().replaceAll("-", "");
+  // A development build takes a fresh id. `tools/release.ts` names a release build's instead (32 hex digits
+  // from the commit and the hashes of what the package is built from), so two builds of one commit are the same bytes.
+  const runtimeBuild = process.env.POCKET_RELEASE_BUILD ?? randomUUID().replaceAll("-", "");
+  if (!/^[0-9a-f]{32}$/.test(runtimeBuild)) throw new Error("POCKET_RELEASE_BUILD is not 32 hex digits");
   // The interface's runtime (PocketJS's PSP host library) builds QuickJS
   // from C for the same target: PocketJS's own flags for it.
   await $`${tc.rustup} run ${tc.manifest.rust.toolchain} cargo psp --release --locked`

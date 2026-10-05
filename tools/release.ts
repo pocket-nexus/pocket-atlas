@@ -132,10 +132,10 @@ function line(command: string[], cwd = ROOT): string | null {
 }
 
 /** Runs a build command with its output in `log`; a failure carries the log's last lines. */
-async function run(log: string, command: string[]): Promise<void> {
+async function run(log: string, command: string[], env: Record<string, string> = {}): Promise<void> {
   const fd = openSync(log, "a");
   writeSync(fd, `\n$ ${command.join(" ")}\n`);
-  const code = await Bun.spawn(command, { cwd: ROOT, stdin: "ignore", stdout: fd, stderr: fd }).exited;
+  const code = await Bun.spawn(command, { cwd: ROOT, stdin: "ignore", stdout: fd, stderr: fd, env: { ...process.env, ...env } }).exited;
   closeSync(fd);
   if (code !== 0) throw new Error(`\`${command.join(" ")}\` exited ${code}; ${log} ends:\n${readFileSync(log, "utf8").trimEnd().split("\n").slice(-20).join("\n")}`);
 }
@@ -153,16 +153,18 @@ function tree(directory: string, prefix: string): { name: string; path?: string 
 }
 
 /**
- * Writes a zip whose bytes follow from its entries alone: entries in the
- * order of their names, every date 1980-01-01 00:00, modes 0644, or 0755 for
- * a directory and for a file its owner may execute, no extra fields. An entry
- * is deflated at level 6 unless that makes it longer.
+ * Writes a zip whose bytes follow from its entries alone: the entries named
+ * in `first`, then the others in the order of their names, every date
+ * 1980-01-01 00:00, modes 0644, or 0755 for a directory and for a file its
+ * owner may execute, no extra fields. An entry is deflated at level 6 unless
+ * that makes it longer.
  */
-function writeZip(output: string, entries: { name: string; path?: string }[]): void {
+function writeZip(output: string, entries: { name: string; path?: string }[], first: string[] = []): void {
+  const rank = (name: string) => (first.includes(name) ? first.indexOf(name) : first.length);
   const fd = openSync(output, "w");
   const directory: Buffer[] = [];
   let at = 0;
-  for (const entry of [...entries].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+  for (const entry of [...entries].sort((a, b) => rank(a.name) - rank(b.name) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
     const data = entry.path === undefined ? Buffer.alloc(0) : readFileSync(entry.path);
     const deflated = data.length ? deflateRawSync(data, { level: 6 }) : data;
     const body = deflated.length < data.length ? deflated : data;
@@ -200,6 +202,32 @@ function writeZip(output: string, entries: { name: string; path?: string }[]): v
   writeSync(fd, list);
   writeSync(fd, end);
   closeSync(fd);
+}
+
+/**
+ * Writes a VPK again from what `vita-pack-vpk` packed. Its archive dates every entry with the time of the
+ * build; this one holds the same files, `sce_sys/param.sfo` and `eboot.bin` first as it had them.
+ */
+function repackVpk(source: string, output: string): void {
+  const unpacked = join(WORK, "vpk");
+  rmSync(unpacked, { recursive: true, force: true });
+  mkdirSync(unpacked, { recursive: true });
+  const done = Bun.spawnSync(["unzip", "-q", "-o", source, "-d", unpacked], { stdout: "pipe", stderr: "pipe" });
+  if (done.exitCode !== 0) throw new Error(`unzip ${source}: ${done.stderr.toString().trim()}`);
+  const files = tree(unpacked, "").filter((entry) => entry.path !== undefined).map((entry) => ({ name: entry.name.slice(1), path: entry.path }));
+  writeZip(output, files, ["sce_sys/param.sfo", "eboot.bin"]);
+}
+
+/** The id each release build carried, by target (release.json). */
+const buildIds: Partial<Record<Target, string>> = {};
+
+/**
+ * The id a release build carries where a development build takes a random one: 32 hex digits from the
+ * commit and the hashes of what the package is built from. The device tool reads it as POCKET_RELEASE_BUILD.
+ */
+function releaseBuild(target: Target, inputs: unknown): Record<string, string> {
+  buildIds[target] = sha256(JSON.stringify([commit, dirty, target, inputs])).slice(0, 32);
+  return { POCKET_RELEASE_BUILD: buildIds[target]! };
 }
 
 // ---------------------------------------------------------------- the Vita's programs
@@ -286,8 +314,11 @@ function vitaPrograms(directory: string): string[] {
 // ---------------------------------------------------------------- targets
 
 let programs: { count: number; manifestSha256: string; sourcesSha256: string } | undefined;
+/** The exports and, by target, the packs cooked from them: what a release build's id is derived from. */
+let sources: ReturnType<typeof exports> | undefined;
+const packs: Partial<Record<Target, Record<string, { bytes: number; sha256: string }>>> = {};
 
-/** The standalone VPK (`tools/atlas.ts vpk`), from a share that holds only the checked programs. */
+/** The standalone VPK (`tools/atlas.ts vpk`), from a share that holds only the checked programs, written again with fixed dates. */
 async function vita(log: string, output: string): Promise<void> {
   const source = resolve(option("--vita-gxp", join(ROOT, ".pocket-build/vita-usb/share/atlas/gxp")));
   const rows = vitaPrograms(source);
@@ -297,15 +328,15 @@ async function vita(log: string, output: string): Promise<void> {
   writeFileSync(join(share, "atlas/gxp/manifest.txt"), rows.join("\n") + "\n");
   for (const row of rows) cpSync(join(source, `${row.slice(0, 16)}.gxp`), join(share, `atlas/gxp/${row.slice(0, 16)}.gxp`));
   programs = { count: rows.length, manifestSha256: sha256(rows.join("\n") + "\n"), sourcesSha256: shaderSources() };
-  await run(log, ["bun", "tools/atlas.ts", "vpk", "--share", share]);
-  cpSync(join(ROOT, "dist/vita/pocket-atlas-PKAT00001.vpk"), output);
+  await run(log, ["bun", "tools/atlas.ts", "vpk", "--share", share], releaseBuild("vita", [sources, packs.vita, programs.manifestSha256]));
+  repackVpk(join(ROOT, "dist/vita/pocket-atlas-PKAT00001.vpk"), output);
 }
 
 /** The Memory Stick folder (`tools/atlas-psp.ts package`, staged through a share of its own), zipped from the card's root. */
 async function psp(log: string, output: string): Promise<void> {
   const share = join(WORK, "psp-share");
   rmSync(share, { recursive: true, force: true });
-  await run(log, ["bun", "tools/atlas-psp.ts", "package", "--share", share]);
+  await run(log, ["bun", "tools/atlas-psp.ts", "package", "--share", share], releaseBuild("psp", [sources, packs.psp]));
   writeZip(output, [{ name: "PSP/" }, { name: "PSP/GAME/" }, ...tree(join(ROOT, "dist/PSP/GAME/PocketAtlas"), "PSP/GAME/PocketAtlas")]);
 }
 
@@ -525,8 +556,7 @@ if (argv.includes("--no-build")) {
     console.log(`release: exporting the places, the globe and the previews (log: ${join(WORK, "logs/export.log")})`);
     await exportAll(join(WORK, "logs/export.log"));
   }
-  const sources = exports();
-  const packs: Partial<Record<Target, Record<string, { bytes: number; sha256: string }>>> = {};
+  sources = exports();
   const seconds: Partial<Record<Target, number>> = {};
   // One at a time: each device's interface is compiled into the same generated files under ui/.
   for (const target of targets) {
@@ -563,7 +593,7 @@ if (argv.includes("--no-build")) {
         dirty,
         packages,
         failed: failed.map(({ target, error }) => ({ target, error: error.split("\n")[0] })),
-        inputs: { ...sources, packs, vitaPrograms: programs ?? null },
+        inputs: { ...sources, packs, vitaPrograms: programs ?? null, buildIds },
         toolchains: toolchains(),
       },
       null,
