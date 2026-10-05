@@ -392,19 +392,26 @@ static float gpu_ms;
 static bool profile, loaded, statistics, quiet;
 // The panel's refresh, as the app can know it. `eglSwapBuffers` returns when
 // the frame is queued and waits for the compositor only while the queue is
-// full. On the atlas screen, where the GPU has little to do, every return
-// follows a latch: that gives the refresh period and where the latches fall.
-// A place at 30 frames a second fills no queue and nothing waits, so the app
-// times its own frames onto that grid (`due`): queued at any other pace they
-// are shown for one refresh and two by turns.
+// full, which a place at 30 frames a second never makes it: the app times its
+// own frames onto the refreshes (`due`). Queued at any other pace they are
+// shown for one refresh and two by turns.
+//
+// Where the refreshes fall comes from the display driver, which publishes the
+// time of the last vertical sync on the app's own clock
+// (/sys/class/graphics/fb0/vsync_event on Qualcomm's MDP). Without that file
+// the atlas screen stands in: the GPU has little to do there, the queue is
+// full, and every return of the swap follows a latch.
 static double refresh = 1 / 60.0, latch, streak_from, due;
 static unsigned streak, longest;
+static bool synced; // the driver's syncs, not the swap's returns
 static float swap_expected = 0.004f;
 static void latched(double at) {
+  if (at == latch)
+    return;
   double n = floor((at - latch) / refresh + 0.5);
-  if (latch && n >= 1 && n < 4 && fabs(at - latch - n * refresh) < 0.0015) {
-    // The period over the longest run of latches seen: its error is a swap's
-    // jitter over the run's length.
+  if (latch && n >= 1 && n < 8 && fabs(at - latch - n * refresh) < 0.0015) {
+    // The period over the longest run of refreshes seen: its error is one
+    // reading's jitter over the run's length.
     streak += (unsigned)n;
     if (streak >= 120 && streak >= longest)
       longest = streak, refresh = (at - streak_from) / streak;
@@ -412,7 +419,19 @@ static void latched(double at) {
     streak = 0, streak_from = at;
   latch = at;
 }
-// The middle of the first slot between two latches at or after a moment.
+// The driver's last vertical sync in seconds of CLOCK_MONOTONIC, or 0.
+static double vertical_sync(void) {
+  static int file = -2;
+  if (file == -2)
+    file = open("/sys/class/graphics/fb0/vsync_event", O_RDONLY);
+  char text[64];
+  ssize_t length = file < 0 ? 0 : pread(file, text, sizeof text - 1, 0);
+  if (length < 7 || strncmp(text, "VSYNC=", 6))
+    return 0;
+  text[length] = 0;
+  return (double)strtoull(text + 6, NULL, 10) * 1e-9;
+}
+// The middle of the first slot between two refreshes at or after a moment.
 static double slot_after(double t) { return latch + (ceil((t - latch) / refresh - 0.5) + 0.5) * refresh; }
 static unsigned frames, redraws, late, marked, marked_late;
 static float worst;
@@ -461,10 +480,10 @@ static void status(void) {
   int at = snprintf(text, sizeof text,
                     "{\"build\":\"%s\",\"state\":\"%s\",\"error\":\"%s\",\"place\":\"%s\",\"shots\":%u,\"shot\":%u,\"shotName\":\"%s\","
                     "\"time\":%.3f,\"cinematic\":%s,\"paused\":%s,\"camera\":[%.3f,%.3f,%.3f],\"frame\":%u,\"fps\":%.3f,"
-                    "\"window\":[%d,%d],\"fixedLines\":%d,\"refreshMs\":%.4f,\"samples\":%d,\"rate\":%d,\"late\":%u,\"marked\":%u,\"markedLate\":%u,\"worstMs\":%.2f,",
+                    "\"window\":[%d,%d],\"fixedLines\":%d,\"refreshMs\":%.4f,\"refreshes\":\"%s\",\"samples\":%d,\"rate\":%d,\"late\":%u,\"marked\":%u,\"markedLate\":%u,\"worstMs\":%.2f,",
                     ATLAS_BUILD, scenes[interface.scene], error, interface.place, scene_shot_count(), atlas.shot,
                     loaded ? scene_shot_name(atlas.shot) : "", atlas.time, atlas.cinematic ? "true" : "false", atlas.paused ? "true" : "false",
-                    atlas.position[0], atlas.position[1], atlas.position[2], frames, fps(), width, height, fixed_lines, refresh * 1000, samples, rate, late, marked, marked_late, worst);
+                    atlas.position[0], atlas.position[1], atlas.position[2], frames, fps(), width, height, fixed_lines, refresh * 1000, synced ? "driver" : "swap", samples, rate, late, marked, marked_late, worst);
   // The last 120 frames shown.
   at += summary(text + at, sizeof text - at, "workMs", timing[0], NULL);
   at += summary(text + at, sizeof text - at, "swapMs", timing[1], NULL);
@@ -916,6 +935,11 @@ static void run(void) {
     // every second slot between two latches: the swap is called as long
     // before that as the last swaps took.
     bool paced = rate == 30 && loaded;
+    // A sync the driver timed within the last tenth of a second is where the refreshes fall.
+    double sync = vertical_sync();
+    synced = sync > 0 && submitted - sync < 0.1;
+    if (synced)
+      latched(sync);
     if (paced) {
       if (due < submitted - refresh || due > submitted + 3 * refresh)
         due = slot_after(submitted + swap_expected);
@@ -931,7 +955,7 @@ static void run(void) {
     if (paced)
       // Two refreshes on; a frame that came late keeps two from where it landed.
       due = (presented > due + refresh * 0.5 ? slot_after(presented) : due) + 2 * refresh;
-    else if (!loaded && took > 0.003f)
+    else if (!synced && !loaded && took > 0.003f)
       latched(presented);
     float interval = (float)(presented - previous) * 1000;
     timing[0][frames % WINDOW] = (float)(submitted - start) * 1000;

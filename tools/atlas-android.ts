@@ -158,11 +158,18 @@ async function install(apk: string) {
 async function launch() {
   shell(`am force-stop ${PACKAGE}`);
   shell(`mkdir -p ${PUSHED}; chmod 755 ${PUSHED}; rm -f ${PUSHED}/control.json`);
+  // A release build's files are not the shell's to remove: the status of the
+  // run before is told from this one's by its frame count starting over.
   shell(`run-as ${PACKAGE} rm -f files/status.json`);
+  let before = Infinity;
+  try { before = status().frame; } catch {}
   shell(`am start -n ${ACTIVITY}`);
   for (let attempt = 0; ; attempt++) {
     await Bun.sleep(500);
-    try { return status(); } catch (error) { if (attempt === 60) throw error; }
+    try {
+      const s = status();
+      if (s.frame < before || attempt === 60) return s;
+    } catch (error) { if (attempt === 60) throw error; }
   }
 }
 
