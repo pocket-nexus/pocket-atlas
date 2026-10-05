@@ -69,7 +69,7 @@ The page names the packs in `<meta name="pocket-places">`, a JSON object of a pl
 
 `wgpu/src/places/` is the PS Vita's renderer (`vita/src/frame.rs`, `scene.rs`, `camera.rs`, `vita/shaders`) on wgpu, reading **the PS Vita's packs** (`.pocket-build/places/<id>/<id>.place`, `PLCE` version 7). The page's four devices all draw it, at their own screen size.
 
-- **Passes**: the static sun map once and the moving casters' map every frame (Depth32Float, 2 048 and 1 024 texels a side), the mirror at half size with its blurred copy, the scene in RGBA16F with 4 samples a pixel and reversed depth, the sky, the light fields, rain and steam, the lit haze from the scene's alpha (the eye distance), bloom over five targets, and the composite through the 32-step colour table with grain, the fade and the bars.
+- **Passes**: the static sun map once, from four samples a texel, and the moving casters' map every frame (Depth32Float, 2 048 and 1 024 texels a side), the mirror at half size with its blurred copy, the scene in RGBA16F with 4 samples a pixel and reversed depth, the sky, the light fields, rain and steam, the lit haze from the scene's alpha (the eye distance), bloom over five targets, and the composite through the 32-step colour table with grain, the fade and the bars.
 - **Light fields** are instances of a four-vertex strip, one a light, sized in pixels in the vertex stage: WebGPU has no point size.
 - **Textures** are the pack's BC1, BC3, BC5, RGBA8 and RGBA16F levels as stored, through `texture-compression-bc`. An adapter without it gets "Places need a desktop browser for now." after the pack's table and `META` (0.6 MB at most) are read; no level is transcoded.
 - **Positions and texture coordinates** are bound as `sint16` and divided by 32 767 in the vertex stage. wgpu 25's Metal backend reads vertex buffers in the shader, and naga 25.0.1 unpacks `snorm16x2` and `snorm16x4` with each pair of components in the other's place.
@@ -87,8 +87,10 @@ A place builds **18 to 30 variants and as many pipelines**; the Konbini builds 5
 
 ### What differs from the PS Vita
 
-- **No distance tiers.** Past 18 m the PS Vita drops the normal and ORM maps, the specular term and the static sun map's lookup. Here every distance has them: a wall 40 m away is shadowed, and a far metal surface (Kamakura's traffic mirror) shows the environment where the PS Vita shows black.
-- **The sun map's casters have a depth bias** of twice their depth slope a texel, for the walls the sun grazes that the PS Vita does not look up.
+- **No far tier.** Past 18 m (`detail_m`) the PS Vita draws a lit surface with its `FAR` variant: no normal or ORM map, no specular term, no lookup of the static sun map. Here every distance draws the full variant. It is a choice, not a missing port, and it shows in two places: **Lombard Street's far walls are shadowed** by the buildings across the street where the console leaves them lit, and **Kamakura's traffic mirror reflects the environment** where the console's is black (a metal surface without its specular term). Restoring the tier would bring back the console's look at those two spots and remove the shadows of every caster past 18 m.
+- **The sun map's casters have a depth bias** of twice their depth slope a texel, for the walls the sun grazes that the PS Vita does not look up. Without it those walls show the map's texels as a hatch.
+- **The static sun map takes the nearest of four samples a texel** (`sun_resolve.wgsl`). A wire or a railing's bar is narrower than a texel (3.6 cm at Suga Shrine Stairs): with one sample a texel, as on the console, its shadow is a row of dots.
+- **People inside a shop take their vertex colours in their emission.** An interior material's emission is its lighting, and the Konbini's four people materials carry their colours a vertex. The PS Vita's program adds the emission as it is, so the console draws those figures pale and flat; here the emission is multiplied by the vertex colour and by the factor the 3DS's bake uses (`pica.rs`: 0.6 + 0.4 n.y + 0.12 |n.x|, times 0.62 to 1 over the figure's height), which is the reference's indoor wardrobe.
 - **960 × 544 with 4 samples** on the PS Vita's screen, where the console draws 480 × 272 to 640 × 362 and doubles it; anisotropic filtering at 8 in place of the level bias of −0.375.
 - **The moving casters' map** is 1 024 texels a side (512 on the console), and the haze integrates six lights at every size.
 
@@ -146,7 +148,7 @@ Chrome 154 headless, WebGPU on the Apple GPU (Metal 3, not the fallback adapter)
 
 - **A frame on Metal** is `atlas-shot --tour 8`: the median of 232 frames, recorded and finished by the GPU one at a time (`device.poll(Wait)`), M3 Max. The worst is under 4.7 ms; the first frame, which makes the pipelines, is 30 to 80 ms.
 - **In the tab** a place holds 30 frames a second on the PS Vita's and the PSP's screens (the shell's rate there), and recording a frame takes 0.3 to 0.6 ms of the page's thread (1.7 ms on the Konbini's first shot).
-- **Targets** are computed from the attachments' sizes (8 bytes an HDR texel, 4 a depth texel); a place with a sun holds 16 MiB of sun map and 4 MiB of moving casters' map at any screen size. WebGPU reports no memory in use.
+- **Targets** are computed from the attachments' sizes (8 bytes an HDR texel, 4 a depth texel); a place with a sun holds 16 MiB of sun map and 4 MiB of moving casters' map at any screen size, and 64 MiB more for the pass that draws the static map's samples. WebGPU reports no memory in use.
 
 **On a line of 16 Mbit/s**, the deployable directory in a browser that has none of it, from `enter` to the first frame and to the last texture:
 
