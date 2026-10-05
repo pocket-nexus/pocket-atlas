@@ -1,3 +1,4 @@
 title = "Pocket Atlas"
-xmb_icon_png = "assets/icon0.png"
+# The Pocket3D icon, from PocketJS: this repository holds no icon file.
+xmb_icon_png = "../vendor/pocketjs/engine/pocket3d/icon/psp/ICON0.PNG"
 xmb_background_png = "assets/pic1.png"

@@ -26,11 +26,14 @@ jobs:
       - run: bun install --frozen-lockfile
         working-directory: web
       - run: bun test tools/*.test.ts web/scripts/*.test.ts web/src/places/shared/daylight/*.test.ts web/src/places/sf-lombard-street/world/*.test.ts
+      # The tools take the app icon's paths from PocketJS's tools/pocket3d-icon.ts,
+      # whose types reach PocketJS's rasterizer (@napi-rs/canvas): PocketJS's
+      # packages are installed before the tools are type-checked.
+      - run: bun install --frozen-lockfile
+        working-directory: vendor/pocketjs
       - run: bun web/node_modules/typescript/bin/tsc -p tsconfig.tools.json
       # The interface (ui/) is compiled for each device and run on PocketJS's
       # wasm core, which is built here.
-      - run: bun install --frozen-lockfile
-        working-directory: vendor/pocketjs
       - run: bun tools/wasm.ts
         working-directory: vendor/pocketjs
       - run: bun test ui/test

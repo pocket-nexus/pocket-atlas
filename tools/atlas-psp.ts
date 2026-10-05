@@ -14,6 +14,7 @@ import {
   type Status,
 } from "./psp-session.ts";
 import { resolvePspBuildToolchain } from "../vendor/pocketjs/tools/psp-toolchain.ts";
+import { POCKET3D_ICON } from "../vendor/pocketjs/tools/pocket3d-icon.ts";
 import { hostBuildEnvironment } from "../vendor/pocketjs/framework/src/manifest/index.ts";
 import { PLACES } from "../web/src/places/registry";
 import { globeSurfacePsp } from "./atlas-globe";
@@ -129,7 +130,8 @@ async function build() {
   // has no setting for it): there every place fits beside the interface. A
   // PSP-1000 lists the places whose pack does not fit as not on the device.
   await Bun.write(`${out}/PARAM.SFO`, paramSfo({ BOOTABLE: 1, CATEGORY: "MG", DISC_VERSION: "1.00", MEMSIZE: 1, PARENTAL_LEVEL: 1, PSP_SYSTEM_VER: "1.00", REGION: 0x8000, TITLE: "Pocket Atlas" }));
-  await $`pack-pbp ${out}/EBOOT.PBP ${out}/PARAM.SFO ${root}/psp/assets/icon0.png NULL NULL ${root}/psp/assets/pic1.png NULL ${out}/pocket-atlas-psp.prx NULL`.quiet();
+  // ICON0.PNG is the Pocket3D icon, from PocketJS; PIC1.PNG is a capture of the game.
+  await $`pack-pbp ${out}/EBOOT.PBP ${out}/PARAM.SFO ${POCKET3D_ICON.psp} NULL NULL ${root}/psp/assets/pic1.png NULL ${out}/pocket-atlas-psp.prx NULL`.quiet();
   lease?.assertHeld();
   cpSync(`${out}/pocket-atlas-psp.prx`, `${share}/pocket-atlas.prx`);
   cpSync(`${out}/EBOOT.PBP`, `${share}/EBOOT.PBP`);

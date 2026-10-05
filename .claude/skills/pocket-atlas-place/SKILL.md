@@ -22,6 +22,14 @@ Every launch starts with the Pocket3D title card (144 vertical blanks, 2.4 s), t
 - **Count it when measuring.** A load time taken from launch, or a first frame captured on a device, has the card's 144 vertical blanks in front of it; the Vita starts its debug link after the card, so `status` and `capture` answer only then. Headless web runs skip the card under `?shot` (and `?export`), which `export-place.ts`, `export-atlas.ts` and `preview-place.ts` pass, so exports and preview cards keep their timing; a `scripts/shot.ts` URL without `?shot` has the card over its first 2.4 s.
 - **Development loops may skip it.** On the Vita, `{"title": false}` in `.pocket-build/vita-usb/share/atlas/boot.json` (`host0:atlas/boot.json`) skips the card in a development build running in Pocket Devkit; the PSP and 3DS builds have no switch. A build that leaves the developer's machine (`vpk`, `package`, a `.3dsx`) plays it.
 
+## The Pocket3D app icon
+
+The icon in each console's launcher is the Pocket3D icon. Every build reads it from PocketJS (`vendor/pocketjs/engine/pocket3d/icon/`), and this repository holds no icon file.
+
+- **Not a place's to add.** A place never adds, replaces or edits an icon (`icon0.png`, `ICON0.PNG`, an SMDH icon, `Icon*.png`), and a capture of a place is never resized into one. `tools/app-icon.test.ts` fails when such a file is tracked or a build stops reading PocketJS's.
+- **Captures go to PIC1 and the LiveArea.** A capture of a place may replace `psp/assets/pic1.png` (PIC1, the XMB background, 480×272) or the LiveArea `bg.png` (840×500) and `startup.png` (280×158) under `vita/assets/sce_sys/livearea/contents/` (8-bit indexed PNGs), taken from a running build. No other file in a package takes one.
+- **Procedure.** `vendor/pocketjs/skills/pocket3d-brand/SKILL.md` has the wiring per console and the checks from a built EBOOT, VPK and SMDH.
+
 ## Workflow
 
 1. **Research** → `.pocket-build/research/<id>/REPORT.md` plus the data. Collect: OSM for ~400 m around the spot; building heights (PLATEAU in Japan); an elevation profile (GSI 1 m in Japan); 10–20 dated Wikimedia Commons photos with author/date/licence in a `manifest.tsv`; aerials with a metre grid. Write the origin and frame, every dimension, the canonical viewpoint (lat/lon, eye height, heading, vertical FOV, from a reference photo), the time and sun (azimuth/elevation from a sun table), sampled colours, what moves and when, and what to exclude. Make 960 px copies of the photos (`photos-960/`) for agents.
