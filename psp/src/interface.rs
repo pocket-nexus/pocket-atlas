@@ -7,7 +7,7 @@ use alloc::{collections::VecDeque, vec::Vec};
 use core::ffi::c_void;
 use libquickjs_sys::*;
 use pocket_atlas_interface::{guest, Command, Rest, State};
-use pocketjs_psp::{ffi, ge, host, pak, qjs_alloc};
+use pocketjs_psp::{arena, ffi, ge, host, pak, qjs_alloc};
 
 // libquickjs-sys omits these; the linked QuickJS provides them.
 extern "C" {
@@ -24,6 +24,8 @@ extern "C" {
 
 /// The guest turns this often, and is told so before it mounts.
 const TURN: f32 = 1.0 / 30.0;
+/// The arena may grow this much before a guest at rest is collected.
+const GROWTH: usize = 128 << 10;
 
 pub struct Ui {
     guest: Option<(*mut JSRuntime, *mut JSContext, JSValue, JSValue)>,
@@ -35,6 +37,8 @@ pub struct Ui {
     words: (*const u32, usize),
     /// Buttons a control message presses, each held two turns and let go for one.
     presses: VecDeque<(u32, u8)>,
+    /// How far the arena had been carved when the guest was last collected.
+    collected: usize,
     pub error: &'static str,
 }
 
@@ -43,7 +47,7 @@ impl Ui {
     /// once this returns), `pak` its styles, fonts and pictures, which the
     /// guest borrows for good.
     pub unsafe fn boot(script: Option<&[u8]>, pak: Option<&'static [u8]>) -> Self {
-        let mut ui = Self { guest: None, owed: TURN, rest: Rest::default(), words: (core::ptr::null(), 0), presses: VecDeque::new(), error: "" };
+        let mut ui = Self { guest: None, owed: TURN, rest: Rest::default(), words: (core::ptr::null(), 0), presses: VecDeque::new(), collected: 0, error: "" };
         let (Some(script), Some(pak)) = (script, pak) else {
             ui.error = "atlas.js or atlas.pak is missing";
             return ui;
@@ -109,7 +113,10 @@ impl Ui {
             }
         }
         if !self.rest.due(buttons != 0, guest::interface().pending()) {
-            if self.rest.settled() {
+            // A collection stops the frame for tens of milliseconds, so it
+            // waits until the arena has had to grow: until then what the
+            // guest dropped has been handed out again.
+            if self.rest.settled() && arena::stats().bump_bytes > self.collected + GROWTH {
                 self.collect();
             }
             return asked;
@@ -140,10 +147,12 @@ impl Ui {
     /// objects refer to each other, and QuickJS alone collects only once its
     /// heap has grown by half: the arena, which hands a block back only to a
     /// request of the same size, would grow with every view. So collect
-    /// between scenes, and whenever the interface comes to rest.
+    /// between scenes, and when the interface comes to rest with the arena
+    /// grown.
     pub unsafe fn collect(&mut self) {
         if let Some((rt, ..)) = self.guest {
             JS_RunGC(rt);
+            self.collected = arena::stats().bump_bytes;
         }
     }
 

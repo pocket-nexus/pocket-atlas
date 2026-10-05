@@ -86,6 +86,20 @@ device rather than failing to load.
 The guest is given a turn only when a button is down or was a moment ago,
 when the renderer's state changed or when its last turn drew something new;
 otherwise about once a second (`Rest` in `crates/pocket-atlas-interface`).
+The status reports its turns as `interfaceMs` (a frame's share of them) and
+`maxInterfaceMs` (the longest since the last report). On a PSP at 333 MHz a
+resting interface takes 0.1 ms of a frame and its look-in 2 to 4 ms; a step
+in a list is one turn of about 37 ms, a change of list 70 ms, a keystroke 70
+to 250 ms, and mounting a view is the long one: 0.5 s for the atlas after a
+place, 0.8 s for the keyboard.
+
+A view that was left stays allocated until a collection (its objects refer to
+each other), and the arena never hands a block to a request of another size,
+so the guest is collected between scenes and, once it has come to rest after
+something happened, when the arena has had to grow by 128 KiB since the last
+collection. A collection stops the frame for 35 to 80 ms; until the arena
+grows, what the guest dropped has been handed out again and there is nothing
+to gain from one.
 
 ## Validation
 

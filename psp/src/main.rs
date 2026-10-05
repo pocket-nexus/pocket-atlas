@@ -125,6 +125,9 @@ struct App {
     buffer: &'static mut [u8],
     frame: u32,
     now: u32,
+    /// The interface's turns since the last report, in microseconds: all of
+    /// them, and the longest.
+    turns: (u64, u32),
 }
 impl App {
     /// The seconds since the last call, bounded.
@@ -139,7 +142,11 @@ impl App {
         for &buttons in command.iter().flat_map(|c| &c.press) {
             self.ui.press(buttons);
         }
-        self.ui.turn(dt, pad.buttons.bits(), (pad.lx as u32) << 8 | pad.ly as u32)
+        let before = sceKernelGetSystemTimeLow();
+        let asked = self.ui.turn(dt, pad.buttons.bits(), (pad.lx as u32) << 8 | pad.ly as u32);
+        let spent = sceKernelGetSystemTimeLow().wrapping_sub(before);
+        self.turns = (self.turns.0 + spent as u64, self.turns.1.max(spent));
+        asked
     }
     /// One vblank wait if work already consumed a refresh, two otherwise.
     /// A control message can have the frame written to the share as it is shown.
@@ -161,19 +168,23 @@ impl App {
             let state = self.ui.state();
             (state.scene, state.place.clone())
         };
+        // A report every thirty frames.
+        let turns = core::mem::take(&mut self.turns);
         self.dev.report(dev::Status {
             scene: ["atlas", "loading", "place", "error"][scene as usize],
             place: &place,
             interface: self.ui.error,
             memory: [stats.bump_bytes, stats.tail_free_bytes, self.buffer.len()],
             frame: self.frame,
+            interface_ms: turns.0 as f32 / 30000.0,
+            max_interface_ms: turns.1 as f32 / 1000.0,
             ..status
         });
     }
 }
 const IDLE: dev::Status = dev::Status {
     scene: "", place: "", interface: "", memory: [0; 3], frame: 0, shot: "", shot_index: 0, time: 0.0, frame_ms: 33.3, work_ms: 0.0,
-    gpu_wait_ms: 0.0, max_work_ms: 0.0, draws: 0, triangles: 0, pack_bytes: 0, rain: false, reflection: false, paused: false, free_camera: false,
+    gpu_wait_ms: 0.0, max_work_ms: 0.0, interface_ms: 0.0, max_interface_ms: 0.0, draws: 0, triangles: 0, pack_bytes: 0, rain: false, reflection: false, paused: false, free_camera: false,
 };
 fn axis(v: u8) -> f32 {
     let x = (v as f32 - 128.0) / 127.0;
@@ -210,7 +221,7 @@ unsafe fn run() {
         &buffer[..length + 1]
     });
     let ui = interface::Ui::boot(script, pak);
-    let mut app = App { ui, dev: dev::Session::connect(), buffer, frame: 0, now: sceKernelGetSystemTimeLow() };
+    let mut app = App { ui, dev: dev::Session::connect(), buffer, frame: 0, now: sceKernelGetSystemTimeLow(), turns: (0, 0) };
     {
         let places = installed(capacity);
         let prefs = read("interface.json").and_then(|bytes| String::from_utf8(bytes).ok()).unwrap_or_default();
@@ -320,6 +331,10 @@ unsafe fn visit(app: &mut App, place: &str) -> Option<String> {
         state.scene = Showing::Loading;
         state.place = place.into();
         state.message.clear();
+        // Another place's, when a control message came straight from it.
+        state.shots.clear();
+        state.options.clear();
+        state.stats.clear();
     }
     // The interface has its say before the memory stick takes the thread.
     for _ in 0..4 {

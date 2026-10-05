@@ -324,6 +324,8 @@ pub struct Rest {
     still: u32,
     skipped: u32,
     drawn: u32,
+    /// Something has happened since the guest was last tidied up after.
+    stirred: bool,
 }
 
 impl Rest {
@@ -338,6 +340,7 @@ impl Rest {
         } else if pending {
             self.still = self.still.min(Self::STILL - 1);
         }
+        self.stirred |= input || pending;
         if self.still >= Self::STILL {
             self.skipped += 1;
             if self.skipped < Self::LOOK_IN {
@@ -348,11 +351,14 @@ impl Rest {
         true
     }
 
-    /// True on the first turn the guest sits out after being awake: the
-    /// moment to tidy up after it (a garbage collection), while nothing on
-    /// the screen moves.
-    pub fn settled(&self) -> bool {
-        self.still >= Self::STILL && self.skipped == 1
+    /// True on the first turn the guest sits out after something happened
+    /// (an input, new state, a new picture): the moment to tidy up after it
+    /// (a garbage collection), while nothing on the screen moves. A look-in
+    /// that found nothing to do leaves nothing to tidy.
+    pub fn settled(&mut self) -> bool {
+        let settled = self.stirred && self.still >= Self::STILL && self.skipped == 1;
+        self.stirred &= !settled;
+        settled
     }
 
     /// After a turn, the draw list it left. True when the picture differs
@@ -364,6 +370,7 @@ impl Rest {
         if moved {
             self.drawn = digest;
             self.still = self.still.min(Self::STILL - 1);
+            self.stirred = true;
         }
         moved
     }
@@ -458,8 +465,17 @@ mod tests {
             rest.drew(&picture);
         }
         // At rest: one turn in LOOK_IN.
-        let turns = (0..90).filter(|_| rest.due(false, false) && !rest.drew(&picture)).count();
-        assert_eq!(turns, 90 / Rest::LOOK_IN as usize);
+        assert!(!rest.due(false, false) && rest.settled());
+        // Looked in on once a second, and not tidied up after for that.
+        let mut tidied = 0;
+        let turns = (1..90)
+            .filter(|_| {
+                let due = rest.due(false, false);
+                tidied += rest.settled() as u32;
+                due && !rest.drew(&picture)
+            })
+            .count();
+        assert_eq!((turns, tidied), (90 / Rest::LOOK_IN as usize, 0));
         // A new state is shown at once, and looked at once more.
         assert!(rest.due(false, true));
         assert!(rest.drew(&[1, 2, 4]));

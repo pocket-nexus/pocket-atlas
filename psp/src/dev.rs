@@ -85,6 +85,9 @@ pub struct Status<'a> {
     pub work_ms: f32,
     pub gpu_wait_ms: f32,
     pub max_work_ms: f32,
+    /// The interface's turns: a frame's share of them, and the longest.
+    pub interface_ms: f32,
+    pub max_interface_ms: f32,
     pub draws: u32,
     pub triangles: u32,
     pub pack_bytes: usize,
@@ -166,7 +169,8 @@ impl Session {
                 "\"arenaBytes\":{},\"arenaFreeBytes\":{},\"packBufferBytes\":{},",
                 "\"frame\":{},\"shot\":\"{}\",\"shotIndex\":{},",
                 "\"time\":{:.2},\"fps\":{:.2},\"frameMs\":{:.2},\"workMs\":{:.2},",
-                "\"gpuWaitMs\":{:.2},\"maxWorkMs\":{:.2},\"draws\":{},\"triangles\":{},",
+                "\"gpuWaitMs\":{:.2},\"maxWorkMs\":{:.2},\"interfaceMs\":{:.2},\"maxInterfaceMs\":{:.2},",
+                "\"draws\":{},\"triangles\":{},",
                 "\"packBytes\":{},\"rain\":{},\"reflection\":{},\"paused\":{},",
                 "\"freeCamera\":{},\"controlNonce\":{},\"packSha256\":\"{}\",\"runtimeBuild\":\"{}\"}}\n"
             ),
@@ -185,6 +189,8 @@ impl Session {
             s.work_ms,
             s.gpu_wait_ms,
             s.max_work_ms,
+            s.interface_ms,
+            s.max_interface_ms,
             s.draws,
             s.triangles,
             s.pack_bytes,

@@ -10,6 +10,9 @@ export interface Status {
   fps: number;
   workMs: number;
   maxWorkMs: number;
+  /** The interface's turns: a frame's share of them, and the longest. */
+  interfaceMs?: number;
+  maxInterfaceMs?: number;
   draws: number;
   triangles: number;
   controlNonce: number;

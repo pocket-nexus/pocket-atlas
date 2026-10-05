@@ -137,7 +137,9 @@ async function build() {
   for (const file of ["atlas.js", "atlas.pak"]) cpSync(`${ui.directory}/${file}`, `${share}/${file}`);
   await Bun.write(`${share}/globe.psp`, globeSurfacePsp(512));
   for (const [id, path] of cooked()) cpSync(path, `${share}/${id}.place`);
-  await Bun.write(`${share}/build.json`, JSON.stringify({ runtimeBuild, packSha256: fileSha256(pack), prxSha256: fileSha256(`${share}/pocket-atlas.prx`), places: cooked().map(([id]) => id) }, null, 2));
+  // Every staged place and its pack: one build is measured in each of them.
+  const packs = Object.fromEntries(cooked().map(([id, path]) => [id, fileSha256(path)]));
+  await Bun.write(`${share}/build.json`, JSON.stringify({ runtimeBuild, packSha256: fileSha256(pack), prxSha256: fileSha256(`${share}/pocket-atlas.prx`), places: Object.keys(packs), packs }, null, 2));
   console.log(`PSP release: ${share}`);
 }
 async function shell(text: string) {
@@ -186,6 +188,7 @@ else if (command === "serve") {
   mkdirSync(directory, { recursive: true });
   const rows: object[] = [];
   const expected = JSON.parse(readFileSync(`${share}/build.json`, "utf8"));
+  expected.packSha256 = expected.packs?.[place] ?? expected.packSha256;
   if (fileSha256(`${share}/${place}.place`) !== expected.packSha256 || fileSha256(`${share}/pocket-atlas.prx`) !== expected.prxSha256)
     throw new Error("PSP staged files changed since build");
   const identity = (s: Status) => ({ device: "psp:usb", runtimeBuild: s.runtimeBuild, assets: { pack: s.packSha256 } });
