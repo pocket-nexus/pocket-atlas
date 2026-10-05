@@ -192,6 +192,12 @@ impl Head {
         Ok(Head { meta, sections })
     }
 
+    /// Bytes of the pack a first frame needs: the table, `META`, the geometry and the animation.
+    pub fn first_frame(&self) -> u64 {
+        let size = |tag| find(&self.sections, tag).map_or(0, |s| s.size as u64);
+        16 + 16 * self.sections.len() as u64 + size(pc::TAG_META) + size(pc::TAG_GEOMETRY) + size(pc::TAG_ANIMATION)
+    }
+
     /// Where a texture's bytes are in the pack.
     pub fn texels(&self, index: usize) -> Result<(u64, u64), String> {
         let s = find(&self.sections, pc::TAG_TEXTURES)?;

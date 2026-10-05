@@ -1,10 +1,10 @@
 //! Where a place's renderer plugs in.
 //!
-//! This build draws the atlas screen and no place: [`RENDERER`] is `None`, so
-//! the interface is told that no place's pack is here (`installed` is empty)
-//! and lists every place as it does one a device has no pack for. A renderer
-//! of places is one value of [`Renderer`], named in `RENDERER`; nothing else
-//! in the shell changes.
+//! A renderer of places is one value of [`Renderer`], named in [`RENDERER`]:
+//! this build's is the PS Vita's on wgpu (`places/`). With `RENDERER` at
+//! `None` the shell draws the atlas screen alone, tells the interface that no
+//! place's pack is here (`installed` is empty), and the interface lists every
+//! place as it does one a device has no pack for.
 //!
 //! What a renderer is given when the visitor enters a place is an
 //! [`Opening`]: the place's pack as PocketJS's browser kernel reads it
@@ -15,12 +15,15 @@
 //! shell then lays the interface over.
 //!
 //! The flow around it is the shell's (`app.rs`): `scene` is `Loading` from the
-//! `enter` command until [`Renderer::open`]'s future ends, then `Place` or,
+//! `enter` command until [`Renderer::open`]'s future ends, with the bytes
+//! read of the bytes the first frame needs as its message, then `Place` or,
 //! with its message, `Error`; `leave` drops the `Place`, which frees what it
 //! holds on the GPU.
 
+use core::cell::Cell;
 use core::future::Future;
 use core::pin::Pin;
+use std::rc::Rc;
 
 use pocket_atlas_interface::{Command, Setting};
 use pocket_web_wgpu::gpu::{Frame, Gpu};
@@ -42,6 +45,9 @@ pub struct Opening {
     /// The screen the frames go to: its format, and its size in pixels, samples and logical size.
     pub format: wgpu::TextureFormat,
     pub shape: Shape,
+    /// Bytes of the pack the first frame needs: the renderer sets it once it has read the pack's table, and
+    /// the shell's loading screen then says how much of that has arrived.
+    pub needs: Rc<Cell<u64>>,
 }
 
 /// What the interface is shown of a place (`ui/app/protocol.ts`, `HostState`).

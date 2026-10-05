@@ -113,7 +113,7 @@ mod native {
         let gpu = task::wait(Gpu::headless_wanting(places::RENDERER.wants))?;
         let screen = Screen::texture(&gpu, shape.width, shape.height, 1);
         let source = task::wait(Source::open(pack))?;
-        let mut visit = task::wait(places::visit(Opening { place: pack.to_string(), pack: source.clone(), gpu: gpu.clone(), format: screen.format, shape }))?;
+        let mut visit = task::wait(places::visit(Opening { place: pack.to_string(), pack: source.clone(), gpu: gpu.clone(), format: screen.format, shape, needs: Default::default() }))?;
         task::wait(places::settle(&mut visit, &source))?;
         if tour.is_none() && !visit.hold(shot, part, time) {
             return Err(format!("the place has no shot {shot}"));

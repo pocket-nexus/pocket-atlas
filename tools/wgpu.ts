@@ -515,7 +515,10 @@ if (command === "build") {
       await p.page.waitForTimeout(1500);
       await p.save("3ds-explore");
       report.devices["3ds"] = await measure(p);
-      // A enters the place: the upper screen is the place's, the lower one its controls.
+      // A row under the stylus, then A, enters the place: the upper screen is the place's, the lower one
+      // its controls.
+      await p.tap("lower", low3ds, 160, 36 + 20);
+      await p.page.waitForTimeout(800);
       await p.key("KeyZ");
       const inside = await p.scene(["place", "error"], true);
       expect(`3ds: A enters the place (${inside.scene} "${inside.message}", ${JSON.stringify(inside.visit?.size)})`, inside.scene === "place" && inside.visit.size[0] === 400 && inside.visit.size[1] === 240 && inside.visit.trouble === "");
@@ -667,8 +670,10 @@ if (command === "build") {
       let received = 0;
       cdp.on("Network.dataReceived", (event: { encodedDataLength: number; dataLength: number }) => (received += event.encodedDataLength || event.dataLength));
       await p.page.evaluate(`pocketAtlas.atlas.control("enter=${id}")`);
-      await p.page.waitForTimeout(1500);
+      await p.page.waitForTimeout(2500);
+      const loading = await p.status();
       await p.save(`${id}-loading`);
+      expect(`${id}: the loading screen says how much has arrived (${loading.scene}: "${loading.message}")`, loading.scene === "loading" && /^Reading the place: \d+ of \d+ MB$/.test(loading.message));
       const first = await p.scene(["place", "error"]);
       expect(`${id} opens on a slow line (${first.scene}: "${first.message}")`, first.scene === "place");
       await p.page.waitForFunction("JSON.parse(pocketAtlas.atlas.status()).visit.arrival >= 0", undefined, { timeout: 60_000 });

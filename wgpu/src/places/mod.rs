@@ -81,10 +81,11 @@ pub struct Visit {
 
 /// Opens the place of `opening.pack`: everything but its textures' texels, which arrive beside the frames.
 pub async fn visit(opening: Opening) -> Result<Visit, String> {
-    let Opening { pack, gpu, format, shape, .. } = opening;
+    let Opening { pack, gpu, format, shape, needs, .. } = opening;
     let born = task::now();
     // (a pack of BC blocks is not read at all where the GPU cannot sample them)
     let head = Head::read(&pack).await?;
+    needs.set(head.first_frame());
     let scene = Scene::open(&gpu, &pack, &head).await?;
     let renderer = frame::Renderer::new(&gpu, &scene, format, shape.width, shape.height, shape.samples);
     let rig = Rig::new(&scene.meta.camera);

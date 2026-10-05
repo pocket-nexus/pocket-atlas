@@ -13,7 +13,7 @@
 //! [`App::draw`]. The guest is turned thirty times a second, as on the
 //! handhelds, and rests while nothing changes (`pocket_atlas_interface::Rest`).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fmt::Write;
 use std::rc::Rc;
 
@@ -77,10 +77,18 @@ impl Shape {
 }
 
 /// What is behind the interface.
+/// What has arrived of a place being opened: its pack once it is open, and the bytes its first frame needs
+/// once the renderer knows them.
+#[derive(Clone, Default)]
+struct Arriving {
+    pack: Rc<RefCell<Option<Source>>>,
+    needs: Rc<Cell<u64>>,
+}
+
 enum Visiting {
     Atlas,
     /// A place is being opened: the renderer's answer lands here.
-    Loading(Rc<RefCell<Option<Result<Box<dyn Place>, String>>>>),
+    Loading(Rc<RefCell<Option<Result<Box<dyn Place>, String>>>>, Arriving),
     Place(Box<dyn Place>),
 }
 
@@ -326,11 +334,15 @@ impl App {
         self.interface.state.scene = Scene::Loading;
         (self.entered, self.arrival) = (task::now(), None);
         let answer = Rc::new(RefCell::new(None));
-        self.visiting = Visiting::Loading(answer.clone());
+        let arriving = Arriving::default();
+        self.visiting = Visiting::Loading(answer.clone(), arriving.clone());
         let (at, gpu, format, shape) = (at.clone(), self.gpu.clone(), self.screen.format, self.shape);
         task::spawn(async move {
             let opened = match Source::open(&at).await {
-                Ok(pack) => (renderer.open)(Opening { place, pack, gpu, format, shape }).await,
+                Ok(pack) => {
+                    *arriving.pack.borrow_mut() = Some(pack.clone());
+                    (renderer.open)(Opening { place, pack, gpu, format, shape, needs: arriving.needs }).await
+                }
                 Err(why) => Err(why),
             };
             *answer.borrow_mut() = Some(opened);
@@ -352,10 +364,23 @@ impl App {
 
     /// The renderer's answer, when it has come.
     fn arrive(&mut self) {
-        let Visiting::Loading(answer) = &self.visiting else { return };
-        let Some(opened) = answer.borrow_mut().take() else { return };
+        let Visiting::Loading(answer, arriving) = &self.visiting else { return };
+        let Some(opened) = answer.borrow_mut().take() else {
+            // Still reading: the loading screen says how much of what the first frame needs is here. (A pack
+            // in pieces is read a whole piece at a time: what is read can pass what is needed.)
+            let (needs, read) = (arriving.needs.get(), arriving.pack.borrow().as_ref().map_or(0, |pack| pack.read_so_far().bytes));
+            if needs > 0 {
+                let mb = |bytes: u64| (bytes as f64 / 1e6).round() as u64;
+                let message = format!("Reading the place: {} of {} MB", mb(read.min(needs)), mb(needs));
+                if self.interface.state.message != message {
+                    self.interface.state.message = message;
+                }
+            }
+            return;
+        };
         match opened {
             Ok(place) => {
+                self.interface.state.message.clear();
                 self.interface.state.shots = place.shots();
                 self.interface.state.scene = Scene::Place;
                 self.visiting = Visiting::Place(place);
