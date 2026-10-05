@@ -1,13 +1,17 @@
 /** Pocket Atlas on the iPod touch 4: cook, build, install and measure. PocketJS
- * supplies the pinned iOS 6 sysroot, the startup objects and the
- * MobileInstallation transaction; the app is two C files (ipod/src). */
+ * supplies the pinned iOS 6 sysroot, the startup objects, the
+ * MobileInstallation transaction, and the interface's runtime: its UI core
+ * (with the OpenGL ES 2 backend), QuickJS and the guest driver. The app is
+ * the C in ipod/src and the interface in ui/. */
 import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:net";
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { ipodtouch4CacheRoot, ipodtouch4CsuPath, ipodtouch4SysrootPath, inspectIPodTouch4Toolchain } from "../vendor/pocketjs/tools/ipodtouch4-toolchain";
+import { IPODTOUCH4_TOOLCHAIN, ipodtouch4CacheRoot, ipodtouch4CsuPath, ipodtouch4QuickJsPath, ipodtouch4SysrootPath, inspectIPodTouch4Toolchain } from "../vendor/pocketjs/tools/ipodtouch4-toolchain";
 import { IPOD_INSTALLER, parseInstalledIPodApp, shellQuote, userDeploymentScript } from "../vendor/pocketjs/tools/ipodtouch4-installation";
 import { PLACES } from "../web/src/places/registry";
+import { globeSurface } from "./atlas-globe";
+import { compileInterface } from "./atlas-ui";
 
 const root = resolve(import.meta.dir, "..");
 const args = Bun.argv.slice(2);
@@ -35,22 +39,22 @@ function cook() {
   for (const p of places) {
     const source = join(root, ".pocket-build/places", p.id);
     run(["cargo", "run", "--release", "--locked", "-p", "pocket3d-place-cook", "--", "--profile", "ipod30", "--cell", "16", "--in", source, "--out", join(assets, `${p.id}.place`)]);
-    // The list's card: 260x146 points on a 2x screen.
-    run(["magick", join(source, "preview.png"), "-resize", "520x292^", "-gravity", "center", "-extent", "520x292", "-quality", "88", join(assets, `${p.id}.jpg`)]);
     console.log(`${p.id}: ${(readFileSync(join(assets, `${p.id}.place`)).byteLength / 1048576).toFixed(1)} MiB`);
   }
 }
 
-function build() {
+async function build() {
   const toolchain = inspectIPodTouch4Toolchain();
-  if (!toolchain.sysroot || !toolchain.csu) throw new Error("no iPod touch 4 toolchain: run `bun ipodtouch4 doctor` in vendor/pocketjs");
+  if (!toolchain.sysroot || !toolchain.csu || !toolchain.quickjs) throw new Error("no iPod touch 4 toolchain: run `bun ipodtouch4 doctor` in vendor/pocketjs");
+  const ui = await compileInterface("ipod");
   const objects = join(out, "native");
   rmSync(bundle, { recursive: true, force: true });
   mkdirSync(objects, { recursive: true });
   mkdirSync(bundle, { recursive: true });
   const clang = run(["xcrun", "--find", "clang"]), ld = run(["xcrun", "--find", "ld-classic"]), sdk = run(["xcrun", "--sdk", "macosx", "--show-sdk-path"]);
-  const sources = ["ipod/src/main.c", "ipod/src/scene.c", "ipod/src/scene.h", "ipod/src/shaders.h", "n3ds/src/format.h", "n3ds/src/control.h"];
-  const build = createHash("sha256").update(sources.map((f) => sha(join(root, f))).join()).digest("hex").slice(0, 12);
+  const sources = ["ipod/src/main.c", "ipod/src/scene.c", "ipod/src/scene.h", "ipod/src/shaders.h", "ipod/src/globe.c", "ipod/src/globe.h",
+    "n3ds/src/format.h", "n3ds/src/control.h", "n3ds/src/interface.c", "n3ds/src/interface.h"];
+  const build = createHash("sha256").update([...sources.map((f) => join(root, f)), join(ui.directory, "atlas.js"), join(ui.directory, "atlas.pak")].map(sha).join()).digest("hex").slice(0, 12);
   const compile = (source: string, extra: string[] = []) => {
     const object = join(objects, source.replace(/[^A-Za-z0-9]/g, "_") + ".o");
     // cortex-a8: scalar float goes through NEON (its VFP unit is not pipelined).
@@ -70,8 +74,30 @@ function build() {
       "-e", "start", "-o", output, ...boot, ...inputs, ...frameworks.flatMap((f) => ["-framework", f]), "-lobjc", "-lSystem", "-lgcc_s.1"]);
     run(["chmod", "755", output]);
   };
+  // The interface's runtime, from PocketJS: the UI core as a static library
+  // (ES 2 backend; PocketJS's own iPod host builds the ES 1.1 one), QuickJS,
+  // and the driver that runs the guest. Its service wire is answered in the
+  // process by n3ds/src/interface.c.
+  const pocket = join(root, "vendor/pocketjs"), rust = IPODTOUCH4_TOOLCHAIN.compiler.rustToolchain, core = join(out, "ui-core");
+  const rustup = (tool: string) => run(["rustup", "which", "--toolchain", rust, tool]);
+  const built = Bun.spawnSync([rustup("cargo"), "build", "--release", "--locked", "--no-default-features", "--features", "bare-platform",
+    "--target", join(pocket, "hosts/ipodtouch4/armv7-apple-ios.json"), "-Z", "json-target-spec", "-Z", "build-std=core,alloc,compiler_builtins",
+    "-Z", "build-std-features=compiler-builtins-mem"], { cwd: join(pocket, "engine/ui-cabi"), stdout: "pipe", stderr: "pipe",
+    env: { ...process.env, RUSTC: rustup("rustc"), CARGO_TARGET_DIR: core, IPHONEOS_DEPLOYMENT_TARGET: "6.0" } });
+  if (built.exitCode) throw new Error(`ui core: ${built.stderr}`);
+  const quickjs = join(ipodtouch4QuickJsPath(), "libquickjs-sys/embed/quickjs");
+  const includes = ["-I", join(pocket, "engine/quickjs-c"), "-I", join(pocket, "engine/ui-cabi/include"), "-I", join(pocket, "contracts/generated"),
+    "-I", join(pocket, "hosts/ios-legacy"), "-I", join(pocket, "hosts/shared"), "-isystem", quickjs];
+  const guest = [
+    ...["quickjs.c", "cutils.c", "dtoa.c", "libregexp.c", "libunicode.c"].map((f) => compile(join(quickjs, f), ["-I", quickjs, "-funsigned-char", "-fwrapv", `-DCONFIG_VERSION="${IPODTOUCH4_TOOLCHAIN.compiler.quickJsVersion}"`])),
+    compile(join(pocket, "engine/quickjs-c/pocket_runtime.c"), [...includes, "-DPOCKET_SVC_WIRE", `-DPOCKETJS_TARGET_ID="${ui.inputs.target}"`,
+      `-DPOCKETJS_HOST_ABI=${ui.inputs.hostAbi}`, `-DPOCKET_RASTER_DENSITY=${ui.inputs.viewport.rasterDensity}`]),
+    compile(join(pocket, "hosts/ios-legacy/compat.c")),
+  ];
+  const strict = ["-Wall", "-Wextra", "-Werror", `-DATLAS_BUILD="${build}"`, ...includes];
   const executable = join(bundle, "PocketAtlas");
-  link(executable, ["main.c", "scene.c"].map((f) => compile(join(root, "ipod/src", f), ["-Wall", "-Wextra", "-Werror", `-DATLAS_BUILD="${build}"`])), ["UIKit", "Foundation", "QuartzCore", "OpenGLES"]);
+  link(executable, [...["ipod/src/main.c", "ipod/src/scene.c", "ipod/src/globe.c", "n3ds/src/interface.c"].map((f) => compile(join(root, f), strict)), ...guest,
+    "-force_load", join(core, "armv7-apple-ios/release/libpocketjs_symbian_core.a")], ["UIKit", "Foundation", "QuartzCore", "OpenGLES"]);
   run(["ldid", "-S", executable]);
   link(join(out, "installer"), [compile(join(root, "vendor/pocketjs/hosts/ipodtouch4/installer.c"))], ["Foundation"]);
   run(["ldid", `-S${root}/vendor/pocketjs/hosts/ipodtouch4/installer-entitlements.plist`, join(out, "installer")]);
@@ -92,12 +118,12 @@ function build() {
   })}</dict></plist>\n`);
   for (const [name, size] of [["Icon.png", "57x57"], ["Icon@2x.png", "114x114"]])
     run(["magick", join(root, "vita/assets/sce_sys/icon0.png"), "-resize", size, "-define", "png:exclude-chunk=date,time", join(bundle, name)]);
-  writeFileSync(join(bundle, "places.tsv"), places.map((p) => `${p.id}\t${p.name}\t${p.locality}\n`).join(""));
-  for (const p of places)
-    for (const suffix of ["place", "jpg"]) {
-      if (!existsSync(join(assets, `${p.id}.${suffix}`))) throw new Error(`${p.id}.${suffix} is not cooked: bun tools/atlas-ipod.ts cook`);
-      cpSync(join(assets, `${p.id}.${suffix}`), join(bundle, `${p.id}.${suffix}`));
-    }
+  for (const file of ["atlas.js", "atlas.pak"]) cpSync(join(ui.directory, file), join(bundle, file));
+  writeFileSync(join(bundle, "globe.rgba"), globeSurface(512));
+  for (const p of places) {
+    if (!existsSync(join(assets, `${p.id}.place`))) throw new Error(`${p.id}.place is not cooked: bun tools/atlas-ipod.ts cook`);
+    cpSync(join(assets, `${p.id}.place`), join(bundle, `${p.id}.place`));
+  }
   rmSync(join(out, "PocketAtlas.ipa"), { force: true });
   if (command !== "build") run(["zip", "-q", "-r", join(out, "PocketAtlas.ipa"), "Payload"], out);
   console.log(JSON.stringify({ bundle, build, bundleId, executable: sha(executable) }));
@@ -147,24 +173,24 @@ async function control(d: Device, message: Record<string, unknown>) {
     await Bun.sleep(500);
     const s = status(d);
     if (s.state === "error") throw new Error(s.error);
-    if (s.lastCommand === nonce && (!message.capture || s.capture === nonce) && (!message.screen || s.screen === nonce)) return s;
+    if (s.lastCommand === nonce && (!(message.capture || message.screen) || s.capture === nonce)) return s;
   }
   throw new Error("the device did not acknowledge the command");
 }
-/** The place as drawn (480x320), or with `screen` the display as composited with UIKit (960x640). */
+/** The frame before the interface (480x320), or with `screen` as presented, interface and all. */
 async function capture(d: Device, output: string, screen = false) {
   await control(d, screen ? { screen: true } : { capture: true });
-  const raw = join(out, screen ? "screen.png" : "frame.rgba");
-  d.pull(`${d.tmp()}/${screen ? "screen.png" : "frame.rgba"}`, raw);
+  const name = screen ? "screen.rgba" : "frame.rgba", raw = join(out, name);
+  d.pull(`${d.tmp()}/${name}`, raw);
   mkdirSync(resolve(output, ".."), { recursive: true });
-  // Both are the portrait screen; the drawable comes bottom row first.
-  run(screen ? ["magick", raw, "-rotate", "-90", output] : ["magick", "-size", "320x480", "-depth", "8", `rgba:${raw}`, "-alpha", "off", "-flip", "-rotate", "-90", output]);
+  // Both are the portrait drawable, bottom row first.
+  run(["magick", "-size", "320x480", "-depth", "8", `rgba:${raw}`, "-alpha", "off", "-flip", "-rotate", "-90", output]);
 }
 
 if (command === "cook") cook();
-else if (command === "build" || command === "package") build();
+else if (command === "build" || command === "package") await build();
 else if (command === "deploy") {
-  build();
+  await build();
   await device((d) => {
     const remote = `/private/var/tmp/atlas-${randomBytes(8).toString("hex")}`, ipa = join(out, "PocketAtlas.ipa");
     d.ssh(`mkdir -p ${remote} /var/root/Library/PocketJS`);
@@ -177,11 +203,11 @@ else if (command === "deploy") {
     console.log(d.ssh(`chmod 700 ${remote}/installer; mv ${remote}/installer ${IPOD_INSTALLER}; ${IPOD_INSTALLER} lock ${shellQuote(bundleId)} ${remote}/deploy.sh; rm -rf ${remote}`));
   });
 } else if (command === "native") {
-  // Replaces the installed executable, and with --place that place's pack.
-  build();
+  // Replaces the installed executable and interface, and with --place that place's pack.
+  await build();
   await device((d) => {
     d.ssh("killall PocketAtlas 2>/dev/null; true");
-    if (option("--place")) d.push(join(bundle, `${option("--place")}.place`), `${d.path()}/${option("--place")}.place`);
+    for (const file of ["atlas.js", "atlas.pak", ...(option("--place") ? [`${option("--place")}.place`] : [])]) d.push(join(bundle, file), `${d.path()}/${file}`);
     d.push(join(bundle, "PocketAtlas"), d.path() + "/PocketAtlas.new");
     const digest = d.ssh(`cd ${shellQuote(d.path())} && chmod 755 PocketAtlas.new && mv PocketAtlas.new PocketAtlas && openssl dgst -sha256 PocketAtlas`);
     if (!digest.endsWith(sha(join(bundle, "PocketAtlas")))) throw new Error("the installed executable differs");

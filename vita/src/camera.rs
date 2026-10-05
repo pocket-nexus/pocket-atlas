@@ -69,8 +69,8 @@ impl Rig {
         self.shots.get(self.shot).map(|s| s.name.as_str()).unwrap_or("")
     }
 
-    pub fn shot_count(&self) -> usize {
-        self.shots.len()
+    pub fn shot_names(&self) -> Vec<String> {
+        self.shots.iter().map(|s| s.name.clone()).collect()
     }
 
     pub fn shot_index(&self) -> usize {
@@ -90,19 +90,28 @@ impl Rig {
         self.set_shot(self.shot + 1);
     }
 
+    /// Hands the camera to the visitor where the shot has it.
+    pub fn release(&mut self, current: &View) {
+        if self.mode == Mode::Free {
+            return;
+        }
+        self.mode = Mode::Free;
+        self.pos = current.pos;
+        let d = (current.target - current.pos).normalize_or(Vec3::NEG_Z);
+        self.yaw = d.x.atan2(-d.z);
+        self.pitch = d.y.asin();
+        self.fov = current.fov_y;
+        self.fade = 0.0;
+        self.look = (0.0, 0.0);
+        self.idle = 0.0;
+    }
+
     /// `stick`: left (move x, z), right (look x, y); `lift`: up/down in m/s.
     pub fn update(&mut self, dt: f32, time: f32, left: (f32, f32), right: (f32, f32), lift: f32, current: &View) -> View {
         let active = left.0.abs() + left.1.abs() + right.0.abs() + right.1.abs() + lift.abs() > 0.0;
-        if active && self.mode == Mode::Cinematic {
+        if active {
             // Take over from wherever the shot is.
-            self.mode = Mode::Free;
-            self.pos = current.pos;
-            let d = (current.target - current.pos).normalize_or(Vec3::NEG_Z);
-            self.yaw = d.x.atan2(-d.z);
-            self.pitch = d.y.asin();
-            self.fov = current.fov_y;
-            self.fade = 0.0;
-            self.look = (0.0, 0.0);
+            self.release(current);
         }
         let k = 1.0 - (-dt * 2.5).exp();
         match self.mode {

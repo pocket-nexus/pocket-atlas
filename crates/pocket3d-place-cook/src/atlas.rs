@@ -1,7 +1,7 @@
 //! `pocket-atlas-cook atlas`: the web globe export (`scripts/export-atlas.ts`)
 //! → `atlas.pack` for the handheld's place picker.
 
-use crate::{textures, uifont};
+use crate::textures;
 use half::f16;
 use pocket3d_place as pc;
 use pocket3d_place::atlas::{AtlasMeta, AtlasPlace, Globe};
@@ -52,7 +52,7 @@ fn hex_linear(s: &str) -> [f32; 3] {
     [lin(v >> 16 & 255), lin(v >> 8 & 255), lin(v & 255)]
 }
 
-pub fn cook(input: &Path, output: &Path, faces: &uifont::Faces) {
+pub fn cook(input: &Path, output: &Path) {
     let t0 = std::time::Instant::now();
     let read_json = |n: &str| -> Value {
         let p = input.join(n);
@@ -129,29 +129,6 @@ pub fn cook(input: &Path, output: &Path, faces: &uifont::Faces) {
         grain: n("grain"),
     };
     let s = |p: &Value, k: &str| p[k].as_str().unwrap_or("").to_string();
-    // Preview cards (web/scripts/preview-place.ts) next to each place's export.
-    let places_dir = input.parent().and_then(|a| a.parent()).map(|b| b.join("places"));
-    let mut previews = std::collections::HashMap::new();
-    for p in places.as_array().expect("places.json") {
-        let id = s(p, "id");
-        let Some(path) = places_dir.as_ref().map(|d| d.join(&id).join("preview.png")) else { continue };
-        let Ok(img) = image::open(&path) else {
-            if p["enterable"].as_bool() == Some(true) {
-                println!("  {id}: no preview card ({}); run web/scripts/preview-place.ts", path.display());
-            }
-            continue;
-        };
-        // The card is 2:1: the middle of the (16:9) capture's height.
-        let img = img.to_rgba8();
-        let (w, h) = img.dimensions();
-        let ch = (w / 2).min(h);
-        let img = image::imageops::crop_imm(&img, 0, (h - ch) / 2, w, ch).to_image();
-        let src = textures::from_rgba8(img.width(), img.height(), img.as_raw(), pc::TexRole::Color);
-        let src = textures::resize(&src, 512, 256);
-        let e = textures::encode_as(&src, pc::TexRole::Color, pc::TexFormat::Bc1, 512, 6);
-        let t = push(&format!("preview:{id}"), pc::TexRole::Color, e.format, e.width, e.height, e.mips, &e.data, pc::Wrap::Clamp, false);
-        previews.insert(id, t);
-    }
     let places: Vec<AtlasPlace> = places
         .as_array()
         .expect("places.json")
@@ -174,13 +151,11 @@ pub fn cook(input: &Path, output: &Path, faces: &uifont::Faces) {
             tags: p["tags"].as_array().map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect()).unwrap_or_default(),
             summary: s(p, "summary"),
             featured: p["featured"].as_bool().unwrap_or(false),
-            preview: previews.get(&s(p, "id")).copied(),
         })
         .collect();
-    let (font, coverage) = uifont::bake(&places, faces);
-    let meta = AtlasMeta { version: 1, places, textures, globe, font: Some(font) };
+    let meta = AtlasMeta { version: 1, places, textures, globe };
     let json = serde_json::to_vec(&meta).unwrap();
-    let bytes = pc::write_as(pc::atlas::MAGIC, &[(pc::TAG_META, &json, 4), (pc::TAG_TEXTURES, &blob, 4096), (pc::atlas::TAG_FONT, &coverage, 4096)]);
+    let bytes = pc::write_as(pc::atlas::MAGIC, &[(pc::TAG_META, &json, 4), (pc::TAG_TEXTURES, &blob, 4096)]);
     std::fs::write(output, &bytes).unwrap_or_else(|e| panic!("{}: {e}", output.display()));
     println!("wrote {} ({:.1} MiB, {} places) in {} ms", output.display(), bytes.len() as f32 / 1048576.0, meta.places.len(), t0.elapsed().as_millis());
 }

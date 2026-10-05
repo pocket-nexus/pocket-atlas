@@ -2,13 +2,17 @@
 #define ATLAS_SETTINGS_H
 #include <stdbool.h>
 #include <stdint.h>
+// What the visitor can set in a place, kept on the SD card and carried to
+// the next place. The interface's menu lists them and sets them.
 void settings_init(void);
 void settings_apply(void);
-bool settings_update(uint32_t down);
+// Writes the list into `interface.options`.
+void settings_list(void);
+// The visitor set `key` to `value`: a switch's 0 or 1, or a choice.
+void settings_set(const char *key, unsigned value);
 void settings_control(const char *json);
-void settings_draw(void);
-bool settings_open(void);
-void settings_close(void);
 unsigned settings_fps(void);
 bool settings_antialias(void);
+// The statistics line is wanted.
+bool settings_stats(void);
 #endif

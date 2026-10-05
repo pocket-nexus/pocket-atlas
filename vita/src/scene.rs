@@ -108,7 +108,11 @@ impl Scene {
     /// # Safety
     /// GXM initialised; call from the render thread.
     pub unsafe fn load(path: &str, progress: impl FnMut(usize, usize, &str)) -> Result<Self, String> {
-        let mut vram = Arena::new(Kind::Cdram, 16 << 20);
+        // The textures go into one block of their own size (rows and mip
+        // chains are padded by less than the megabyte added): an arena of
+        // 16 MiB chunks left up to that much video memory unused behind them.
+        let texels = Seq::open(path).and_then(|mut f| Ok(find(&f.sections(pc::MAGIC)?, pc::TAG_TEXTURES)?.size as usize))?;
+        let mut vram = Arena::new(Kind::Cdram, texels + (1 << 20));
         let mut main = Arena::new(Kind::Main, 8 << 20);
         match Self::load_in(path, progress, &mut vram, &mut main) {
             Ok(mut s) => {

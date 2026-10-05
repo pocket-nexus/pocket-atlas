@@ -7,7 +7,7 @@
 
 /* Initialize once, after C3D_Init and before loading the first view. This tiny
  * program and 8x8 white texture stay alive until after C3D_Fini, across every
- * scene/browser reload.
+ * scene or globe reload.
  */
 bool atlas_gpu_park_init(char *error, size_t capacity);
 void atlas_gpu_park_shutdown(void);

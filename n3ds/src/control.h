@@ -72,6 +72,13 @@ static inline unsigned long control_uint(const char *json, const char *key,
     return fallback;
   return strtoul(p, NULL, 10);
 }
+static inline double control_number(const char *json, const char *key,
+                                    double fallback) {
+  const char *p = control_field(json, key);
+  if (!p || (*p != '-' && (*p < '0' || *p > '9')))
+    return fallback;
+  return strtod(p, NULL);
+}
 static inline void control_escape(char *out, size_t cap, const char *s) {
   size_t n = 0;
   while (*s && n + 2 < cap) {

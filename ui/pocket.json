@@ -1,0 +1,36 @@
+{
+  "$schema": "https://pocketjs.dev/schema/pocket-2.json",
+  "pocket": 2,
+  "id": "dev.pocket-nexus.atlas",
+  "name": "pocket-atlas",
+  "title": "Pocket Atlas",
+  "version": "0.1.0",
+  "engine": {
+    "capabilities": {
+      "requires": ["text.glyphs.baked"],
+      "enhances": ["input.buttons", "input.touch", "input.analog.left"]
+    }
+  },
+  "app": {
+    "entry": "app/main.tsx",
+    "output": "atlas",
+    "framework": "solid",
+    "viewport": { "logical": [480, 272], "presentation": "integer-fit" },
+    "presentations": [
+      {
+        "id": "dual-screen",
+        "entry": "app/main-dual.tsx",
+        "modality": { "screens": 2, "touch": "auxiliary" },
+        "viewport": { "fixed": { "logical": [400, 240], "presentation": "native" } },
+        "surfaces": { "auxiliary": { "fixed": { "logical": [320, 240], "presentation": "native" } } },
+        "capabilities": { "requires": ["display.auxiliary", "input.touch.auxiliary"], "enhances": ["input.analog.right"] }
+      },
+      {
+        "id": "touch",
+        "entry": "app/main-touch.tsx",
+        "modality": { "touch": "primary", "buttons": false },
+        "viewport": { "fixed": { "logical": [480, 320], "presentation": "native" } }
+      }
+    ]
+  }
+}

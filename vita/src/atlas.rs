@@ -395,23 +395,15 @@ impl Atlas {
         Ok(atlas)
     }
 
-    /// Turns place `i` into the lit-limb-free part of the disc without
-    /// centring it (the web's card hover).
-    pub fn turn_to(&mut self, i: usize) {
-        let p = &self.meta.places[i];
-        self.goal = Some(((p.lat * 0.75).clamp(-40.0, 55.0), p.lon - 4.0));
+    /// Turns a point into the lit-limb-free part of the disc without
+    /// centring it (the web's card hover), and with `lit` rings the place
+    /// there. The interface asks for this as its focus moves.
+    pub fn face(&mut self, lat: f32, lon: f32, lit: bool) {
+        self.goal = Some(((lat * 0.75).clamp(-40.0, 55.0), lon - 4.0));
         self.idle = 0.0;
-    }
-
-    /// Marks the browser's focused place and the places in its list.
-    pub fn mark(&mut self, focus: Option<usize>, list: &[usize]) {
-        self.highlight = focus;
-        self.listed = (0..self.meta.places.len()).map(|i| list.contains(&i)).collect();
-    }
-
-    /// A pack texture (place previews), if `i` names one.
-    pub fn texture(&self, i: u32) -> Option<*const g::SceGxmTexture> {
-        self.textures.get(i as usize).map(|t| &t.gxm as *const _)
+        let near = |p: &pocket3d_place::atlas::AtlasPlace| (p.lat - lat).abs() + wrap_deg(p.lon - lon).abs();
+        self.highlight = lit.then(|| (0..self.meta.places.len()).min_by(|&a, &b| near(&self.meta.places[a]).total_cmp(&near(&self.meta.places[b])))).flatten();
+        self.listed = vec![true; self.meta.places.len()];
     }
 
     /// The globe for one frame: the left stick spins it, otherwise it eases

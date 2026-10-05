@@ -35,21 +35,23 @@ unsigned scene_features(void);
 unsigned scene_shot_count(void);
 const char *scene_shot_name(unsigned index);
 void scene_select_shot(unsigned index);
+// The authored tour, or the camera in the visitor's hands where it stands.
+void scene_tour(bool on);
 void scene_settings_get(AtlasSettings *settings);
 void scene_settings_set(const AtlasSettings *settings);
 void scene_settings_reset(void);
-void scene_hud_reset(void);
-void scene_input_block(bool blocked);
 void scene_frame_budget(float milliseconds);
 void atlas_diagnostic(const char *message);
 bool scene_load(const char *path, const char *expected_sha256, char *error, size_t capacity);
-void scene_update(float dt, uint32_t down, uint32_t held);
+// move: -1..1 to the right and forward; look: -1..1 to the right and up
+// (a rate); drag: pixels a finger turned the view by since the last call.
+void scene_update(float dt, const float move[2], const float look[2],
+                  const float drag[2]);
 void scene_prepare(void);
 void scene_measure(void);
 void scene_render(C3D_RenderTarget *target);
 C3D_RenderTarget *scene_reflection_target(void);
 void scene_control(const char *json);
 void scene_status(char *out, size_t capacity);
-void scene_hud(void);
 void scene_free(void);
 #endif

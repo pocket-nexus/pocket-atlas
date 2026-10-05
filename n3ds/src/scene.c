@@ -56,9 +56,6 @@ static int uv_loc, wet_uv_loc, water_eye_loc, water_sky_loc, water_params_loc,
     waves0_loc, waves1_loc;
 static bool glow_enabled = true, hud_enabled = true;
 static float exposure_ev, exposure_gain = 1;
-static bool hud_first = true, hud_last_connected;
-static int hud_previous_shot = -1;
-static unsigned hud_previous_effects = UINT32_MAX;
 static AtlasVertex *sky_vertices;
 #define SKY_SEGMENTS 32
 #define SKY_RINGS 16
@@ -80,7 +77,7 @@ static C3D_Mtx projection, view, vp;
 static C3D_FogLut fog;
 static float shot_time, yaw, pitch, freeze_time = -1;
 static float detail_range = 6.0f;
-static bool camera_hold, input_lock, ui_input_block;
+static bool camera_hold, input_lock;
 static uint64_t last_control;
 static int stick_x, stick_y;
 static unsigned measured_frames, frame_hist[128];
@@ -109,8 +106,6 @@ static float frame_percentile(float p) {
 }
 static float ident[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
 static unsigned over, under;
-static int touch_x, touch_y;
-static bool touching;
 static float smooth_frame = 33.3f;
 static float frame_budget = 1000.0f / 30.0f;
 static float planes[6][4];
@@ -196,10 +191,17 @@ bool scene_load(const char *path, const char *expected_sha256, char *error, size
   mbedtls_sha256_context hash;
   mbedtls_sha256_init(&hash);
   bool valid = mbedtls_sha256_starts_ret(&hash, 0) == 0;
-  unsigned char buffer[4096], digest[32];
+  // The SD card is read through a service call per request: in small
+  // requests the pack takes ten times as long to read as to hash.
+  enum { CHUNK = 256 * 1024 };
+  unsigned char *buffer = malloc(CHUNK), digest[32];
   size_t n;
-  while (valid && (n = fread(buffer, 1, sizeof buffer, file)) != 0)
+  valid = valid && buffer;
+  while (valid && (n = fread(buffer, 1, CHUNK, file)) != 0) {
     valid = mbedtls_sha256_update_ret(&hash, buffer, n) == 0;
+    devserver_poll();
+  }
+  free(buffer);
   valid = valid && !ferror(file) && mbedtls_sha256_finish_ret(&hash, digest) == 0;
   mbedtls_sha256_free(&hash);
   char actual[65];
@@ -277,7 +279,11 @@ bool scene_load(const char *path, const char *expected_sha256, char *error, size
   weights = (AtlasSkin *)(dry + head->dry_boxes);
   send_progress("Geometry and animation");
   geometry = linearMemAlign(gs, 128);
-  animation = malloc(as ? as : 4);
+  // The animation is the one large thing that is not the GPU's. It lives in
+  // the linear heap all the same: there a place is freed whole, while in the
+  // malloc heap the interface's allocations come to rest around it and the
+  // next place's block no longer fits the hole.
+  animation = linearAlloc(as ? as : 4);
   matrices = malloc(head->matrices ? head->matrices * 48 : 4);
   skin_vertices = calloc(head->draws, sizeof(void *));
   skin_back = calloc(head->draws, sizeof(void *));
@@ -561,7 +567,15 @@ const char *scene_shot_name(unsigned i) {
 }
 void scene_select_shot(unsigned i) {
   if (head && i < head->shots)
-    set_shot(i, true);
+    set_shot(i, false);
+}
+void scene_tour(bool on) {
+  if (!head)
+    return;
+  if (on)
+    atlas.cinematic = true;
+  else
+    free_camera();
 }
 void scene_settings_get(AtlasSettings *s) {
   *s = (AtlasSettings){.reflection = atlas.reflection,
@@ -592,7 +606,6 @@ void scene_settings_set(const AtlasSettings *s) {
   else
     atlas.cinematic = s->cinematic;
   over = under = 0;
-  scene_hud_reset();
 }
 void scene_settings_reset(void) {
   AtlasSettings s = {.reflection = true,
@@ -607,74 +620,28 @@ void scene_settings_reset(void) {
                      .exposure = 0};
   scene_settings_set(&s);
 }
-void scene_hud_reset(void) {
-  hud_first = true;
-  hud_previous_shot = -1;
-  hud_previous_effects = UINT32_MAX;
-}
-
-void scene_input_block(bool blocked) { ui_input_block = blocked; }
 void scene_frame_budget(float milliseconds) {
   if (isfinite(milliseconds) && milliseconds >= 10 && milliseconds <= 100)
     frame_budget = milliseconds;
 }
-void scene_update(float dt, uint32_t down, uint32_t held) {
+void scene_update(float dt, const float move[2], const float look[2],
+                  const float drag[2]) {
   if (!head)
     return;
   if (input_lock && osGetTime() - last_control > 3000)
     input_lock = false;
-  if (input_lock || ui_input_block)
-    down = held = 0;
   if (freeze_time >= 0)
     atlas.time = freeze_time;
   else
     atlas.time += dt;
-  if (down & KEY_A)
-    set_shot(atlas.shot + 1, false);
-  if (down & KEY_B) {
-    if (atlas.cinematic)
-      free_camera();
-    else
-      atlas.cinematic = true;
-  }
-  if (down & KEY_X) {
-    atlas.hold = !atlas.hold;
-    over = under = 0;
-  }
-  if (down & KEY_Y) {
-    atlas.step = (atlas.step + 1) % 5;
-    atlas.hold = true;
-  }
-  if ((down & KEY_SELECT))
-    atlas.reflection = !atlas.reflection;
-  circlePosition pad;
-  hidCircleRead(&pad);
-  stick_x = pad.dx;
-  stick_y = pad.dy;
-  if (input_lock || ui_input_block)
-    pad.dx = pad.dy = 0;
-  float lx, ly;
-  atlas_stick(pad.dx, pad.dy, &lx, &ly);
-  float mx = ((held & KEY_RIGHT) ? 1 : 0) - ((held & KEY_LEFT) ? 1 : 0);
-  float my = ((held & KEY_UP) ? 1 : 0) - ((held & KEY_DOWN) ? 1 : 0);
-  float lift = ((held & KEY_R) ? 1 : 0) - ((held & KEY_L) ? 1 : 0);
-  touchPosition p;
-  hidTouchRead(&p);
-  bool active = (held & KEY_TOUCH) != 0;
-  if (active && !touching && p.py >= 32 && p.py < 32 + head->shots * 8) {
-    unsigned row = (p.py - 32) / 8;
-    if (row < head->shots)
-      set_shot(row, true);
-  }
-  float drag_x = 0, drag_y = 0;
-  if (active && touching && p.py > 120) {
-    drag_x = (p.px - touch_x) * 0.006f;
-    drag_y = (p.py - touch_y) * 0.006f;
-  }
-  touch_x = p.px;
-  touch_y = p.py;
-  touching = active;
-  if (mx || my || lx || ly || lift || drag_x || drag_y)
+  // A measurement holds the camera against the pad.
+  static const float none[2];
+  if (input_lock)
+    move = look = drag = none;
+  float mx = move[0], my = move[1], lx = look[0], ly = look[1];
+  stick_x = (int)(mx * 100), stick_y = (int)(my * 100);
+  float drag_x = drag[0] * 0.006f, drag_y = drag[1] * 0.006f;
+  if (mx || my || lx || ly || drag_x || drag_y)
     free_camera();
   if (atlas.cinematic) {
     AtlasShot *s = &shots[atlas.shot];
@@ -696,8 +663,8 @@ void scene_update(float dt, uint32_t down, uint32_t held) {
     pitch = clampf(pitch + ly * dt * 1.3f - drag_y, -1.3f, 1.3f);
     // Scene origins are geographic, so stairs/coast may sit below y=0.
     // The free camera may fly; do not apply the street helper's ground clamp.
-    float height = atlas.position[1] + lift * dt * 1.8f;
-    atlas_move(atlas.position, yaw, mx, my, lift, dt);
+    float height = atlas.position[1];
+    atlas_move(atlas.position, yaw, mx, my, 0, dt);
     atlas.position[1] = height;
     atlas.target[0] = atlas.position[0] + sinf(yaw) * cosf(pitch);
     atlas.target[1] = atlas.position[1] + sinf(pitch);
@@ -1482,64 +1449,6 @@ void scene_status(char *out, size_t capacity) {
       frame_percentile(.95f), measured_max, work_max,
       input_lock ? "true" : "false", stick_x, stick_y);
 }
-void scene_hud(void) {
-  if (!head)
-    return;
-  DevserverSnapshot dev;
-  devserver_snapshot(&dev);
-  if (hud_first) {
-    consoleClear();
-    printf("\x1b[H\x1b[36mPOCKET ATLAS\x1b[0m     Nintendo 3DS\n\n\n\n");
-    for (unsigned i = 0; i < head->shots; i++)
-      printf("  %-28s\n", shots[i].name);
-    printf("\nCircle pad: look  D-pad: move\n");
-    printf("Touch / drag here to look around\n\n");
-    printf("A next shot   B camera   L/R height\nX auto/hold   Y quality  "
-           "SELECT settings\nSTART atlas   L+R+START exit\n");
-    printf("\x1b[23;1H%s:%u", dev.ip, dev.port);
-  }
-  if (!hud_enabled) {
-    if (hud_first) {
-      printf("\x1b[2;1HPerformance overlay off\n");
-      hud_first = false;
-    }
-    return;
-  }
-  // Redrawing the entire console cost several milliseconds on Old 3DS.
-  // Static instructions stay resident; refresh only three telemetry rows.
-  printf("\x1b[2;1H%5.1f fps %5.1f ms  quality %lu %s  \n",
-         1000.0f / fmaxf(smooth_frame, 1), smooth_frame,
-         (unsigned long)atlas.step, atlas.hold ? "HOLD" : "AUTO");
-  printf("CPU %5.1f  GPU %5.1f ms             \n", atlas.cpu_ms, atlas.gpu_ms);
-  printf("%-15s %6lu triangles      ",
-         atlas.cinematic ? "Cinematic" : "Free camera",
-         (unsigned long)atlas.triangles);
-  if (hud_previous_shot != atlas.shot) {
-    if (hud_previous_shot >= 0)
-      printf("\x1b[%d;1H ", 5 + hud_previous_shot);
-    printf("\x1b[%d;1H>", 5 + atlas.shot);
-    hud_previous_shot = atlas.shot;
-  }
-  unsigned effects = atlas.rain | (atlas.haze << 1) | (atlas.reflection << 2);
-  if (hud_first || effects != hud_previous_effects) {
-    printf("\x1b[21;1HRain %s  Haze %s  Reflection %s    ",
-           !(head->features & SCENE_RAIN) ? "--"
-           : atlas.rain                   ? "on"
-                                          : "off",
-           !(head->features & SCENE_HAZE) ? "--"
-           : atlas.haze                   ? "on"
-                                          : "off",
-           !(head->features & SCENE_REFLECTION) ? "--"
-           : atlas.reflection                   ? "on"
-                                                : "off");
-    hud_previous_effects = effects;
-  }
-  if (hud_first || dev.connected != hud_last_connected) {
-    printf("\x1b[24;1H%-12s", dev.connected ? "CONNECTED" : "ready");
-    hud_last_connected = dev.connected;
-  }
-  hud_first = false;
-}
 void scene_free(void) {
   // main parks the program and binds resident textures before releasing a
   // drawn scene. Citro3D's public TexBind API does not accept NULL.
@@ -1595,7 +1504,8 @@ void scene_free(void) {
   free(skin_vertices);
   free(skin_back);
   free(matrices);
-  free(animation);
+  if (animation)
+    linearFree(animation);
   free(table);
   head = NULL;
   shots = NULL;
@@ -1628,9 +1538,9 @@ void scene_free(void) {
   atlas.fov = 45;
   shot_time = yaw = pitch = 0;
   freeze_time = -1;
-  camera_hold = input_lock = touching = ui_input_block = false;
+  camera_hold = input_lock = false;
   last_control = 0;
-  stick_x = stick_y = touch_x = touch_y = 0;
+  stick_x = stick_y = 0;
   smooth_frame = 33.3f;
   visible_count = opaque_count = mirror_count = main_plan_count =
       mirror_plan_count = 0;

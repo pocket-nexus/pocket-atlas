@@ -17,6 +17,8 @@ jobs:
         with:
           submodules: true
       - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          targets: wasm32-unknown-unknown
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
@@ -25,6 +27,14 @@ jobs:
         working-directory: web
       - run: bun test tools/*.test.ts web/scripts/*.test.ts web/src/places/shared/daylight/*.test.ts web/src/places/sf-lombard-street/world/*.test.ts
       - run: bun web/node_modules/typescript/bin/tsc -p tsconfig.tools.json
+      # The interface (ui/) is compiled for each device and run on PocketJS's
+      # wasm core, which is built here.
+      - run: bun install --frozen-lockfile
+        working-directory: vendor/pocketjs
+      - run: bun tools/wasm.ts
+        working-directory: vendor/pocketjs
+      - run: bun test ui/test
+      - run: bun web/node_modules/typescript/bin/tsc -p ui/tsconfig.json
       - name: Shadow receiver bounds
         run: |
           mkdir -p .pocket-build/validation/ci

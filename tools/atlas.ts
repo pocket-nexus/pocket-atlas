@@ -36,6 +36,7 @@ import { prepareVitaUsb } from "../vendor/pocketjs/tools/vita-usb.ts";
 import { VitaUsbClient } from "../vendor/pocketjs/tools/vita-dev-client.ts";
 import { guardDeviceCommand } from "../vendor/pocketjs/tools/device-lease.ts";
 import { DeviceEvidence, assertDeviceIdentity, fileSha256, type DeviceIdentity } from "../vendor/pocketjs/tools/device-evidence.ts";
+import { compileInterface } from "./atlas-ui";
 import { assertFrameSample, assertVitaMeasurement, compileIdentity } from "./device-validation";
 import { readPack, VITA_PACK_VERSION } from "./place-container";
 
@@ -130,37 +131,8 @@ const SHARE = resolve(USB_SHARE, "atlas");
 const PLACES_DIR = resolve(ROOT, ".pocket-build/places");
 const PLACE_DIR = `${PLACES_DIR}/${PLACE}`;
 const PACK = `${PLACE_DIR}/${PLACE}.place`;
-/** The globe and place list (`cook-atlas`, from web/scripts/export-atlas.ts). */
+/** The globe (`cook-atlas`, from web/scripts/export-atlas.ts). */
 const ATLAS_PACK = resolve(ROOT, ".pocket-build/atlas/atlas.pack");
-const FONTS = resolve(ROOT, ".pocket-build/fonts");
-const NOTO_REVISION = "f8d157532fbfaeda587e826d4cd5b21a49186f7c";
-/** SHA-256 of the Noto Sans CJK JP faces at NOTO_REVISION. */
-const NOTO_SHA256: Record<string, string> = {
-  "NotoSansCJKjp-Medium.otf": "dd523e580e3413c480b2d701bf64e534c20f8419e3cfb6a44c2bdcd8d2a6c052",
-  "NotoSansCJKjp-Bold.otf": "e53dcb0dcb2922e45d01aae1ebd2f382bb81d4229b18b6b883bd170678af1f76",
-};
-
-/**
- * The interface font's faces: Inter Regular/Bold from PocketJS, Noto Sans CJK
- * JP Medium/Bold (OFL) fetched once into `.pocket-build/fonts` and checked.
- */
-async function fontFaces(): Promise<string[]> {
-  mkdirSync(FONTS, { recursive: true });
-  const cjk: string[] = [];
-  for (const [name, sha] of Object.entries(NOTO_SHA256)) {
-    const path = `${FONTS}/${name}`;
-    if (!existsSync(path)) {
-      const r = await fetch(`https://raw.githubusercontent.com/notofonts/noto-cjk/${NOTO_REVISION}/Sans/OTF/Japanese/${name}`);
-      if (!r.ok) throw new Error(`${name}: ${r.status}`);
-      writeFileSync(path, new Uint8Array(await r.arrayBuffer()));
-    }
-    if (createHash("sha256").update(readFileSync(path)).digest("hex") !== sha) throw new Error(`${path}: checksum mismatch`);
-    cjk.push(path);
-  }
-  const inter = `${POCKETJS}/assets/fonts`;
-  return ["--latin", `${inter}/Inter-Regular.ttf`, "--latin-bold", `${inter}/Inter-Bold.ttf`, "--cjk", cjk[0]!, "--cjk-bold", cjk[1]!];
-}
-
 /** Every cooked place pack: [id, path]. */
 function cookedPlaces(): [string, string][] {
   if (!existsSync(PLACES_DIR)) return [];
@@ -177,10 +149,17 @@ function copyIfChanged(src: string, dst: string): boolean {
   return !same;
 }
 
+// The interface (ui/), compiled for the Vita: the device reads it beside the packs.
+async function syncInterface(directory: string): Promise<void> {
+  const ui = await compileInterface("vita");
+  for (const file of ["atlas.js", "atlas.pak"]) copyIfChanged(`${ui.directory}/${file}`, `${directory}/${file}`);
+}
+
 // The device reads the pack and shader sources from the USB share; shaders
 // recompile on the device when their source changes.
-function sync(): void {
+async function sync(): Promise<void> {
   lease?.assertHeld();
+  await syncInterface(SHARE);
   // The device never creates directories on host0: (stat-style requests stall
   // the USB channel); every directory it writes into exists up front.
   for (const dir of ["shaders", "gxp", "errors", "places"]) mkdirSync(`${SHARE}/${dir}`, { recursive: true });
@@ -228,7 +207,7 @@ async function lint(): Promise<void> {
     ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "MOVING_SHADOW", "FAR", "ALBEDO_MAP", "FOG"]],
     ["standard_f.cg", ["LIGHTS=0", "SUN", "MOVING_SHADOW", "SUN_SPEC", "FOG"]],
     ...[[], ["FAR"], ["LITE"], ["REFLECTION"]].map((tier): [string, string[]] => ["standard_f.cg", ["LIGHTS=0", "BAKED", "SUN", "MOVING_SHADOW", "SUN_SPEC", "VERTEX_COLOR", "VERTEX_PBR", "FOG", ...tier]]),
-    ["globe_v.cg", []], ["globe_f.cg", []], ["marker_v.cg", []], ["marker_f.cg", []], ["ui_v.cg", []], ["ui_f.cg", []], ["ui_f.cg", ["TEX"]], ["text_v.cg", []], ["text_f.cg", []], ["surface_v.cg", ["WAVES"]], ["water_f.cg", ["SUN", "FOG"]], ["water_f.cg", []], ["water_f.cg", ["SUN", "FOG", "SHALLOW"]], ["surface_v.cg", ["WAVES", "COLOR"]], ["surface_v.cg", ["FLAT"]], ["surface_v.cg", ["BAKED", "FLAT"]],
+    ["globe_v.cg", []], ["globe_f.cg", []], ["marker_v.cg", []], ["marker_f.cg", []], ["surface_v.cg", ["WAVES"]], ["water_f.cg", ["SUN", "FOG"]], ["water_f.cg", []], ["water_f.cg", ["SUN", "FOG", "SHALLOW"]], ["surface_v.cg", ["WAVES", "COLOR"]], ["surface_v.cg", ["FLAT"]], ["surface_v.cg", ["BAKED", "FLAT"]],
     // Light fields and the vista haze (dusk-vista places).
     ["lights_v.cg", []], ["lights_v.cg", ["VISTA"]], ["lights_f.cg", []],
     ["surface_v.cg", ["BAKED", "VISTA"]], ["surface_v.cg", ["VISTA", "COLOR", "TANGENT"]], ["surface_v.cg", ["SKINNED", "MAX_BONES=24", "VISTA", "VERTEX_LIGHTS=2"]], ["surface_v.cg", ["WAVES", "VISTA"]], ["surface_v.cg", ["VISTA", "FLAT"]],
@@ -484,6 +463,7 @@ async function vpk(): Promise<void> {
   for (const [id, path] of places) cpSync(path, `${stage}/places/${id}.place`);
   if (!existsSync(ATLAS_PACK)) throw new Error(`${ATLAS_PACK} missing: run \`bun tools/atlas.ts cook-atlas\` first`);
   cpSync(ATLAS_PACK, `${stage}/atlas.pack`);
+  await syncInterface(stage);
   console.log(`atlas: staged ${hashes.length} programs, the atlas and ${places.map(([id]) => id).join(", ")} in ${stage}`);
   await build({ standalone: true, assets: stage });
 }
@@ -545,7 +525,7 @@ else if (command === "bench") await bench();
 else if (command === "profile") await profile();
 else if (command === "shots") await shots();
 else if (command === "sweep") await sweep();
-else if (command === "sync") sync();
+else if (command === "sync") await sync();
 else if (command === "ctl") {
   mkdirSync(SHARE, { recursive: true });
   const body = argv[1] ?? "{}";
@@ -553,7 +533,7 @@ else if (command === "ctl") {
   await Bun.write(`${SHARE}/control.json`, body + "\n");
   console.log(`atlas: ${SHARE}/control.json = ${body}`);
 } else if (command === "native") {
-  sync();
+  await sync();
   await build();
   await dev("native");
 } else if (command === "serve") {
@@ -563,8 +543,7 @@ else if (command === "ctl") {
   if (![128, 256, 512, 1024, 2048].includes(tex)) throw new Error("--tex must be 128, 256, 512, 1024 or 2048");
   await $`cargo run --release --locked -p pocket3d-place-cook -- --target vita --in ${PLACE_DIR} --tex ${tex}`.cwd(ROOT);
 } else if (command === "cook-atlas") {
-  const faces = await fontFaces();
-  await $`cargo run --release -p pocket3d-place-cook -- atlas --in ${resolve(ROOT, ".pocket-build/atlas/globe")} --out ${ATLAS_PACK} ${faces}`.cwd(ROOT);
+  await $`cargo run --release --locked -p pocket3d-place-cook -- atlas --in ${resolve(ROOT, ".pocket-build/atlas/globe")} --out ${ATLAS_PACK}`.cwd(ROOT);
 } else if (command === "capture") {
   const out = value("--out", resolve(ROOT, `.pocket-build/validation/captures/${new Date().toISOString().replace(/[:.]/g, "-")}.png`));
   await dev("capture", "--out", out);

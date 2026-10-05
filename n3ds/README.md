@@ -3,22 +3,28 @@
 Pocket Atlas opens on an interactive globe and supports five shared places on
 an Old 3DS: Rainy Night Konbini, Suga Shrine Stairs, Radio Kaikan at Blue Hour,
 Kamakura-Kōkōmae Crossing and daytime San Francisco Lombard Street.
-The registry, globe maps, postcard previews,
-font, material annotations, camera shots, geometry and motion come from the
-same web exports and lossless PlaceIR as the Vita. PICA cooks independently
-from source geometry and textures; it does not read a Vita device pack. Rendering contains no
-scene-name branches. PocketJS owns the unchanged paired debug transport and
+Material annotations, camera shots, geometry and motion come from the same web
+exports and lossless PlaceIR as the Vita. PICA cooks independently from source
+geometry and textures; it does not read a Vita device pack. Rendering contains
+no scene-name branches. PocketJS owns the unchanged paired debug transport and
 native installer; Atlas owns the application and its content-addressed packs.
+
+Everything flat on either screen is [the interface](../README.md#the-interface)
+(`ui/`, shared with the other handhelds): a PocketJS guest that `guest.c` runs
+on PocketJS's 3DS UI core, QuickJS driver and PICA DrawList backend, drawn over
+the top screen's scene and on the whole touch screen. The renderer draws the
+globe (`globe.c`) and the places (`scene.c`) and answers the interface through
+`interface.c`. Nothing is printed on a screen: diagnostics go to
+`sdmc:/pocket-atlas/boot.log` and the debug wire.
 
 The native catalog uses explicit per-place `targets` eligibility in the web
 registry; PlaceIR validates the authored feature set before device lowering.
 Griffith Observatory's existing `dusk-vista` renderer requires light fields
 and distance/height-dependent vista haze that PICA does not yet implement.
-Its marker, details and preview remain visible, with **Unavailable on 3DS**;
-pressing A explains that it is unavailable instead of trying to load it.
-The browser reports `availability: unsupported` for that selection. Planned
-places retain their separate Coming soon state. The open-place count counts
-only supported live places.
+The interface lists every place of the registry; one without a pack on the SD
+card (unsupported here, or not yet built) keeps its marker and details, is
+marked **Not on this device** or **Coming soon**, and says so instead of
+loading.
 
 Cook, build, package, install and sync use the same supported subset. Their
 manifests/receipts list unsupported live entries separately. `cook --place`
@@ -33,9 +39,11 @@ Emulator timing does not establish performance on an Old 3DS.
 
 ## Build and deploy
 
-Initialize `vendor/pocketjs`, install `web` dependencies, start Docker and run
-one web development server. Export the shared assets (adjust `--base` when the
-server is not on port 5173):
+Initialize `vendor/pocketjs` and run `bun install` in it, install `web`
+dependencies, start Docker and run one web development server. The interface's
+UI core is built on the host with the Rust nightly its crate pins
+(`vendor/pocketjs/hosts/3ds/core/rust-toolchain.toml`, with `rust-src`). Export
+the shared assets (adjust `--base` when the server is not on port 5173):
 
 ```sh
 cd web
@@ -47,16 +55,17 @@ bun scripts/export-place.ts --place sf-lombard-street --seconds 120
 bun scripts/preview-place.ts
 bun scripts/export-atlas.ts
 cd ..
-bun tools/atlas.ts cook-atlas
 bun tools/atlas-3ds.ts cook
-bun tools/atlas-3ds-assets.ts
 bun tools/atlas-3ds.ts build
 bun tools/atlas-3ds.ts install --host 192.168.8.159
 ```
 
-`cook --place ID` rebuilds one native pack. `build` produces
-`dist/3ds/pocket-atlas.3dsx`, with the small globe/browser pack in ROMFS and a
-compiled catalog of exact scene hashes. Scene packs live in
+`cook --place ID` rebuilds one native pack. `build` compiles the interface
+for the 3DS (`tools/atlas-ui.ts`), cooks the globe (`tools/atlas-3ds-assets.ts`),
+builds PocketJS's UI core and QuickJS, and produces
+`dist/3ds/pocket-atlas.3dsx` with the interface (`atlas.js`, `atlas.pak`) and
+the globe (`globe.3ds`) in RomFS and a compiled catalog of exact scene hashes.
+Scene packs live in
 `sdmc:/pocket-atlas/<sha256>.place`; the scenes exceed the native installer's
 32 MiB limit, so they are delivered separately.
 
@@ -66,8 +75,8 @@ a temporary token-protected HTTP endpoint on the host interface routed to the
 console (`--asset-host` overrides it). The application streams to SD, verifies
 size and CRC, and renames a temporary file only after verification. Matching
 cached packs are checked and skipped. The host verifies SHA-256 before serving.
-`install --thin` updates only the program/browser and requires matching packs
-already on SD. `sync` can be run independently.
+`install --thin` updates only the program and its interface and requires
+matching packs already on SD. `sync` can be run independently.
 
 For an initial installation or crash recovery while ftpd is open:
 
@@ -80,53 +89,58 @@ bun tools/atlas-3ds.ts sync --host 192.168.8.159
 
 For an entirely offline installation, run `bun tools/atlas-3ds.ts package` and
 extract `dist/3ds/pocket-atlas-sd.zip` at the SD root. It contains the 3dsx,
-manifest and every required scene pack. Missing packs give a visible message
-and return to the browser. Files from another revision are never selected.
+manifest and every required scene pack. A place whose pack is missing is
+listed as not on the device. Files from another revision are never selected.
 
 ## Browse and control
 
-The upper screen shows a real rotating globe, location markers and a postcard.
-The lower screen contains the touchable place lists and details:
+The upper screen shows the rotating globe, a pin per place and the focused
+place's card. The lower screen is the interface's touch surface:
 
-- Circle pad rotates the globe. D-pad up/down selects a place; left/right zooms.
-- L/R changes Featured, Explore, Saved and Search. Explore sorts all 19 places
-  by distance from the globe's facing point.
-- A enters an available place. Planned places remain browseable but cannot be entered.
-- X opens the system keyboard. Every search word must match a name, locality,
-  country, tag, kind, author or summary; native names are searchable.
-- Y saves or unsaves a place. Favorites persist on SD.
-- B opens details; up/down scrolls long text. Selection, globe orientation,
-  query and favorites survive a scene visit.
+- Circle Pad rotates the globe; Explore re-sorts around where it faces.
+- The list scrolls under the stylus or the D-pad; a tap focuses a row, a
+  second tap (or A) enters it. L/R, or a tap on a tab, changes between
+  Featured, Explore, Saved and Search.
+- X opens the keyboard on the lower screen. Every search word must occur in a
+  place's name, native name, locality, country, kind, tags, weather or summary.
+- Y saves or unsaves a place. Saved places are kept in
+  `sdmc:/pocket-atlas/interface.json`.
 
-The compact font is derived from the shared Inter/Noto atlas. Names whose
-native script is absent from that atlas use the corresponding Latin label;
-the original text remains searchable.
+Inside a place the top screen is the scene, with its name for a few seconds
+and the shot's name when it changes. The lower screen lists the authored shots
+(tap one to cut to it), has a pad to drag the view with, and Pause, Menu and
+Atlas buttons. The Circle Pad walks; the D-pad, the C-stick (New 3DS) and the
+look pad turn the view, which leaves the tour. L/R step through the shots,
+START pauses or resumes, X opens the menu and B returns to the globe.
+L + R + START exits. The Circle Pad has a radial deadzone and gentle response,
+movement diagonals are normalized, and entering free camera preserves the
+current direction.
 
-Inside a place, the circle pad looks and the D-pad moves relative to the
-camera. Lower-screen drag also looks; L/R changes height. A chooses the next
-shot, B switches camera mode, X toggles quality hold and Y steps quality.
-SELECT opens settings; START returns to the globe. L + R + START exits.
-The circle pad has a radial deadzone and gentle response, movement diagonals
-are normalized, and entering free camera preserves the current direction.
-
-Settings include frame target, automatic/fixed quality, the effects supported
-by the current scene, exposure, shot, performance overlay and antialiasing.
-Choices persist and apply to the next place. The menu blocks camera input and
-holds automatic quality while open. X resets choices; B/SELECT closes it.
+The menu lists the tour switch, frame target (30, 60 or 20 fps), automatic or
+fixed quality, antialiasing, the effects the current scene has, exposure and
+the statistics line. Choices persist in `sdmc:/pocket-atlas/settings.json` and
+apply to the next place. An open menu has the pad: the camera does not move.
 The application frees a scene's GPU resources before loading the globe or
 another scene.
+
+Entering a place verifies its pack's SHA-256 before loading it (5 s for a
+17 MiB pack, 11 s for Tokyo's 36 MiB, read in 256 KiB requests); the interface
+shows the place's card meanwhile and does not animate.
 
 ## Inspect and measure
 
 ```sh
 bun tools/atlas-3ds.ts status
-bun tools/atlas-3ds.ts ctl '{"atlas":true,"tab":"search","search":"summer"}'
+bun tools/atlas-3ds.ts ctl '{"press":"down,a"}'            # the interface's buttons, one after another
+bun tools/atlas-3ds.ts ctl '{"touch":[160,103]}'           # hold the stylus on the lower screen; {"touch":false} lifts it
 bun tools/atlas-3ds.ts ctl '{"place":"kamakura-koko-mae-crossing"}'
+bun tools/atlas-3ds.ts ctl '{"atlas":true}'
 bun tools/atlas-3ds.ts ctl '{"shot":"Crossing","time":25,"step":0,"hold":true}'
 bun tools/atlas-3ds.ts ctl '{"shot":"Crossing","shotPhase":0.4,"time":10}'
-bun tools/atlas-3ds.ts ctl '{"sheet":true,"settings":{"exposure":0.25}}'
-bun tools/atlas-3ds.ts capture
+bun tools/atlas-3ds.ts ctl '{"settings":true,"exposure":0.25}'
+bun tools/atlas-3ds.ts capture                             # both screens, the lower under the upper
 bun tools/atlas-3ds.ts capture --surface reflection
+bun tools/atlas-3ds.ts profile --place suga-shrine-stairs --no-interface   # the same cameras without the interface
 bun tools/atlas-3ds.ts profile --place suga-shrine-stairs --step 0 --samples 60 --live
 bun tools/atlas-3ds.ts profile --place tokyo-konbini --step 3 --samples 60 --live
 bun tools/atlas-3ds.ts sweep --place akihabara-radio-kaikan --samples 60 --live
@@ -137,8 +151,11 @@ bun tools/atlas-3ds.ts ctl '{"hold":false,"play":true}'
 `POCKET_3DS_HOST`/`--host` selects the device; `--keys` selects an existing
 PocketJS pairing-key directory. Only one paired TCP client may be active.
 Control replies can precede a queued scene change: poll until the expected
-`place` and `phase: running` appear. Browser status exposes the selected place,
-list, tab, search, saved ids, orientation and zoom.
+`place` and `phase: running` appear. Status reports the interface's `scene`,
+any `interfaceError`, what a guest turn costs (`interfaceMs`: script, layout,
+draw lists, vertices), the turns taken (`interfaceTurns`), the malloc heap
+(`heapUsed`, `heapSize`) and the free linear and video memory. `"interface":
+false` leaves the interface out of the frame, for comparisons.
 
 Captures, timing traces, cooked packs and build receipts stay in ignored
 `.pocket-build/`. Profiling pins each camera midpoint, settles, then samples
@@ -194,6 +211,23 @@ within 24 m while the cell projects to more than an 8-pixel radius; distant
 geometry and reflection proxies retain their original coarse triangles.
 It starts conservatively on each scene entry, so a costly scene does not
 inherit a lighter scene's highest quality before its first measurements.
+
+## The interface's cost
+
+The guest is given a turn (script, layout, two draw lists: about 6 ms on an
+Old 3DS, 10 ms when a list changes) only when a button or the stylus is down
+or was within two thirds of a second, when the renderer's state changed, or
+when its last turn drew something new; otherwise once a second. Its vertices
+are rebuilt only when a draw list changed, and the touch screen is presented
+only when its picture changed, so a resting interface costs the top screen's
+few quads and no GPU time below.
+
+libctru would halve the application's memory between `malloc` and the linear
+heap. The interface's textures are linear, and so is everything large a place
+owns, the animation included (in the malloc heap the guest's allocations come
+to rest around it and the next place's block no longer fits the hole). The
+malloc heap is therefore fixed at 14 MiB (the interface uses 6 to 8) and the
+linear heap takes the rest: Tokyo, the largest place, leaves 3.4 MiB of it.
 
 ## Lifecycle and validation
 

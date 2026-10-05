@@ -25,12 +25,17 @@ pub fn read_json(name: &str) -> Option<Value> {
     std::fs::read(format!("{DATA}/{name}")).ok().and_then(|b| serde_json::from_slice(&b).ok())
 }
 
-/// Writes a JSON file in the data folder through a temporary file, so a
-/// power-off mid-write leaves the previous version.
+/// Writes a JSON file in the data folder.
 pub fn write_json(name: &str, v: &Value) {
+    write_text(name, &v.to_string());
+}
+
+/// Writes a file in the data folder through a temporary file, so a
+/// power-off mid-write leaves the previous version.
+pub fn write_text(name: &str, text: &str) {
     let _ = std::fs::create_dir_all(DATA);
     let (tmp, path) = (format!("{DATA}/{name}.tmp"), format!("{DATA}/{name}"));
-    if std::fs::write(&tmp, v.to_string()).is_ok() {
+    if std::fs::write(&tmp, text).is_ok() {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::rename(&tmp, &path);
     }

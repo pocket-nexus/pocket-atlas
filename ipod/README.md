@@ -1,11 +1,13 @@
 # Pocket Atlas on the iPod touch 4
 
-A native ARMv7 app for the iPod touch 4 (iPod4,1, iOS 6.1.6): a list of the places that opt in (`targets: "ipod"` in the web registry), each drawn at 480×320 with OpenGL ES 2 on the SGX535, as a tour of its authored shots or under the fingers. It is two C files and one tool:
+A native ARMv7 app for the iPod touch 4 (iPod4,1, iOS 6.1.6): the atlas, and the places that opt in (`targets: "ipod"` in the web registry), each drawn at 480×320 with OpenGL ES 2 on the SGX535, as a tour of its authored shots or under the fingers. [The interface](../README.md#the-interface) (`ui/`, shared with the other handhelds, in its touch presentation) is everything flat on the screen:
 
 | Path | Contents |
 | --- | --- |
 | `ipod/src/scene.c`, `shaders.h` | one place: pack loader, culling and levels of detail, the mirror, sky, light sprites, rain and glows; six small GLSL programs |
-| `ipod/src/main.c` | the UIKit shell (place list, a bar of controls, touch), the render thread, commands, status and captures |
+| `ipod/src/main.c` | the shell: the window and its touches, the render thread, the interface's guest (PocketJS's C runtime and UI core) and the pass that lays it over the frame, commands, status and captures |
+| `ipod/src/globe.c` | the atlas screen's globe: a lit sphere with city lights, a halo and a pin per place |
+| `n3ds/src/interface.c` | the renderer's side of the interface's protocol, shared with the 3DS |
 | `tools/atlas-ipod.ts` | cook, build, install, launch, control, capture, measure |
 | `crates/pocket3d-place-cook/src/pica.rs`, `profiles/ipod30.json` | the pack: the 3DS lowering with GLES texels and a dusk vista's lights and haze |
 
@@ -23,9 +25,11 @@ What is cooked for this target only:
 
 The frame time on this device follows the triangles submitted, about 0.2 ms per thousand, not the pixels: a quarter-size viewport changes nothing. So the renderer spends its effort there. Static chunks are 16 m cells; each picks the coarsest level whose error stays under one pixel; adjacent chunks of a material share one index buffer that is rewritten only when the choice of chunks and levels changes, which makes a material one draw call with no per-frame index traffic. People are skinned on the CPU, only the vertices of the level drawn.
 
-The EAGL layer is the portrait screen, opaque and untransformed, and nothing lies over it while a place plays (the scene is drawn a quarter turn round instead): Core Animation then shows the frame as it is rather than compositing it with the same GPU. A tap calls up the bar of controls for four seconds.
+The EAGL layer is the portrait screen, opaque and untransformed, and no UIKit view lies over it (the scene is drawn a quarter turn round instead): Core Animation then shows the frame as it is rather than compositing it with the same GPU.
 
-Not here: the globe, a settings sheet, sound, saved state. Leaving the app ends it (PocketJS's link stubs carry no UIKit version, and UIKit ends an app that old when it is suspended). Against the Vita it also lacks per-pixel lighting, normal maps, rooms traced behind windows (a flat room texture stands in), glass reflections, steam and bloom.
+The interface is drawn at the drawable's own 480×320, one sample per logical pixel (at the panel's 640×960 the extra fill cost 16 ms a frame). Its picture goes into a texture, redrawn only when its draw list changes, and is blended over the frame as one quad. While it shows nothing (a tour playing, a few seconds after the last touch) the quad is skipped and the guest is only looked in on: a place then draws as fast as it did before there was an interface.
+
+Not here: sound. Leaving the app ends it (PocketJS's link stubs carry no UIKit version, and UIKit ends an app that old when it is suspended). Against the Vita it also lacks per-pixel lighting, normal maps, rooms traced behind windows (a flat room texture stands in), glass reflections, steam and bloom.
 
 ## Build and run
 
@@ -34,22 +38,22 @@ Requirements: Bun, Rust, Xcode's command line tools with `ld-classic`, `ldid`, I
 Export each place and its preview as for the Vita (`web/scripts/export-place.ts`, `preview-place.ts`), then:
 
 ```sh
-bun tools/atlas-ipod.ts cook                 # → .pocket-build/ipod/assets/<id>.place and its list card
+bun tools/atlas-ipod.ts cook                 # → .pocket-build/ipod/assets/<id>.place
 bun tools/atlas-ipod.ts deploy               # build, package, install, read every installed file back
 bun tools/atlas-ipod.ts launch
 bun tools/atlas-ipod.ts ctl '{"place":"tokyo-konbini","shot":0,"time":25}'
 bun tools/atlas-ipod.ts status
 bun tools/atlas-ipod.ts capture --out .pocket-build/validation/ipod/view.png   # the place, 480×320
-bun tools/atlas-ipod.ts capture --screen                                       # the display with UIKit
+bun tools/atlas-ipod.ts capture --screen                                       # the frame with the interface over it
 bun tools/atlas-ipod.ts shots                # every authored shot: frame times, then a capture
 bun tools/atlas-ipod.ts native --place ID    # replace the executable (and one pack) in place
 ```
 
 `ATLAS_IPOD_BUNDLE_ID` installs a build beside another under its own identity (`dev.pocket-nexus.atlas` otherwise).
 
-Commands are JSON: `place` (an id) enters a place and `atlas: true` leaves it; `shot` (index or name) cuts to a shot's midpoint; `time` freezes the loop at that second and a negative one releases it; `view: [x, y, z, tx, ty, tz, fov]` pins a camera; `cinematic`, `pause`, `reflection`, `rain`, `glow` are switches; `lod` is the error tolerance in pixels (1); `bar: true` calls up the controls; `profile: true` waits for the GPU inside every frame (`gpuMs`, not a frame rate).
+Commands are JSON: `place` (an id) enters a place and `atlas: true` leaves it; `shot` (index or name) cuts to a shot's midpoint; `time` freezes the loop at that second and a negative one releases it; `view: [x, y, z, tx, ty, tz, fov]` pins a camera; `cinematic`, `pause`, `reflection`, `rain`, `glow` are switches; `lod` is the error tolerance in pixels (1); `touch: [[x, y], …]` holds fingers on the interface (480×320, landscape) until a message with other contacts or none; `profile: true` waits for the GPU inside every frame (`gpuMs`, not a frame rate).
 
-On the device: one finger on the left half walks, one on the right half looks, either leaves the tour; a tap shows the bar (the list, previous and next shot, pause).
+On the device: the atlas has the globe at the left (a finger spins it) and the lists at the right, with Save and Visit buttons and a Search list that opens a keyboard. In a place two sticks stand at fixed spots in the lower corners, the left to walk and the right to look, and using either leaves the tour; a tap elsewhere calls up the bar (atlas, previous and next shot, pause or tour, menu).
 
 ## Measuring
 
@@ -57,4 +61,6 @@ On the device: one finger on the left half walks, one on the right half looks, e
 
 Status reads over SSH preempt the single core; read after the window, not during it. The receipt and captures stay in `.pocket-build/validation/ipod/`; device results belong in the pull request.
 
-Not verified by the tool: touch handling under real fingers, the sharpness of UIKit text on the screen (the legacy screen capture returns 480×320), and thermal behaviour over a long session.
+Status adds the interface's cost: `interfaceMs` (the guest's turn), `interfaceDrawMs` (redrawing its texture), `interfaceRedraws` and `interfaceQuiet`.
+
+Not verified by the tool: touch handling under real fingers, and thermal behaviour over a long session.

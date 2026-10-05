@@ -21,7 +21,7 @@ A place is one real spot, recreated faithfully enough that someone who has stood
 3. **Fidelity pass** (large places): split by area — ground/walls/buildings/planting; equipment/poles/wires/signs; vehicles/people; sky/water/light/grade — one agent per area with file ownership, one shared dev server, captures compared side by side with the reference photos at the same camera. See `references/device-loop.md` for agent hygiene.
 4. **Export and cook**: `(cd web && bun scripts/export-place.ts --place <id> --seconds <LOOP>)`, `bun tools/atlas.ts cook --place <id>`; read the cook report (draws, triangles, texture list, pack size).
 5. **Device**: run it in Pocket Devkit, capture every shot at the same views, compare with the photos and the web, measure (`shots`, `profile`), fix, repeat. Commands and traps: `references/device-loop.md`.
-6. **Atlas and package**: `(cd web && bun scripts/preview-place.ts --place <id>)`, `bun scripts/export-atlas.ts`, `bun tools/atlas.ts cook-atlas` (also bakes the interface font from the places' strings), then `vpk` after visiting every place and the atlas in one device session.
+6. **Atlas and package**: `(cd web && bun scripts/preview-place.ts --place <id>)`, `bun scripts/export-atlas.ts`, `bun tools/atlas.ts cook-atlas` (the Vita's globe; the interface, `ui/`, takes the place's card and its registry entry when a device's tool compiles it), then `vpk` after visiting every place and the atlas in one device session.
 7. **Ship**: Conventional Commits, a draft PR with the device numbers and limits in the description, captures kept in `.pocket-build/validation/` (never committed). Review for drift before merge (`references/device-loop.md`, "Before merge").
 
 ## Quality bar
