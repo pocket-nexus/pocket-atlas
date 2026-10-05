@@ -505,6 +505,15 @@ if (command === "build") {
       const tapped = await p.status();
       expect(`3ds: a row tapped on the lower screen is the place the globe turns to (pin ${first.globe.lit} to ${tapped.globe.lit})`, tapped.globe.lit !== first.globe.lit);
       await p.save("3ds-tapped");
+      // A enters the place the row is: the upper screen is the place's, the lower one its controls. B leaves.
+      await p.key("KeyZ");
+      const inside = await p.scene(["place", "error"], true);
+      expect(`3ds: A enters the place (${inside.scene} "${inside.message}", ${JSON.stringify(inside.visit?.size)})`, inside.scene === "place" && inside.visit.size[0] === 400 && inside.visit.size[1] === 240 && inside.visit.trouble === "");
+      await p.page.waitForTimeout(1500);
+      await p.save("3ds-place");
+      await p.key("KeyX");
+      expect("3ds: B leaves the place", (await p.scene(["atlas"])).visit === null);
+      await p.page.waitForTimeout(800);
       // The Explore tab, tapped; then the Circle Pad spins the globe.
       await p.tap("lower", low3ds, 120, 18);
       await p.page.keyboard.down("KeyA");
@@ -515,17 +524,6 @@ if (command === "build") {
       await p.page.waitForTimeout(1500);
       await p.save("3ds-explore");
       report.devices["3ds"] = await measure(p);
-      // A row under the stylus, then A, enters the place: the upper screen is the place's, the lower one
-      // its controls.
-      await p.tap("lower", low3ds, 160, 36 + 20);
-      await p.page.waitForTimeout(800);
-      await p.key("KeyZ");
-      const inside = await p.scene(["place", "error"], true);
-      expect(`3ds: A enters the place (${inside.scene} "${inside.message}", ${JSON.stringify(inside.visit?.size)})`, inside.scene === "place" && inside.visit.size[0] === 400 && inside.visit.size[1] === 240 && inside.visit.trouble === "");
-      await p.page.waitForTimeout(1500);
-      await p.save("3ds-place");
-      await p.key("KeyX");
-      expect("3ds: B leaves the place", (await p.scene(["atlas"])).visit === null);
       await p.page.screenshot({ path: join(directory, "page-3ds.png") });
       expect(`3ds: no error on the page (${p.problems.join("; ")})`, p.problems.length === 0);
       await p.page.close();
