@@ -123,6 +123,11 @@ function cadence(): { refreshMs: number; shown: Record<string, number> } | null 
   }
   return { refreshMs: period / 1e6, shown };
 }
+/** The SoC's hottest sensor (°C) and the cores online: above about 60 °C this phone runs on two cores at 1.0 GHz. */
+function thermal(): { celsius: number; cores: string } {
+  const [cores, ...sensors] = shell("cat /sys/devices/system/cpu/online /sys/class/thermal/thermal_zone0/temp /sys/class/thermal/thermal_zone1/temp /sys/class/thermal/thermal_zone2/temp /sys/class/thermal/thermal_zone3/temp /sys/class/thermal/thermal_zone4/temp /sys/class/thermal/thermal_zone5/temp").split("\n");
+  return { celsius: Math.max(...sensors.map(Number).filter(Number.isFinite)), cores };
+}
 async function capture(output: string, screen = false) {
   const s = await control(screen ? { screen: true } : { capture: true });
   const name = screen ? "screen.rgba" : "frame.rgba", raw = join(out, name);
@@ -324,6 +329,7 @@ else if (command === "launch") console.log(JSON.stringify(await launch()));
 else if (command === "stop") shell(`am force-stop ${PACKAGE}`);
 else if (command === "status") console.log(JSON.stringify(status()));
 else if (command === "cadence") console.log(JSON.stringify(cadence()));
+else if (command === "thermal") console.log(JSON.stringify(thermal()));
 else if (command === "ctl") console.log(JSON.stringify(await control(JSON.parse(args[1] ?? "{}"))));
 else if (command === "capture") await capture(resolve(option("--out", join(validation, "capture.png"))), args.includes("--screen"));
 else if (command === "shots") {
@@ -352,13 +358,13 @@ else if (command === "shots") {
         if (String(s.window) === size) break;
         await Bun.sleep(1500); // the guard changed the window: measure the size it settled at
       }
-      const panel = cadence();
+      const panel = cadence(), heat = thermal();
       await capture(join(directory, `${p.id}-${shot}.png`));
-      results.push({ place: p.id, shot, name: s.shotName, window: s.window, samples: s.samples, rate: s.rate, fps: s.fps, frames: s.marked, late: s.markedLate, worstMs: s.worstMs, shown: panel?.shown ?? null,
+      results.push({ place: p.id, shot, name: s.shotName, window: s.window, samples: s.samples, rate: s.rate, fps: s.fps, frames: s.marked, late: s.markedLate, worstMs: s.worstMs, shown: panel?.shown ?? null, celsius: heat.celsius, cores: heat.cores,
         workMs: s.workMs, swapMs: s.swapMs, intervalMs: s.intervalMs, prepareMs: s.prepareMs, ...(args.includes("--gpu") ? { gpuMs: s.gpuMs } : {}), draws: s.draws, triangles: s.triangles, mirrorTriangles: s.mirrorTriangles, sprites: s.sprites, build: s.build, glError: s.glError });
-      console.log(`${p.id}/${shot} ${s.shotName}: ${s.window.join("x")}, ${s.fps.toFixed(1)} fps, shown for ${panel ? Object.entries(panel.shown).map(([n, count]) => `${n} refresh${n === "1" ? "" : "es"} x${count}`).join(", ") : "?"}, ${s.markedLate} late in ${s.marked}, worst ${s.worstMs.toFixed(1)} ms, work ${s.workMs.mean.toFixed(1)} ms${args.includes("--gpu") ? `, GPU ${s.gpuMs.mean.toFixed(1)} ms` : ""}, ${s.triangles + s.mirrorTriangles} triangles in ${s.draws} draws`);
+      console.log(`${p.id}/${shot} ${s.shotName}: ${s.window.join("x")}, ${s.fps.toFixed(1)} fps, shown for ${panel ? Object.entries(panel.shown).map(([n, count]) => `${n} refresh${n === "1" ? "" : "es"} x${count}`).join(", ") : "?"}, ${s.markedLate} late in ${s.marked}, ${heat.celsius} °C on cores ${heat.cores}, worst ${s.worstMs.toFixed(1)} ms, work ${s.workMs.mean.toFixed(1)} ms${args.includes("--gpu") ? `, GPU ${s.gpuMs.mean.toFixed(1)} ms` : ""}, ${s.triangles + s.mirrorTriangles} triangles in ${s.draws} draws`);
       writeFileSync(join(directory, "receipt.json"), JSON.stringify({ scenario: "authored shot midpoints, loop frozen", frames, settings, results }, null, 2));
     }
   await control({ time: -1, shot: 0, profile: false });
   console.log(directory);
-} else throw new Error("usage: doctor | cook [--place ID] | build | apk [--release] [--lean] | install [--release] [--lean] | native [--place ID] [--packs] [--no-title] | unpush | launch | stop | status | cadence | ctl JSON | capture [--screen] [--out PNG] | shots [--place ID] [--samples N] [--rate N] [--lines N] [--gpu] [--frames N] [--out DIR]");
+} else throw new Error("usage: doctor | cook [--place ID] | build | apk [--release] [--lean] | install [--release] [--lean] | native [--place ID] [--packs] [--no-title] | unpush | launch | stop | status | cadence | thermal | ctl JSON | capture [--screen] [--out PNG] | shots [--place ID] [--samples N] [--rate N] [--lines N] [--gpu] [--frames N] [--out DIR]");
