@@ -98,7 +98,7 @@ export const PLACES: PlaceDef[] = [
   },
   {
     id: "sangubashi-crossing",
-    targets: ["vita"],
+    targets: ["vita", "3ds"],
     name: "Sangubashi in Bloom",
     native: "桜の参宮橋３号踏切",
     locality: "Yoyogi, Tokyo",
@@ -122,7 +122,7 @@ export const PLACES: PlaceDef[] = [
   {
     // The centre of the planetarium dome (OSM); −Z is north, the basin lies south.
     id: "griffith-observatory",
-    targets: ["vita", "ipod"],
+    targets: ["vita", "3ds", "ipod"],
     name: "Griffith Observatory at Blue Hour",
     native: "Griffith Observatory",
     locality: "Los Angeles, California",

@@ -1,8 +1,9 @@
 # Nintendo 3DS renderer
 
-Pocket Atlas opens on an interactive globe and supports five shared places on
-an Old 3DS: Rainy Night Konbini, Suga Shrine Stairs, Radio Kaikan at Blue Hour,
-Kamakura-Kōkōmae Crossing and daytime San Francisco Lombard Street.
+Pocket Atlas opens on an interactive globe and shows every live place on an
+Old 3DS: Rainy Night Konbini, Suga Shrine Stairs, Radio Kaikan at Blue Hour,
+Kamakura-Kōkōmae Crossing, Sangubashi in Bloom, Griffith Observatory at Blue
+Hour and daytime San Francisco Lombard Street.
 Material annotations, camera shots, geometry and motion come from the same web
 exports and lossless PlaceIR as the Vita. PICA cooks independently from source
 geometry and textures; it does not read a Vita device pack. Rendering contains
@@ -19,8 +20,6 @@ globe (`globe.c`) and the places (`scene.c`) and answers the interface through
 
 The native catalog uses explicit per-place `targets` eligibility in the web
 registry; PlaceIR validates the authored feature set before device lowering.
-Griffith Observatory's existing `dusk-vista` renderer requires light fields
-and distance/height-dependent vista haze that PICA does not yet implement.
 The interface lists every place of the registry; one without a pack on the SD
 card (unsupported here, or not yet built) keeps its marker and details, is
 marked **Not on this device** or **Coming soon**, and says so instead of
@@ -28,9 +27,8 @@ loading.
 
 Cook, build, package, install and sync use the same supported subset. Their
 manifests/receipts list unsupported live entries separately. `cook --place`
-rejects an unsupported place explicitly, and the cooker rejects light-field and
-vista-haze features before treating any payload as triangle geometry; it does
-not omit those effects and publish an incomplete place.
+rejects an unsupported place explicitly; the cooker lowers what a place needs
+or refuses it, and does not omit an effect and publish an incomplete place.
 
 Default output is monoscopic 400 × 240 with a 30 fps target. The optional 4×
 antialias setting renders 800 × 480 and downsamples on display. Settings also
@@ -209,6 +207,50 @@ Compact static tubes and rings that lose their shape in the coarse mesh get
 local detail cells and an 8 mm error middle LOD. That level remains visible
 within 24 m while the cell projects to more than an 8-pixel radius; distant
 geometry and reflection proxies retain their original coarse triangles.
+A daytime street keeps its runs the same way: a post, a mast, a beam or a rail
+of one section up to 24 cm, of any length. Its middle level, which a day scene
+draws at any distance, is 25 cm off and leaves nothing of a crossing signal's
+post or a utility pole. The other kinds keep the compact rule their budgets
+were measured with (the wider one adds 4 to 6 thousand triangles and up to 570
+draws to each of their packs).
+
+A figure's coarse level (the reflection's) is the whole figure within a known
+error. Where that error is under the detail tolerance on screen, the figure is
+skinned and drawn as the coarse one, about a seventh of its vertices; at load
+those vertices are put first, so the skinning and the cache flush stop there.
+Twenty-eight thousand skinned vertices cost an Old 3DS 37 ms a frame.
+
+## Vistas
+
+A `dusk-vista` place (Griffith Observatory) reaches a horizon 70 km away. Its
+haze is in the vertex colours, cooked as seen from the middle of the camera
+shots (`vista` in `pica.rs`), and the pack's header carries the far plane
+(120 km; 0 stands for the 1.2 km of a street). The depth buffer stays 24-bit
+with the near plane at 8 cm: surfaces 0.75 m apart separate at 1 km, 75 m at
+10 km.
+
+Its lights are the pack's sixth section, `FELD`: fields of sprites, each field
+with a bounding sphere, each sprite a light's place, radius, path, blink and
+display colour, the brightest of a field first. At load a sprite becomes four
+vertices in linear memory (36 bytes each, 64 for one that travels or blinks);
+`field.v.pica` and `traffic.v.pica` turn them to the camera, size them in
+pixels between the field's limits, dim them by as much as they are wider than
+the light, twinkle them and pull them towards the eye, clear of the surface
+they sit on. They are added over the finished scene through a 32 × 32 falloff
+texture, depth-tested and not written. Fields outside the view are skipped;
+whole fields that follow one another are one draw; a quality step above 0
+keeps three quarters, a half, three eighths or a quarter of each field. About
+20,000 sprites are in view from the terrace, in a frame whose GPU time is
+19 ms.
+
+A surface with an emission map of its own (`MAT_GLOW`: floodlit masonry, a
+tower's windows) goes through `glow.v.pica`, the scene's program with a second
+set of texture coordinates, and a second combiner stage that adds the map
+times the vertex alpha. Both programs are one binary, so changing between them
+uploads no code.
+
+A long lens (the Overlook, 3.2°) enlarges what the size cull calls subpixel:
+past four times a normal lens the cull follows the focal length.
 It starts conservatively on each scene entry, so a costly scene does not
 inherit a lighter scene's highest quality before its first measurements.
 
@@ -227,12 +269,15 @@ heap. The interface's textures are linear, and so is everything large a place
 owns, the animation included (in the malloc heap the guest's allocations come
 to rest around it and the next place's block no longer fits the hole). The
 malloc heap is therefore fixed at 14 MiB (the interface uses 6 to 8) and the
-linear heap takes the rest: Tokyo, the largest place, leaves 3.4 MiB of it.
+linear heap takes the rest: Tokyo, the largest place, leaves 3.4 MiB of it,
+Griffith with its 130,000 sprite vertices 11.5 MiB.
 
 ## Lifecycle and validation
 
 Every shader output is written in full exactly once. Attribute loaders consume
-the entire vertex stride: float3 position, float2 UV, RGBA8 color. Device
+the entire vertex stride: float3 position, float2 UV, RGBA8 color (a light
+sprite: float3, float4, RGBA8, four signed bytes, then float4 and float3 for
+one that moves). A uniform is the first source of an instruction. Device
 screenshots exposed a second UV flip that emulation alone did not catch.
 
 GPU retirement occurs at successful `C3D_FrameBegin`; `FrameSync` only waits

@@ -139,7 +139,9 @@ The export is sealed as PlaceIR before device lowering, following
 [the compiler architecture](../../../../docs/COMPILER.md). Palette packing of
 solid PBR factors into UVs belongs to the Vita lowering. Native targets use
 source geometry and pixels rather than decoding a Vita pack. The registry
-publishes this place for web and Vita only; 3DS/PSP support is not implied.
+publishes this place for web, Vita and 3DS (`n3ds/README.md`, where a daytime
+street keeps its posts, masts, beams and rails at the middle level); PSP
+support is not implied.
 
 Vita PLCE and ATLS envelopes use version 7, and Vita Place META uses version 7.
 Older readers must reject the new vertex-PBR encoding. PICA keeps its separate
