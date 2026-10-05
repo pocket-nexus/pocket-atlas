@@ -49,7 +49,7 @@ const javaHome = process.env.JAVA_HOME ?? "/opt/homebrew/opt/openjdk@17";
 const RUST = pins.rust.toolchain as string, RUST_TARGET = "armv7-linux-androideabi";
 const cache = join(homedir(), ".cache/pocket-nexus/android");
 const quickJs = quickJsCheckout(join(cache, "sources/quickjs-rs"));
-// PocketJS's Android tools keep one debug key; an installed app upgrades only under the key it was signed with.
+// A development package's key: PocketJS's Android tools keep one debug key. An installed app upgrades only under the key it was signed with.
 const signing = join(cache, "signing");
 const keystore = join(signing, ["blackberry-android-probe.jks", "blackberry-classic.jks", "android-debug.jks"].find((name) => existsSync(join(signing, name))) ?? "android-debug.jks");
 
@@ -268,7 +268,34 @@ async function build(): Promise<{ libraries: string; ui: string; build: string }
   return { libraries, ui: ui.directory, build: id };
 }
 
+/**
+ * What a package is signed with. A development package: the debug key. A release (`--release`): the Pocket
+ * Nexus Android release key, one key for every Pocket Nexus package, kept outside every repository. It is the
+ * PKCS #12 keystore POCKET_NEXUS_ANDROID_KEY names (default
+ * ~/.config/pocket-nexus/signing/pocket-nexus-android-release.p12, alias `pocket-nexus`); its password is the
+ * first line of the `.password` file beside it, which apksigner reads itself, so it is in no command line and
+ * no log.
+ */
+function signer(java: Record<string, string | undefined>): string[] {
+  if (release) {
+    const key = process.env.POCKET_NEXUS_ANDROID_KEY || join(homedir(), ".config/pocket-nexus/signing/pocket-nexus-android-release.p12");
+    const password = key.replace(/\.[^./]*$/, "") + ".password";
+    for (const file of [key, password])
+      if (!existsSync(file)) throw new Error(`a release is signed with the Pocket Nexus Android release key, and ${file} is not there (POCKET_NEXUS_ANDROID_KEY names the keystore; its password is the first line of the .password file beside it)`);
+    return ["--ks", key, "--ks-type", "PKCS12", "--ks-key-alias", "pocket-nexus", "--ks-pass", `file:${password}`];
+  }
+  if (!existsSync(keystore)) {
+    mkdirSync(signing, { recursive: true });
+    run([join(javaHome, "bin/keytool"), "-genkeypair", "-noprompt", "-keystore", keystore, "-storepass", "android", "-alias", "androiddebugkey", "-keypass", "android",
+      "-dname", "CN=PocketJS Android,O=PocketJS,C=HK", "-keyalg", "RSA", "-keysize", "2048", "-validity", "10000"], root, java);
+  }
+  return ["--ks", keystore, "--ks-key-alias", "androiddebugkey", "--ks-pass", "pass:android", "--key-pass", "pass:android"];
+}
+
 async function apk(): Promise<string> {
+  const java = { ...process.env, JAVA_HOME: javaHome, PATH: `${join(javaHome, "bin")}:${process.env.PATH}` };
+  // Before the build: a release without its key stops here.
+  const key = signer(java);
   await build();
   const staging = join(out, "apk"), packed = join(staging, "assets"), resources = join(staging, "res");
   rmSync(packed, { recursive: true, force: true });
@@ -300,14 +327,9 @@ async function apk(): Promise<string> {
   for (const library of readdirSync(join(staging, "lib/armeabi-v7a"))) utimesSync(join(staging, "lib/armeabi-v7a", library), new Date(1980, 0, 1), new Date(1980, 0, 1));
   run(["zip", "-q", "-X", "-r", unsigned, "lib"], staging);
   run([join(buildTools, "zipalign"), "-f", "4", unsigned, output]);
-  const java = { ...process.env, JAVA_HOME: javaHome, PATH: `${join(javaHome, "bin")}:${process.env.PATH}` };
-  if (!existsSync(keystore)) {
-    mkdirSync(signing, { recursive: true });
-    run([join(javaHome, "bin/keytool"), "-genkeypair", "-noprompt", "-keystore", keystore, "-storepass", "android", "-alias", "androiddebugkey", "-keypass", "android",
-      "-dname", "CN=PocketJS Android,O=PocketJS,C=HK", "-keyalg", "RSA", "-keysize", "2048", "-validity", "10000"], root, java);
-  }
-  run([join(buildTools, "apksigner"), "sign", "--ks", keystore, "--ks-key-alias", "androiddebugkey", "--ks-pass", "pass:android", "--key-pass", "pass:android", "--min-sdk-version", "18", output], root, java);
+  run([join(buildTools, "apksigner"), "sign", ...key, "--min-sdk-version", "18", output], root, java);
   const badging = run([join(buildTools, "aapt"), "dump", "badging", output]);
+  if (badging.includes("application-debuggable") === release) throw new Error(release ? "the release package is debuggable" : "the development package is not debuggable");
   for (const marker of [`package: name='${PACKAGE}'`, "sdkVersion:'18'", "native-code: 'armeabi-v7a'", "uses-gl-es: '0x30000'"])
     if (!badging.includes(marker)) throw new Error(`the APK lacks ${marker}`);
   console.log(JSON.stringify({ apk: output, bytes: statSync(output).size, sha256: sha(output), places: args.includes("--lean") ? [] : places.map((p) => p.id) }));

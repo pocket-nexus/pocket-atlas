@@ -370,12 +370,13 @@ async function ipod(log: string, output: string): Promise<void> {
 }
 
 /**
- * The certificate the Android package is signed under, by its SHA-256 (CN=PocketJS BlackBerry Classic, the one
- * key PocketJS's Android tools keep). Its key is a file outside Git: `keystore` in tools/atlas-android.ts names
- * where it is looked for, and the tool makes a new key when it finds none. A phone installs a package over an
- * installed one only under the same certificate, so a package signed by another key is refused here.
+ * The certificate the Android package is signed under, by its SHA-256: the Pocket Nexus Android release key's,
+ * the one key of every Pocket Nexus Android package. The key is a file outside every repository
+ * (`tools/atlas-android.ts apk --release` names where it is looked for and stops when it is not there). A
+ * phone installs a package over an installed one only under the same certificate, so a package signed by
+ * another key is refused here.
  */
-const ANDROID_SIGNER = "4742388044491df88be7d7f2ce6d0cbd4269ef23c30c528ef9dd8a9b3af7bfbe";
+const ANDROID_SIGNER = "fb36ca939a6f03ae436d72d5309861407451f6c549e43bb1a35b05dd67ca9c21";
 let signer: string | undefined;
 
 /** The release package (`tools/atlas-android.ts apk --release`: no door for pushed code or packs), as the tool leaves it. */
@@ -385,7 +386,7 @@ async function android(log: string, output: string): Promise<void> {
   signer = apkSigner(built);
   if (signer !== ANDROID_SIGNER) {
     throw new Error(
-      `the Android package is signed under ${signer}, and a release is signed under ${ANDROID_SIGNER}: the release key is not on this computer (tools/atlas-android.ts names where it looks, and made a key of its own)`,
+      `the Android package is signed under ${signer}, and a release is signed under ${ANDROID_SIGNER}: POCKET_NEXUS_ANDROID_KEY names another key than the Pocket Nexus Android release key`,
     );
   }
   cpSync(built, output);
