@@ -159,7 +159,7 @@ impl Profile {
             if *n == 0
                 || !matches!(tag.as_str(), "META" | "PICA" | "TEXD" | "GEOM" | "ANIM" | "FELD")
                 || (tag == "PICA" && !matches!(self.target, Target::Pica | Target::Ipod))
-                || (tag == "FELD" && self.target != Target::Ipod)
+                || (tag == "FELD" && !matches!(self.target, Target::Pica | Target::Ipod))
                 || self.target == Target::Psp
             {
                 return Err(format!("invalid section budget {tag}"));
@@ -232,10 +232,13 @@ impl Profile {
             ));
         }
         for (tag, limit) in &self.budgets.sections {
-            let actual = a
-                .sections
-                .get(tag)
-                .ok_or_else(|| format!("missing budgeted section {tag}"))?;
+            // A PICA pack carries FELD only for a place with light fields.
+            let Some(actual) = a.sections.get(tag) else {
+                if tag == "FELD" && self.target == Target::Pica {
+                    continue;
+                }
+                return Err(format!("missing budgeted section {tag}"));
+            };
             if actual > limit {
                 return Err(format!("{tag} budget exceeded: {actual} > {limit} bytes"));
             }
