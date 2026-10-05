@@ -7,6 +7,9 @@ SOURCE := /atlas/n3ds/src
 PICA_KERNEL := /atlas/vendor/pocketjs/devices/3ds/pocket-3ds-pica/include
 TITLE := /atlas/vendor/pocketjs/engine/pocket3d/crates/pocket3d-title/include
 POCKET := /atlas/vendor/pocketjs/hosts/3ds
+# The Pocket3D icon, from PocketJS: the 48-pixel one and the 24-pixel one.
+ICON := /atlas/vendor/pocketjs/engine/pocket3d/icon/3ds/icon.png
+SMALL_ICON := /atlas/vendor/pocketjs/engine/pocket3d/icon/3ds/icon-small.png
 OUT := /atlas/dist/3ds/pocket-atlas.3dsx
 ROMFS := /atlas/.pocket-build/3ds/romfs
 ARCH := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
@@ -52,8 +55,8 @@ $(BUILD)/qjs.o: $(POCKET)/src/qjs.c | $(BUILD)
 	$(CC) $(CFLAGS) -Ddevserver_active=interface_devtools -c $< -o $@
 $(BUILD)/atlas.elf: $(OBJECTS) $(CORE_LIB) $(QUICKJS)/libquickjs.a
 	$(CC) $(LDFLAGS) $^ -L$(DEVKITPRO)/libctru/lib -L$(DEVKITPRO)/portlibs/3ds/lib -lcitro3d -lmbedcrypto -lctru -lm -o $@
-$(BUILD)/atlas.smdh: $(POCKET)/icon.png | $(BUILD)
-	$(DEVKITPRO)/tools/bin/smdhtool --create 'Pocket Atlas' 'A globe of places' 'Pocket Nexus' $< $@
+$(BUILD)/atlas.smdh: $(ICON) $(SMALL_ICON) | $(BUILD)
+	$(DEVKITPRO)/tools/bin/smdhtool --create 'Pocket Atlas' 'A globe of places' 'Pocket Nexus' $(ICON) $@ $(SMALL_ICON)
 $(OUT): $(BUILD)/atlas.elf $(BUILD)/atlas.smdh $(ROMFS)/manifest.json
 	mkdir -p $(dir $@)
 	$(DEVKITPRO)/tools/bin/3dsxtool $< $@ --smdh=$(BUILD)/atlas.smdh --romfs=$(ROMFS)

@@ -86,6 +86,19 @@ Every launch starts with the Pocket3D title card: the mark and the name "Pocket3
 
 A Vita development build skips the card when the USB share holds `atlas/boot.json` with `{"title": false}`; packaged builds do not read that file, and the PSP and 3DS builds have no switch. The web reference skips it under `?shot` and `?export`, which `export-place.ts`, `export-atlas.ts` and `preview-place.ts` pass. The iPod touch app has no card: `pocket3d-title` has no drawer for it. The Pocket3D License (`vendor/pocketjs/pocket3d/LICENSE`) makes showing the card first a condition of distributing a product built on Pocket3D.
 
+## App icon
+
+On the PSP, the PS Vita, the Nintendo 3DS and the iPod touch the icon in the launcher is the Pocket3D icon, the same picture for every game built on Pocket3D. PocketJS holds one file per console under `vendor/pocketjs/engine/pocket3d/icon/` and each build reads it from there: **this repository holds no icon file**, and a new drawing arrives with the submodule pin.
+
+| Target | File under `vendor/pocketjs/engine/pocket3d/icon/` | Read by |
+| --- | --- | --- |
+| PSP | `psp/ICON0.PNG` (144×80) | `xmb_icon_png` in `psp/Psp.toml` (cargo-psp), and `POCKET3D_ICON.psp` as the third argument of `pack-pbp` in `tools/atlas-psp.ts`, which writes the EBOOT that ships |
+| PS Vita | `vita/icon0.png` (128×128, 8-bit indexed) | `packageVitaVpk({ …, icon: POCKET3D_ICON.vita })` in `tools/atlas.ts`: it replaces `sce_sys/icon0.png` in the development build and in the standalone VPK |
+| Nintendo 3DS | `3ds/icon.png` (48×48) and `3ds/icon-small.png` (24×24) | `ICON` and `SMALL_ICON` in `n3ds/Makefile`, both given to `smdhtool --create` |
+| iPod touch 4 | `ios/Icon.png` (57×57) and `ios/Icon@2x.png` (114×114) | `tools/atlas-ipod.ts` copies both into the bundle; `Info.plist` lists them in `CFBundleIconFiles` and sets `UIPrerenderedIcon` |
+
+The name beside the icon stays "Pocket Atlas": `TITLE` in `PARAM.SFO`, the SMDH title, `CFBundleDisplayName`. A capture of the game goes where a console shows a picture behind or beside the icon: `psp/assets/pic1.png` (the XMB background) and the LiveArea pictures under `vita/assets/sce_sys/livearea/contents/`. `tools/app-icon.test.ts` fails when an icon file is tracked outside `vendor/` or when a build stops reading PocketJS's. The procedure, with the checks from a built EBOOT, VPK and SMDH, is PocketJS's `pocket3d-brand` skill (`vendor/pocketjs/skills/pocket3d-brand/SKILL.md`).
+
 ## Web
 
 ```sh
@@ -138,7 +151,7 @@ On the connected PSP (333 MHz CPU, 166 MHz bus, PSPLINK, 2026-10-01), five 30-fr
 
 PSPLINK control and status live in an optional mailbox module. Standalone startup probes the control file once; without a host it performs no per-frame host0 I/O. Control writes are atomic and commands are acknowledged by nonce before measurement. The runtime validates camera bases, finite transforms, skin weights, texture grids and GE draw counts before submitting geometry.
 
-`psp/Psp.toml` embeds the 144×80 Pocket Atlas icon and a 480×272 PSP scene capture as the XMB background. Artwork sources and regeneration instructions live in `psp/assets/`.
+The EBOOT carries two pictures for the XMB. `ICON0.PNG` is the 144×80 Pocket3D icon from PocketJS (see [App icon](#app-icon)). `PIC1.PNG`, the background, is `psp/assets/pic1.png`, a 480×272 capture from the PSP renderer; `psp/assets/README.md` records where it was taken.
 
 ## Vita
 

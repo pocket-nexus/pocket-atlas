@@ -32,6 +32,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { packageVitaVpk } from "../vendor/pocketjs/tools/vita-package.ts";
+import { POCKET3D_ICON } from "../vendor/pocketjs/tools/pocket3d-icon.ts";
 import { prepareVitaUsb } from "../vendor/pocketjs/tools/vita-usb.ts";
 import { VitaUsbClient } from "../vendor/pocketjs/tools/vita-dev-client.ts";
 import { guardDeviceCommand } from "../vendor/pocketjs/tools/device-lease.ts";
@@ -104,7 +105,9 @@ async function build(options: BuildOptions = {}): Promise<string> {
   // native slot need the standard homebrew permissions.
   await $`${vitasdk}/bin/vita-make-fself ${target}/pocket-atlas-vita.velf ${eboot}`;
   await $`${vitasdk}/bin/vita-mksfoex -d ATTRIBUTE2=12 -s TITLE_ID=${title} ${"Pocket Atlas"} ${sfo}`;
-  await packageVitaVpk({ tool: `${vitasdk}/bin/vita-pack-vpk`, sfo, eboot, output: vpk, usbDriver: usb?.driver, applicationAssets: options.assets });
+  // The bubble icon is the Pocket3D icon, from PocketJS, in the development
+  // build and in the standalone package: `icon` replaces sce_sys/icon0.png.
+  await packageVitaVpk({ tool: `${vitasdk}/bin/vita-pack-vpk`, sfo, eboot, output: vpk, usbDriver: usb?.driver, applicationAssets: options.assets, icon: POCKET3D_ICON.vita });
 
   mkdirSync(OUT_DIR, { recursive: true });
   cpSync(vpk, `${OUT_DIR}/${output}.vpk`);
