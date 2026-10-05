@@ -2,7 +2,7 @@
 
 A world map of places people remember. A place is a small, self-contained 3D scene of one real spot — a street corner, a stairway, a café — pinned to its location on a shared globe. People will publish their own places (publicly or privately) and download other people's places to visit them.
 
-This repository holds the first-party places, the pipeline that turns a place into a pack for a handheld GPU, native PS Vita, Nintendo 3DS, PSP and iPod touch 4 renderers, and the one interface they all draw. Publishing and downloading are not built yet. Vita and 3DS target 30 fps; PSP supports night streets and daytime slopes/streets through its fixed-function GE pipeline; the iPod touch draws five places from the 3DS's kind of pack.
+This repository holds the first-party places, the pipeline that turns a place into a pack for a handheld GPU, native PS Vita, Nintendo 3DS, PSP, iPod touch 4 and Android (Redmi 1S) renderers, and the one interface they all draw. Publishing and downloading are not built yet. Vita and 3DS target 30 fps; PSP supports night streets and daytime slopes/streets through its fixed-function GE pipeline; the iPod touch draws five places from the 3DS's kind of pack; the Redmi 1S draws all seven from it at up to 1280 × 720.
 
 The packages for each device are on [Pocket Studio](https://studio.pocket.nexus) for its members.
 
@@ -13,6 +13,7 @@ Places share their assets across the reference and handheld renderers:
 - **`n3ds/`** renders the globe and all seven live places on an Old 3DS, using a PICA200 cook of the same assets, native 400 × 240 output and a 30fps quality budget. See [the 3DS build and debug workflow](n3ds/README.md).
 - **`psp/`** renders the globe and the places its GE pipeline supports on a PSP.
 - **`ipod/`** renders the globe and five places on an iPod touch 4 (iOS 6, SGX535, OpenGL ES 2) at 480 × 320, from the 3DS lowering with GLES texels and Griffith's lights and haze cooked for it. See [how it draws, builds and is measured](ipod/README.md).
+- **`android/`** renders the globe and all seven places on a Redmi 1S (Android 4.3, Adreno 305, OpenGL ES 3.0) at up to 1280 × 720 and 30 fps, from the 3DS lowering with ETC2 texels at 1024, relief cooked into the textures and the sun's shadows read per pixel from a depth map. See [how it draws, builds and is measured](android/README.md).
 - **`wgpu/`** draws the atlas screen in a browser tab with wgpu over WebGPU: the iPod touch's globe in WGSL, with the interface over it and the page as any of the four handhelds. It opens no place yet. See [Browser tab](#browser-tab).
 - **`ui/`** is what all of them put on the screen in two dimensions: one PocketJS app with a presentation for each form of device. See [The interface](#the-interface).
 
@@ -49,9 +50,10 @@ Real places fall into a finite set of kinds; the registry names them (`PlaceKind
 | `tools/atlas.ts` | cook (places and the atlas pack), build, deploy over USB, status/capture/profile/sweep/shots, shader lint, standalone VPK |
 | `tools/atlas-psp.ts` | PSP cook/build, PSPLINK serve/run/control/capture/shot measurements, standalone EBOOT package |
 | `ipod/`, `tools/atlas-ipod.ts` | iPod touch 4 app (the GLES 2 renderer, the globe and the shell that hosts the interface) and its cook/build/install/control/capture/measure tool |
+| `android/`, `tools/atlas-android.ts` | Android app for the Redmi 1S (a NativeActivity: the GLES 3 renderer, the globe, the title card and the shell that hosts the interface) and its cook/build/package/install/control/capture/measure tool |
 | `wgpu/`, `tools/wgpu.ts` | browser tab: the atlas screen's globe (`globe.rs`), the shell and the interface channel (`app.rs`), the seam of a renderer of places (`place.rs`), the page; the tool builds, serves, writes the deployable directory and checks the page in Chrome |
 | `vendor/pocketjs/devices/web/pocket-web-wgpu` | Shared browser mechanisms: the WebGPU device and its screens, the interface's overlay pass, ranges of a pack over HTTP, the title card and the frame loop, the interface's guest in a realm, a handheld's controls and screens on the page; no scene |
-| `vendor/pocketjs` | PocketJS: the interface's framework, UI core and per-device guest runtimes; Vita dev host and wired debug transport; 3DS paired transport and native installer; pinned PSP toolchain resolver; iPod touch 4 sysroot, startup objects and installer |
+| `vendor/pocketjs` | PocketJS: the interface's framework, UI core and per-device guest runtimes; Vita dev host and wired debug transport; 3DS paired transport and native installer; pinned PSP toolchain resolver; iPod touch 4 sysroot, startup objects and installer; the QuickJS and Rust pins the Android guest builds with |
 
 ## The interface
 
@@ -63,17 +65,17 @@ Everything flat on a handheld's screen (the atlas screen's lists, cards and sear
 | --- | --- | --- | --- |
 | `single.tsx`, 480 × 272, a pad | PSP, Vita (whose panel also takes taps) | globe at the left, a card and four rows at the right; d-pad moves, ○ visits, □ saves, △ searches, L/R change list, the stick spins the globe | the scene has the screen; title and shot name fade after a few seconds; × atlas, △ menu, L/R shot, START pause |
 | `dual.tsx`, 400 × 240 over 320 × 240 | 3DS | globe and card on the top screen; lists with pictures on the touch screen, scrolled by stylus or d-pad; A visits, Y saves, X searches | top: the scene; bottom: the shots as rows to tap, a pad to drag the view with, Pause, Menu and Atlas buttons |
-| `touch.tsx`, 480 × 320, touch only | iPod touch | a finger spins the globe and scrolls the list; Save and Visit are buttons | two sticks at fixed places in the lower corners (left walks, right looks); a tap calls up a bar (atlas, shots, tour, menu) |
+| `touch.tsx`, 480 × 320 or 640 × 360, touch only | iPod touch, Redmi 1S | a finger spins the globe and scrolls the list; Save and Visit are buttons | two sticks at fixed places in the lower corners (left walks, right looks); a tap calls up a bar (atlas, shots, tour, menu); on the phone the back key closes a sheet or leaves and the menu key opens the menu |
 
 Featured, Explore (nearest where the globe faces), Saved and Search are the lists everywhere. Search types into PocketJS's own keyboard, which is a grid for a d-pad and keys for a finger. A place's menu lists what its renderer offers there (frame rate, quality, effects the place has, exposure, statistics).
 
 A renderer need not give the guest every turn: while no button or touch is down and neither the state nor the guest's picture has just changed, it looks in about once a second (`Rest` in `crates/pocket-atlas-interface`, `n3ds/src/guest.c`). The interface's own timers follow the wall clock for that reason (`ui/app/clock.ts`). A renderer sends only the fields of its state that changed.
 
 ```sh
-bun tools/atlas-ui.ts <psp|vita|3ds|ipod>   # → .pocket-build/ui/<device>/atlas.js, atlas.pak (each device's build runs this)
+bun tools/atlas-ui.ts <psp|vita|3ds|ipod|android>   # → .pocket-build/ui/<device>/atlas.js, atlas.pak (each device's build runs this)
 (cd vendor/pocketjs && bun install && bun tools/wasm.ts)   # once, for the host tests and previews
 bun test ui/test                            # each presentation on PocketJS's wasm core: presses and touches in, commands out
-bun ui/test/preview.ts <psp|3ds|ipod>       # pictures of the screens → .pocket-build/ui/preview/
+bun ui/test/preview.ts <psp|3ds|ipod|android>   # pictures of the screens → .pocket-build/ui/preview/
 ```
 
 Place cards come from each place's preview (`web/scripts/preview-place.ts`); a place without one shows a wash of its accent.
@@ -87,14 +89,15 @@ Every launch starts with the Pocket3D title card: the mark and the name "Pocket3
 | PS Vita | `pocket3d_title::vita::play()` | `vita/src/main.rs`, first in `main`, before `graphics::init_with_pool` |
 | PSP | `title()` → `pocket3d_title::play` | `psp/src/main.rs`, in `run()` before `renderer::init` (`sceGuInit`); `play` leaves the frame buffer as zero bytes |
 | Nintendo 3DS | `pocket3d_title_play()` | `n3ds/src/main.c`, after `gfxInitDefault` (both screens BGR8) and before `C3D_Init` |
+| Redmi 1S | `title()` → `atlas_title_draw` (`android/title`, `pocket3d_title::draw` in its RGBA layout) | `android/src/main.c`, first in `run()`, before `graphics()` and before the interface's bundle is read; a tick that differs from the one shown is uploaded to one texture and covers the window, and the texture is deleted when the card ends |
 | Web reference | `playTitle()` | `web/src/main.ts`; `App` builds the first stage under the card and shows it when the card ends |
 | Browser tab | `titleCard(playTitle)` | `wgpu/page/main.js`, first in `start`; the shell, the interface and the globe's surface are read under the card, and the canvas is shown when it ends |
 
-A Vita development build skips the card when the USB share holds `atlas/boot.json` with `{"title": false}`; packaged builds do not read that file, and the PSP and 3DS builds have no switch. The web reference skips it under `?shot` and `?export`, which `export-place.ts`, `export-atlas.ts` and `preview-place.ts` pass. The iPod touch app has no card: `pocket3d-title` has no drawer for it. The Pocket3D License (`vendor/pocketjs/pocket3d/LICENSE`) makes showing the card first a condition of distributing a product built on Pocket3D.
+A Vita development build skips the card when the USB share holds `atlas/boot.json` with `{"title": false}`; packaged builds do not read that file, and the PSP and 3DS builds have no switch. An Android development build skips it while `/data/local/tmp/<package>/no-title` exists (`bun tools/atlas-android.ts native --no-title`); a release build does not look. The web reference skips it under `?shot` and `?export`, which `export-place.ts`, `export-atlas.ts` and `preview-place.ts` pass. The iPod touch app has no card: `pocket3d-title` has no drawer for it. The Pocket3D License (`vendor/pocketjs/pocket3d/LICENSE`) makes showing the card first a condition of distributing a product built on Pocket3D.
 
 ## App icon
 
-On the PSP, the PS Vita, the Nintendo 3DS and the iPod touch the icon in the launcher is the Pocket3D icon, the same picture for every game built on Pocket3D. PocketJS holds one file per console under `vendor/pocketjs/engine/pocket3d/icon/` and each build reads it from there: **this repository holds no icon file**, and a new drawing arrives with the submodule pin.
+On the PSP, the PS Vita, the Nintendo 3DS, the iPod touch and Android the icon in the launcher is the Pocket3D icon, the same picture for every game built on Pocket3D. PocketJS holds one file per console under `vendor/pocketjs/engine/pocket3d/icon/` and each build reads it from there: **this repository holds no icon file**, and a new drawing arrives with the submodule pin.
 
 | Target | File under `vendor/pocketjs/engine/pocket3d/icon/` | Read by |
 | --- | --- | --- |
@@ -103,7 +106,9 @@ On the PSP, the PS Vita, the Nintendo 3DS and the iPod touch the icon in the lau
 | Nintendo 3DS | `3ds/icon.png` (48×48) and `3ds/icon-small.png` (24×24) | `ICON` and `SMALL_ICON` in `n3ds/Makefile`, both given to `smdhtool --create` |
 | iPod touch 4 | `ios/Icon.png` (57×57) and `ios/Icon@2x.png` (114×114) | `tools/atlas-ipod.ts` copies both into the bundle; `Info.plist` lists them in `CFBundleIconFiles` and sets `UIPrerenderedIcon` |
 
-The name beside the icon stays "Pocket Atlas": `TITLE` in `PARAM.SFO`, the SMDH title, `CFBundleDisplayName`. A capture of the game goes where a console shows a picture behind or beside the icon: `psp/assets/pic1.png` (the XMB background) and the LiveArea pictures under `vita/assets/sce_sys/livearea/contents/`. `tools/app-icon.test.ts` fails when an icon file is tracked outside `vendor/` or when a build stops reading PocketJS's. The procedure, with the checks from a built EBOOT, VPK and SMDH, is PocketJS's `pocket3d-brand` skill (`vendor/pocketjs/skills/pocket3d-brand/SKILL.md`).
+| Android | `android/mdpi.png` (48×48), `hdpi.png` (72×72), `xhdpi.png` (96×96), `xxhdpi.png` (144×144) | `tools/atlas-android.ts` copies each to `res/drawable-<density>/icon.png` in the staged resources (`POCKET3D_ICON_ANDROID`); `android/AndroidManifest.xml` names `@drawable/icon`, and `aapt --no-crunch` packs the files as they are |
+
+The name beside the icon stays "Pocket Atlas": `TITLE` in `PARAM.SFO`, the SMDH title, `CFBundleDisplayName`, `android:label`. A capture of the game goes where a console shows a picture behind or beside the icon: `psp/assets/pic1.png` (the XMB background) and the LiveArea pictures under `vita/assets/sce_sys/livearea/contents/`. `tools/app-icon.test.ts` fails when an icon file is tracked outside `vendor/` or when a build stops reading PocketJS's. The procedure, with the checks from a built EBOOT, VPK and SMDH, is PocketJS's `pocket3d-brand` skill (`vendor/pocketjs/skills/pocket3d-brand/SKILL.md`).
 
 ## Web
 
@@ -323,6 +328,51 @@ Suga Shrine Stairs holds 33.3–33.4 ms at step 0 in every shot (`sweep --time 5
 Kamakura-Kōkōmae Crossing holds 30.0 fps at step 0 in every shot with the camera rig and governor running (`shots --seconds 160`): Crossing, Postcard, Platform, Route134, Seawall and Park draw 81–263 draws and 81k–141k triangles, Platform the most. Serialized GPU time is 21.3 ms in Crossing, 20.9 ms in Platform and 23.7 ms in Seawall (main pass 13.4–16.2 ms), with the sun's shadow map drawn once at load.
 
 Radio Kaikan at Blue Hour holds 30.0 fps at step 0 in every shot with the camera rig and governor running (`shots --seconds 130`): Arrival, Facade, Band, Vista, Corner and Clock draw 148–399 draws and 34k–61k triangles. Serialized GPU time (`profile --time 5`) is 17.9–19.5 ms: main pass 10.2–11.7 ms, bloom 4.2 ms, composite 2.1 ms, display scale 1.4 ms.
+
+### Redmi 1S
+
+All seven places on a Redmi 1S (Android 4.3, Adreno 305), the release build as installed, at the app's 30 frames a second with the window's height left to the guard (`bun tools/atlas-android.ts shots --rate 30`): each authored shot at its midpoint, the loop frozen at 25 s, 240 frames. "Shown" is the compositor's record of each shot's last 125 frames (`dumpsys SurfaceFlinger --latency`); "GPU" is the time from the swap's call to the frame's last tile, by a fence, at whatever clock the GPU's governor chose. The phone had rested to 41 °C and read 49 – 58 °C during the run, with one or two of its four cores online.
+
+| Place | Shots | Window lines | fps | Shown for two refreshes | GPU ms | CPU ms | Triangles | Draws |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Rainy Night Konbini | 6 | 720 | 29.9 – 30.0 | 748 of 752 frames (99.5 %) | 17.0 – 24.7 | 4.3 – 7.1 | 73 – 172k | 31 – 132 |
+| Suga Shrine Stairs | 5 | 648 → 576 | 30.0 | 623 of 627 frames (99.4 %) | 20.3 – 27.5 | 2.0 – 2.7 | 115 – 157k | 36 – 43 |
+| Radio Kaikan at Blue Hour | 6 | 720 | 29.9 – 30.0 | 748 of 755 frames (99.1 %) | 16.8 – 24.8 | 1.6 – 3.7 | 51 – 113k | 43 – 112 |
+| Kamakura-Kōkōmae Crossing | 6 | 720 | 29.9 – 30.0 | 752 of 755 frames (99.6 %) | 19.6 – 22.7 | 1.6 – 2.8 | 117 – 188k | 52 – 71 |
+| Sangubashi in Bloom | 6 | 576 | 30.0 | 753 of 753 frames (100.0 %) | 21.9 – 26.6 | 3.2 – 7.8 | 142 – 196k | 61 – 274 |
+| Griffith Observatory at Blue Hour | 6 | 720 | 30.0 | 740 of 752 frames (98.4 %) | 18.6 – 24.6 | 1.9 – 4.0 | 62 – 159k | 29 – 92 |
+| Lombard Street in Bloom | 6 | 720 | 30.0 – 30.1 | 754 of 754 frames (100.0 %) | 19.6 – 28.1 | 1.6 – 3.3 | 84 – 199k | 18 – 37 |
+
+At 60 frames a second (`shots --rate 60`, the phone at 58 – 68 °C) the guard takes the window to 540 – 648 lines: the konbini, Radio Kaikan, Kamakura and Griffith show 99.9 % of their frames for one refresh and Lombard Street 97.5 %; Suga Shrine Stairs (42.7 – 59.7 fps) and Sangubashi (41.9 – 50.4 fps) do not hold it. These are fixed views; tours and walks were not measured. See [android/README.md](android/README.md#measuring).
+
+## Releases
+
+`bun tools/release.ts` builds every device's package from the checked-out commit and writes them to `dist/release/`, which Git ignores:
+
+```sh
+bun tools/release.ts [--export] [--targets vita,psp,3ds,ipod-touch] [--out dist/release] [--vita-gxp DIR] [--no-build] [--upload]
+```
+
+| Target | File | Holds |
+| --- | --- | --- |
+| `vita` | `pocket-atlas-<version>.vpk` | the program, `atlas.pack`, every Vita place, the interface and the programs a console compiled |
+| `psp` | `pocket-atlas-<version>-psp.zip` | `PSP/GAME/PocketAtlas/` for the root of a Memory Stick: `EBOOT.PBP`, the interface, `globe.psp` and each PSP place |
+| `3ds` | `pocket-atlas-<version>-3ds.zip` | the root of the SD card: `3ds/pocket-atlas.3dsx`, and `pocket-atlas/manifest.json` with each place as `pocket-atlas/<sha256>.place`. The `.3dsx` is the only form: no CIA is built |
+| `ipod-touch` | `pocket-atlas-<version>-ipod.ipa` | `Payload/PocketAtlas.app`, with the globe and each iPod place |
+
+**The exports come from a browser.** `--export` writes them first, from this commit: `tools/place.ts export --place <id>` for each live place of `web/src/places/registry.ts` (→ `.pocket-build/places/<id>/`: `scene.glb`, its environment, `export.json`; **Sangubashi with `--geometry handheld`**, because its full geometry cooks to 51.7 MB for the 3DS, whose reader takes 24 MiB), then `web/scripts/export-atlas.ts` (→ `.pocket-build/atlas/globe/`) and `web/scripts/preview-place.ts` (→ each place's `preview.png`) against the reference served on a port of its own. It needs `bun install` in `web/`, Google Chrome and the GPU. Without `--export` the tool uses the exports on disk and **refuses a place whose `export.json` names other web sources than the checkout holds** (`sourceSnapshot` in `web/scripts/export-source.ts`, the identity `tools/place.ts export` seals), has another geometry than the release takes, or lists a file whose hash differs. The globe's export has no receipt; `release.json` records its hash.
+
+**It needs the toolchains of the four device tools**: VitaSDK at `~/vitasdk` with `cargo-vita` and Rust `nightly-2026-05-28` ([Vita](#vita)); PocketJS's pinned PSP toolchain (`bun tools/bootstrap.ts` in `vendor/pocketjs`) with `pack-pbp`; Docker, for the devkitARM container, and the Rust nightly `vendor/pocketjs/hosts/3ds/core/rust-toolchain.toml` pins; the Xcode command line tools, `ldid` and PocketJS's iPod touch 4 toolchain (`bun ipodtouch4 doctor` in `vendor/pocketjs`); ImageMagick's `magick`, which cuts the interface's cards from the previews.
+
+For each target the tool cooks every live place the registry gives that target with this commit's compiler and runs the build a developer runs: `tools/atlas.ts cook`, `cook-atlas` and `vpk`; `tools/atlas-psp.ts cook` and `package`; `tools/atlas-3ds.ts cook` and `package`; `tools/atlas-ipod.ts cook` and `package`. The PSP build holds PocketJS's `psp:usb` lease while it runs, as `tools/atlas-psp.ts build` does. The version is the one in `ui/pocket.json`. A target that fails is listed with its error, the other targets build, and the exit status is 1. Each step's output is in `.pocket-build/release/logs/`.
+
+`release.json`, beside the packages, records **the commit, the version, each package's size and SHA-256, the SHA-256 of the web sources, of the globe export, of each place's `scene.glb` and `preview.png` and of each cooked pack, and the toolchains**: the pinned PocketJS revision, the `rustc` of each target, VitaSDK's compiler and `version_info.txt`, the PSP SDK's hash, the devkitARM image's digest, and the Chrome version and GPU the exports were made with.
+
+**The Vita's programs are an input.** SceShaccCg runs on a console, so the package carries the `.gxp` files a development run left in its share's `atlas/gxp`, the ones `manifest.txt` there lists. `--vita-gxp DIR` names that directory; the default is `.pocket-build/vita-usb/share/atlas/gxp`. Each manifest row is a program's name and its label (`standard_f.cg[BAKED,FOG,LIGHTS=0]`). Before the Vita build the tool computes every name again from `vita/shaders`, as `vita/src/shaders.rs` does: FNV-1a over the source with its includes expanded, the label's definitions and the stage. The build stops, with the reason, when the manifest is missing, when a `.gxp` is missing, and when a name differs, which is a program compiled from a source that has changed since or has left the repository. **The check does not cover completeness**: a place asks for its programs when it loads (`warm` in `vita/src/frame.rs`) and the console lists the ones it has compiled, so the set holds the programs of the places that were entered on that console, under the settings they ran with. On a console without `ur0:data/libshacccg.suprx`, a draw whose program the package does not hold is skipped.
+
+**All four packages are byte-identical across two builds of a commit on one computer**, from the same exports. The tool writes the `.zip` files, the `.ipa` and the `.vpk` itself: entries in the order of their names (in the `.vpk`, `sce_sys/param.sfo` and `eboot.bin` first, as `vita-pack-vpk` has them), every date 1980-01-01, modes 0644 and 0755, deflate at level 6. A development build of the Vita or PSP program carries a random build id. For a release the tool names it (`POCKET_RELEASE_BUILD`, which `tools/atlas.ts` and `tools/atlas-psp.ts` read): 32 hex digits from the commit, the hashes of the exports and of the target's packs and, for the Vita, the hash of the programs' manifest; `release.json` records both. Two exports of a commit on one computer give the same seven `scene.glb` files and the same globe; a place's `preview.png` is a capture of the running scene and differs between exports, and the card the interface compiles from it, so every package differs after `--export`.
+
+**Packages go to Pocket Studio and to no page on GitHub.** `--upload` runs `pocket-studio package <file> --target <id> --version <version>` for each package from the repository's root, where `pocket-studio register --title "Pocket Atlas"` wrote `.pocket-studio.json` (ignored by Git). It refuses a checkout with uncommitted changes. It does not register the game, publish it or change its address; when the link file is missing it prints the commands that write it. `--no-build --upload` sends the packages `release.json` lists, after checking their hashes.
 
 ## License
 

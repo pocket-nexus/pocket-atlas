@@ -1,11 +1,16 @@
-// A touch panel and nothing else (the iPod touch, held sideways): every verb
-// is a control under a finger. On the atlas a finger spins the globe and
-// scrolls the lists; in a place two sticks stand in the lower corners, the
-// left to walk and the right to look, and a tap elsewhere calls up the bar.
+// A touch panel and nothing else (the iPod touch held sideways, an Android
+// phone): every verb is a control under a finger. On the atlas a finger spins
+// the globe and scrolls the lists; in a place two sticks stand in the lower
+// corners, the left to walk and the right to look, and a tap elsewhere calls
+// up the bar. The screen is the host's: 480 × 320 on the iPod touch, 640 × 360
+// on a 16:9 phone, where the panel is wider and the globe larger. A phone's
+// back key closes a sheet or leaves the place, and its menu key opens the menu.
 import { createEffect, createSignal, Match, on, onMount, Show, Switch as Case } from "solid-js";
 import { Text, View } from "@pocketjs/framework/components";
 import { createGesture } from "@pocketjs/framework/gesture";
-import { onFrame } from "@pocketjs/framework/lifecycle";
+import { getOps, hostViewport } from "@pocketjs/framework/host";
+import { BTN } from "@pocketjs/framework/input";
+import { onButtonPress, onFrame } from "@pocketjs/framework/lifecycle";
 import type { NodeMirror } from "@pocketjs/framework/renderer";
 import { createBrowser, type Browser } from "../browse.ts";
 import { connectHost, type Host } from "../host.ts";
@@ -14,15 +19,25 @@ import { GLASS, HAIRLINE, tint } from "../theme.ts";
 import { createPulse } from "../clock.ts";
 import { createVisit, reportQuiet } from "../visit.ts";
 
-const W = 480, H = 320;
 /** A fingertip on this panel (Pocket HIG, touch modality). */
 const TARGET = 44;
 const FIELD = 36;
-const PANEL = { x: 252, y: 8, w: 220, h: H - 16 };
-const CARD_H = PANEL.w / 2;
-const GLOBE = { x: 126, y: 164, r: 112 };
+// The screen and what is laid out from it, set once the host is there.
+let W = 480, H = 320;
+let PANEL = { x: 252, y: 8, w: 220, h: H - 16 };
+let CARD_H = PANEL.w / 2;
+let GLOBE = { x: 126, y: 164, r: 112 };
+function measureScreen() {
+  ({ w: W, h: H } = hostViewport(getOps()) ?? { w: 480, h: 320 });
+  const width = W >= 640 ? 260 : 220;
+  PANEL = { x: W - width - 8, y: 8, w: width, h: H - 16 };
+  CARD_H = PANEL.w / 2;
+  // The globe has the rest of the screen: centred in it, clear of the title.
+  GLOBE = { x: PANEL.x / 2, y: H / 2 + 4, r: Math.min(PANEL.x / 2 - 14, H / 2 - 48) };
+}
 
 export default function TouchScreen() {
+  measureScreen();
   const host = connectHost();
   const browser = createBrowser(host, GLOBE);
   return (
@@ -161,6 +176,9 @@ function Place(props: { host: Host }) {
     sent = key;
     host.send({ type: "drive", mx: now[0], my: now[1], lx: now[2], ly: now[3] });
   });
+  // A phone's keys, where it has them: back leaves (a sheet takes it first), menu opens the menu.
+  onButtonPress(BTN.CROSS, () => visit.leave());
+  onButtonPress(BTN.TRIANGLE, () => setMenu(true));
   const top = TARGET + 12;
   return (
     <View class="relative w-full h-full">

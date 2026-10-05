@@ -61,8 +61,9 @@ test("two screens and a stylus (3ds)", () => {
   expect(asked.search.at(-1)).toBe("globe:1");
 }, 60000);
 
-test("a touch panel alone (ipod)", () => {
-  const asked = visit("ipod");
+for (const device of ["ipod", "android"] as const)
+test(`a touch panel alone (${device})`, () => {
+  const asked = visit(device);
   expect(asked.boot).toEqual(["globe:0", "pins"]);
   expect(asked.spin).toEqual(["spin:-1,-1"]);
   expect(asked["second row"]).toEqual(["globe:1"]);
@@ -73,5 +74,11 @@ test("a touch panel alone (ipod)", () => {
   expect(asked["next shot"]).toEqual(["shot:1"]);
   expect(asked.tour).toEqual(["tour:true"]);
   expect(asked["left alone"]).toEqual(["quiet:true"]);
+  if (device === "android") {
+    // The phone's menu key opens the place's menu and its back key closes it;
+    // with no sheet open, back leaves the place.
+    expect(asked["menu key"]).toEqual(["quiet:false"]);
+    expect(asked.back).toEqual(["quiet:true"]);
+  }
   expect(asked.leave).toContain("leave");
 }, 60000);

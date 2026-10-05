@@ -24,6 +24,10 @@ pub enum Target {
     /// GLES 2 on the iPod touch 4: the PICA display-referred table with GLES texels.
     #[serde(rename="ipod")]
     Ipod,
+    /// GLES 3 on an Adreno 305 (the Redmi 1S): that table with ETC2 texels
+    /// and what `adreno.rs` cooks for a GPU with cheap fetches and triangles.
+    #[serde(rename="android")]
+    Android,
 }
 impl Target {
     pub fn parse(s: &str) -> Result<Self, String> {
@@ -32,6 +36,7 @@ impl Target {
             "3ds" => Ok(Self::Pica),
             "psp" => Ok(Self::Psp),
             "ipod" => Ok(Self::Ipod),
+            "android" => Ok(Self::Android),
             _ => Err(format!("unknown target {s}")),
         }
     }
@@ -41,6 +46,7 @@ impl Target {
             Self::Pica => "3ds",
             Self::Psp => "psp",
             Self::Ipod => "ipod",
+            Self::Android => "android",
         }
     }
 }

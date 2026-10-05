@@ -1,5 +1,5 @@
 // Writes pictures of the interface on one device to .pocket-build/ui/preview/.
-//   bun ui/test/preview.ts <psp|vita|3ds|ipod>
+//   bun ui/test/preview.ts <psp|vita|3ds|ipod|android>
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { BTN } from "../../vendor/pocketjs/contracts/spec/spec.ts";
@@ -9,7 +9,7 @@ const device = (process.argv[2] ?? "psp") as Device;
 const out = resolve(import.meta.dir, "../../.pocket-build/ui/preview");
 mkdirSync(out, { recursive: true });
 const rig = await boot(device, ["tokyo-konbini", "suga-shrine-stairs", "akihabara-radio-kaikan", "kamakura-koko-mae-crossing", "griffith-observatory"]);
-const place = resolve(import.meta.dir, "../../.pocket-build/validation/ipod/sweep-7/tokyo-konbini-0.png");
+const place = resolve(import.meta.dir, device === "android" ? "../../.pocket-build/validation/android/shots/tokyo-konbini-0.png" : "../../.pocket-build/validation/ipod/sweep-7/tokyo-konbini-0.png");
 const names: string[] = [];
 const save = async (name: string, backdrop?: string) => {
   const file = join(out, `${device}-${name}.png`);
@@ -19,7 +19,39 @@ const save = async (name: string, backdrop?: string) => {
 
 rig.step(20);
 await save("atlas");
-if (device === "ipod") {
+if (device === "android") {
+  // A phone's 640 × 360: the Search tab and two keys, the second row, a visit, the sticks, the menu key.
+  rig.tap(606, 24);
+  rig.step(10);
+  rig.tap(520, 216);
+  rig.step(20);
+  for (const x of [294, 544]) {
+    rig.tap(x, 232);
+    rig.step(4);
+  }
+  await save("atlas-search");
+  rig.tap(614, 340);
+  rig.step(10);
+  await save("atlas-found");
+  rig.tap(424, 24);
+  rig.step(10);
+  rig.tap(520, 260);
+  rig.step(20);
+  await save("atlas-second");
+  rig.tap(560, 170);
+  rig.step(10);
+  await save("loading");
+  rig.mock.loaded();
+  rig.step(30);
+  await save("place", place);
+  for (let i = 0; i < 12; i++) rig.step(1, { touch: [{ id: 1, x: 82, y: 278 - i * 3 }, { id: 2, x: 558 + i * 3, y: 278 }] });
+  await save("place-sticks", place);
+  rig.step(400);
+  await save("place-quiet", place);
+  rig.press(BTN.TRIANGLE);
+  rig.step(30);
+  await save("place-menu", place);
+} else if (device === "ipod") {
   // The Search tab, its field, and three keys.
   rig.tap(446, 24);
   rig.step(10);

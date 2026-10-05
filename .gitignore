@@ -14,3 +14,7 @@ node_modules/
 /ui/app/generated/
 /ui/.pocket/
 /ui/app/images.json
+/android/title/target/
+
+# The Pocket Studio project this checkout uploads its packages to (pocket-studio register)
+.pocket-studio.json

@@ -26,6 +26,12 @@
         "capabilities": { "requires": ["display.auxiliary", "input.touch.auxiliary"], "enhances": ["input.analog.right"] }
       },
       {
+        "id": "touch-wide",
+        "entry": "app/main-touch.tsx",
+        "modality": { "touch": "primary", "buttons": false, "minScreen": [640, 360] },
+        "viewport": { "fixed": { "logical": [640, 360], "presentation": "native" } }
+      },
+      {
         "id": "touch",
         "entry": "app/main-touch.tsx",
         "modality": { "touch": "primary", "buttons": false },

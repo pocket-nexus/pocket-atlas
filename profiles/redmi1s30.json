@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "id": "redmi1s30",
+  "revision": 1,
+  "target": "android",
+  "host": {
+    "os": "android18",
+    "abi": "armeabi-v7a"
+  },
+  "gpu": "adreno305",
+  "presentation": {
+    "targetFps": 30,
+    "renderWidth": 1280,
+    "renderHeight": 720,
+    "displayWidth": 1280,
+    "displayHeight": 720,
+    "auxiliary": null
+  },
+  "recipe": {
+    "revision": 1,
+    "textureCap": 1024,
+    "detailTextureCap": 2048,
+    "emissiveTextureCap": 2048,
+    "animationPaletteBytes": 50331648,
+    "maxMeshVertices": 65535,
+    "maxFieldPoints": 16384
+  },
+  "budgets": {
+    "maxPackBytes": null,
+    "sections": {
+      "PICA": 4194304,
+      "TEXD": 50331648,
+      "GEOM": 33554432,
+      "ANIM": 50331648,
+      "FELD": 4194304
+    }
+  },
+  "disabledFeatures": []
+}

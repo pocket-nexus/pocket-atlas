@@ -4,7 +4,7 @@
 import { expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
-import { POCKET3D_ICON } from "../vendor/pocketjs/tools/pocket3d-icon.ts";
+import { POCKET3D_ICON, POCKET3D_ICON_ANDROID } from "../vendor/pocketjs/tools/pocket3d-icon.ts";
 
 const root = resolve(import.meta.dir, "..");
 const read = (path: string) => readFileSync(resolve(root, path), "utf8");
@@ -17,13 +17,16 @@ function launcherIcon(path: string): boolean {
   if (/^icon0\./i.test(name)) return true;
   // Nintendo 3DS: an SMDH, or a picture one is made from
   if (/\.smdh$/i.test(name) || (path.startsWith("n3ds/") && /^icon.*\.png$/i.test(name))) return true;
+  // Android: the manifest's `@drawable/icon`, or a launcher picture under any resource directory
+  if (path.startsWith("android/") && /^(icon|ic_launcher).*\.(png|webp|xml)$/i.test(name)) return true;
   // iPod touch: Icon.png, Icon@2x.png and the other names SpringBoard reads from a bundle
   return /^Icon.*\.png$/.test(name) || (path.startsWith("ipod/") && /^icon.*\.png$/i.test(name));
 }
 
 test("the rule names each console's icon file and leaves the game's own pictures alone", () => {
   for (const path of ["psp/assets/icon0.png", "psp/assets/ICON0.PNG", "psp/assets/icon0.svg", "vita/assets/sce_sys/icon0.png",
-    "n3ds/icon.png", "n3ds/icon-small.png", "n3ds/atlas.smdh", "ipod/Icon.png", "ipod/Icon@2x.png", "ipod/assets/icon-72.png"])
+    "n3ds/icon.png", "n3ds/icon-small.png", "n3ds/atlas.smdh", "ipod/Icon.png", "ipod/Icon@2x.png", "ipod/assets/icon-72.png",
+    "android/res/drawable-xhdpi/icon.png", "android/res/mipmap-hdpi/ic_launcher.png", "android/icon.png"])
     expect([path, launcherIcon(path)]).toEqual([path, true]);
   for (const path of ["psp/assets/pic1.png", "vita/assets/sce_sys/livearea/contents/bg.png", "vita/assets/sce_sys/livearea/contents/startup.png"])
     expect([path, launcherIcon(path)]).toEqual([path, false]);
@@ -38,7 +41,7 @@ test("no icon file is tracked outside vendor/", () => {
 });
 
 test("the pinned PocketJS holds the icon of every console", () => {
-  for (const file of Object.values(POCKET3D_ICON)) {
+  for (const file of [...Object.values(POCKET3D_ICON), ...Object.values(POCKET3D_ICON_ANDROID)]) {
     expect(file.startsWith(resolve(root, "vendor/pocketjs/engine/pocket3d/icon") + "/")).toBe(true);
     expect([file, existsSync(file)]).toEqual([file, true]);
   }
@@ -69,4 +72,12 @@ test("every console's build reads the icon from PocketJS", () => {
   expect(ipod).toContain('cpSync(POCKET3D_ICON.ios2x, join(bundle, "Icon@2x.png"))');
   expect(ipod).toContain('CFBundleIconFiles: `<array>${text("Icon.png")}${text("Icon@2x.png")}</array>`');
   expect(ipod).toContain('UIPrerenderedIcon: "<true/>"');
+
+  // Android: one file a density, copied under the name the manifest gives, and aapt told to leave the PNGs as they are
+  const android = read("tools/atlas-android.ts");
+  expect(android).toContain("for (const [density, file] of Object.entries(POCKET3D_ICON_ANDROID))");
+  expect(android).toContain("cpSync(file, join(resources, `drawable-${density}/icon.png`))");
+  expect(android).toContain('"--no-crunch"');
+  expect(read("android/AndroidManifest.xml")).toContain('android:icon="@drawable/icon"');
+  expect(Object.keys(POCKET3D_ICON_ANDROID).sort()).toEqual(["hdpi", "mdpi", "xhdpi", "xxhdpi"]);
 });

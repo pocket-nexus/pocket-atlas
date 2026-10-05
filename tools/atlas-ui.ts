@@ -4,7 +4,7 @@
  * resolves `ui/pocket.json` against the device's profile, picks the
  * presentation its modality asks for and writes the bundle and its pak.
  *
- *   bun tools/atlas-ui.ts <psp|vita|3ds|ipod>   → .pocket-build/ui/<device>/atlas.{js,pak}, plan.json
+ *   bun tools/atlas-ui.ts <psp|vita|3ds|ipod|android>   → .pocket-build/ui/<device>/atlas.{js,pak}, plan.json
  *   bun tools/atlas-ui.ts prepare               → the generated catalogue and preview cards only
  */
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -14,8 +14,9 @@ import { POCKET_CAPABILITIES, definePlatformContractRegistry, defineTargetRegist
 import { validateAndResolveBuildPlan } from "../vendor/pocketjs/framework/src/manifest/resolve.ts";
 import { resolve3dsBuildPlan } from "../vendor/pocketjs/tools/3ds-profile.ts";
 import { IPODTOUCH4_DEV_HOST_ABI } from "../vendor/pocketjs/tools/ipodtouch4-profile.ts";
+import { MOTO_G_PLAY_CONTRACTS, MOTO_G_PLAY_TARGET } from "../vendor/pocketjs/tools/moto-g-play-profile.ts";
 
-export const DEVICES = ["psp", "vita", "3ds", "ipod"] as const;
+export const DEVICES = ["psp", "vita", "3ds", "ipod", "android"] as const;
 export type Device = (typeof DEVICES)[number];
 
 const root = resolve(import.meta.dir, "..");
@@ -43,8 +44,31 @@ function resolveIPodBuildPlan(manifest: unknown): unknown {
   if (!resolution.ok) throw new Error(`atlas-ui: ${resolution.diagnostics.map((d) => `${d.path || "/"}: ${d.message}`).join("; ")}`);
   return resolution.plan;
 }
+/**
+ * The Redmi 1S as Pocket Atlas presents it: the landscape window, 1280×720,
+ * with the interface at 640×360 logical pixels of two samples each
+ * (android/src/main.c). A touch panel and no pad: the back and menu keys
+ * reach the interface as buttons without making the phone a pad device.
+ */
+const ANDROID_TARGET = "redmi1s-atlas";
+const ANDROID_CONTRACTS = definePlatformContractRegistry(POCKET_CAPABILITIES, defineTargetRegistry({
+  [ANDROID_TARGET]: {
+    hostAbi: MOTO_G_PLAY_CONTRACTS.targets[MOTO_G_PLAY_TARGET].hostAbi,
+    platform: "android",
+    form: "takeover",
+    display: { physicalViewport: [1280, 720], logicalViewports: [[640, 360]], presentations: ["native"], rasterDensity: 2 },
+    capabilities: ["input.touch", "text.glyphs.baked"],
+  },
+}));
 /** Devices outside PocketJS's public registry resolve through a profile kept with their tool. */
-const PRIVATE: Partial<Record<Device, (manifest: unknown) => unknown>> = { "3ds": resolve3dsBuildPlan, ipod: resolveIPodBuildPlan };
+function resolver(target: string, contracts: Parameters<typeof validateAndResolveBuildPlan>[2]) {
+  return (manifest: unknown): unknown => {
+    const resolution = validateAndResolveBuildPlan(manifest, { target }, contracts);
+    if (!resolution.ok) throw new Error(`atlas-ui: ${resolution.diagnostics.map((d) => `${d.path || "/"}: ${d.message}`).join("; ")}`);
+    return resolution.plan;
+  };
+}
+const PRIVATE: Partial<Record<Device, (manifest: unknown) => unknown>> = { "3ds": resolve3dsBuildPlan, ipod: resolveIPodBuildPlan, android: resolver(ANDROID_TARGET, ANDROID_CONTRACTS) };
 
 export interface Interface {
   /** Directory holding `atlas.js`, `atlas.pak` and `plan.json`. */
