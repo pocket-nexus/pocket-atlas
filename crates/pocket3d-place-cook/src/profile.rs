@@ -59,13 +59,14 @@ pub struct Budgets {
     pub sections: BTreeMap<String, usize>,
 }
 
-const BUILTINS: [&str; 4] = [
+const BUILTINS: [&str; 5] = [
     include_str!("../../../profiles/vita30.json"),
     include_str!("../../../profiles/old3ds30.json"),
     include_str!("../../../profiles/psp30.json"),
     include_str!("../../../profiles/ipod30.json"),
+    include_str!("../../../profiles/redmi1s60.json"),
 ];
-pub const TARGETS: [Target; 4] = [Target::Vita, Target::Pica, Target::Psp, Target::Ipod];
+pub const TARGETS: [Target; 5] = [Target::Vita, Target::Pica, Target::Psp, Target::Ipod, Target::Android];
 impl Profile {
     pub fn builtin(target: Target) -> Self {
         serde_json::from_str(BUILTINS[TARGETS.iter().position(|t| *t == target).unwrap()]).unwrap()
@@ -107,11 +108,12 @@ impl Profile {
             || self.presentation.auxiliary != base.presentation.auxiliary
             || self.presentation.target_fps != base.presentation.target_fps
         {
-            return Err("presentation requires a matching runtime implementation; current profiles use the existing 30 fps contract".into());
+            return Err("presentation requires a matching runtime implementation: a profile keeps its backend's size and frame rate".into());
         }
         let (min, max) = match self.target {
             Target::Vita => (4, 4096),
             Target::Pica | Target::Ipod => (64, 1024),
+            Target::Android => (64, 4096),
             Target::Psp => (8, 512),
         };
         for cap in [
@@ -133,7 +135,7 @@ impl Profile {
         if self.recipe.max_mesh_vertices != 65535
             || !(1..=16384).contains(&self.recipe.max_field_points)
             || self.recipe.animation_palette_bytes == 0
-            || self.recipe.animation_palette_bytes > if self.target == Target::Ipod { 64 } else { 16 } * 1024 * 1024
+            || self.recipe.animation_palette_bytes > if matches!(self.target, Target::Ipod | Target::Android) { 64 } else { 16 } * 1024 * 1024
         {
             return Err("recipe exceeds vertex, point or animation limits".into());
         }
@@ -157,9 +159,10 @@ impl Profile {
         }
         for (tag, n) in &self.budgets.sections {
             if *n == 0
-                || !matches!(tag.as_str(), "META" | "PICA" | "TEXD" | "GEOM" | "ANIM" | "FELD")
-                || (tag == "PICA" && !matches!(self.target, Target::Pica | Target::Ipod))
-                || (tag == "FELD" && !matches!(self.target, Target::Pica | Target::Ipod))
+                || !matches!(tag.as_str(), "META" | "PICA" | "TEXD" | "GEOM" | "ANIM" | "FELD" | "SUNL")
+                || (tag == "PICA" && !matches!(self.target, Target::Pica | Target::Ipod | Target::Android))
+                || (tag == "FELD" && !matches!(self.target, Target::Pica | Target::Ipod | Target::Android))
+                || (tag == "SUNL" && self.target != Target::Android)
                 || self.target == Target::Psp
             {
                 return Err(format!("invalid section budget {tag}"));

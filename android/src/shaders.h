@@ -1,0 +1,155 @@
+// One vertex and one fragment source in GLSL ES 3.00, compiled per program
+// with a #define: surfaces (texture x cooked vertex colour, fog), CUT (alpha
+// test), GLOW (an emission map added to the lit texture), WET (planar mirror
+// through a puddle mask), WATER (two wave layers, sky by Fresnel) and FIELD
+// (light sprites); SKIN moves a rig's vertices by its own joints as the
+// frame poses them; SUN picks a surface's lit or shaded colour by one
+// comparison fetch from the place's shadow map; DEPTH is what draws that map. The arithmetic of WET and WATER is
+// n3ds/src/wet.v.pica and water.v.pica.
+//
+// The Adreno 305 pays for arithmetic in a fragment program and little for a
+// fetch, so every program's fragment stage is fetches and a mix: light, haze
+// and Fresnel terms are worked out per vertex. `mediump` is a 16-bit float
+// on this GPU: texture coordinates and the mirror's are `highp`.
+static const char vertex_source[] =
+    "#ifdef FIELD\n"
+    "in vec4 aPos, aUV, aColor, aAnim;\n" // xyz radius; path cycles; colour twinkle; phase blink duty 1/k
+    "uniform mat4 uMVP; uniform vec3 uEye; uniform vec4 uField; uniform vec2 uClock;\n"
+    "out lowp vec3 vColor;\n"
+    "void main() {\n"
+    "  vec3 v = aPos.xyz + aUV.xyz * fract(aAnim.x + aUV.w * uClock.x) - uEye;\n"
+    "  float d = max(length(v), 0.01);\n"
+    "  float size = aPos.w * uField.x / d;\n"
+    "  gl_PointSize = clamp(size, uField.y, uField.z);\n"
+    "  float on = step(fract(aAnim.x + aAnim.y * uClock.x), aAnim.z);\n"
+    "  float twinkle = 1.0 + aColor.a * 0.25 * sin(aAnim.x * 86.08 + uClock.y);\n"
+    "  vColor = aColor.rgb * (min(size / gl_PointSize, 1.0) * aAnim.w * twinkle * on);\n"
+    "  gl_Position = uMVP * vec4(uEye + v * (1.0 - clamp(uField.w * d, 0.002, 0.5)), 1.0);\n"
+    "}\n"
+    "#else\n"
+    // A cutout's depth and its colour come from two programs: the same position, bit for bit.
+    "invariant gl_Position;\n"
+    "in vec3 aPos; in vec2 aUV; in vec4 aColor;\n"
+    "uniform mat4 uMVP, uMirror; uniform vec4 uUV, uTint; uniform float uFog, uMask;\n"
+    "uniform vec3 uEye, uWet, uWave0, uWave1, uSky;\n"
+    // A triangle pays for each interpolant it sets up: a program declares only its own.
+    "out highp vec2 vUV; out mediump vec4 vColor; out mediump float vFog;\n"
+    "#if defined(WET) || defined(WATER)\n"
+    "out highp vec2 vUV2;\n"
+    "#endif\n"
+    "#ifdef WET\n"
+    "out highp vec3 vMirror;\n"
+    "#endif\n"
+    "#ifdef SUN\n"
+    // World to the shadow map's texture and depth; the shade's tint and the depth bias.
+    "uniform mat4 uShadow; uniform vec4 uShade;\n"
+    "out highp vec3 vShadow; out mediump vec3 vShade;\n"
+    "#endif\n"
+    "#ifdef SKIN\n"
+    "in vec4 aJoint, aWeight;\n"
+    // Three rows of each joint the rig's vertices name, as the frame poses them.
+    "uniform vec4 uBone[3 * BONES];\n"
+    "vec3 moved(float joint, vec4 q) {\n"
+    "  int j = int(joint) * 3;\n"
+    "  return vec3(dot(uBone[j], q), dot(uBone[j + 1], q), dot(uBone[j + 2], q));\n"
+    "}\n"
+    "#endif\n"
+    "void main() {\n"
+    "#ifdef SKIN\n"
+    // The driver takes no loop over an attribute's components.
+    "  vec4 q = vec4(aPos, 1.0);\n"
+    "  vec3 p = aWeight.x * moved(aJoint.x, q) + aWeight.y * moved(aJoint.y, q) + aWeight.z * moved(aJoint.z, q) + aWeight.w * moved(aJoint.w, q);\n"
+    "#else\n"
+    "  vec3 p = aPos;\n"
+    "#endif\n"
+    "  gl_Position = uMVP * vec4(p, 1.0);\n"
+    "  vUV = aUV * uUV.xy + uUV.zw;\n"
+    "#ifdef DEPTH\n"
+    // The alpha the colour stage tests: the vertex's times uTint.x, or uTint.y where the vertex's is a shade.
+    "  vColor = vec4(aColor.a * uTint.x + uTint.y);\n"
+    "#elif defined(SUN)\n"
+    // The vertex's alpha is the share of its colour the shade keeps; the shade
+    // is cooler than the light by the place's tint. Past the map's edge a
+    // surface is as lit as the other readers of the table draw it.
+    "  vShadow = (uShadow * vec4(p, 1.0)).xyz;\n"
+    "  vShadow.z -= uShade.w;\n"
+    "  vec2 edge = abs(vShadow.xy - 0.5);\n"
+    "  float out_of_map = clamp((max(edge.x, edge.y) - 0.46) * 25.0, 0.0, 1.0);\n"
+    "  float k = aColor.a;\n"
+    "  vColor = vec4(aColor.rgb, 1.0) * uTint;\n"
+    "  vShade = vColor.rgb * mix(k * mix(uShade.rgb, vec3(1.0), k), vec3(1.0), out_of_map);\n"
+    "#else\n"
+    "  vColor = aColor * uTint;\n"
+    "#endif\n"
+    "  float f = uFog * gl_Position.w;\n"
+    "  vFog = 1.0 - exp(-f * f);\n"
+    "#if defined(WET) || defined(WATER)\n"
+    "  float graze = 1.0 - abs(normalize(uEye - aPos).y);\n"
+    "#endif\n"
+    "#ifdef WET\n"
+    "  vec4 m = uMirror * vec4(aPos, 1.0);\n"
+    "  vMirror = vec3((m.xy + m.w) * 0.5, m.w);\n"
+    "  vUV2 = aPos.xz * uWet.z;\n"
+    "  vColor.a = uWet.x + uWet.y * graze * graze;\n"
+    "#endif\n"
+    "#ifdef WATER\n"
+    "  vUV = aPos.xz * uWave0.x + uWave0.yz;\n"
+    "  vUV2 = aPos.xz * uWave1.x + uWave1.yz;\n"
+    "  float k = max(graze - uMask, 0.0);\n"
+    "  vColor.rgb = mix(aColor.rgb, uSky, min(k * k * k * k * k + 0.02, 1.0)) * uTint.rgb;\n"
+    "#endif\n"
+    "}\n"
+    "#endif\n";
+static const char fragment_source[] =
+    "out lowp vec4 oColor;\n"
+    "#ifdef FIELD\n"
+    "in lowp vec3 vColor;\n"
+    "void main() {\n"
+    "  mediump vec2 q = gl_PointCoord * 2.0 - 1.0;\n"
+    "  lowp float f = clamp(1.0 - dot(q, q), 0.0, 1.0);\n"
+    "  oColor = vec4(vColor * (f * f), 1.0);\n"
+    "}\n"
+    "#else\n"
+    "uniform lowp sampler2D uTex, uMirrorTex, uPuddle, uGlow; uniform lowp vec3 uFogColor; uniform lowp float uCut;\n"
+    "in highp vec2 vUV; in mediump vec4 vColor; in mediump float vFog;\n"
+    "#if defined(WET) || defined(WATER)\n"
+    "in highp vec2 vUV2;\n"
+    "#endif\n"
+    "#ifdef WET\n"
+    "in highp vec3 vMirror;\n"
+    "#endif\n"
+    "#ifdef SUN\n"
+    "uniform lowp sampler2DShadow uShadowMap;\n"
+    "in highp vec3 vShadow; in mediump vec3 vShade;\n"
+    "#endif\n"
+    "void main() {\n"
+    "#if defined(DEPTH) && defined(CUT)\n"
+    "  lowp vec4 c = vec4(texture(uTex, vUV).a * vColor.a);\n"
+    "#elif defined(DEPTH)\n"
+    "  lowp vec4 c = vec4(0.0);\n"
+    "#elif defined(WATER)\n"
+    "  lowp vec4 c = vec4(texture(uTex, vUV).rgb * texture(uTex, vUV2).rgb * vColor.rgb, 1.0);\n"
+    "#elif defined(WET)\n"
+    "  lowp float k = texture(uPuddle, vUV2).r * vColor.a;\n"
+    "  lowp vec4 c = vec4(mix(texture(uTex, vUV).rgb * vColor.rgb, textureProj(uMirrorTex, vMirror).rgb, k), 1.0);\n"
+    "#elif defined(GLOW)\n"
+    "  lowp vec4 c = vec4(texture(uTex, vUV).rgb * vColor.rgb + texture(uGlow, vUV).rgb * vColor.a, 1.0);\n"
+    "#elif defined(SUN)\n"
+    // This driver hands the comparison back as a vector with the answer in red
+    // alone, whatever the language says: spread over a colour as it comes, it
+    // lights the red channel only. The dot product takes the red.
+    "  lowp float sunned = dot(vec4(texture(uShadowMap, vShadow)), vec4(1.0, 0.0, 0.0, 0.0));\n"
+    "  lowp vec4 c = texture(uTex, vUV) * vec4(mix(vShade, vColor.rgb, sunned), vColor.a);\n"
+    "#else\n"
+    "  lowp vec4 c = texture(uTex, vUV) * vColor;\n"
+    "#endif\n"
+    "#ifdef CUT\n"
+    "  if (c.a < uCut) discard;\n"
+    "#endif\n"
+    "#ifdef DEPTH\n"
+    "  oColor = c;\n"
+    "#else\n"
+    "  oColor = vec4(mix(c.rgb, uFogColor, vFog), c.a);\n"
+    "#endif\n"
+    "}\n"
+    "#endif\n";

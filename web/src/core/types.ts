@@ -78,7 +78,7 @@ export interface PlaceDef {
   timeZone: string;
   status: PlaceStatus;
   /** Native catalogs allowed to publish this place. Compiler capabilities are checked separately. */
-  targets?: readonly ("vita" | "3ds" | "psp" | "ipod")[];
+  targets?: readonly ("vita" | "3ds" | "psp" | "ipod" | "android")[];
   weather: string;
   accent: string;
   /** Who made the place ("Pocket Atlas" for first-party places). */

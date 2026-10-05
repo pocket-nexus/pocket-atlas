@@ -1,0 +1,21 @@
+# The Pocket3D title card for the Android shell (android/src/main.c): PocketJS's
+# pocket3d-title, which draws a tick's frame into memory, behind three C calls.
+[package]
+name = "atlas-title"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+pocket3d-title = { path = "../../vendor/pocketjs/engine/pocket3d/crates/pocket3d-title" }
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[workspace]

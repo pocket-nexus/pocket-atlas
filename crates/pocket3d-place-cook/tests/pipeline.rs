@@ -88,7 +88,7 @@ fn one_ir_builds_three_repeatable_packs_without_web_export_or_vita_intermediate(
     std::fs::remove_dir_all(export).unwrap();
     let manifest = std::fs::read(ir.join("manifest.json")).unwrap();
     // Deliberately compile Vita last; every target only sees the sealed source.
-    for target in ["psp", "3ds", "ipod", "vita"] {
+    for target in ["psp", "3ds", "ipod", "android", "vita"] {
         let output = temp.0.join("target.place");
         let args = [
             "--in",
@@ -152,6 +152,18 @@ fn one_ir_builds_three_repeatable_packs_without_web_export_or_vita_intermediate(
             assert_eq!(&first[..4], b"PLCE");
             assert_eq!(first[4..12], [1u32.to_le_bytes(), 6u32.to_le_bytes()].concat());
             assert!(first[16..16 + 6 * 16].chunks(16).any(|s| &s[..4] == b"FELD"));
+            assert!(!Command::new(temp.0.join("pica-contract"))
+                .arg(&output)
+                .status()
+                .unwrap()
+                .success());
+        } else if target == "android" {
+            // The Adreno pack is the table again under a third container
+            // version: neither the 3DS's reader nor the iPod's takes it.
+            assert_eq!(&first[..4], b"PLCE");
+            assert_eq!(first[4..8], 0x201u32.to_le_bytes());
+            let sections = u32::from_le_bytes(first[8..12].try_into().unwrap()) as usize;
+            assert!(first[16..16 + sections * 16].chunks(16).any(|s| &s[..4] == b"FELD"));
             assert!(!Command::new(temp.0.join("pica-contract"))
                 .arg(&output)
                 .status()
@@ -455,7 +467,7 @@ fn skin_without_joints_is_rejected_for_every_target() {
     skin_fixture(&export, 0);
     ok(&["import", "--in", export.to_str().unwrap(), "--out", ir.to_str().unwrap()]);
     std::fs::remove_dir_all(export).unwrap();
-    for target in ["psp", "3ds", "ipod", "vita"] {
+    for target in ["psp", "3ds", "ipod", "android", "vita"] {
         let output = temp.0.join(format!("{target}.place"));
         let result = run(&["--in", ir.to_str().unwrap(), "--out", output.to_str().unwrap(), "--target", target]);
         assert!(!result.status.success(), "{target} accepted an empty skin");
@@ -612,7 +624,7 @@ fn two_layouts_per_family_keep_source_ownership_through_each_supported_recipe() 
     for family in ["night-street","daytime-street"] {
         for layout in 0..2 {
             let export=temp.0.join(format!("{family}-{layout}"));authored_fixture(&export,family,layout);
-            for target in ["vita","3ds","psp","ipod"] {
+            for target in ["vita","3ds","psp","ipod","android"] {
                 let output=temp.0.join("result.place");
                 let result=run(&["--in",export.to_str().unwrap(),"--out",output.to_str().unwrap(),"--target",target,"--json"]);
                 assert!(result.status.success(),"{}",String::from_utf8_lossy(&result.stderr));

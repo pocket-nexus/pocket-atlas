@@ -1,5 +1,5 @@
 // One device's interface driven through a visit, for interface.test.ts:
-//   bun ui/test/scenario.ts <psp|vita|3ds|ipod>
+//   bun ui/test/scenario.ts <psp|vita|3ds|ipod|android>
 // prints, step by step, what the interface asked of the renderer. The bundle
 // owns the process's globals, so each device runs in a process of its own.
 import { BTN } from "../../vendor/pocketjs/contracts/spec/spec.ts";
@@ -104,30 +104,44 @@ if (device === "psp" || device === "vita") {
   rig.press(BTN.START);
   step("search");
 } else {
-  // A finger: the globe, the second row, Visit; then both sticks.
+  // A finger: the globe, the second row, Visit; then both sticks. The panel
+  // is the iPod touch's 480 × 320 or a phone's 640 × 360, and the layout
+  // follows it: the list at the right edge, the sticks in the lower corners.
+  const wide = device === "android";
+  const [w, h] = wide ? [640, 360] : [480, 320];
   drag([120, 160], [90, 150]);
   step("spin");
-  rig.tap(360, 240);
+  rig.tap(w - 120, wide ? 260 : 240);
   step("second row");
-  rig.tap(400, 150);
+  rig.tap(w - 80, wide ? 170 : 150);
   step("visit");
   rig.mock.loaded();
   step("loaded");
-  for (let i = 0; i < 8; i++) rig.step(1, { touch: [{ id: 1, x: 82, y: 238 - i * 4 }, { id: 2, x: 398 + i * 4, y: 238 }] });
+  for (let i = 0; i < 8; i++) rig.step(1, { touch: [{ id: 1, x: 82, y: h - 82 - i * 4 }, { id: 2, x: w - 82 + i * 4, y: h - 82 }] });
   step("sticks", 0);
   rig.step(2);
   step("sticks let go");
   // The bar: next shot, then back to the tour, and fifteen seconds alone.
-  rig.tap(240, 120);
+  rig.tap(w / 2, 120);
   rig.step(6);
-  rig.tap(326, 24);
+  rig.tap(w - 154, 24);
   step("next shot");
-  rig.tap(384, 24);
+  rig.tap(w - 96, 24);
   step("tour");
   step("left alone", 450);
-  rig.tap(240, 120);
-  rig.step(6);
-  rig.tap(40, 24);
-  step("leave");
+  if (wide) {
+    // A phone's keys: menu opens the sheet, back closes it, back again leaves.
+    rig.press(BTN.TRIANGLE);
+    step("menu key");
+    rig.press(BTN.CROSS);
+    step("back", 30);
+    rig.press(BTN.CROSS);
+    step("leave");
+  } else {
+    rig.tap(w / 2, 120);
+    rig.step(6);
+    rig.tap(40, 24);
+    step("leave");
+  }
 }
 console.log(JSON.stringify(steps));
