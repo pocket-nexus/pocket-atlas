@@ -106,6 +106,23 @@ async function control(message: Record<string, unknown>) {
   throw new Error("the phone did not acknowledge the command");
 }
 /** The frame before the interface, or with `screen` as shown, interface and all. */
+/** For how many refreshes each of the window's last frames stayed on the
+ * panel, from the compositor's own record of when it showed them (up to 127
+ * frames): { "2": 126 } is a steady 30 frames a second. Null when the
+ * compositor has no layer under the activity's name. */
+function cadence(): { refreshMs: number; shown: Record<string, number> } | null {
+  const lines = shell(`dumpsys SurfaceFlinger --latency ${ACTIVITY}`).split("\n").map((line) => line.trim().split(/\s+/).map(Number));
+  const period = lines[0]?.[0];
+  // A row is "desired present, shown, ready" in nanoseconds; a frame still waiting has no time yet.
+  const times = lines.slice(1).filter((row) => row.length === 3 && row[1] > 0 && row[1] < 2 ** 62).map((row) => row[1]);
+  if (!period || times.length < 2) return null;
+  const shown: Record<string, number> = {};
+  for (let i = 1; i < times.length; i++) {
+    const refreshes = String(Math.max(1, Math.round((times[i] - times[i - 1]) / period)));
+    shown[refreshes] = (shown[refreshes] ?? 0) + 1;
+  }
+  return { refreshMs: period / 1e6, shown };
+}
 async function capture(output: string, screen = false) {
   const s = await control(screen ? { screen: true } : { capture: true });
   const name = screen ? "screen.rgba" : "frame.rgba", raw = join(out, name);
@@ -306,6 +323,7 @@ else if (command === "install") {
 else if (command === "launch") console.log(JSON.stringify(await launch()));
 else if (command === "stop") shell(`am force-stop ${PACKAGE}`);
 else if (command === "status") console.log(JSON.stringify(status()));
+else if (command === "cadence") console.log(JSON.stringify(cadence()));
 else if (command === "ctl") console.log(JSON.stringify(await control(JSON.parse(args[1] ?? "{}"))));
 else if (command === "capture") await capture(resolve(option("--out", join(validation, "capture.png"))), args.includes("--screen"));
 else if (command === "shots") {
@@ -334,12 +352,13 @@ else if (command === "shots") {
         if (String(s.window) === size) break;
         await Bun.sleep(1500); // the guard changed the window: measure the size it settled at
       }
+      const panel = cadence();
       await capture(join(directory, `${p.id}-${shot}.png`));
-      results.push({ place: p.id, shot, name: s.shotName, window: s.window, samples: s.samples, rate: s.rate, fps: s.fps, frames: s.marked, late: s.markedLate, worstMs: s.worstMs,
+      results.push({ place: p.id, shot, name: s.shotName, window: s.window, samples: s.samples, rate: s.rate, fps: s.fps, frames: s.marked, late: s.markedLate, worstMs: s.worstMs, shown: panel?.shown ?? null,
         workMs: s.workMs, swapMs: s.swapMs, intervalMs: s.intervalMs, prepareMs: s.prepareMs, ...(args.includes("--gpu") ? { gpuMs: s.gpuMs } : {}), draws: s.draws, triangles: s.triangles, mirrorTriangles: s.mirrorTriangles, sprites: s.sprites, build: s.build, glError: s.glError });
-      console.log(`${p.id}/${shot} ${s.shotName}: ${s.fps.toFixed(1)} fps, ${s.markedLate} late in ${s.marked}, worst ${s.worstMs.toFixed(1)} ms, work ${s.workMs.mean.toFixed(1)} ms${args.includes("--gpu") ? `, GPU ${s.gpuMs.mean.toFixed(1)} ms` : ""}, ${s.triangles + s.mirrorTriangles} triangles in ${s.draws} draws`);
+      console.log(`${p.id}/${shot} ${s.shotName}: ${s.window.join("x")}, ${s.fps.toFixed(1)} fps, shown for ${panel ? Object.entries(panel.shown).map(([n, count]) => `${n} refresh${n === "1" ? "" : "es"} x${count}`).join(", ") : "?"}, ${s.markedLate} late in ${s.marked}, worst ${s.worstMs.toFixed(1)} ms, work ${s.workMs.mean.toFixed(1)} ms${args.includes("--gpu") ? `, GPU ${s.gpuMs.mean.toFixed(1)} ms` : ""}, ${s.triangles + s.mirrorTriangles} triangles in ${s.draws} draws`);
       writeFileSync(join(directory, "receipt.json"), JSON.stringify({ scenario: "authored shot midpoints, loop frozen", frames, settings, results }, null, 2));
     }
   await control({ time: -1, shot: 0, profile: false });
   console.log(directory);
-} else throw new Error("usage: doctor | cook [--place ID] | build | apk [--release] [--lean] | install [--release] [--lean] | native [--place ID] [--packs] [--no-title] | unpush | launch | stop | status | ctl JSON | capture [--screen] [--out PNG] | shots [--place ID] [--samples N] [--rate N] [--lines N] [--gpu] [--frames N] [--out DIR]");
+} else throw new Error("usage: doctor | cook [--place ID] | build | apk [--release] [--lean] | install [--release] [--lean] | native [--place ID] [--packs] [--no-title] | unpush | launch | stop | status | cadence | ctl JSON | capture [--screen] [--out PNG] | shots [--place ID] [--samples N] [--rate N] [--lines N] [--gpu] [--frames N] [--out DIR]");

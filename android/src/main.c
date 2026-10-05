@@ -390,6 +390,30 @@ static GLuint gpu_timer;
 static bool gpu_timing;
 static float gpu_ms;
 static bool profile, loaded, statistics, quiet;
+// The panel's refresh, as the app can know it. `eglSwapBuffers` returns when
+// the frame is queued and waits for the compositor only while the queue is
+// full. On the atlas screen, where the GPU has little to do, every return
+// follows a latch: that gives the refresh period and where the latches fall.
+// A place at 30 frames a second fills no queue and nothing waits, so the app
+// times its own frames onto that grid (`due`): queued at any other pace they
+// are shown for one refresh and two by turns.
+static double refresh = 1 / 60.0, latch, streak_from, due;
+static unsigned streak, longest;
+static float swap_expected = 0.004f;
+static void latched(double at) {
+  double n = floor((at - latch) / refresh + 0.5);
+  if (latch && n >= 1 && n < 4 && fabs(at - latch - n * refresh) < 0.0015) {
+    // The period over the longest run of latches seen: its error is a swap's
+    // jitter over the run's length.
+    streak += (unsigned)n;
+    if (streak >= 120 && streak >= longest)
+      longest = streak, refresh = (at - streak_from) / streak;
+  } else
+    streak = 0, streak_from = at;
+  latch = at;
+}
+// The middle of the first slot between two latches at or after a moment.
+static double slot_after(double t) { return latch + (ceil((t - latch) / refresh - 0.5) + 0.5) * refresh; }
 static unsigned frames, redraws, late, marked, marked_late;
 static float worst;
 static char command[40], captured[40], failure[256];
@@ -437,10 +461,10 @@ static void status(void) {
   int at = snprintf(text, sizeof text,
                     "{\"build\":\"%s\",\"state\":\"%s\",\"error\":\"%s\",\"place\":\"%s\",\"shots\":%u,\"shot\":%u,\"shotName\":\"%s\","
                     "\"time\":%.3f,\"cinematic\":%s,\"paused\":%s,\"camera\":[%.3f,%.3f,%.3f],\"frame\":%u,\"fps\":%.3f,"
-                    "\"window\":[%d,%d],\"fixedLines\":%d,\"samples\":%d,\"rate\":%d,\"late\":%u,\"marked\":%u,\"markedLate\":%u,\"worstMs\":%.2f,",
+                    "\"window\":[%d,%d],\"fixedLines\":%d,\"refreshMs\":%.4f,\"samples\":%d,\"rate\":%d,\"late\":%u,\"marked\":%u,\"markedLate\":%u,\"worstMs\":%.2f,",
                     ATLAS_BUILD, scenes[interface.scene], error, interface.place, scene_shot_count(), atlas.shot,
                     loaded ? scene_shot_name(atlas.shot) : "", atlas.time, atlas.cinematic ? "true" : "false", atlas.paused ? "true" : "false",
-                    atlas.position[0], atlas.position[1], atlas.position[2], frames, fps(), width, height, fixed_lines, samples, rate, late, marked, marked_late, worst);
+                    atlas.position[0], atlas.position[1], atlas.position[2], frames, fps(), width, height, fixed_lines, refresh * 1000, samples, rate, late, marked, marked_late, worst);
   // The last 120 frames shown.
   at += summary(text + at, sizeof text - at, "workMs", timing[0], NULL);
   at += summary(text + at, sizeof text - at, "swapMs", timing[1], NULL);
@@ -612,30 +636,30 @@ static void graphics(void) {
 // The guard of a place's frame rate. The display processor scales a smaller
 // window buffer to the panel at no cost to the GPU, so the buffer's height is
 // what a place pays its frame rate with: 720 lines on entering, and one step
-// down (648, 576, 540) each time 30 frames took 4 % longer than their rate
-// allows or 4 of them were late. A frame the GPU cannot finish in time is
-// shown when it is done, not a refresh later, so the mean says what the count
-// of late frames does not. It does not climb: a place keeps the size its
-// heaviest view so far could hold.
-static void guard(float interval, bool behind) {
-  static unsigned judged, judged_late, settling;
-  static float judged_ms;
+// down (648, 576, 540) each time half of 30 frames took 4 % longer than the
+// rate allows. A frame the GPU cannot finish in time is shown when it is
+// done, so the guard reads intervals, and it asks for half the frames because
+// a place's first second has slow frames of its own (first uses of textures
+// and programs). It does not climb: a place keeps the size its heaviest view
+// so far could hold.
+static void guard(float interval) {
+  static unsigned judged, slow, settling;
   static int judged_lines;
   if (!loaded || fixed_lines || profile || lines != judged_lines) {
     // A new size, or a new place: its first frames are the change's, not the place's.
-    judged = judged_late = 0, judged_ms = 0, settling = 12, judged_lines = lines;
+    judged = slow = 0, settling = 30, judged_lines = lines;
     return;
   }
   if (settling) {
     settling--;
     return;
   }
-  judged++, judged_late += behind, judged_ms += interval;
+  judged++, slow += interval > 1040.0f / rate;
   if (judged < 30)
     return;
-  if ((judged_late >= 4 || judged_ms > 30 * 1040.0f / rate) && lines > LEAST_LINES)
+  if (slow >= 15 && lines > LEAST_LINES)
     lines = lines > 648 ? 648 : lines > 576 ? 576 : LEAST_LINES;
-  judged = judged_late = 0, judged_ms = 0;
+  judged = slow = 0;
 }
 static uint64_t drawn_hash;
 // A change of samples: a new context, and everything on the GPU made again
@@ -700,7 +724,7 @@ static void run(void) {
   free(prefs);
 
   bool capture = false, screen = false;
-  double previous = now(), started = previous, reported = 0, turn = 0, shown = previous;
+  double previous = now(), started = previous, reported = 0, turn = 0;
   unsigned waited = 0, idle = 0;
   long long commanded = 0;
   uint8_t *pixels = malloc((size_t)screen_width * screen_height * 4);
@@ -888,16 +912,30 @@ static void run(void) {
     const GLenum unused[] = {GL_DEPTH, GL_STENCIL};
     glInvalidateFramebuffer(GL_FRAMEBUFFER, 2, unused);
     double submitted = now();
-    // At 30 frames a second a frame is shown for two refreshes: the swap
-    // waits for the next one, so the frame holds back until the second is near.
-    if (rate == 30 && submitted - shown < 0.024)
-      usleep((useconds_t)((0.024 - (submitted - shown)) * 1e6));
+    // At 30 frames a second in a place, a frame is queued in the middle of
+    // every second slot between two latches: the swap is called as long
+    // before that as the last swaps took.
+    bool paced = rate == 30 && loaded;
+    if (paced) {
+      if (due < submitted - refresh || due > submitted + 3 * refresh)
+        due = slot_after(submitted + swap_expected);
+      double wait = due - swap_expected - 0.001 - submitted;
+      if (wait > 0)
+        usleep((useconds_t)(wait * 1e6));
+    }
+    double swapping = now();
     eglSwapBuffers(display, surface);
     double presented = now();
-    shown = presented;
+    float took = (float)(presented - swapping);
+    swap_expected += (took - swap_expected) * 0.25f;
+    if (paced)
+      // Two refreshes on; a frame that came late keeps two from where it landed.
+      due = (presented > due + refresh * 0.5 ? slot_after(presented) : due) + 2 * refresh;
+    else if (!loaded && took > 0.003f)
+      latched(presented);
     float interval = (float)(presented - previous) * 1000;
     timing[0][frames % WINDOW] = (float)(submitted - start) * 1000;
-    timing[1][frames % WINDOW] = (float)(presented - submitted) * 1000;
+    timing[1][frames % WINDOW] = took * 1000;
     timing[2][frames % WINDOW] = interval;
     // A frame is late when it is shown a refresh or more after its turn.
     bool behind = interval > (rate == 30 ? 41.7f : 25.0f);
@@ -906,7 +944,7 @@ static void run(void) {
       if (interval > worst)
         worst = interval;
     }
-    guard(interval, behind);
+    guard(interval);
     frames++;
     previous = presented;
     if (presented - reported > 0.5) {
