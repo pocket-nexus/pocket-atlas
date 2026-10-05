@@ -83,7 +83,7 @@ The 864 Cg variants are WGSL sources with a preprocessor (`programs.rs`: `#ifdef
 - **A material's definitions** come from its record: its maps, `VERTEX_COLOR`, `VERTEX_PBR`, `ALPHA_TEST`, `BLEND`, `WET`, `PLANAR`, `DAMP`, `CLEARCOAT`, `INTERIOR`, `FOG` or `VISTA`, and for a place with a sun `SUN`, `SUN_SPEC`, `MOVING_SHADOW`. The draw adds `SKINNED` or `BAKED` (its vertex layout) and the mirror pass `REFLECTION`.
 - **Three dimensions of the PS Vita's keys are gone**: the light count is a loop bound in the draw's constants (the PS Vita compiles a variant a count), and there is no `LITE` or `FAR` tier and no `VERTEX_LIGHTS`.
 
-A place builds **18 to 30 variants and as many pipelines**; the Konbini builds 52 and 57 on its first shot and 56 and 61 over its tour.
+A place builds **18 to 31 variants and 18 to 32 pipelines**; the Konbini builds 52 and 57 on its first shot and 56 and 61 over its tour.
 
 ### What differs from the PS Vita
 
@@ -139,30 +139,30 @@ Chrome 154 headless, WebGPU on the Apple GPU (Metal 3, not the fallback adapter)
 | Place | Draws (mirror, sun map) | Triangles | Variants, pipelines | Textures, geometry | Targets at 960 × 544, 480 × 272 | A frame on Metal at 960 × 544, 480 × 272 |
 | --- | --- | --- | --- | --- | --- | --- |
 | Rainy Night Konbini | 287 (155, 0) | 188 000 | 52, 57 | 31.9, 16.1 MiB | 30.4, 7.6 MiB | 3.3, 2.0 ms |
-| Suga Shrine Stairs | 547 (0, static) | 169 000 | 18, 18 | 25.2, 8.5 MiB | 44.5, 23.1 MiB | 3.0, 1.7 ms |
+| Suga Shrine Stairs | 547 (0, static) | 169 000 | 19, 19 | 25.2, 8.5 MiB | 44.5, 23.1 MiB | 3.0, 1.7 ms |
 | Radio Kaikan at Blue Hour | 365 | 168 000 | 18, 18 | 18.2, 6.5 MiB | 28.5, 7.1 MiB | 1.6, 1.6 ms |
-| Kamakura Koko Mae Crossing | 74 (0, 4) | 91 000 | 27, 27 | 31.2, 9.9 MiB | 48.5, 27.1 MiB | 1.5, 1.5 ms |
-| Sangubashi Crossing | 246 (0, 28) | 147 000 | 22, 22 | 24.4, 15.2 MiB | 48.5, 27.1 MiB | 2.9, 1.6 ms |
-| Lombard Street | 335 (0, 13) | 150 000 | 21, 21 | 12.9, 9.4 MiB | 48.5, 27.1 MiB | 2.9, 2.9 ms |
+| Kamakura Koko Mae Crossing | 74 (0, 4) | 91 000 | 28, 29 | 31.2, 9.9 MiB | 48.5, 27.1 MiB | 1.5, 1.5 ms |
+| Sangubashi Crossing | 246 (0, 28) | 147 000 | 23, 23 | 24.4, 15.2 MiB | 48.5, 27.1 MiB | 2.9, 1.6 ms |
+| Lombard Street | 335 (0, 13) | 150 000 | 22, 22 | 12.9, 9.4 MiB | 48.5, 27.1 MiB | 2.9, 2.9 ms |
 | Griffith Observatory | 261, 32 000 lights | 142 000 | 19, 19 | 16.8, 11.4 MiB | 28.5, 7.1 MiB | 2.9, 1.7 ms |
 
-- **A frame on Metal** is `atlas-shot --tour 8`: the median of 232 frames, recorded and finished by the GPU one at a time (`device.poll(Wait)`), M3 Max. The worst is under 4.7 ms; the first frame, which makes the pipelines, is 30 to 80 ms.
+- **A frame on Metal** is `atlas-shot --tour 8`: the median of 232 frames, recorded and finished by the GPU one at a time (`device.poll(Wait)`), M3 Max. The worst is under 4.7 ms; the first frame, which makes the pipelines, is 30 to 80 ms. A second run of a place differs from the first by up to 1.2 ms.
 - **In the tab** a place holds 30 frames a second on the PS Vita's and the PSP's screens (the shell's rate there), and recording a frame takes 0.3 to 0.6 ms of the page's thread (1.7 ms on the Konbini's first shot).
 - **Targets** are computed from the attachments' sizes (8 bytes an HDR texel, 4 a depth texel); a place with a sun holds 16 MiB of sun map and 4 MiB of moving casters' map at any screen size, and 64 MiB more for the pass that draws the static map's samples. WebGPU reports no memory in use.
 
 **On a line of 16 Mbit/s**, the deployable directory in a browser that has none of it, from `enter` to the first frame and to the last texture:
 
-| Place | First frame | Every texture |
-| --- | --- | --- |
-| Rainy Night Konbini | 10.4 s, 20.6 MB | 26.5 s, 54.3 MB |
-| Suga Shrine Stairs | 6.6 s, 13.0 MB | 18.3 s, 36.2 MB |
-| Radio Kaikan at Blue Hour | 5.6 s, 11.0 MB | 14.1 s, 27.8 MB |
-| Kamakura Koko Mae Crossing | 8.4 s, 16.5 MB | 23.2 s, 45.9 MB |
-| Sangubashi Crossing | 13.3 s, 26.4 MB | 25.0 s, 51.7 MB |
-| Lombard Street | 7.9 s, 15.5 MB | 13.5 s, 26.1 MB |
-| Griffith Observatory | 10.3 s, 20.4 MB | 17.8 s, 35.1 MB |
+| Place | First frame | Every texture | First frame over byte ranges |
+| --- | --- | --- | --- |
+| Rainy Night Konbini | 10.5 s, 20.6 MB | 26.5 s, 54.3 MB | 9.4 s, 18.5 MB |
+| Suga Shrine Stairs | 6.6 s, 13.0 MB | 18.4 s, 36.2 MB | 4.9 s, 9.5 MB |
+| Radio Kaikan at Blue Hour | 5.7 s, 11.0 MB | 14.1 s, 27.9 MB | 4.5 s, 8.6 MB |
+| Kamakura Koko Mae Crossing | 8.4 s, 16.5 MB | 23.3 s, 46.0 MB | 6.7 s, 12.9 MB |
+| Sangubashi Crossing | 13.4 s, 26.5 MB | 25.1 s, 51.7 MB | 12.1 s, 23.8 MB |
+| Lombard Street | 7.9 s, 15.6 MB | 13.5 s, 26.1 MB | 6.4 s, 12.4 MB |
+| Griffith Observatory | 10.4 s, 20.5 MB | 17.8 s, 35.3 MB | 8.8 s, 17.3 MB |
 
-Over byte ranges the Konbini's first frame is at 9.4 s and 18.5 MB.
+The last column is the site (`check` without `--dist`), where a read fetches the bytes it asks for and not whole pieces.
 
 ## What it does not do
 
