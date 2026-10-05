@@ -361,6 +361,8 @@ struct SunPass {
 }
 
 const MOVING_MAP: u32 = 1024;
+/// Depth bias of a caster in the sun's maps, in units of its depth slope a texel.
+const SUN_SLOPE: i32 = 2;
 
 fn depth_target(gpu: &Gpu, label: &str, width: u32, height: u32, samples: u32, sampled: bool) -> wgpu::TextureView {
     gpu.device
@@ -1143,7 +1145,10 @@ impl Renderer {
     fn fixed(&mut self, gpu: &Gpu, program: Program, defines: &[&'static str], layout: Layout, blend: Blend, depth: Depth, format: Option<TextureFormat>, samples: u32) -> Option<usize> {
         let mut defines = defines.to_vec();
         defines.sort();
-        let key = Key { program, defines, layout, blend, cull: Cull::None, depth, bias: (0, 0), format, samples };
+        // A caster is pushed from the sun by its slope in the map: the PS Vita leaves the static map out past
+        // 18 m, and here every distance reads it, walls the sun grazes included.
+        let bias = if depth == Depth::Sun { (SUN_SLOPE, 0) } else { (0, 0) };
+        let key = Key { program, defines, layout, blend, cull: Cull::None, depth, bias, format, samples };
         match self.programs.pipeline(gpu, &self.groups, &key) {
             Ok(index) => Some(index),
             Err(why) => {
