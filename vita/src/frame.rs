@@ -2062,7 +2062,9 @@ fn fixed_keys() -> Vec<Key> {
         Key::new("down_f.cg", &[]),
         Key::new("up_f.cg", &[]),
         Key::new("post_v.cg", &["GRAIN"]),
+        // The composite of each pair of Haze and Bloom: a member switches either.
         Key::new("composite_f.cg", &[]),
+        Key::new("composite_f.cg", &["HAZE"]),
         Key::new("composite_f.cg", &["BLOOM"]),
         Key::new("composite_f.cg", &["HAZE", "BLOOM"]),
         Key::new("blit_f.cg", &[]),

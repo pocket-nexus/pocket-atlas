@@ -26,12 +26,15 @@
 //                 the GPU do the work. Without it the exports on disk are
 //                 used, and a place's is refused when it was made from other
 //                 web sources than the checkout holds.
-// --vita-gxp DIR  The programs a console compiled: `manifest.txt` and the
-//                 `<hash>.gxp` files a development run leaves in its share's
-//                 `atlas/gxp` (default .pocket-build/vita-usb/share/atlas/gxp).
-//                 SceShaccCg runs on the console only, so the package carries
-//                 what it compiled. The set is refused when a program in it
-//                 was not compiled from this commit's vita/shaders.
+// --vita-gxp DIR  The programs a console compiled: `manifest.txt`, the
+//                 `<hash>.gxp` files and `coverage.json`, as
+//                 `bun tools/atlas.ts programs` leaves them (default
+//                 .pocket-build/vita-programs). SceShaccCg runs on the console
+//                 only, so the package carries what it compiled. The set is
+//                 refused when a program in it was not compiled from this
+//                 commit's vita/shaders, and when it was not collected over
+//                 every place, frame rate and switch a member has
+//                 (tools/vita-programs.ts).
 // --no-build      Take the packages release.json lists; their hashes are checked.
 // --upload        Send each package to Pocket Studio with `pocket-studio package`,
 //                 run here, where `pocket-studio register` wrote .pocket-studio.json.
@@ -47,6 +50,7 @@ import { basename, join, resolve } from "node:path";
 import { deflateRawSync } from "node:zlib";
 import { sourceSnapshot } from "../web/scripts/export-source";
 import { PLACES } from "../web/src/places/registry";
+import { PROGRAMS_DIR, coverageFault, shaderSources, type Coverage } from "./vita-programs";
 
 const ROOT = resolve(import.meta.dir, "..");
 const POCKETJS = join(ROOT, "vendor/pocketjs");
@@ -241,12 +245,6 @@ function releaseBuild(target: Target, inputs: unknown): Record<string, string> {
 // ---------------------------------------------------------------- the Vita's programs
 
 /** `vita/shaders` as the console and `tools/atlas.ts` name it: one hash over each file's name and bytes in the order of the names. */
-function shaderSources(): string {
-  const hash = new Bun.CryptoHasher("sha256");
-  for (const name of readdirSync(join(ROOT, "vita/shaders")).sort()) hash.update(name).update(readFileSync(join(ROOT, "vita/shaders", name)));
-  return hash.digest("hex");
-}
-
 /**
  * A program's name as the console computes it (`build` in vita/src/shaders.rs):
  * FNV-1a over the source with its `#include` lines expanded, then a zero byte
@@ -285,16 +283,16 @@ function programHash(label: string): string {
  * row of the console's `manifest.txt` is a program's name and its label; the
  * name is computed again from `vita/shaders` here. Refused: a row whose name
  * differs (its source changed since the console compiled it, or left the
- * repository), a missing `.gxp`. Not checked: that the manifest lists every
- * program this commit's renderer asks for. A place asks for its programs when
- * it loads (`warm` in vita/src/frame.rs), so the set covers the places that
- * were entered on the console, under the settings they ran with.
+ * repository), a missing `.gxp`, and a set that was not collected by the pass
+ * over every member setting (`coverageFault` in tools/vita-programs.ts): a
+ * place asks for its programs when it loads and when a setting changes, so
+ * the console's list holds what was asked for in the process that wrote it.
  */
 function vitaPrograms(directory: string): string[] {
   const manifest = join(directory, "manifest.txt");
   if (!existsSync(manifest)) {
     throw new Error(
-      `no programs for the Vita: ${manifest} is missing. A console compiles them: run the development build there (\`bun tools/atlas.ts native\`, README "Vita") and enter each place, then pass its share's atlas/gxp as --vita-gxp`,
+      `no programs for the Vita: ${manifest} is missing. A console compiles them: run \`bun tools/atlas.ts programs\` with the console in Pocket Devkit (README "Releases"), which writes ${PROGRAMS_DIR}`,
     );
   }
   const rows = readFileSync(manifest, "utf8").split("\n").filter(Boolean);
@@ -321,21 +319,27 @@ function vitaPrograms(directory: string): string[] {
 
 // ---------------------------------------------------------------- targets
 
-let programs: { count: number; manifestSha256: string; sourcesSha256: string } | undefined;
+let programs: { count: number; manifestSha256: string; sourcesSha256: string; pass: Pick<Coverage, "at" | "nativeBuild" | "places" | "profiles" | "compiled"> & { settings: number } } | undefined;
 /** The exports and, by target, the packs cooked from them: what a release build's id is derived from. */
 let sources: ReturnType<typeof exports> | undefined;
 const packs: Partial<Record<Target, Record<string, { bytes: number; sha256: string }>>> = {};
 
 /** The standalone VPK (`tools/atlas.ts vpk`), from a share that holds only the checked programs, written again with fixed dates. */
 async function vita(log: string, output: string): Promise<void> {
-  const source = resolve(option("--vita-gxp", join(ROOT, ".pocket-build/vita-usb/share/atlas/gxp")));
+  const source = resolve(option("--vita-gxp", PROGRAMS_DIR));
   const rows = vitaPrograms(source);
+  const fault = coverageFault(source, readFileSync(join(source, "manifest.txt"), "utf8"));
+  if (fault) throw new Error(`the Vita's programs in ${source} do not cover every member setting: ${fault}. Run \`bun tools/atlas.ts programs\` with the console in Pocket Devkit (README "Releases")`);
+  const pass = JSON.parse(readFileSync(join(source, "coverage.json"), "utf8")) as Coverage;
   const share = join(WORK, "vita-share");
   rmSync(share, { recursive: true, force: true });
   mkdirSync(join(share, "atlas/gxp"), { recursive: true });
   writeFileSync(join(share, "atlas/gxp/manifest.txt"), rows.join("\n") + "\n");
   for (const row of rows) cpSync(join(source, `${row.slice(0, 16)}.gxp`), join(share, `atlas/gxp/${row.slice(0, 16)}.gxp`));
-  programs = { count: rows.length, manifestSha256: sha256(rows.join("\n") + "\n"), sourcesSha256: shaderSources() };
+  programs = {
+    count: rows.length, manifestSha256: sha256(rows.join("\n") + "\n"), sourcesSha256: shaderSources(),
+    pass: { at: pass.at, nativeBuild: pass.nativeBuild, places: pass.places, profiles: pass.profiles, settings: pass.settings.length, compiled: pass.compiled },
+  };
   await run(log, ["bun", "tools/atlas.ts", "vpk", "--share", share], releaseBuild("vita", [sources, packs.vita, programs.manifestSha256]));
   repackVpk(join(ROOT, "dist/vita/pocket-atlas-PKAT00001.vpk"), output);
 }

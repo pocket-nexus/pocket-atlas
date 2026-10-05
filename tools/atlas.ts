@@ -6,6 +6,7 @@
 //   bun tools/atlas.ts cook-atlas                   # web export-atlas → atlas.pack (globe + places)
 //   bun tools/atlas.ts serve                         # USB host (keep running)
 //   bun tools/atlas.ts build  [--title P3B1D7273] [--debug]
+//   bun tools/atlas.ts programs                     # every program a package needs → .pocket-build/vita-programs/
 //   bun tools/atlas.ts vpk                          # standalone PKAT00001 VPK
 //   bun tools/atlas.ts push-vpk [file.vpk]          # → ux0:data/pocket-atlas/ via the dev build
 //   bun tools/atlas.ts native [--title P3B1D7273]   # build + USB SELF replacement
@@ -40,6 +41,7 @@ import { DeviceEvidence, assertDeviceIdentity, fileSha256, type DeviceIdentity }
 import { compileInterface } from "./atlas-ui";
 import { assertFrameSample, assertVitaMeasurement, compileIdentity } from "./device-validation";
 import { readPack, VITA_PACK_VERSION } from "./place-container";
+import { PROGRAMS_DIR, PROGRAM_SETTINGS, profileNames, shaderSources, vitaPlaces, type Coverage } from "./vita-programs";
 
 const ROOT = resolve(import.meta.dir, "..");
 const POCKETJS = resolve(ROOT, "vendor/pocketjs");
@@ -515,6 +517,82 @@ async function shots(): Promise<void> {
 
 // Copies the standalone VPK to ux0:data/pocket-atlas/ through the running
 // development build, ready to install from VitaShell.
+// Every program a package needs (tools/vita-programs.ts): each Vita place under each frame rate, each switch a
+// member has thrown both ways, in a process started for the pass, so the console's list is what those settings
+// ask for and nothing an earlier run left. The list, its programs and the record of the pass go to
+// .pocket-build/vita-programs/, which `tools/release.ts` packs.
+async function programs(): Promise<void> {
+  const places = vitaPlaces(), profiles = profileNames();
+  const uncooked = places.filter((id) => !existsSync(`${PLACES_DIR}/${id}/${id}.place`));
+  if (uncooked.length) throw new Error(`${uncooked.join(", ")} not cooked: run \`bun tools/atlas.ts cook --place ID\` first`);
+  await sync();
+  await build();
+  await dev("native");
+  const runtime = JSON.parse(readFileSync(`${OUT_DIR}/${output}.runtime.json`, "utf8"));
+  const client = new VitaUsbClient(USB_SHARE, title);
+  /** This build's engine status, or null while it is not up (the USB host replaces the file while it is read). */
+  const read = (): any => {
+    lease?.assertHeld();
+    try {
+      const status = client.status();
+      return status.nativeBuild === runtime.nativeBuild ? (status.engine ?? null) : null;
+    } catch {
+      return null;
+    }
+  };
+  const send = (message: object) => writeFileSync(`${SHARE}/control.json`, JSON.stringify({ ...message, nonce: Date.now() }) + "\n");
+  /** Waits until `ready` has held for a second. A program that failed stops the pass. */
+  const wait = async (what: string, ready: (e: any) => boolean, seconds = 240): Promise<any> => {
+    for (let held = 0, i = 0; i < seconds * 4; i++) {
+      await Bun.sleep(250);
+      const e = read();
+      if (e?.errors?.length) throw new Error(`a program failed in ${what}: ${JSON.stringify(e.errors)}`);
+      held = e && ready(e) ? held + 1 : 0;
+      if (held >= 4) return e;
+    }
+    throw new Error(`the console did not settle in ${what}: is Pocket Devkit on screen and the cable in?`);
+  };
+  /** Nothing compiling and no draw waiting for its program. */
+  const drawn = (e: any) => !e.pending && !e.main?.missing && !e.reflection?.missing;
+  await wait("the atlas", (e) => e.stage === "atlas", 120);
+  const renderErrors: Coverage["renderErrors"] = [];
+  let last: any;
+  for (const profile of profiles)
+    for (const place of places) {
+      const here = `${place} at ${profile}`;
+      const loaded = (e: any) => e.stage === "running" && e.place === place && e.settings?.profile === profile && drawn(e);
+      send({ renderProfile: profile, place });
+      await wait(here, loaded);
+      for (const settings of PROGRAM_SETTINGS) {
+        send({ settings });
+        await Bun.sleep(500);
+        await wait(`${here} with ${JSON.stringify(settings)}`, (e) => e.stage === "running" && e.place === place && drawn(e));
+      }
+      // The profile's own switches and its governor again.
+      send({ renderProfile: profile, settings: { hold: false } });
+      await Bun.sleep(500);
+      last = await wait(here, loaded);
+      if (last.renderError) renderErrors.push({ profile, place, error: String(last.renderError) });
+      console.log(`atlas: ${here}: ${last.compiled} compiled so far${last.renderError ? `, ${last.renderError}` : ""}`);
+    }
+  if (last.shaderSourceSha256 !== shaderSources()) throw new Error("the console compiled other shader sources than vita/shaders holds");
+  // The list is rewritten when a program is first needed: the last one is in it once nothing is pending.
+  await Bun.sleep(2000);
+  const manifest = readFileSync(`${SHARE}/gxp/manifest.txt`, "utf8");
+  const rows = manifest.split("\n").filter(Boolean);
+  rmSync(PROGRAMS_DIR, { recursive: true, force: true });
+  mkdirSync(PROGRAMS_DIR, { recursive: true });
+  for (const row of rows) cpSync(`${SHARE}/gxp/${row.slice(0, 16)}.gxp`, `${PROGRAMS_DIR}/${row.slice(0, 16)}.gxp`);
+  writeFileSync(`${PROGRAMS_DIR}/manifest.txt`, manifest);
+  const coverage: Coverage = {
+    schema: 1, at: new Date().toISOString(), nativeBuild: runtime.nativeBuild, shaderSourcesSha256: shaderSources(), places, profiles, settings: PROGRAM_SETTINGS,
+    programs: rows.length, manifestSha256: createHash("sha256").update(manifest).digest("hex"), compiled: last.compiled, renderErrors,
+  };
+  writeFileSync(`${PROGRAMS_DIR}/coverage.json`, JSON.stringify(coverage, null, 2) + "\n");
+  send({ renderProfile: "vita30", atlas: true });
+  console.log(`atlas: ${rows.length} programs over ${places.length} places × ${profiles.length} frame rates × ${PROGRAM_SETTINGS.length} settings (${last.compiled} compiled in this pass) → ${PROGRAMS_DIR}`);
+}
+
 async function pushVpk(): Promise<void> {
   const vpkPath = argv[1] && !argv[1].startsWith("--") ? resolve(argv[1]) : `${OUT_DIR}/pocket-atlas-PKAT00001.vpk`;
   const name = vpkPath.split("/").pop()!;
@@ -535,6 +613,7 @@ if (["bench", "profile", "shots", "sweep"].includes(command)) observe(engine(), 
 if (command === "build") await build();
 else if (command === "push-vpk") await pushVpk();
 else if (command === "vpk") await vpk();
+else if (command === "programs") await programs();
 else if (command === "lint") await lint();
 else if (command === "bench") await bench();
 else if (command === "profile") await profile();
