@@ -74,10 +74,22 @@ interface BuildOptions {
   readonly assets?: string;
 }
 
+/**
+ * The id a build carries. A development build takes a fresh one, which the dev host tells two builds apart by.
+ * `tools/release.ts` names a release build's instead (POCKET_RELEASE_BUILD: 32 hex digits from the commit and
+ * the hashes of what the package is built from), so two builds of one commit are the same bytes.
+ */
+function buildId(): string {
+  const named = process.env.POCKET_RELEASE_BUILD;
+  if (named === undefined) return randomBytes(16).toString("hex");
+  if (!/^[0-9a-f]{32}$/.test(named)) throw new Error("POCKET_RELEASE_BUILD is not 32 hex digits");
+  return named;
+}
+
 async function build(options: BuildOptions = {}): Promise<string> {
   if (!existsSync(`${vitasdk}/bin/vita-pack-vpk`)) throw new Error(`VitaSDK not found at ${vitasdk}`);
   const usb = options.standalone ? undefined : await prepareVitaUsb();
-  const nativeBuild = randomBytes(16).toString("hex");
+  const nativeBuild = buildId();
   const env = {
     ...process.env,
     PATH: `${vitasdk}/bin:${home}/.cargo/bin:${process.env.PATH ?? ""}`,
