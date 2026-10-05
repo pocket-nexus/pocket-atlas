@@ -1,6 +1,7 @@
 #include "scene.h"
 #include <pocket_pica.h>
 #include "devserver.h"
+#include "field_shbin.h"
 #include "navigation.h"
 #include "scene_shbin.h"
 #include "water_shbin.h"
@@ -42,7 +43,42 @@ static float *animation, *matrices;
 static C3D_Tex *textures, white, glow;
 static AtlasVertex **skin_vertices, **skin_back;
 static DVLB_s *dvlb;
-static shaderProgram_s shader;
+// glow_shader: the scene's program with a second set of texture coordinates,
+// for a surface with an emission map (MAT_GLOW).
+static shaderProgram_s shader, glow_shader;
+static bool using_glow;
+// A vista's lights (FELD). A sprite is four vertices in linear memory, a
+// field's brightest first, and the still lights and the ones that travel or
+// blink have a program each. A page is the sprites 16-bit indices reach.
+typedef struct {
+  float position[3], size[4]; // size: radius, gain, twinkle phase and depth
+  uint8_t color[4];
+  int8_t corner[4]; // which corner, and where that is in the spot
+} StillLight;
+typedef struct {
+  StillLight light;
+  float path[4], blink[3]; // path and its cycles; phase, blink cycles, duty
+} MovingLight;
+typedef struct {
+  float center[3], radius, sizes[3], period; // sizes: pixels from and to, pull
+  uint32_t first, count;                     // sprites, from the page's first
+  uint8_t page;
+} LightField;
+enum { PAGE_SPRITES = 16384, MAX_PAGES = 8, MAX_FIELDS = 512 };
+_Static_assert(sizeof(StillLight) == 36, "still light");
+_Static_assert(sizeof(MovingLight) == 64, "moving light");
+static LightField *fields;
+static unsigned field_count, page_count;
+static const void *pages[MAX_PAGES];
+static bool page_moves[MAX_PAGES];
+static void *sprite_vertices[2];
+static uint16_t *sprite_indices;
+static DVLB_s *field_dvlb;
+static shaderProgram_s field_shader, traffic_shader;
+static int field_projection_loc, field_eye_loc, field_sizes_loc, field_clock_loc,
+    field_pixel_loc;
+static C3D_Tex spot;
+static float far_plane = 1200.0f;
 static DVLB_s *wet_dvlb;
 static shaderProgram_s wet_shader;
 static C3D_Tex reflection_tex, puddle_tex;
@@ -72,6 +108,7 @@ static float focal_length;
 static float world_bounds[4096][7];
 static float local_half[4096][3];
 static uint8_t skin_used[65536];
+static uint32_t coarse_vertices[4096];
 static int projection_loc, model_loc, tint_loc;
 static C3D_Mtx projection, view, vp;
 static C3D_FogLut fog;
@@ -130,6 +167,7 @@ static unsigned fx_count;
 static float clampf(float v, float lo, float hi) {
   return fminf(hi, fmaxf(lo, v));
 }
+static float wrap01(float f) { return f - floorf(f); }
 static float dot3(const float *a, const float *b) {
   return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 }
@@ -176,7 +214,208 @@ static bool make_effect_textures(void) {
   C3D_TexSetWrap(&glow, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
   C3D_TexFlush(&white);
   C3D_TexFlush(&glow);
+  if (!field_count)
+    return true;
+  // A light sprite's falloff, (1 - r^2)^2 as the GLES renderer computes it.
+  if (!C3D_TexInit(&spot, 32, 32, GPU_L8))
+    return false;
+  uint8_t *falloff = spot.data;
+  for (unsigned y = 0; y < 32; y++)
+    for (unsigned x = 0; x < 32; x++) {
+      unsigned i = 0;
+      for (unsigned b = 0; b < 3; b++) {
+        i |= ((x >> b) & 1) << (2 * b);
+        i |= ((y >> b) & 1) << (2 * b + 1);
+      }
+      i += ((y / 8) * 4 + x / 8) * 64;
+      float dx = ((float)x + 0.5f) / 16 - 1, dy = ((float)y + 0.5f) / 16 - 1;
+      float f = fmaxf(0, 1 - dx * dx - dy * dy);
+      falloff[i] = (uint8_t)(f * f * 255 + 0.5f);
+    }
+  C3D_TexSetFilter(&spot, GPU_LINEAR, GPU_LINEAR);
+  C3D_TexSetWrap(&spot, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+  C3D_TexFlush(&spot);
   return true;
+}
+static bool moves(const AtlasSprite *l) {
+  return l->path[0] || l->path[1] || l->path[2] ||
+         (l->blink_cycles && l->duty < 1);
+}
+// Reads FELD and lays its sprites out as quads.
+static bool load_fields(FILE *file, uint32_t offset, uint32_t size) {
+  if (!size)
+    return true;
+  uint8_t *raw = linearAlloc(size);
+  bool ok = raw && size >= 4 && read_at(file, offset, raw, size);
+  uint32_t count = ok ? *(uint32_t *)raw : 0;
+  ok = ok && count <= MAX_FIELDS &&
+       range(4, (uint64_t)count * sizeof(AtlasField), size);
+  const AtlasField *in = (const AtlasField *)(raw + 4);
+  const AtlasSprite *sprites = (const AtlasSprite *)(in + count);
+  uint32_t total =
+      ok ? (size - 4 - count * sizeof(AtlasField)) / sizeof(AtlasSprite) : 0;
+  fields = ok ? calloc(count ? count : 1, sizeof *fields) : NULL;
+  ok = ok && fields;
+  // A field of only still lights is one of still sprites.
+  static bool moving[MAX_FIELDS];
+  uint32_t sum[2] = {0, 0}, most = 0;
+  for (unsigned i = 0; ok && i < count; i++) {
+    ok = in[i].count <= PAGE_SPRITES &&
+         range(in[i].first, in[i].count, total) && in[i].period > 0;
+    moving[i] = false;
+    for (unsigned j = 0; ok && j < in[i].count && !moving[i]; j++)
+      moving[i] = moves(&sprites[in[i].first + j]);
+    sum[moving[i]] += ok ? in[i].count : 0;
+  }
+  static const size_t stride[2] = {sizeof(StillLight), sizeof(MovingLight)};
+  for (unsigned kind = 0; ok && kind < 2; kind++)
+    if (sum[kind]) {
+      sprite_vertices[kind] = linearAlloc(sum[kind] * 4 * stride[kind]);
+      ok = sprite_vertices[kind] != NULL;
+    }
+  page_count = 0;
+  for (unsigned kind = 0; ok && kind < 2; kind++) {
+    uint32_t placed = 0, used = PAGE_SPRITES;
+    for (unsigned i = 0; ok && i < count; i++) {
+      if (moving[i] != kind || !in[i].count)
+        continue;
+      if (used + in[i].count > PAGE_SPRITES) {
+        if (page_count == MAX_PAGES) {
+          ok = false;
+          break;
+        }
+        pages[page_count] =
+            (uint8_t *)sprite_vertices[kind] + placed * 4 * stride[kind];
+        page_moves[page_count++] = kind;
+        used = 0;
+      }
+      LightField *f = &fields[i];
+      memcpy(f->center, in[i].center, sizeof f->center);
+      f->radius = in[i].radius;
+      f->sizes[0] = in[i].min_pixels;
+      f->sizes[1] = in[i].max_pixels;
+      f->sizes[2] = in[i].depth_pull / 1000;
+      f->period = in[i].period;
+      f->first = used;
+      f->count = in[i].count;
+      f->page = page_count - 1;
+      for (unsigned j = 0; j < in[i].count; j++) {
+        const AtlasSprite *l = &sprites[in[i].first + j];
+        for (unsigned c = 0; c < 4; c++) {
+          void *out = (uint8_t *)sprite_vertices[kind] +
+                      ((placed + j) * 4 + c) * stride[kind];
+          StillLight *v = out;
+          memcpy(v->position, l->position, sizeof v->position);
+          v->size[0] = l->radius;
+          v->size[1] = l->gain;
+          v->size[2] = wrap01(l->phase * 13.7f);
+          v->size[3] = l->color[3] / 255.0f;
+          memcpy(v->color, l->color, 3);
+          v->color[3] = 0;
+          v->corner[0] = c & 1 ? 1 : -1;
+          v->corner[1] = c & 2 ? 1 : -1;
+          v->corner[2] = c & 1;
+          v->corner[3] = c >> 1;
+          if (kind) {
+            MovingLight *m = out;
+            memcpy(m->path, l->path, sizeof l->path);
+            m->path[3] = l->path_cycles;
+            m->blink[0] = l->phase;
+            m->blink[1] = l->blink_cycles;
+            m->blink[2] = l->duty;
+          }
+        }
+      }
+      placed += in[i].count;
+      used += in[i].count;
+      most = used > most ? used : most;
+    }
+  }
+  if (raw)
+    linearFree(raw);
+  if (!ok)
+    return false;
+  field_count = count;
+  if (!most)
+    return true;
+  sprite_indices = linearAlloc(most * 6 * sizeof(uint16_t));
+  if (!sprite_indices)
+    return false;
+  for (unsigned i = 0; i < most; i++) {
+    static const uint8_t corners[6] = {0, 1, 2, 2, 1, 3};
+    for (unsigned c = 0; c < 6; c++)
+      sprite_indices[i * 6 + c] = i * 4 + corners[c];
+  }
+  GSPGPU_FlushDataCache(sprite_indices, most * 6 * sizeof(uint16_t));
+  for (unsigned kind = 0; kind < 2; kind++)
+    if (sprite_vertices[kind])
+      GSPGPU_FlushDataCache(sprite_vertices[kind],
+                            sum[kind] * 4 * stride[kind]);
+  return true;
+}
+// Puts the vertices of a figure's coarse level first, so that a figure
+// wearing only that level is skinned, and flushed, that far. Returns how many
+// they are: all of them where the figure has no such level, shares its data
+// with another draw, or there is no memory to sort it in.
+static unsigned coarse_first(unsigned i) {
+  AtlasDraw *d = &draws[i];
+  if (!d->lod[3].count)
+    return d->count;
+  for (unsigned j = 0; j < head->draws; j++) {
+    if (j == i)
+      continue;
+    bool shared =
+        draws[j].vertices == d->vertices || draws[j].skin == d->skin;
+    for (unsigned a = 0; a < 4; a++)
+      for (unsigned b = 0; b < 4; b++)
+        shared = shared || (d->lod[a].count && draws[j].lod[b].count &&
+                            d->lod[a].offset == draws[j].lod[b].offset);
+    if (shared)
+      return d->count;
+  }
+  AtlasVertex *vertices = (AtlasVertex *)(geometry + d->vertices);
+  AtlasSkin *skins = (AtlasSkin *)((uint8_t *)weights + d->skin);
+  uint16_t *place = malloc(d->count * sizeof *place);
+  AtlasVertex *was = malloc(d->count * sizeof *was);
+  AtlasSkin *bound = malloc(d->count * sizeof *bound);
+  unsigned coarse = d->count;
+  if (place && was && bound) {
+    const uint16_t *level = (const uint16_t *)(geometry + d->lod[3].offset);
+    memset(skin_used, 0, d->count);
+    for (unsigned j = 0; j < d->lod[3].count; j++)
+      skin_used[level[j]] = 1;
+    coarse = 0;
+    for (unsigned v = 0; v < d->count; v++)
+      coarse += skin_used[v];
+    unsigned first = 0, rest = coarse;
+    for (unsigned v = 0; v < d->count; v++)
+      place[v] = skin_used[v] ? first++ : rest++;
+    memcpy(was, vertices, d->count * sizeof *was);
+    memcpy(bound, skins, d->count * sizeof *bound);
+    for (unsigned v = 0; v < d->count; v++) {
+      vertices[place[v]] = was[v];
+      skins[place[v]] = bound[v];
+    }
+    // Levels may share their indices: each run of them is renumbered once.
+    for (unsigned k = 0; k < 4; k++) {
+      unsigned count = d->lod[k].count;
+      bool done = false;
+      for (unsigned m = 0; m < 4; m++)
+        if (d->lod[m].count && d->lod[m].offset == d->lod[k].offset) {
+          done = done || m < k;
+          count = d->lod[m].count > count ? d->lod[m].count : count;
+        }
+      if (done || !count)
+        continue;
+      uint16_t *indices = (uint16_t *)(geometry + d->lod[k].offset);
+      for (unsigned j = 0; j < count; j++)
+        indices[j] = place[indices[j]];
+    }
+  }
+  free(place);
+  free(was);
+  free(bound);
+  return coarse;
 }
 bool scene_load(const char *path, const char *expected_sha256, char *error, size_t capacity) {
   // Call only once the previous GPU frame has retired: resources may still
@@ -212,18 +451,19 @@ bool scene_load(const char *path, const char *expected_sha256, char *error, size
     return false;
   }
   rewind(file);
-  uint32_t header[4], sect[5][4];
+  uint32_t header[4], sect[6][4];
   long length;
   fseek(file, 0, SEEK_END);
   length = ftell(file);
   if (!read_at(file, 0, header, sizeof header) || !atlas_pack_header_valid(header) ||
-      !read_at(file, 16, sect, sizeof sect)) {
+      !read_at(file, 16, sect, header[2] * sizeof *sect)) {
     snprintf(error, capacity, "invalid PLCE header");
     fclose(file);
     return false;
   }
-  uint32_t po = 0, ps = 0, to = 0, ts = 0, go = 0, gs = 0, ao = 0, as = 0;
-  for (unsigned i = 0; i < 5; i++) {
+  uint32_t po = 0, ps = 0, to = 0, ts = 0, go = 0, gs = 0, ao = 0, as = 0,
+           fo = 0, fs = 0;
+  for (unsigned i = 0; i < header[2]; i++) {
     if (!range(sect[i][1], sect[i][2], length)) {
       snprintf(error, capacity, "section beyond file");
       fclose(file);
@@ -246,10 +486,15 @@ bool scene_load(const char *path, const char *expected_sha256, char *error, size
       ao = sect[i][1];
       as = sect[i][2];
       break;
+    case 0x444c4546:
+      fo = sect[i][1];
+      fs = sect[i][2];
+      break;
     }
   }
   if (ps < sizeof(AtlasHeader) || ps > 4 * 1024 * 1024 ||
-      gs > 24 * 1024 * 1024 || ts > 12 * 1024 * 1024 || as > 16 * 1024 * 1024)
+      gs > 24 * 1024 * 1024 || ts > 12 * 1024 * 1024 ||
+      as > 16 * 1024 * 1024 || fs > 4 * 1024 * 1024)
     goto invalid;
   table = malloc(ps);
   if (!table || !read_at(file, po, table, ps))
@@ -269,6 +514,9 @@ bool scene_load(const char *path, const char *expected_sha256, char *error, size
       (uint64_t)candidate->matrices * candidate->frames * 48 > as)
     goto invalid;
   head = candidate;
+  far_plane = head->far_plane >= 100 && head->far_plane <= 1000000
+                  ? head->far_plane
+                  : 1200.0f;
   apply_lod_floor();
   texture_info = (AtlasTexture *)(head + 1);
   materials = (AtlasMaterial *)(texture_info + head->textures);
@@ -294,6 +542,8 @@ bool scene_load(const char *path, const char *expected_sha256, char *error, size
     goto invalid;
   if (head->matrices)
     memcpy(matrices, animation, head->matrices * 48);
+  if (!load_fields(file, fo, fs))
+    goto invalid;
   for (unsigned i = 0; i < head->draws; i++) {
     AtlasDraw *d = &draws[i];
     if (d->count > 65536 || d->material >= head->materials ||
@@ -337,6 +587,7 @@ bool scene_load(const char *path, const char *expected_sha256, char *error, size
         for (unsigned k = 0; k < 4; k++)
           if (w[j].joint[k] >= head->matrices)
             goto invalid;
+      coarse_vertices[i] = coarse_first(i);
       skin_vertices[i] = linearAlloc(d->count * sizeof(AtlasVertex));
       skin_back[i] = linearAlloc(d->count * sizeof(AtlasVertex));
       if (!skin_vertices[i] || !skin_back[i])
@@ -399,6 +650,9 @@ bool scene_load(const char *path, const char *expected_sha256, char *error, size
     if (materials[i].texture != UINT32_MAX &&
         materials[i].texture >= head->textures)
       goto invalid;
+    if ((m->flags & MAT_GLOW) &&
+        !(m->waves[0] >= 0 && m->waves[0] < head->textures))
+      goto invalid;
   }
   if ((head->sky_texture != UINT32_MAX &&
        head->sky_texture >= head->textures) ||
@@ -409,7 +663,7 @@ bool scene_load(const char *path, const char *expected_sha256, char *error, size
   file = NULL;
   GSPGPU_FlushDataCache(geometry, gs);
   dvlb = DVLB_ParseFile((u32 *)scene_shbin, scene_shbin_size);
-  if (!dvlb)
+  if (!dvlb || dvlb->numDVLE < 2)
     goto invalid;
   shaderProgramInit(&shader);
   shaderProgramSetVsh(&shader, &dvlb->DVLE[0]);
@@ -419,6 +673,35 @@ bool scene_load(const char *path, const char *expected_sha256, char *error, size
   tint_loc = shaderInstanceGetUniformLocation(shader.vertexShader, "tint");
   uv_loc =
       shaderInstanceGetUniformLocation(shader.vertexShader, "uv_transform");
+  shaderProgramInit(&glow_shader);
+  shaderProgramSetVsh(&glow_shader, &dvlb->DVLE[1]);
+  if (shaderInstanceGetUniformLocation(glow_shader.vertexShader,
+                                       "projection") != projection_loc ||
+      shaderInstanceGetUniformLocation(glow_shader.vertexShader, "tint") !=
+          tint_loc ||
+      shaderInstanceGetUniformLocation(glow_shader.vertexShader,
+                                       "uv_transform") != uv_loc)
+    goto invalid;
+  if (field_count) {
+    field_dvlb = DVLB_ParseFile((u32 *)field_shbin, field_shbin_size);
+    if (!field_dvlb || field_dvlb->numDVLE < 2)
+      goto invalid;
+    shaderProgramInit(&field_shader);
+    shaderProgramSetVsh(&field_shader, &field_dvlb->DVLE[0]);
+    shaderProgramInit(&traffic_shader);
+    shaderProgramSetVsh(&traffic_shader, &field_dvlb->DVLE[1]);
+    static const char *const names[] = {"projection", "eye", "sizes", "clock",
+                                        "pixel"};
+    int *const at[] = {&field_projection_loc, &field_eye_loc, &field_sizes_loc,
+                       &field_clock_loc, &field_pixel_loc};
+    for (unsigned i = 0; i < 5; i++) {
+      *at[i] =
+          shaderInstanceGetUniformLocation(field_shader.vertexShader, names[i]);
+      if (*at[i] < 0 || shaderInstanceGetUniformLocation(
+                            traffic_shader.vertexShader, names[i]) != *at[i])
+        goto invalid;
+    }
+  }
   wet_dvlb = DVLB_ParseFile((u32 *)wet_shbin, wet_shbin_size);
   if (!wet_dvlb)
     goto invalid;
@@ -520,7 +803,7 @@ bool scene_load(const char *path, const char *expected_sha256, char *error, size
   fx = linearAlloc(MAX_FX * sizeof(AtlasVertex));
   if (!fx || !make_effect_textures())
     goto invalid;
-  FogLut_Exp(&fog, head->fog_density, 1.0, 0.08f, 1200.0f);
+  FogLut_Exp(&fog, head->fog_density, 1.0, 0.08f, far_plane);
   atlas.geom_bytes = gs;
   atlas.texture_bytes = ts;
   atlas.animation_bytes = as;
@@ -699,7 +982,7 @@ void scene_update(float dt, const float move[2], const float look[2],
 static void camera(void) {
   focal_length = 120.0f / tanf(C3D_AngleFromDegrees(atlas.fov) * 0.5f);
   Mtx_PerspTilt(&projection, C3D_AngleFromDegrees(atlas.fov),
-                C3D_AspectRatioTop, 0.08f, 1200.0f, false);
+                C3D_AspectRatioTop, 0.08f, far_plane, false);
   Mtx_LookAt(&view,
              FVec3_New(atlas.position[0], atlas.position[1], atlas.position[2]),
              FVec3_New(atlas.target[0], atlas.target[1], atlas.target[2]),
@@ -771,8 +1054,10 @@ static bool visible(unsigned i, bool mirror, float *distance) {
   float z = fmaxf(0, fabsf(c[2] - atlas.position[2]) - extent[2]);
   *distance = fmaxf(0.1f, sqrtf(x * x + y * y + z * z));
   // Subpixel static objects may disappear, never the silhouette of a person.
+  // The rule is a normal lens's; past four of those it follows the lens.
   if (draws[i].skin == UINT32_MAX &&
-      r * 240 / (*distance) < 0.3f + atlas.step * 0.15f)
+      r * fmaxf(240, focal_length * 0.25f) / (*distance) <
+          0.3f + atlas.step * 0.15f)
     return false;
   return true;
 }
@@ -792,6 +1077,11 @@ static unsigned select_lod(const AtlasDraw *d, bool mirror, float distance) {
   // street chunk or spend this detail in the low-resolution mirror.
   if (preserve && lod > 1)
     lod = 1;
+  // A figure's coarse level is the whole figure within its error: where
+  // that is under the tolerance, it is skinned and drawn as the coarse one.
+  if (d->skin != UINT32_MAX && d->lod[3].count &&
+      d->lod[3].error * focal_length / distance < tolerance)
+    lod = 3;
   return lod;
 }
 static void skin(unsigned i, int main_lod, int mirror_lod) {
@@ -799,9 +1089,17 @@ static void skin(unsigned i, int main_lod, int mirror_lod) {
   const AtlasVertex *src = (const AtlasVertex *)(geometry + d->vertices);
   AtlasVertex *dst = skin_vertices[i];
   AtlasSkin *w = (AtlasSkin *)((uint8_t *)weights + d->skin);
-  memset(skin_used, 0, d->count);
+  // The coarse level's vertices come first (coarse_first): a figure that
+  // wears no other level is skinned that far, any other where a level in use
+  // has a vertex.
+  bool coarse = coarse_vertices[i] < d->count &&
+                (main_lod < 0 || main_lod == 3) &&
+                (mirror_lod < 0 || mirror_lod == 3);
+  unsigned count = coarse ? coarse_vertices[i] : d->count;
   int levels[] = {main_lod, mirror_lod};
-  for (unsigned pass = 0; pass < 2; pass++) {
+  if (!coarse)
+    memset(skin_used, 0, d->count);
+  for (unsigned pass = 0; pass < 2 && !coarse; pass++) {
     int l = levels[pass];
     if (l < 0 || (pass && l == levels[0]))
       continue;
@@ -809,8 +1107,8 @@ static void skin(unsigned i, int main_lod, int mirror_lod) {
     for (unsigned j = 0; j < d->lod[l].count; j++)
       skin_used[indices[j]] = 1;
   }
-  for (unsigned v = 0; v < d->count; v++) {
-    if (!skin_used[v])
+  for (unsigned v = 0; v < count; v++) {
+    if (!coarse && !skin_used[v])
       continue;
     atlas.skinned_vertices++;
     float p[3] = {0};
@@ -825,7 +1123,7 @@ static void skin(unsigned i, int main_lod, int mirror_lod) {
     }
     memcpy(dst[v].position, p, 12);
   }
-  GSPGPU_FlushDataCache(dst, d->count * sizeof(AtlasVertex));
+  GSPGPU_FlushDataCache(dst, count * sizeof(AtlasVertex));
 }
 static void model_uniform(const float *m, bool mirror) {
   if (last_model == m && last_mirror == mirror)
@@ -853,7 +1151,7 @@ static void attributes(const void *v) {
   BufInfo_Add(b, v, sizeof(AtlasVertex), 3, 0x210);
 }
 static void common_state(void) {
-  using_wet = using_water = false;
+  using_wet = using_water = using_glow = false;
   last_model = NULL;
   last_material = -1;
   C3D_BindProgram(&shader);
@@ -885,7 +1183,7 @@ static void surface_program(bool wet) {
     return;
   }
   using_wet = true;
-  using_water = false;
+  using_water = using_glow = false;
   last_model = NULL;
   last_material = -1;
   C3D_BindProgram(&wet_shader);
@@ -912,7 +1210,7 @@ static void water_program(void) {
   if (using_water)
     return;
   using_water = true;
-  using_wet = false;
+  using_wet = using_glow = false;
   last_material = -1;
   last_model = NULL;
   C3D_BindProgram(&water_shader);
@@ -932,7 +1230,25 @@ static void water_program(void) {
   C3D_TexEnvSrc(e, C3D_RGB, GPU_PREVIOUS, GPU_PRIMARY_COLOR, 0);
   C3D_TexEnvFunc(e, C3D_RGB, GPU_MODULATE);
 }
-static float wrap01(float f) { return f - floorf(f); }
+// The scene's program for a surface with an emission map: the map goes
+// through a second combiner stage, times the vertex alpha, over the lit
+// texture. Both programs are one binary, so the change costs no upload.
+static void glow_program(bool on) {
+  if (on == using_glow)
+    return;
+  using_glow = on;
+  C3D_BindProgram(on ? &glow_shader : &shader);
+  C3D_TexEnv *e = C3D_GetTexEnv(1);
+  C3D_TexEnvInit(e);
+  if (!on)
+    return;
+  C3D_TexEnvSrc(e, C3D_RGB, GPU_TEXTURE1, GPU_PRIMARY_COLOR, GPU_PREVIOUS);
+  C3D_TexEnvOpRgb(e, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_ALPHA,
+                  GPU_TEVOP_RGB_SRC_COLOR);
+  C3D_TexEnvFunc(e, C3D_RGB, GPU_MULTIPLY_ADD);
+  C3D_TexEnvSrc(e, C3D_Alpha, GPU_PREVIOUS, 0, 0);
+  C3D_TexEnvFunc(e, C3D_Alpha, GPU_REPLACE);
+}
 static void material_uv(const AtlasMaterial *m) {
   float t = atlas.time + m->phase, sx = 1, sy = 1, u = 0, v = 0;
   if (m->frames > 1) {
@@ -961,6 +1277,8 @@ static void draw_one(unsigned i, bool mirror, unsigned lod,
     water_program();
   else
     surface_program(wet);
+  if (!using_wet && !using_water)
+    glow_program((m->flags & MAT_GLOW) != 0);
   int material_key = (int)(d->material * 2 + mirror);
   model_uniform(d->node == UINT32_MAX ? ident : matrices + d->node * 12,
                 mirror);
@@ -976,9 +1294,16 @@ static void draw_one(unsigned i, bool mirror, unsigned lod,
       gain *= powf(fmaxf(0, track[a] * (1 - (f - a)) + track[b] * (f - a)),
                    1.0f / 2.2f);
     }
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, tint_loc, color_scale * gain,
-                  color_scale * gain, color_scale * gain,
-                  m->alpha * color_scale);
+    if (using_glow) {
+      // A flashing light's track scales the map, not the surface under it.
+      float lit = color_scale * exposure_gain;
+      C3D_FVUnifSet(GPU_VERTEX_SHADER, tint_loc, lit, lit, lit,
+                    color_scale * gain);
+      C3D_TexBind(1, &textures[(unsigned)m->waves[0]]);
+    } else
+      C3D_FVUnifSet(GPU_VERTEX_SHADER, tint_loc, color_scale * gain,
+                    color_scale * gain, color_scale * gain,
+                    m->alpha * color_scale);
     C3D_CullFace((m->flags & MAT_TWO_SIDED) ? GPU_CULL_NONE
                  : mirror                   ? GPU_CULL_FRONT_CCW
                                             : GPU_CULL_BACK_CCW);
@@ -1057,6 +1382,7 @@ static void fx_draw(unsigned begin, C3D_Tex *tex, bool additive, bool depth) {
   if (fx_count == begin)
     return;
   surface_program(false);
+  glow_program(false);
   C3D_FVUnifSet(GPU_VERTEX_SHADER, uv_loc, 1, 1, 0, 0);
   C3D_CullFace(GPU_CULL_NONE);
   C3D_TexBind(0, tex);
@@ -1134,6 +1460,91 @@ static void effects(void) {
     }
     fx_draw(start, &white, true, true);
   }
+}
+// The lights of a vista, added over everything else: the fields in view, and
+// of each as many of its brightest sprites as the quality step keeps.
+static void light_fields(void) {
+  static const float share[] = {1, 0.75f, 0.5f, 0.375f, 0.25f};
+  atlas.sprites = 0;
+  bool begun = false;
+  for (unsigned page = 0; page < page_count; page++) {
+    const LightField *run = NULL;
+    unsigned first = 0, count = 0;
+    bool bound = false;
+    for (unsigned i = 0; i <= field_count; i++) {
+      const LightField *f = i < field_count ? &fields[i] : NULL;
+      unsigned lit = 0;
+      if (f && f->page == page && f->count) {
+        bool inside = true;
+        for (int p = 0; p < 6 && inside; p++)
+          inside = dot3(planes[p], f->center) + planes[p][3] >= -f->radius;
+        if (inside)
+          lit = (unsigned)ceilf(f->count * share[atlas.step]);
+      }
+      if (f && !lit)
+        continue;
+      // Fields drawn whole that follow one another are one draw.
+      if (count && f && f->first == first + count &&
+          !memcmp(f->sizes, run->sizes, sizeof f->sizes) &&
+          f->period == run->period) {
+        count += lit;
+        continue;
+      }
+      if (count) {
+        if (!begun) {
+          begun = true;
+          common_state();
+          C3D_TexBind(0, &spot);
+          C3D_AlphaTest(false, GPU_ALWAYS, 0);
+          C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
+          C3D_DepthTest(true, GPU_GEQUAL, GPU_WRITE_COLOR);
+          C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ONE,
+                         GPU_ONE, GPU_ZERO);
+        }
+        if (!bound) {
+          bound = true;
+          bool moving = page_moves[page];
+          C3D_BindProgram(moving ? &traffic_shader : &field_shader);
+          C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, field_projection_loc, &vp);
+          C3D_FVUnifSet(GPU_VERTEX_SHADER, field_eye_loc, atlas.position[0],
+                        atlas.position[1], atlas.position[2], 1);
+          // A pixel in clip space: the top screen lies on its side.
+          C3D_FVUnifSet(GPU_VERTEX_SHADER, field_pixel_loc, 1.0f / 240,
+                        1.0f / 400, 0, 0);
+          C3D_AttrInfo *a = C3D_GetAttrInfo();
+          AttrInfo_Init(a);
+          AttrInfo_AddLoader(a, 0, GPU_FLOAT, 3);
+          AttrInfo_AddLoader(a, 1, GPU_FLOAT, 4);
+          AttrInfo_AddLoader(a, 2, GPU_UNSIGNED_BYTE, 4);
+          AttrInfo_AddLoader(a, 3, GPU_BYTE, 4);
+          if (moving) {
+            AttrInfo_AddLoader(a, 4, GPU_FLOAT, 4);
+            AttrInfo_AddLoader(a, 5, GPU_FLOAT, 3);
+          }
+          C3D_BufInfo *b = C3D_GetBufInfo();
+          BufInfo_Init(b);
+          BufInfo_Add(b, pages[page],
+                      moving ? sizeof(MovingLight) : sizeof(StillLight),
+                      moving ? 6 : 4, moving ? 0x543210 : 0x3210);
+        }
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, field_sizes_loc, 2 * focal_length,
+                      run->sizes[0], run->sizes[1], run->sizes[2]);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, field_clock_loc,
+                      wrap01(atlas.time / run->period),
+                      wrap01(4 * atlas.time), exposure_gain / 255, 0);
+        C3D_DrawElements(GPU_TRIANGLES, count * 6, C3D_UNSIGNED_SHORT,
+                         sprite_indices + first * 6);
+        atlas.draws++;
+        atlas.triangles += count * 2;
+        atlas.sprites += count;
+      }
+      run = f;
+      first = f ? f->first : 0;
+      count = lit;
+    }
+  }
+  if (begun)
+    common_state();
 }
 static int compare_transparent(const void *a, const void *b) {
   float d =
@@ -1299,6 +1710,7 @@ void scene_render(C3D_RenderTarget *target) {
     draw_one(i, false, main_lods[i], NULL);
   }
   effects();
+  light_fields();
   atlas.submit_ms =
       (svcGetSystemTick() - render_start) * 1000.0f / SYSCLOCK_ARM11;
 }
@@ -1422,7 +1834,8 @@ void scene_status(char *out, size_t capacity) {
       "\"frameMs\":%.3f,"
       "\"cpuMs\":%.3f,\"skinMs\":%.3f,\"updateMs\":%.3f,\"submitMs\":%.3f,"
       "\"prepareMs\":%.3f,\"skinnedVertices\":%lu,\"gpuMs\":%.3f,\"time\":%."
-      "3f,\"draws\":%lu,\"triangles\":%lu,\"reflectionDraws\":%lu,"
+      "3f,\"draws\":%lu,\"triangles\":%lu,\"sprites\":%lu,"
+      "\"reflectionDraws\":%lu,"
       "\"reflectionTriangles\":%lu,"
       "\"culled\":%lu,\"reflection\":%s,\"rain\":%s,\"haze\":%s,\"position\":[%"
       ".3f,%.3f,%.3f],"
@@ -1438,7 +1851,7 @@ void scene_status(char *out, size_t capacity) {
       atlas.skin_ms, atlas.update_ms, atlas.submit_ms, atlas.prepare_ms,
       (unsigned long)atlas.skinned_vertices, atlas.gpu_ms, atlas.time,
       (unsigned long)atlas.draws, (unsigned long)atlas.triangles,
-      (unsigned long)atlas.reflect_draws,
+      (unsigned long)atlas.sprites, (unsigned long)atlas.reflect_draws,
       (unsigned long)atlas.reflect_triangles, (unsigned long)atlas.culled,
       atlas.reflection ? "true" : "false", atlas.rain ? "true" : "false",
       atlas.haze ? "true" : "false", atlas.position[0], atlas.position[1],
@@ -1491,8 +1904,32 @@ void scene_free(void) {
     C3D_TexDelete(&glow);
   if (dvlb) {
     shaderProgramFree(&shader);
+    shaderProgramFree(&glow_shader);
     DVLB_Free(dvlb);
   }
+  if (field_dvlb) {
+    shaderProgramFree(&field_shader);
+    shaderProgramFree(&traffic_shader);
+    DVLB_Free(field_dvlb);
+  }
+  if (spot.data)
+    C3D_TexDelete(&spot);
+  for (unsigned i = 0; i < 2; i++)
+    if (sprite_vertices[i])
+      linearFree(sprite_vertices[i]);
+  if (sprite_indices)
+    linearFree(sprite_indices);
+  free(fields);
+  fields = NULL;
+  field_count = page_count = 0;
+  sprite_vertices[0] = sprite_vertices[1] = NULL;
+  sprite_indices = NULL;
+  field_dvlb = NULL;
+  far_plane = 1200.0f;
+  memset(&spot, 0, sizeof spot);
+  memset(&glow_shader, 0, sizeof glow_shader);
+  memset(&field_shader, 0, sizeof field_shader);
+  memset(&traffic_shader, 0, sizeof traffic_shader);
   if (fx)
     linearFree(fx);
   if (geometry)
@@ -1529,6 +1966,7 @@ void scene_free(void) {
   dry = NULL;
   weights = NULL;
   memset(local_half, 0, sizeof local_half);
+  memset(coarse_vertices, 0, sizeof coarse_vertices);
   memset(world_bounds, 0, sizeof world_bounds);
   memset(&shader, 0, sizeof shader);
   memset(&wet_shader, 0, sizeof wet_shader);
@@ -1545,7 +1983,7 @@ void scene_free(void) {
   visible_count = opaque_count = mirror_count = main_plan_count =
       mirror_plan_count = 0;
   batch_frame = batch_used = fx_count = 0;
-  using_wet = using_water = false;
+  using_wet = using_water = using_glow = false;
   last_model = NULL;
   last_material = -1;
   last_mirror = false;

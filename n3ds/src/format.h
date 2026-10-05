@@ -5,18 +5,19 @@
 #include <stdbool.h>
 // PLCE v5, PICA section v3. All integers and IEEE floats are little endian.
 // Cooker: crates/pocket3d-place-cook/src/pica.rs. GPU records contain no
-// pointers.
+// pointers. Five sections, and a sixth (FELD) in a place with light fields.
 #define ATLAS_PICA_CONTAINER_VERSION 5
 #define ATLAS_PICA_TABLE_VERSION 3
 static inline bool atlas_pack_header_valid(const uint32_t header[4]) {
   return header[0] == 0x45434c50 &&
-         header[1] == ATLAS_PICA_CONTAINER_VERSION && header[2] == 5;
+         header[1] == ATLAS_PICA_CONTAINER_VERSION &&
+         (header[2] == 5 || header[2] == 6);
 }
 typedef struct {
   uint32_t version, textures, materials, draws, shots, matrices, frames, lights,
       dry_boxes, skin_bytes;
   float fps, fog_density, haze_density, rain, fog[3], bloom, zenith[3],
-      vignette, horizon[3], reserved;
+      vignette, horizon[3], far_plane; // metres; 0 stands for 1.2 km
   uint32_t features, sky_texture, cloud_texture;
   float cloud_drift;
 } AtlasHeader;
@@ -52,6 +53,21 @@ typedef struct {
 typedef struct {
   float min[3], max[3];
 } AtlasBox;
+// FELD: a count, that many fields, then every field's sprites, the brightest
+// of a field first.
+typedef struct {
+  uint32_t first, count;
+  float center[3], radius, min_pixels, max_pixels, depth_pull, period;
+} AtlasField;
+// A light as a sprite: where it is and its radius; the path it travels
+// path_cycles times a period from phase; lit for duty of each of its
+// blink_cycles; its display colour, cooked for a sprite `gain` times wider
+// than the light, with the twinkle in alpha (a quarter of it is the depth).
+typedef struct {
+  float position[3], radius, path[3], path_cycles, phase, blink_cycles, duty,
+      gain;
+  uint8_t color[4];
+} AtlasSprite;
 typedef struct {
   float position[3], uv[2];
   uint8_t color[4];
@@ -66,6 +82,8 @@ _Static_assert(sizeof(AtlasDraw) == 96, "PICA draw");
 _Static_assert(sizeof(AtlasShot) == 92, "PICA shot");
 _Static_assert(sizeof(AtlasVertex) == 24, "PICA vertex");
 _Static_assert(sizeof(AtlasSkin) == 12, "PICA skin");
+_Static_assert(sizeof(AtlasField) == 40, "light field");
+_Static_assert(sizeof(AtlasSprite) == 52, "light sprite");
 enum {
   MAT_BLEND = 1,
   MAT_TWO_SIDED = 2,
@@ -76,8 +94,8 @@ enum {
   MAT_ADD = 64,
   MAT_DEPTH = 128,
   MAT_WATER = 256,
-  // GLES packs only (ipod/): texture (unsigned)waves[0] is an emission map,
-  // added to the lit texture at the strength in the vertex alpha.
+  // Texture (unsigned)waves[0] is an emission map, added to the lit texture
+  // at the strength in the vertex alpha: GLES packs (ipod/), and PICA vistas.
   MAT_GLOW = 512
 };
 #endif

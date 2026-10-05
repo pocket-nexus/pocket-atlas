@@ -150,7 +150,7 @@ fn required_files(document: &Value) -> Result<BTreeSet<String>, String> {
 impl Manifest {
     pub fn check_target(&self, target: Target) -> Result<(), String> {
         for feature in &self.features {
-            if !matches!(target, Target::Vita | Target::Ipod)
+            if target == Target::Psp
                 && matches!(feature.as_str(), "material:lights" | "vista-haze")
             {
                 return Err(format!(
@@ -468,11 +468,11 @@ mod tests {
         };
         assert!(m.check_target(Target::Vita).is_ok());
         assert!(m.check_target(Target::Ipod).is_ok());
+        assert!(m.check_target(Target::Pica).is_ok());
         assert!(m
-            .check_target(Target::Pica)
+            .check_target(Target::Psp)
             .unwrap_err()
-            .contains("no 3ds lowering"));
-        assert!(m.check_target(Target::Psp).is_err());
+            .contains("no psp lowering"));
     }
     #[test]
     fn psp_daylight_admission_keeps_water_and_vista_effects_explicit() {

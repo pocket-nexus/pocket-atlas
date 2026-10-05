@@ -1,0 +1,28 @@
+; scene.v.pica for a surface with an emission map: the same texture
+; coordinates go to the second texture unit as well. Assembled into the
+; scene's binary, it shares that program's uniforms and code space.
+.fvec projection[4]
+.fvec model[3]
+.fvec tint
+.fvec uv_transform
+.in inpos v0
+.in intex v1
+.in inclr v2
+.out outpos position
+.out outtex texcoord0
+.out outclr color
+.out outglow texcoord1
+.entry glow
+.proc glow
+    dp4 outpos.x, projection[0], inpos
+    dp4 outpos.y, projection[1], inpos
+    dp4 outpos.z, projection[2], inpos
+    dp4 outpos.w, projection[3], inpos
+    mul r0.xy, uv_transform.xy, intex.xy
+    add r0.xy, uv_transform.zw, r0.xy
+    mov r0.zw, intex.zw
+    mov outtex, r0
+    mov outglow, r0
+    mul outclr, tint, inclr
+    end
+.end

@@ -5,8 +5,11 @@
 //!
 //! The iPod touch 4 (GLES 2 on an SGX535) draws the same table as it is
 //! cooked, one texture times one vertex colour (`gles` below). That pack keeps
-//! its texels in plain rows and adds what a dusk vista needs (`light_fields`,
-//! `vista`), both cooked as seen from the middle of the camera shots.
+//! its texels in plain rows.
+//!
+//! A dusk vista adds, on both, its haze in the vertex colours (`vista`) and
+//! its lights as sprites (`light_fields`, the `FELD` section), both cooked as
+//! seen from the middle of the camera shots.
 use crate::textures::{self, Rgba};
 use glam::{Mat4, Quat, Vec3};
 use pocket3d_place as pc;
@@ -287,14 +290,22 @@ fn principal_extents(points: &[Vec3]) -> Vec3 {
     Vec3::from(e)
 }
 
-fn structural_detail(extent: Vec3, fine: usize, coarse: usize) -> bool {
-    fine >= 24
-        && coarse * 100 < fine * 45
-        && (0.008..=0.12).contains(&extent.x)
-        && (0.1..=2.0).contains(&extent.z)
+fn structural_detail(extent: Vec3, fine: usize, coarse: usize, runs: bool) -> bool {
+    // Thin one way and compact: a tube, a ring, a bracket.
+    let compact = (0.008..=0.12).contains(&extent.x) && (0.1..=2.0).contains(&extent.z);
+    // Or, where `runs` are kept, a length of one section up to a utility
+    // pole's: a post, a mast, a beam, a rail. A coarse level 25 cm off leaves
+    // nothing of these either, and a street without the pole its lamps and
+    // wires hang from shows it.
+    let run = runs
+        && (0.008..=0.24).contains(&extent.x)
+        && extent.y <= extent.x.max(0.08) * 1.5
+        && (0.1..=100.0).contains(&extent.z);
+    fine >= 24 && coarse * 100 < fine * 45 && (compact || run)
 }
 
-/// Preserve compact tubes/rings that canonical distance LODs partly erase.
+/// Preserve compact tubes/rings (and, with `runs`, posts, beams and rails)
+/// that canonical distance LODs partly erase.
 /// Their coarse geometry stays identical; a separate 2 m cell can select a
 /// bounded-error middle LOD without restoring an entire 32 m street chunk.
 /// Draw reserved bit 0 marks this near-detail policy (no format-size change).
@@ -302,6 +313,7 @@ fn recover_structural_details(
     geom: &mut Vec<u8>,
     draws: Vec<Vec<u8>>,
     eligible_materials: &[bool],
+    runs: bool,
 ) -> Vec<Vec<u8>> {
     let get = |r: &[u8], o: usize| u32::from_le_bytes(r[o..o + 4].try_into().unwrap()) as usize;
     let put =
@@ -390,6 +402,7 @@ fn recover_structural_details(
                     principal_extents(&points),
                     part[0].len() / 3,
                     part[2].len() / 3,
+                    runs,
                 )
             {
                 for k in 0..4 {
@@ -639,7 +652,7 @@ fn vista(m: &crate::source::Scene, eye: Vec3, p: Vec3, c: Vec3, additive: bool) 
 /// pixel and a half of each other there (sprites are wider) are summed into
 /// one before it: a hundred of them would otherwise add up to white. What
 /// the curve leaves at black is dropped.
-fn sprites(lights: &[pc::LightPoint], f: &pc::LightField, eye: Vec3, focal: f32, height: f32, air: impl Fn(Vec3, Vec3) -> Vec3, display: impl Fn(Vec3) -> Vec3) -> Vec<u8> {
+fn sprites(lights: &[pc::LightPoint], f: &pc::LightField, eye: Vec3, focal: f32, height: f32, brightest_first: bool, air: impl Fn(Vec3, Vec3) -> Vec3, display: impl Fn(Vec3) -> Vec3) -> Vec<u8> {
     let (lo, hi) = (f.min_pixels * height / 272.0, f.max_pixels * height / 272.0);
     // (energy, position weighted by energy with the weight in w, first light with the largest radius)
     let mut cells: std::collections::BTreeMap<Option<[i32; 2]>, Vec<(Vec3, glam::Vec4, pc::LightPoint)>> = Default::default();
@@ -662,8 +675,13 @@ fn sprites(lights: &[pc::LightPoint], f: &pc::LightField, eye: Vec3, focal: f32,
             group => group.push((energy, at, *l)),
         }
     }
+    let mut merged: Vec<_> = cells.into_values().flatten().collect();
+    if brightest_first {
+        // PICA draws a field's first sprites only when its frame is late.
+        merged.sort_by(|a, b| b.0.max_element().total_cmp(&a.0.max_element()));
+    }
     let mut points = Vec::new();
-    for (energy, at, l) in cells.into_values().flatten() {
+    for (energy, at, l) in merged {
         let p = at.truncate() / at.w;
         let dist = (p - eye).length().max(0.01);
         let size = l.radius * focal / dist;
@@ -684,15 +702,15 @@ fn sprites(lights: &[pc::LightPoint], f: &pc::LightField, eye: Vec3, focal: f32,
     points
 }
 
-/// The GLES `FELD` section: a count, then per field its first sprite and
-/// count, bounding sphere, sprite sizes in pixels, depth pull and period,
-/// then every field's `sprites`.
-fn light_fields(m: &crate::source::Scene, eye: Vec3, focal: f32, height: f32) -> Vec<u8> {
+/// The `FELD` section: a count, then per field its first sprite and count,
+/// bounding sphere, sprite sizes in pixels, depth pull and period, then
+/// every field's `sprites`.
+fn light_fields(m: &crate::source::Scene, eye: Vec3, focal: f32, height: f32, brightest_first: bool) -> Vec<u8> {
     let (mut records, mut points) = (Vec::new(), Vec::new());
     for d in &m.draws {
         let crate::source::Geometry::LightField(lights) = &d.geometry else { continue };
         let f = m.materials[d.material as usize].lights.unwrap_or_default();
-        let field = sprites(lights, &f, eye, focal, height, |p, c| vista(m, eye, p, c, true), |c| grade(c, &m.post));
+        let field = sprites(lights, &f, eye, focal, height, brightest_first, |p, c| vista(m, eye, p, c, true), |c| grade(c, &m.post));
         let (min, max) = (Vec3::from(d.min), Vec3::from(d.max));
         u32s(&mut records, &[points.len() as u32 / 52, field.len() as u32 / 52]);
         fs(&mut records, &((min + max) * 0.5).to_array());
@@ -748,12 +766,14 @@ fn main_lods<'a>(indices: &'a [u32], levels: &'a [crate::source::Lod]) -> impl I
 pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,String> {
     let m = scene;
     let gles = profile.target == crate::ir::Target::Ipod;
-    // GLES adds an emission map of its own to the lit surface (MAT_GLOW). One
-    // texture times one colour draws a floodlit wall white all over where the
-    // map paints cones of light, and a distant tower black between its windows
-    // where its body should fade into the haze.
+    // An emission map of its own is added to the lit surface (MAT_GLOW): a
+    // second fetch on GLES, a second combiner stage on PICA. One texture
+    // times one colour draws a floodlit wall white all over where the map
+    // paints cones of light, and a distant tower black between its windows
+    // where its body should fade into the haze. PICA takes it in a vista,
+    // whose buildings are lit by little else.
     let glows = |mat: &pc::Material| {
-        gles && mat.kind == pc::Kind::Standard && mat.emission.is_some() && mat.albedo != mat.emission
+        (gles || m.vista_haze.is_some()) && mat.kind == pc::Kind::Standard && mat.emission.is_some() && mat.albedo != mat.emission
             && mat.blend == pc::Blend::Opaque && mat.alpha_test == 0.0 && !mat.interior
     };
     let eye = m.camera.shots.iter().flat_map(|s| [s.from.pos, s.to.pos]).map(Vec3::from).sum::<Vec3>()
@@ -1311,7 +1331,10 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
                 && mat.emissive.iter().all(|&v| v <= 0.0)
         })
         .collect();
-    let draws = recover_structural_details(&mut geom, draws, &eligible_materials);
+    // A daytime street is street furniture from end to end, and PICA draws
+    // its middle level at any distance: there the runs are kept as well. The
+    // other kinds' budgets were measured without them.
+    let draws = recover_structural_details(&mut geom, draws, &eligible_materials, m.kind == "daytime-street");
     // Canonical street chunks are broad. Subdivide detail-only chunks so
     // approaching one rail does not restore all thin geometry across 32 m.
     let get = |r: &[u8], o: usize| u32::from_le_bytes(r[o..o + 4].try_into().unwrap());
@@ -1531,7 +1554,9 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         &mut table,
         &grade(Vec3::from(m.atmosphere.sky_horizon), &m.post).to_array(),
     );
-    fs(&mut table, &[0.0]);
+    // PICA's far plane: a vista reaches its horizon, other places 1.2 km (0).
+    // GLES has none.
+    fs(&mut table, &[if !gles && m.vista_haze.is_some() { 120_000.0 } else { 0.0 }]);
     u32s(&mut table, &[features, sky_texture, cloud_texture]);
     fs(&mut table, &[cloud_drift]);
     assert_eq!(table.len(), 120);
@@ -1568,10 +1593,12 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         fs(&mut table, &b[1]);
     }
     table.extend(&skin_data);
-    let field = if gles {
+    // PICA packs carry the section only when the place has light fields.
+    let fields = gles || m.draws.iter().any(|d| matches!(d.geometry, crate::source::Geometry::LightField(_)));
+    let field = if fields {
         let fov = m.camera.shots.iter().map(|s| s.from.fov + s.to.fov).sum::<f32>() / (2 * m.camera.shots.len().max(1)) as f32;
         let height = profile.presentation.render_height as f32;
-        light_fields(m, eye, height / (fov.to_radians() * 0.5).tan(), height)
+        light_fields(m, eye, height / (fov.to_radians() * 0.5).tan(), height, !gles)
     } else {
         Vec::new()
     };
@@ -1584,13 +1611,13 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         (pc::TAG_GEOMETRY, &geom, 128),
         (pc::TAG_ANIMATION, &anim, 16),
     ];
-    if gles {
+    if fields {
         sections.push((*b"FELD", &field, 16));
     }
     let out = pc::write_versioned(pc::MAGIC, if gles { GLES_CONTAINER_VERSION } else { CONTAINER_VERSION }, &sections);
     Ok(Artifact {
         bytes: out, summary,
-        sections: [("META",meta.len()),("PICA",table.len()),("TEXD",tex.len()),("GEOM",geom.len()),("ANIM",anim.len())].into_iter().chain(gles.then_some(("FELD",field.len()))).map(|(k,v)|(k.into(),v)).collect(),
+        sections: [("META",meta.len()),("PICA",table.len()),("TEXD",tex.len()),("GEOM",geom.len()),("ANIM",anim.len())].into_iter().chain(fields.then_some(("FELD",field.len()))).map(|(k,v)|(k.into(),v)).collect(),
         textures: textures.iter().enumerate().map(|(id,t)|serde_json::json!({"id":id,"sourceTextures":texkeys.iter().filter(|(_,output)|**output as usize==id).filter_map(|(key,_)|key.0).collect::<std::collections::BTreeSet<_>>(),"sources":texkeys.iter().filter(|(_,output)|**output as usize==id).filter_map(|(key,_)|key.0).flat_map(|source|crate::provenance::texture_sources(scene,source as usize)).collect::<std::collections::BTreeSet<_>>(),"width":t[0],"height":t[1],"format":t[2],"levels":t[3],"bytes":t[5]})).collect(),
     })
 }
@@ -1624,10 +1651,19 @@ mod tests {
             .collect();
         let extents = principal_extents(&points);
         assert!((extents - Vec3::new(0.02, 0.04, 0.6)).length() < 1e-5);
-        assert!(structural_detail(extents, 32, 4));
-        assert!(!structural_detail(Vec3::new(0.004, 0.004, 0.6), 32, 0));
-        assert!(!structural_detail(Vec3::new(0.02, 0.4, 0.6), 12, 0));
-        assert!(!structural_detail(extents, 32, 24));
+        assert!(structural_detail(extents, 32, 4, false));
+        assert!(!structural_detail(Vec3::new(0.004, 0.004, 0.6), 32, 0, false));
+        assert!(!structural_detail(Vec3::new(0.02, 0.4, 0.6), 12, 0, false));
+        assert!(!structural_detail(extents, 32, 24, false));
+        // A crossing signal's banded post, a utility pole, a catenary beam
+        // and a fence rail down a street; not a wall, a slab or a column.
+        for (run, fine) in [(Vec3::new(0.156, 0.159, 0.353), 40), (Vec3::new(0.229, 0.229, 8.7), 50), (Vec3::new(0.095, 0.11, 9.3), 76), (Vec3::new(0.03, 0.03, 70.0), 210)] {
+            assert!(structural_detail(run, fine, 0, true), "{run}");
+            assert!(!structural_detail(run, fine, 0, false), "{run}");
+        }
+        assert!(!structural_detail(Vec3::new(0.16, 2.6, 6.0), 40, 0, true));
+        assert!(!structural_detail(Vec3::new(0.05, 3.0, 12.0), 200, 0, true));
+        assert!(!structural_detail(Vec3::new(0.4, 0.4, 3.0), 40, 0, true));
     }
 
     #[test]
@@ -1668,7 +1704,7 @@ mod tests {
                 geom.extend((i as u16).to_le_bytes());
             }
         }
-        let result = recover_structural_details(&mut geom, vec![d], &[true]);
+        let result = recover_structural_details(&mut geom, vec![d], &[true], false);
         assert_eq!(result.len(), 2);
         let get = |r: &[u8], o: usize| u32::from_le_bytes(r[o..o + 4].try_into().unwrap()) as usize;
         let detail = result.iter().find(|r| get(r, 28) == 1).unwrap();
@@ -1817,7 +1853,7 @@ mod tests {
     fn gles_light_field_sums_far_steady_lights_and_drops_the_dark() {
         let field = pc::LightField { min_pixels: 2.0, max_pixels: 10.0, gain: 1.0, depth_pull: 0.0, period: 120.0 };
         let light = |x: f32, z: f32, intensity: f32| pc::LightPoint { position: [x, 0.0, z], color: [1.0; 3], intensity, radius: 0.2, duty: 1.0, ..Default::default() };
-        let cook = |lights: &[pc::LightPoint]| sprites(lights, &field, Vec3::ZERO, 800.0, 320.0, |_, c| c, |c| c.min(Vec3::ONE));
+        let cook = |lights: &[pc::LightPoint]| sprites(lights, &field, Vec3::ZERO, 800.0, 320.0, false, |_, c| c, |c| c.min(Vec3::ONE));
         let color = |bytes: &[u8], i: usize| bytes[i * 52 + 48];
         // At 5 km a cell is 19 m wide: these two share one, and their energy
         // (k² = (0.032 / 2.35)² of 1000 each) adds up in one sprite.
@@ -1834,6 +1870,12 @@ mod tests {
         // 1 / k: the sub-pixel light's sprite is 2.35 px wide, the light 0.032.
         let k = f32::from_le_bytes(one[44..48].try_into().unwrap());
         assert!((k - 2.0 * 320.0 / 272.0 / (0.2 * 800.0 / 5000.0)).abs() < 0.01, "{k}");
+        // PICA's order: the brightest first, so that a prefix is the best part.
+        let lights = [light(0.0, -5000.0, 300.0), light(100.0, -5000.0, 1000.0), light(-100.0, -5000.0, 600.0)];
+        let ordered = sprites(&lights, &field, Vec3::ZERO, 800.0, 240.0, true, |_, c| c, |c| c.min(Vec3::ONE));
+        assert_eq!(ordered.len(), 3 * 52);
+        assert!(color(&ordered, 0) > color(&ordered, 1) && color(&ordered, 1) > color(&ordered, 2));
+        assert_eq!(f32::from_le_bytes(ordered[0..4].try_into().unwrap()), 100.0);
     }
 
     #[test]
