@@ -21,7 +21,8 @@
 //                                                  the page in Chrome, driven by keys, pointer and touch: each
 //                                                  device's atlas screen and its lists, a place entered through
 //                                                  the interface and left again, every place's held view beside
-//                                                  this machine's own, another device picked, what a frame costs,
+//                                                  this machine's own, the player with every device in its shell
+//                                                  in a 1440 by 900 window and on a phone, what a frame costs,
 //                                                  what a first frame needs on a slow line (--quick: of one place)
 //                                                  → .pocket-build/validation/web/
 //
@@ -51,6 +52,8 @@ const SURFACE = 1024;
 // What the host a build is deployed to allows (Pocket Studio's site deployments): the size of a file, the
 // files and the bytes of a deployment, and the top-level names it keeps for itself.
 const HOST = { file: 32 << 20, files: 4000, bytes: 1 << 30, reserved: ["play", "runtime"] };
+// The devices the page shows (`DEVICES` in wgpu/page/main.js): each has a shell in the kernel's player.
+const SHOWN: readonly string[] = ["vita", "psp", "3ds", "ipod"];
 // The places' packs as the PS Vita reads them: the browser draws the same file.
 const PACKS = join(ROOT, ".pocket-build/places");
 const pack = (id: string) => join(PACKS, id, `${id}.place`);
@@ -85,8 +88,9 @@ async function build() {
   // interface's guest with the UI core, and the host helpers of the framework. Then the icon of the tab.
   await stagePocket3dWeb(SITE);
   cpSync(POCKET3D_ICON.ios2x, join(SITE, "icon.png"));
-  // The game's interface for each device, as its own build compiles it, with the plan PocketJS resolved.
-  for (const device of DEVICES) {
+  // The game's interface for each device the page shows, as its own build compiles it, with the plan
+  // PocketJS resolved. (An Android phone has no shell in the player: its bundle is not staged.)
+  for (const device of DEVICES.filter((d) => SHOWN.includes(d))) {
     const built = await compileInterface(device);
     mkdirSync(join(SITE, "ui", device), { recursive: true });
     for (const file of ["atlas.js", "atlas.pak", "plan.json"]) cpSync(join(built.directory, file), join(SITE, "ui", device, file));
@@ -151,10 +155,21 @@ async function dist(pieceBytes: number) {
   for (const [from, to] of [
     [`<meta name="pocket-globe" content="globe.rgba">`, `<meta name="pocket-globe" content="${manifest}">`],
     [`href="pocket3d-stage.css"`, `href="app/${id}/pocket3d-stage.css"`],
+    [`href="pocket3d-player.css"`, `href="app/${id}/pocket3d-player.css"`],
     [`src="main.js"`, `src="app/${id}/main.js"`],
   ] as const) {
     if (!page.includes(from)) throw new Error(`wgpu/page/index.html has no ${from}`);
     page = page.replace(from, to);
+  }
+  // The game in Pocket Studio, for the player's door to it where the host answers no /app.json: the project
+  // this checkout is registered as (`pocket-studio register` wrote .pocket-studio.json, which Git ignores).
+  // A checkout that is not registered deploys a page whose door is the Studio's front one.
+  const link = join(ROOT, ".pocket-studio.json");
+  const project = existsSync(link) ? (JSON.parse(readFileSync(link, "utf8")) as { kind?: string; server?: string; app?: string }) : null;
+  const studio = project?.kind === "site" && /^[A-Za-z0-9_-]+$/.test(project.app ?? "") && /^https:\/\/[A-Za-z0-9.-]+$/.test(project.server ?? "") ? { app: project.app!, server: project.server! } : null;
+  if (studio) {
+    if (!page.includes(`<meta name="pocket-globe"`)) throw new Error("wgpu/page/index.html has no pocket-globe");
+    page = page.replace(`<meta name="pocket-globe"`, `<meta name="pocket-app" content="${studio.app}">\n<meta name="pocket-studio" content="${studio.server}">\n<meta name="pocket-globe"`);
   }
   writeFileSync(join(DIST, "index.html"), page);
   cpSync(join(SITE, "icon.png"), join(DIST, "icon.png"));
@@ -171,12 +186,21 @@ async function dist(pieceBytes: number) {
     ...readdirSync(DIST).filter((name) => HOST.reserved.includes(name)).map((name) => `${name}/ is the host's own`),
   ];
   if (refused.length) throw new Error(`the host would refuse the directory: ${refused.join("; ")}`);
-  const report = { directory: DIST, files: all.length, bytes: total, largest, build: id, page: part("index.html"), app: part("app/"), globe: { ...part("globe/"), manifest, pieces: cut.pieces.length, piece: pieceBytes, sha256: cut.sha256 }, places: { ...part("places/"), packs } };
+  const report = { directory: DIST, files: all.length, bytes: total, largest, build: id, studio, page: part("index.html"), app: part("app/"), globe: { ...part("globe/"), manifest, pieces: cut.pieces.length, piece: pieceBytes, sha256: cut.sha256 }, places: { ...part("places/"), packs } };
   writeFileSync(join(BUILD, "dist.json"), JSON.stringify(report, null, 1));
   return report;
 }
 
-const TYPES: Record<string, string> = { html: "text/html; charset=utf-8", js: "text/javascript; charset=utf-8", css: "text/css; charset=utf-8", wasm: "application/wasm", json: "application/json", png: "image/png" };
+const TYPES: Record<string, string> = { html: "text/html; charset=utf-8", js: "text/javascript; charset=utf-8", css: "text/css; charset=utf-8", wasm: "application/wasm", json: "application/json", png: "image/png", webp: "image/webp", woff2: "font/woff2", txt: "text/plain; charset=utf-8", md: "text/plain; charset=utf-8" };
+
+/**
+ * What a game's host of Pocket Studio answers at `/app.json`, for the site's server here: the player reads
+ * the game's name and its packages from it. (The packages and their sizes are examples.)
+ */
+const APP = {
+  kind: "site", id: "local", slug: null, url: null, title: "Pocket Atlas", author: "local", tagline: "The world in your pocket.", verified: true, status: "published",
+  packages: [{ target: "psp", filename: "pocket-atlas-psp.zip", size: 31_000_000, version: "0.0.0" }, { target: "3ds", filename: "pocket-atlas.3dsx", size: 64_000_000, version: "0.0.0" }],
+};
 
 /** A directory as a static host serves it. `ranges`: a request for a byte range is answered with that range
  * (the site, whose surface is one file); without, every answer is a whole file, the page is asked for again
@@ -187,6 +211,9 @@ function serve(directory: string, port: number, ranges: boolean) {
     hostname: "127.0.0.1",
     fetch(request) {
       const path = decodeURIComponent(new URL(request.url).pathname);
+      // (the site's server answers as a game's host does; the deployable directory's answers nothing there,
+      // and the page's own two words stand)
+      if (ranges && path === "/app.json") return Response.json(APP, { headers: { "Cache-Control": "no-store" } });
       const file = join(directory, path === "/" ? "index.html" : path);
       if (!file.startsWith(directory) || !existsSync(file) || !statSync(file).isFile()) return new Response("not found", { status: 404 });
       const type = file.split(".").pop()!;
@@ -282,7 +309,8 @@ if (command === "build") {
   const visit = async (address: string, context?: Context) => {
     const page: Page = await (context ?? browser).newPage({ viewport: { width: 1280, height: 800 } });
     const problems: string[] = [];
-    page.on("console", (message: { type(): string; text(): string }) => message.type() === "error" && problems.push(message.text()));
+    // (the deployable directory's server answers no /app.json: the player asks, and the page's own words stand)
+    page.on("console", (message: { type(): string; text(): string; location(): { url: string } }) => message.type() === "error" && !message.location().url.endsWith("/app.json") && problems.push(message.text()));
     page.on("pageerror", (error: unknown) => problems.push(String(error)));
     await page.goto(`${origin}/${address}`);
     const status = async () => JSON.parse((await page.evaluate("pocketAtlas.atlas.status()")) as string);
@@ -393,11 +421,11 @@ if (command === "build") {
     {
       const p = await visit("?device=ipod&interface=off");
       await p.page.waitForTimeout(1200);
-      const during = (await p.page.evaluate("[document.querySelectorAll('[aria-label=Pocket3D]').length, document.getElementById('scene').hidden]")) as [number, boolean];
+      const during = (await p.page.evaluate("[document.querySelectorAll('[aria-label=Pocket3D]').length, document.querySelector('[data-pocket-screen=upper]').hidden]")) as [number, boolean];
       await p.page.screenshot({ path: join(directory, "title-card.png") });
       expect(`the Pocket3D title card covers the page before the atlas is shown (${during})`, during[0] === 1 && during[1] === true);
       await p.page.waitForFunction("window.pocketAtlas?.firstGlobe > 0", undefined, { timeout: 60_000 });
-      const afterwards = (await p.page.evaluate("[document.querySelectorAll('[aria-label=Pocket3D]').length, document.getElementById('scene').hidden]")) as [number, boolean];
+      const afterwards = (await p.page.evaluate("[document.querySelectorAll('[aria-label=Pocket3D]').length, document.querySelector('[data-pocket-screen=upper]').hidden]")) as [number, boolean];
       expect(`the card has left and the atlas is shown (${afterwards})`, afterwards[0] === 0 && afterwards[1] === false);
       // (with no guest the globe is where the shell first has it, facing where it first faces)
       await p.page.waitForTimeout(600);
@@ -671,6 +699,7 @@ if (command === "build") {
       await p.page.waitForTimeout(2500);
       const loading = await p.status();
       await p.save(`${id}-loading`);
+      if (id === one) await p.page.screenshot({ path: join(directory, "loading-page.png") });
       expect(`${id}: the loading screen says how much has arrived (${loading.scene}: "${loading.message}")`, loading.scene === "loading" && /^Reading the place: \d+ of \d+ MB$/.test(loading.message));
       const first = await p.scene(["place", "error"]);
       expect(`${id} opens on a slow line (${first.scene}: "${first.message}")`, first.scene === "place");
@@ -697,6 +726,7 @@ if (command === "build") {
       const refused = await p.scene(["place", "error"]);
       await p.page.waitForTimeout(600);
       await p.save("no-bc");
+      await p.page.screenshot({ path: join(directory, "no-bc-page.png") });
       report.withoutBC = refused.message;
       expect(`a GPU without BC textures is told so (${refused.scene}: "${refused.message}")`, refused.scene === "error" && refused.message === "Places need a desktop browser for now.");
       await context.close();
@@ -728,45 +758,167 @@ if (command === "build") {
       await p.page.close();
     }
 
-    // ---- a browser whose pointer is a finger: the iPod touch first, and a device's buttons on the page
-    {
-      const context = await browser.newContext({ hasTouch: true, isMobile: true, viewport: { width: 844, height: 390 }, deviceScaleFactor: 2 });
-      const p = await visit("", context);
-      await p.up();
-      expect("a finger gets the iPod touch first", (await p.page.evaluate("pocketAtlas.device()")) === "ipod");
-      await p.page.screenshot({ path: join(directory, "finger-ipod.png") });
-      await p.page.close();
-      const q = await visit("?device=psp", context);
-      await q.up();
-      const named = (await q.page.evaluate("[...document.querySelectorAll('[data-pocket-button]')].map((b) => b.textContent).join(' ')")) as string;
-      expect(`a device with buttons has them on the page (${named})`, ["L", "R", "△", "○", "✕", "□", "START", "SELECT", "▲"].every((name) => named.split(" ").includes(name)));
-      const cdp = await context.newCDPSession(q.page);
-      const touch = async (label: string, hold = 120) => {
-        const box = (await q.page.locator(`[data-pocket-button="${label}"]`).boundingBox())!;
-        await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: box.x + box.width / 2, y: box.y + box.height / 2, id: 1 }] });
-        await q.page.waitForTimeout(hold);
-        await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
-        await q.page.waitForTimeout(300);
-      };
-      const before = await q.status();
-      await touch("▼");
-      await q.page.waitForTimeout(1200);
-      const moved = await q.status();
-      expect(`the d-pad on the page moves down the list (pin ${before.globe.lit} to ${moved.globe.lit})`, moved.globe.lit !== before.globe.lit);
-      // The stick on the page, under a thumb, spins the globe.
-      const stick = (await q.page.locator("[data-pocket-stick]").boundingBox())!;
-      const centre = { x: stick.x + stick.width / 2, y: stick.y + stick.height / 2 };
-      await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ ...centre, id: 1 }] });
-      await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: centre.x + stick.width * 0.4, y: centre.y, id: 1 }] });
-      await q.page.waitForTimeout(900);
-      await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
-      await q.page.waitForTimeout(200);
-      const spun = await q.status();
-      expect(`the stick on the page spins the globe (${moved.globe.facing[1]} to ${spun.globe.facing[1]})`, round(spun.globe.facing[1], moved.globe.facing[1]) > 15);
-      await q.page.screenshot({ path: join(directory, "finger-psp.png") });
-      expect(`no error on the page (${q.problems.join("; ")})`, q.problems.length === 0);
+    // ---- the player around the game, in a desktop window and on a phone: every device in its shell on the
+    // atlas screen and inside a place, the mark that says the picture is simulated, the door to Pocket
+    // Studio, the shell's own keys under a pointer or a finger. A finger gets the iPod touch first.
+    report.player = {};
+    const WINDOWS = [
+      { name: "1440", options: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2 }, coarse: false },
+      { name: "phone", options: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, hasTouch: true, isMobile: true }, coarse: true },
+    ];
+    const LABELS: Record<string, string> = { vita: "PS Vita", psp: "PSP", "3ds": "Nintendo 3DS", ipod: "iPod touch" };
+    expect(`the page's devices are the ones whose interface is staged (${Object.keys(LABELS)}, ${SHOWN})`, JSON.stringify(Object.keys(LABELS).sort()) === JSON.stringify([...SHOWN].sort()));
+    for (const window of WINDOWS) {
+      const context = await browser.newContext(window.options);
+      if (window.coarse) {
+        const first = await visit("", context);
+        await first.up();
+        expect("a finger gets the iPod touch first", (await first.page.evaluate("pocketAtlas.device()")) === "ipod");
+        await first.page.close();
+      }
+      for (const id of Object.keys(LABELS)) {
+        const p = await visit(`?device=${id}`, context);
+        await p.up();
+        const tag = `${window.name} ${id}`;
+        const cdp = await context.newCDPSession(p.page);
+        // A pointer, or a finger, down on a place of the page; `then` runs while it is held.
+        const held = async (x: number, y: number, then: () => Promise<void>, to?: [number, number]) => {
+          if (window.coarse) {
+            await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y, id: 1 }] });
+            if (to) await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: to[0], y: to[1], id: 1 }] });
+            await then();
+            await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+          } else {
+            await p.page.mouse.move(x, y);
+            await p.page.mouse.down();
+            if (to) await p.page.mouse.move(to[0], to[1], { steps: 6 });
+            await then();
+            await p.page.mouse.up();
+          }
+          await p.page.waitForTimeout(250);
+        };
+        const middle = async (selector: string) => {
+          const box = (await p.page.locator(selector).first().boundingBox())!;
+          return { x: box.x + box.width / 2, y: box.y + box.height / 2, width: box.width, height: box.height };
+        };
+        // The shell is whole between the bar and the dock, its screens are where its picture has them, and
+        // nothing of the page lies over a screen.
+        const look = async () => (await p.page.evaluate(`(async () => {
+          const box = (selector) => { const el = document.querySelector(selector); if (!el || el.hidden) return null; const r = el.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom].map((n) => +n.toFixed(2)); };
+          const art = document.querySelector("[data-pocket-shell-art]");
+          await art.decode().catch(() => {});
+          const { SHELLS } = await import(new URL("shells/profiles.js", document.querySelector('link[href$="pocket3d-stage.css"]').href).href);
+          const shell = SHELLS[${JSON.stringify(id)}];
+          const covered = [...document.querySelectorAll("[data-pocket-screen]:not([hidden])")].map((canvas) => {
+            const r = canvas.getBoundingClientRect();
+            const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+            return top === canvas ? "" : (top?.outerHTML ?? "").slice(0, 80);
+          });
+          return { view: [innerWidth, innerHeight], bar: box("[data-pocket-bar]"), stage: box("[data-pocket-stage=root]"), dock: box("[data-pocket-studio]"), shell: box("[data-pocket-shell]"), upper: box("[data-pocket-screen=upper]"), lower: box("[data-pocket-screen=lower]"),
+            art: [art.naturalWidth, art.naturalHeight, art.currentSrc.split("/").pop()], profile: { width: shell.width, height: shell.height, screens: shell.screens }, covered,
+            face: [getComputedStyle(document.querySelector("[data-pocket-game] h1")).fontFamily.split(",")[0].replaceAll('"', ""), document.fonts.check('800 22px "Gabarito"')],
+            words: [document.querySelector("[data-pocket-game] h1").textContent, document.querySelector("[data-pocket-game] p").textContent],
+            scroll: [document.documentElement.scrollWidth, document.documentElement.scrollHeight] };
+        })()`)) as Record<string, any>;
+        const whole = (seen: Record<string, any>, where: string) => {
+          const { shell, stage, bar, dock, upper, lower, profile } = seen;
+          expect(`${tag} ${where}: the page is one window, with no scroll (${seen.scroll} in ${seen.view})`, seen.scroll[0] <= seen.view[0] && seen.scroll[1] <= seen.view[1]);
+          expect(`${tag} ${where}: the bar, the stage and the dock are inside the window (${JSON.stringify({ bar, stage, dock })} in ${seen.view})`, [bar, stage, dock].every((box: number[]) => box[0]! >= -0.5 && box[2]! <= seen.view[0] + 0.5 && box[1]! >= -0.5 && box[3]! <= seen.view[1] + 0.5));
+          expect(`${tag} ${where}: the shell's picture is the device's (${seen.art})`, seen.art[0] === profile.width && seen.art[1] === profile.height);
+          expect(`${tag} ${where}: the shell is whole inside the stage, under the bar and over the dock (${JSON.stringify({ shell, stage, bar, dock })})`, shell[0] >= stage[0] - 0.5 && shell[2] <= stage[2] + 0.5 && shell[1] >= bar[3] - 0.5 && shell[3] <= dock[1] + 0.5 && shell[2] - shell[0] > 100);
+          const perPixel = (shell[2] - shell[0]) / profile.width;
+          for (const [name, canvas] of [["upper", upper], ["lower", lower]] as const) {
+            if (!canvas) continue;
+            const rect = profile.screens[name] as number[];
+            const want = [shell[0] + rect[0]! * perPixel, shell[1] + rect[1]! * perPixel, shell[0] + (rect[0]! + rect[2]!) * perPixel, shell[1] + (rect[1]! + rect[3]!) * perPixel];
+            // (the game's canvas is fitted inside the picture's screen: within it, and within a fiftieth of its width)
+            const slack = (want[2]! - want[0]!) * 0.02 + 1;
+            expect(`${tag} ${where}: the ${name} screen is where the shell's picture has it (${canvas} in ${want.map((n) => n.toFixed(1))})`, canvas[0] >= want[0]! - 1 && canvas[1] >= want[1]! - 1 && canvas[2] <= want[2]! + 1 && canvas[3] <= want[3]! + 1 && canvas[0] - want[0]! < slack && want[2]! - canvas[2] < slack);
+          }
+          expect(`${tag} ${where}: nothing lies over a screen (${seen.covered})`, seen.covered.every((over: string) => over === ""));
+        };
+        const seen = await look();
+        whole(seen, "atlas");
+        expect(`${tag}: the game's name and its sentence, the name in the kernel's own face (${seen.words}, ${seen.face})`, seen.words[0] === "Pocket Atlas" && seen.words[1] === "The world in your pocket." && seen.face[0] === "Gabarito" && seen.face[1] === true);
+        expect(`${tag}: the 3DS has its lower screen, and no other device has one (${seen.lower})`, (seen.lower !== null) === (id === "3ds"));
+        await p.page.screenshot({ path: join(directory, `player-${window.name}-${id}-atlas.png`) });
+
+        // The mark beside the device's name: a pointer that rests on it, or a finger, shows what it says.
+        const mark = await middle("[data-pocket-mark]");
+        if (window.coarse) await held(mark.x, mark.y, async () => {});
+        else await p.page.mouse.move(mark.x, mark.y);
+        await p.page.waitForTimeout(250);
+        const said = (await p.page.evaluate(`(() => { const tip = document.getElementById("pocket-simulated"); const r = tip.getBoundingClientRect(); return { hidden: tip.hidden, text: tip.textContent, inside: r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight }; })()`)) as Record<string, any>;
+        expect(`${tag}: the mark says the picture is simulated, and how this device's differs (${JSON.stringify(said)})`, said.hidden === false && said.inside && said.text.includes("Your browser draws this picture") && said.text.includes(`A real ${LABELS[id]}`) && said.text.includes("PS Vita build's") && said.text.includes("iPod touch build's") && !said.text.includes("—"));
+        (report.player.notes ??= {})[id] = said.text;
+        await p.page.screenshot({ path: join(directory, `player-${window.name}-${id}-simulated.png`) });
+        if (window.coarse) await held(mark.x, mark.y, async () => {});
+        else await p.page.mouse.move(4, seen.view[1] / 2);
+        await p.page.waitForTimeout(200);
+        expect(`${tag}: the mark's words leave again`, (await p.page.evaluate(`document.getElementById("pocket-simulated").hidden`)) === true);
+
+        // The door to Pocket Studio: the game's card there, and the Studio's own front door.
+        const door = (await p.page.evaluate(`({ get: document.querySelector('[data-pocket-action=get]').href, make: document.querySelector('[data-pocket-action=make]').href, words: document.querySelector('[data-pocket-pitch]').textContent, shown: document.querySelector('[data-pocket-action=get]').getBoundingClientRect().width > 40 })`)) as Record<string, any>;
+        report.player.door ??= door;
+        const card = deployed ? (deployed.studio ? `${deployed.studio.server}/studio/?app=${deployed.studio.app}` : "https://studio.pocket.nexus/") : "https://studio.pocket.nexus/studio/?app=local";
+        expect(`${tag}: the door leads to the game in Pocket Studio (${JSON.stringify(door)}, wanted ${card})`, door.shown && door.get === card && new URL(door.make).pathname === "/" && door.words.includes("Pocket Atlas is built for PSP, PS Vita, Nintendo 3DS, iPod touch and Android."));
+        if (!deployed) expect(`${tag}: the door says what the host holds (${door.words})`, door.words.includes("Pocket Studio has its packages for PSP (31 MB) and Nintendo 3DS (64 MB)."));
+
+        // The shell's own keys: the d-pad's lower arm moves down the list and goes down while it is held; the
+        // stick's cap slides and the globe spins. An iPod touch has neither: its screen is under the finger.
+        const before = await p.status();
+        if (id === "ipod") {
+          expect(`${tag}: a touch panel's shell has no key`, (await p.page.locator("[data-pocket-control], [data-pocket-stick], [data-pocket-pad]").count()) === 0);
+        } else {
+          const pad = await middle("[data-pocket-pad]");
+          let arm = 0;
+          await held(pad.x, pad.y + pad.height * 0.32, async () => {
+            await p.page.waitForTimeout(120);
+            arm = await p.page.locator("[data-pocket-part][data-held]").count();
+          });
+          await p.page.waitForTimeout(1200);
+          const moved = await p.status();
+          expect(`${tag}: the shell's d-pad moves down the list, and its arm goes down while it is held (pin ${before.globe.lit} to ${moved.globe.lit}, ${arm} held)`, moved.globe.lit !== before.globe.lit && arm >= 1);
+          const stick = await middle("[data-pocket-stick=left]");
+          let cap = "";
+          await held(stick.x, stick.y, async () => {
+            await p.page.waitForTimeout(900);
+            cap = (await p.page.evaluate(`document.querySelector('[data-pocket-part-kind=cap][data-held]')?.style.transform ?? ""`)) as string;
+          }, [stick.x + stick.width * 0.4, stick.y]);
+          const spun = await p.status();
+          expect(`${tag}: the shell's stick spins the globe, and its cap slides (${moved.globe.facing[1]} to ${spun.globe.facing[1]}, "${cap}")`, round(spun.globe.facing[1], moved.globe.facing[1]) > 10 && cap !== "");
+        }
+
+        // A place inside the shell: its letterbox bars while the tour runs, the interface over it, and on the
+        // 3DS its controls on the lower screen.
+        await p.page.evaluate(`pocketAtlas.atlas.control("enter=${one}")`);
+        const inside = await p.scene(["place", "error"], true);
+        expect(`${tag}: ${one} opens inside the shell (${inside.scene}: "${inside.message}" "${inside.visit?.trouble}")`, inside.scene === "place" && inside.visit.trouble === "" && inside.visit.tour === true);
+        await p.page.waitForTimeout(2500);
+        whole(await look(), "place");
+        await p.page.screenshot({ path: join(directory, `player-${window.name}-${id}-place.png`) });
+        if (id !== "ipod") {
+          // ✕ on the shell leaves the place.
+          const leave = await middle("[data-pocket-control=cross]");
+          await held(leave.x, leave.y, async () => p.page.waitForTimeout(120));
+          expect(`${tag}: the shell's ✕ leaves the place`, (await p.scene(["atlas"])).visit === null);
+        }
+        if (window.name === "1440" && id === "vita") {
+          // The keys as a list, and the notices.
+          await p.page.locator("[data-pocket-open=controls]").click();
+          await p.page.waitForTimeout(200);
+          report.player.controls = await p.page.evaluate(`document.getElementById("pocket-controls").textContent`);
+          await p.page.screenshot({ path: join(directory, "player-1440-vita-controls.png") });
+          await p.page.locator("[data-pocket-open=about]").click();
+          await p.page.waitForTimeout(200);
+          report.player.about = await p.page.evaluate(`document.getElementById("pocket-about").textContent`);
+          expect(`the notices name the devices as their owners' marks (${report.player.about})`, /PS Vita, PSP, Nintendo 3DS and iPod touch are trademarks of their owners\. Pocket Nexus is not affiliated with them\./.test(report.player.about));
+          await p.page.screenshot({ path: join(directory, "player-1440-vita-about.png") });
+        }
+        expect(`${tag}: no error on the page (${p.problems.join("; ")})`, p.problems.length === 0);
+        await p.page.close();
+      }
       await context.close();
-      report.finger = { first: "ipod", buttons: named };
     }
 
     // ---- what the first frame of the atlas needs: the page on a line of 16 Mbit/s
@@ -794,8 +946,8 @@ if (command === "build") {
       const without = await browser.newPage();
       await without.addInitScript("Object.defineProperty(Navigator.prototype, 'gpu', { get: undefined, configurable: true }); delete Navigator.prototype.gpu;");
       await without.goto(`${origin}/`);
-      await without.waitForFunction("document.getElementById('say').textContent !== ''", undefined, { timeout: 20_000 });
-      report.withoutWebGPU = await without.locator("#say").textContent();
+      await without.waitForFunction("document.querySelector('[data-pocket-say]')?.textContent !== ''", undefined, { timeout: 20_000 });
+      report.withoutWebGPU = await without.locator("[data-pocket-say]").textContent();
       const cover = (await without.evaluate("document.querySelectorAll('[aria-label=Pocket3D]').length")) as number;
       expect(`a browser without WebGPU is told so, once the card has left ("${report.withoutWebGPU}", ${cover})`, report.withoutWebGPU === "This browser has no WebGPU, which Pocket Atlas draws with." && cover === 0);
       await without.close();

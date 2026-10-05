@@ -1,20 +1,20 @@
-// Pocket Atlas in a browser tab: the page around the wgpu shell (../src, built
-// to pkg/) and the game's own interface (../../ui, one bundle a device,
-// compiled by tools/atlas-ui.ts), which a realm of the page runs on PocketJS's
-// UI core and the shell lays over the globe. The pocket3d-*.js modules, the
-// stylesheet, the realm and the title card are PocketJS's browser kernel
-// (vendor/pocketjs/devices/web/pocket-web-wgpu), staged beside this file.
+// Pocket Atlas in a browser tab: the wgpu shell (../src, built to pkg/) and
+// the game's own interface (../../ui, one bundle a device, compiled by
+// tools/atlas-ui.ts), which a realm of the page runs on PocketJS's UI core and
+// the shell lays over the globe or the place. The page around them is the
+// Pocket3D player of PocketJS's browser kernel
+// (vendor/pocketjs/devices/web/pocket-web-wgpu, staged beside this file): the
+// bar, the device's shell with the screens in it and its keys as the controls,
+// the dock. What is Atlas's here is what it says of itself, and the frame.
 //
 // The page shows one of the handhelds the atlas runs on: its screens at their
-// own size, its presentation of the interface, its buttons. The Pocket3D title
+// own size in its shell, its presentation of the interface. The Pocket3D title
 // card plays first; the interface and the globe's surface are read while it
-// plays. This build draws the atlas screen and no place: the interface is
-// told that no place's pack is here and lists every place as closed.
+// plays.
 //
 // The address chooses the device:
 //
 //   ?device=vita|psp|3ds|ipod   the handheld (without it: an iPod touch for a finger, a PS Vita otherwise)
-//   ?buttons                    the device's buttons on the page, also where there is a keyboard
 //   ?globe=URL                  the globe's surface: its file, on a server that answers byte ranges, or the
 //                               manifest (.json) of one cut into pieces. Without it, the page's own
 //                               (<meta name="pocket-globe">)
@@ -25,30 +25,65 @@
 import { playTitle } from "./pocket3d-title.js";
 import { frames, hasWebGPU, titleCard } from "./pocket3d-shell.js";
 import { openInterface, screens } from "./pocket3d-interface.js";
-import { createControls, legend } from "./pocket3d-controls.js";
-import { choices, createStage } from "./pocket3d-stage.js";
+import { createPlayer } from "./pocket3d-player.js";
 import init, { Atlas, shapes, surface, turns } from "./pkg/atlas_wgpu.js";
 
 // The handhelds: each one's screen is the shell's shape of the same name and its interface the bundle under
-// ui/<id>/. `sticks` says what the page's keys and buttons stand for: on the atlas screen the left stick
-// spins the globe, and a device with a touch panel alone has no buttons at all.
+// ui/<id>/. `sticks` says what the device's keys stand for: on the atlas screen the left stick spins the
+// globe, and a device with a touch panel alone has no buttons at all. `note` is what the player's Simulated
+// mark says of the device: every layout here draws the PS Vita build's places (wgpu/README.md, "What
+// differs from the PS Vita") and the iPod touch build's globe, and the device itself draws its own.
 const DEVICES = [
-  { id: "vita", label: "PS Vita", sticks: 2 },
-  { id: "psp", label: "PSP", sticks: 1 },
-  { id: "3ds", label: "Nintendo 3DS", sticks: 1 },
-  { id: "ipod", label: "iPod touch", sticks: 0 },
+  {
+    id: "vita",
+    label: "PS Vita",
+    sticks: 2,
+    note: "This page draws the PS Vita build's places from the same packs, at about twice the sharpness. On a PS Vita, surfaces more than 18 metres away are not shadowed by the buildings and trees around them and, unless they are wet, do not shine. The shadows of wires and railings break into dots, and the people inside the Konbini are pale. The globe here is the iPod touch build's. The PS Vita draws its own.",
+  },
+  {
+    id: "psp",
+    label: "PSP",
+    sticks: 1,
+    note: "This page draws the PS Vita build's places and the iPod touch build's globe. A PSP has two of the seven places, Rainy Night Konbini and Lombard Street, with lower detail and light that is worked out when the place is built.",
+  },
+  {
+    id: "3ds",
+    label: "Nintendo 3DS",
+    sticks: 1,
+    note: "This page draws the PS Vita build's places and the iPod touch build's globe. A 3DS has all seven places at 400 by 240, with lower detail and light that is worked out when the place is built.",
+  },
+  {
+    id: "ipod",
+    label: "iPod touch",
+    sticks: 0,
+    note: "The globe is the iPod touch build's own. The places are the PS Vita build's. An iPod touch 4 has five of the seven, without Sangubashi Crossing and Lombard Street, at 480 by 320 with lower detail and light that is worked out when the place is built.",
+  },
 ];
 // Where the interface's saved places are kept between visits (a device keeps them in a file).
 const KEPT = "pocket-atlas.interface";
 
 const query = new URLSearchParams(location.search);
-const canvas = document.getElementById("scene");
-const say = (text) => (document.getElementById("say").textContent = text);
 const beside = (name) => new URL(name, import.meta.url).href;
 const message = (error) => String(error?.message ?? error);
 const meta = (name) => document.querySelector(`meta[name="${name}"]`).content;
 const coarse = matchMedia("(pointer: coarse)").matches;
 const started = performance.now();
+
+// The page: PocketJS's player, with the device the address asks for, or an iPod touch under a finger.
+const wanted = query.get("device");
+let device = DEVICES.find((d) => d.id === wanted) ?? DEVICES.find((d) => d.id === (coarse ? "ipod" : "vita"));
+let present = () => {};
+const player = createPlayer({
+  title: "Pocket Atlas",
+  tagline: "The world in your pocket.",
+  devices: DEVICES,
+  device: device.id,
+  // (the devices Atlas is built for)
+  runsOn: ["psp", "vita", "3ds", "ipod-touch", "android"],
+  pick: (id) => present(DEVICES.find((d) => d.id === id)),
+});
+const { canvas, stage, controls } = player;
+const say = (text) => player.say(text);
 
 function kept() {
   try {
@@ -69,15 +104,10 @@ async function start() {
   }
   await init();
   const all = JSON.parse(shapes());
-  const wanted = query.get("device");
-  let device = DEVICES.find((d) => d.id === wanted) ?? DEVICES.find((d) => d.id === (coarse ? "ipod" : "vita"));
-  const root = document.getElementById("stage");
-  const stage = createStage(root, canvas);
-  const controls = createControls();
 
   // The shell, on the first device's screen. It draws before the globe is there: the night, and the interface.
   const first = all.find((s) => s.name === device.id);
-  stage.show({ width: first.width, height: first.height });
+  stage.show({ device: device.id, width: first.width, height: first.height });
   const atlas = await Atlas.open(canvas, first.name, kept());
   atlas.packs(meta("pocket-places"));
   let shape = first;
@@ -105,29 +135,18 @@ async function start() {
   // A device on the page: its screens, its controls, and its presentation of the interface in a new realm.
   let ui = null;
   let lower = null;
-  const stack = () => root.toggleAttribute("data-stacked", innerHeight > innerWidth);
-  const picker = choices(document.getElementById("devices"), DEVICES, device.id, (id) => present(DEVICES.find((d) => d.id === id)));
-  async function present(next) {
+  present = async (next) => {
     device = next;
-    picker.set(next.id);
     const plan = await (await fetch(beside(`ui/${next.id}/plan.json`))).json();
     if (device !== next) return;
     // The screens are the plan's: the scene has the primary surface's pixels, the globe is placed in its
     // logical ones.
     const of = screens(plan);
     const to = all.find((s) => s.name === next.id);
-    stage.show({ width: of.physical[0], height: of.physical[1], lower: of.auxiliary });
+    // The device's shell with its screens in it, its keys as the controls, and the screen that takes touch.
+    player.show(next.id, { width: of.physical[0], height: of.physical[1], lower: of.auxiliary, sticks: next.sticks, glyphs: of.glyphs, touch: of.touch, viewport: of.viewport });
     shape = JSON.parse(atlas.reshape(to.name, of.physical[0], of.physical[1], to.samples, to.hz, of.viewport[0], of.viewport[1]));
-    controls.device({ sticks: next.sticks, glyphs: of.glyphs });
-    if (coarse || query.has("buttons")) controls.buttonsIn(stage.left, stage.right);
-    stack();
-    stage.fit();
-    controls.touch(of.touch === "primary" ? canvas : of.touch === "auxiliary" ? stage.second : null, of.touch === "auxiliary" ? of.auxiliary : of.viewport);
     lower = of.auxiliary ? new ImageData(of.auxiliary[0], of.auxiliary[1]) : null;
-    const keys = legend({ sticks: next.sticks, glyphs: of.glyphs }).map(([key, what]) => `${key}: ${what}`);
-    const pointer = of.touch === "auxiliary" ? ["the pointer is a stylus on the lower screen"] : of.touch === "primary" ? [next.sticks ? "the screen takes taps" : "The pointer is a finger on the screen"] : [];
-    // (a browser whose pointer is a finger has no keys to be told of, and knows what its finger is)
-    document.getElementById("keys").textContent = coarse ? "" : [...keys, ...pointer].join(" · ");
     // The guest of the device before goes with its realm; the new one is told the whole state on its first turn.
     ui?.close();
     ui = null;
@@ -146,11 +165,7 @@ async function start() {
       report.failure = message(error);
       say(report.failure);
     }
-  }
-  addEventListener("resize", () => {
-    stack();
-    stage.fit();
-  });
+  };
   const presented = present(device);
 
   // One frame: the globe's turn, the guest's turn when one is due, its pictures when they have changed, the scene.
@@ -202,7 +217,11 @@ async function start() {
     atlas.draw();
     report.frames++;
     report.firstFrame ||= performance.now() - started;
-    if (!report.firstGlobe && report.globe) report.firstGlobe = performance.now() - started;
+    if (!report.firstGlobe && report.globe) {
+      report.firstGlobe = performance.now() - started;
+      // (the globe is on the screen: the player may read what it kept back)
+      player.ready();
+    }
   };
 
   await title;
