@@ -143,6 +143,7 @@ dependencies = [
  "pocket-atlas-interface",
  "pocket-vita-gxm",
  "pocket3d-place",
+ "pocket3d-title",
  "pocketjs-vita",
  "serde_json",
  "sha2",
@@ -165,6 +166,13 @@ dependencies = [
  "pocket-atlas-model",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "pocket3d-title"
+version = "0.1.0"
+dependencies = [
+ "vitasdk-sys",
 ]
 
 [[package]]

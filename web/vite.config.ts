@@ -17,7 +17,8 @@ export default defineConfig({
     },
   }],
   base: "./",
-  server: { host: "127.0.0.1", port: 5173 },
+  // the Pocket3D title card is served from vendor/pocketjs, one level above this app
+  server: { host: "127.0.0.1", port: 5173, fs: { allow: [".."] } },
   build: {
     target: "es2022",
     chunkSizeWarningLimit: 2000,

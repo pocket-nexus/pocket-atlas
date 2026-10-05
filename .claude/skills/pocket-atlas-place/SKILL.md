@@ -14,6 +14,14 @@ A place is one real spot, recreated faithfully enough that someone who has stood
 - **Measured, not guessed.** Geometry comes from OSM, national 3D city models and elevation data, and dated photos; anything estimated is marked as such in the research report.
 - **The device decides.** A place is done when its captures on the Vita read as the reference photos at the same camera and every shot holds 30.0 fps at step 0. Web captures are a step, not the verdict.
 
+## The Pocket3D title card
+
+Every launch starts with the Pocket3D title card (144 vertical blanks, 2.4 s), then the atlas. PocketJS's `pocket3d-title` draws it straight into the frame buffer before the renderer starts and before the interface (`ui/`) boots, so it costs a place no texture memory, no program and no frame time.
+
+- **Not a place's to draw.** A place never draws the Pocket3D mark or name itself, in its scene or through the interface, never adds its own splash before the card, and never skips, shortens or recolours it. The art and the timing change in PocketJS only (`vendor/pocketjs/engine/pocket3d/crates/pocket3d-title`).
+- **Count it when measuring.** A load time taken from launch, or a first frame captured on a device, has the card's 144 vertical blanks in front of it; the Vita starts its debug link after the card, so `status` and `capture` answer only then. Headless web runs skip the card under `?shot` (and `?export`), which `export-place.ts`, `export-atlas.ts` and `preview-place.ts` pass, so exports and preview cards keep their timing; a `scripts/shot.ts` URL without `?shot` has the card over its first 2.4 s.
+- **Development loops may skip it.** On the Vita, `{"title": false}` in `.pocket-build/vita-usb/share/atlas/boot.json` (`host0:atlas/boot.json`) skips the card in a development build running in Pocket Devkit; the PSP and 3DS builds have no switch. A build that leaves the developer's machine (`vpk`, `package`, a `.3dsx`) plays it.
+
 ## Workflow
 
 1. **Research** → `.pocket-build/research/<id>/REPORT.md` plus the data. Collect: OSM for ~400 m around the spot; building heights (PLATEAU in Japan); an elevation profile (GSI 1 m in Japan); 10–20 dated Wikimedia Commons photos with author/date/licence in a `manifest.tsv`; aerials with a metre grid. Write the origin and frame, every dimension, the canonical viewpoint (lat/lon, eye height, heading, vertical FOV, from a reference photo), the time and sun (azimuth/elevation from a sun table), sampled colours, what moves and when, and what to exclude. Make 960 px copies of the photos (`photos-960/`) for agents.

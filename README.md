@@ -73,6 +73,19 @@ bun ui/test/preview.ts <psp|3ds|ipod>       # pictures of the screens → .pocke
 
 Place cards come from each place's preview (`web/scripts/preview-place.ts`); a place without one shows a wash of its accent.
 
+## Title card
+
+Every launch starts with the Pocket3D title card: the mark and the name "Pocket3D" in white on the plum ground for **144 vertical blanks at 60 Hz (2.4 s)**, then the atlas. PocketJS's `pocket3d-title` (`vendor/pocketjs/engine/pocket3d/crates/pocket3d-title`) draws it into the frame buffer before the renderer starts and before [the interface](#the-interface) boots, so it holds no texture, program or draw afterwards:
+
+| Target | Call | Where |
+| --- | --- | --- |
+| PS Vita | `pocket3d_title::vita::play()` | `vita/src/main.rs`, first in `main`, before `graphics::init_with_pool` |
+| PSP | `title()` → `pocket3d_title::play` | `psp/src/main.rs`, in `run()` before `renderer::init` (`sceGuInit`); `play` leaves the frame buffer as zero bytes |
+| Nintendo 3DS | `pocket3d_title_play()` | `n3ds/src/main.c`, after `gfxInitDefault` (both screens BGR8) and before `C3D_Init` |
+| Web reference | `playTitle()` | `web/src/main.ts`; `App` builds the first stage under the card and shows it when the card ends |
+
+A Vita development build skips the card when the USB share holds `atlas/boot.json` with `{"title": false}`; packaged builds do not read that file, and the PSP and 3DS builds have no switch. The web reference skips it under `?shot` and `?export`, which `export-place.ts`, `export-atlas.ts` and `preview-place.ts` pass. The iPod touch app has no card: `pocket3d-title` has no drawer for it. The Pocket3D License (`vendor/pocketjs/pocket3d/LICENSE`) makes showing the card first a condition of distributing a product built on Pocket3D.
+
 ## Web
 
 ```sh

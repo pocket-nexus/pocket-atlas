@@ -20,6 +20,7 @@
 #include <citro3d.h>
 #include <malloc.h>
 #include <math.h>
+#include <pocket3d_title.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -354,6 +355,9 @@ static C3D_RenderTarget *make_top(bool antialias) {
 int main(void) {
   gfxInitDefault();
   gfxSet3D(false);
+  // The Pocket3D title card, on both screens, in the BGR8 frame buffers
+  // gfxInitDefault selects: before the GPU is set up and the interface boots.
+  pocket3d_title_play();
   mkdir("sdmc:/pocket-atlas", 0777);
   boot_log = fopen("sdmc:/pocket-atlas/boot.log", "w");
   atlas_diagnostic("Pocket Atlas " ATLAS_BUILD_ID);

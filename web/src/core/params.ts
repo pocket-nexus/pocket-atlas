@@ -8,7 +8,7 @@ export type GeometryProfile = "full" | "handheld";
  * URL switches. They exist for development and for deterministic captures:
  *   ?q=low|medium|high|ultra   force a quality preset
  *   ?geometry=handheld        use geometry intended for the handheld cooker
- *   ?shot                      capture mode: no UI, no intro, fixed clock
+ *   ?shot                      capture mode: no UI, no title card, no intro, fixed clock
  *   ?t=12.5                    start the simulation clock at this time (s)
  *   ?cam=hero|street|door|...  start a place at a named camera shot
  *   ?stats                     frame-time readout
