@@ -123,12 +123,12 @@ A place builds **18 to 31 variants and 18 to 32 pipelines**; the Konbini builds 
 
 ## The deployable directory
 
-`bun tools/wgpu.ts dist` writes `.pocket-build/wgpu/dist` for a host that limits a file to 32 MiB and a deployment to 4 000 files and 1 GiB, keeps `play/` and `runtime/` at the top for itself, asks for the page again at every visit and keeps every other file for ten minutes: **175 files, 275.8 MiB** with the seven packs, the largest the PS Vita's interface pak at 4.8 MB.
+`bun tools/wgpu.ts dist` writes `.pocket-build/wgpu/dist` for a host that limits a file to 32 MiB and a deployment to 4 000 files and 1 GiB, keeps `play/` and `runtime/` at the top for itself, asks for the page again at every visit and keeps every other file for ten minutes: **185 files, 271.3 MiB** with the seven packs, the largest the PS Vita's interface pak at 4.8 MB.
 
 | Part | Files | Contents |
 | --- | --- | --- |
-| `index.html`, `icon.png` | 2 | the page names its build and the surface's manifest |
-| `app/<build>/` | 28 | the module, the page's scripts, the kernel's modules and stylesheet, the UI core, the four interface bundles; named by a hash of its contents |
+| `index.html`, `icon.png` | 2 | the page names its build, the surface's and the packs' manifests, and the game in Pocket Studio (`pocket-app`, `pocket-studio`) |
+| `app/<build>/` | 41 | 10.0 MiB: the module, the page's script, the kernel's modules and stylesheets with `shells/` and `fonts/`, the UI core, the four interface bundles; named by a hash of its contents |
 | `globe/` | 2 | the surface as one piece of 2 MiB and its manifest, each named by a hash |
 | `places/<id>/` | 140 | each pack in pieces of 2 MiB and its manifest, each named by a hash: 259.3 MiB |
 
@@ -153,7 +153,7 @@ Chrome 154 headless, WebGPU on the Apple GPU (Metal 3, not the fallback adapter)
 - **The tab's frame is the build machine's**: the globe alone on the iPod touch's screen, the tab's canvas beside `atlas-shot` on Metal, differs by 0 of 255 in every pixel.
 - **Beside the PSP build in PPSSPP** (the release package's atlas screen, the same place focused): the interface's legend bar differs by a mean of 0.8 of 255 a colour; the globe's disc by 7.5, because the PSP draws its globe with the GE's fixed pipeline (two layers and square pins) and this is the iPod touch's program.
 - **Sizes**: the module is 404 KB (133 KB gzip), its JavaScript 68 KB, the UI core 365 KB, the surface 2 097 KB (639 KB gzip). The interface: 318 KB of script for each device, and a pak of 4 778 KB (PS Vita, the cards at two samples a pixel), 415 KB (PSP), 1 202 KB (3DS), 940 KB (iPod touch).
-- **On a line of 16 Mbit/s**, PS Vita first: **8.3 MB before the globe and the interface are both there**. The first frame is at 2.4 s, when the title card ends; the surface is there at 2.3 s and the interface at 4.1 s.
+- **On a line of 16 Mbit/s**, PS Vita first: **9.3 MB before the globe and the interface are both there**, the PS Vita's shell and the player's font among them. The first frame is at 2.4 s, when the title card ends; the surface is there at 2.6 s and the interface at 4.6 s.
 
 ### Places
 
