@@ -478,7 +478,11 @@ const geometryOf = (id: string) => EXPORT_OPTIONS[id]?.geometry ?? "full";
  */
 async function exportAll(log: string): Promise<void> {
   rmSync(log, { force: true });
-  for (const place of PLACES.filter((p) => p.status === "live")) await run(log, ["bun", "tools/place.ts", "export", "--place", place.id, "--geometry", geometryOf(place.id)]);
+  for (const place of PLACES.filter((p) => p.status === "live")) {
+    const command = ["bun", "tools/place.ts", "export", "--place", place.id, "--geometry", geometryOf(place.id)];
+    // An export has ended in "The operation timed out" on a loaded computer and passed when run again: a place gets a second try.
+    await run(log, command).catch(() => run(log, command));
+  }
   const port = await new Promise<number>((done, fail) => {
     const probe = createServer().once("error", fail).listen(0, "127.0.0.1", () => {
       const { port } = probe.address() as { port: number };
