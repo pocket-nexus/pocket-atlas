@@ -3,7 +3,7 @@
 // the checked-out commit by the commands a developer runs (tools/atlas.ts,
 // atlas-psp.ts, atlas-3ds.ts, atlas-ipod.ts).
 //
-//   bun tools/release.ts [--export] [--targets vita,psp,3ds,ipod-touch] [--out dist/release]
+//   bun tools/release.ts [--export] [--targets vita,psp,3ds,ipod-touch,android] [--out dist/release]
 //                        [--vita-gxp DIR] [--no-build] [--upload]
 //
 // For each target it cooks every live place of that target from its export
@@ -14,6 +14,7 @@
 //   psp         pocket-atlas-<version>-psp.zip    PSP/GAME/PocketAtlas/, for the root of a Memory Stick
 //   3ds         pocket-atlas-<version>-3ds.zip    3ds/pocket-atlas.3dsx and pocket-atlas/<sha256>.place, for the root of the SD card
 //   ipod-touch  pocket-atlas-<version>-ipod.ipa   Payload/PocketAtlas.app
+//   android     pocket-atlas-<version>.apk        the app for Android 4.3 and later on ARMv7, every Android place inside, signed
 //
 // and release.json beside them: the commit, the version (ui/pocket.json),
 // each file's size and SHA-256, the inputs and the toolchains. A target that
@@ -68,8 +69,8 @@ interface Package {
   sha256: string;
 }
 
-/** Pocket Studio's ids for the devices this repository builds for. It also takes `android`; nothing here builds one. */
-const TARGETS = ["vita", "psp", "3ds", "ipod-touch"] as const;
+/** Pocket Studio's ids for the devices this repository builds for. */
+const TARGETS = ["vita", "psp", "3ds", "ipod-touch", "android"] as const;
 type Target = (typeof TARGETS)[number];
 
 interface Build {
@@ -115,6 +116,13 @@ const BUILDS: Record<Target, Build> = {
     pack: (id) => join(ROOT, ".pocket-build/ipod/assets", `${id}.place`),
     cook: (log) => run(log, ["bun", "tools/atlas-ipod.ts", "cook"]),
     build: ipod,
+  },
+  android: {
+    device: "android",
+    filename: (v) => `${NAME}-${v}.apk`,
+    pack: (id) => join(ROOT, ".pocket-build/android/assets", `${id}.place`),
+    cook: (log) => run(log, ["bun", "tools/atlas-android.ts", "cook"]),
+    build: android,
   },
 };
 
@@ -357,6 +365,38 @@ async function ipod(log: string, output: string): Promise<void> {
   writeZip(output, tree(join(ROOT, ".pocket-build/ipod/Payload"), "Payload"));
 }
 
+/**
+ * The certificate the Android package is signed under, by its SHA-256 (CN=PocketJS BlackBerry Classic, the one
+ * key PocketJS's Android tools keep). Its key is a file outside Git: `keystore` in tools/atlas-android.ts names
+ * where it is looked for, and the tool makes a new key when it finds none. A phone installs a package over an
+ * installed one only under the same certificate, so a package signed by another key is refused here.
+ */
+const ANDROID_SIGNER = "4742388044491df88be7d7f2ce6d0cbd4269ef23c30c528ef9dd8a9b3af7bfbe";
+let signer: string | undefined;
+
+/** The release package (`tools/atlas-android.ts apk --release`: no door for pushed code or packs), as the tool leaves it. */
+async function android(log: string, output: string): Promise<void> {
+  await run(log, ["bun", "tools/atlas-android.ts", "apk", "--release"]);
+  const built = join(ROOT, ".pocket-build/android/PocketAtlas.apk");
+  signer = apkSigner(built);
+  if (signer !== ANDROID_SIGNER) {
+    throw new Error(
+      `the Android package is signed under ${signer}, and a release is signed under ${ANDROID_SIGNER}: the release key is not on this computer (tools/atlas-android.ts names where it looks, and made a key of its own)`,
+    );
+  }
+  cpSync(built, output);
+}
+
+/** The SHA-256 of the certificate an APK's v1 signature carries, as lower-case hex. */
+function apkSigner(apk: string): string {
+  const signature = Bun.spawnSync(["unzip", "-p", apk, "META-INF/*.RSA"]).stdout;
+  const certificate = Bun.spawnSync(["openssl", "pkcs7", "-inform", "DER", "-print_certs"], { stdin: signature }).stdout;
+  const said = Bun.spawnSync(["openssl", "x509", "-noout", "-fingerprint", "-sha256"], { stdin: certificate }).stdout.toString();
+  const digest = /Fingerprint=([0-9A-Fa-f:]+)/.exec(said)?.[1];
+  if (!digest) throw new Error(`${apk} carries no certificate this tool can read`);
+  return digest.replaceAll(":", "").toLowerCase();
+}
+
 /** What Pocket Studio accepts as a package: its name, its first bytes and its size. */
 function accept(path: string): void {
   const name = basename(path);
@@ -438,7 +478,11 @@ const geometryOf = (id: string) => EXPORT_OPTIONS[id]?.geometry ?? "full";
  */
 async function exportAll(log: string): Promise<void> {
   rmSync(log, { force: true });
-  for (const place of PLACES.filter((p) => p.status === "live")) await run(log, ["bun", "tools/place.ts", "export", "--place", place.id, "--geometry", geometryOf(place.id)]);
+  for (const place of PLACES.filter((p) => p.status === "live")) {
+    const command = ["bun", "tools/place.ts", "export", "--place", place.id, "--geometry", geometryOf(place.id)];
+    // An export has ended in "The operation timed out" on a loaded computer and passed when run again: a place gets a second try.
+    await run(log, command).catch(() => run(log, command));
+  }
   const port = await new Promise<number>((done, fail) => {
     const probe = createServer().once("error", fail).listen(0, "127.0.0.1", () => {
       const { port } = probe.address() as { port: number };
@@ -466,6 +510,11 @@ function named(tool: string): string | null {
   return / run (\S+) cargo /.exec(readFileSync(join(ROOT, tool), "utf8"))?.[1] ?? null;
 }
 
+/** What a tool's source names with `pattern`: its pinned versions are constants there, not exports. */
+function inTool(tool: string, pattern: RegExp): string | null {
+  return pattern.exec(readFileSync(join(ROOT, tool), "utf8"))?.[1] ?? null;
+}
+
 function toolchains() {
   const rustc = (toolchain: string | null) => (toolchain ? `${toolchain}: ${line(["rustup", "run", toolchain, "rustc", "-V"]) ?? "not installed"}` : null);
   const pinned = (file: string) => JSON.parse(readFileSync(join(POCKETJS, "tools/cli", file), "utf8"));
@@ -481,6 +530,12 @@ function toolchains() {
       // The 3DS and iPod touch programs are C; their Rust is PocketJS's UI core.
       "3ds": line(["rustc", "-V"], join(POCKETJS, "hosts/3ds/core")),
       "ipod-touch": rustc(pinned("iphone4s-toolchain.json").compiler.rustToolchain),
+      android: rustc(pinned("moto-g-play-toolchain.json").rust.toolchain),
+    },
+    android: {
+      ndk: inTool("tools/atlas-android.ts", /ndk\/([0-9.]+)/),
+      buildTools: inTool("tools/atlas-android.ts", /build-tools\/([0-9.]+)/),
+      java: Bun.spawnSync([`${process.env.JAVA_HOME ?? "/opt/homebrew/opt/openjdk@17"}/bin/java`, "-version"]).stderr.toString().split("\n")[0] || null,
     },
     vitasdk: {
       gcc: line([`${vitasdk}/bin/arm-vita-eabi-gcc`, "--version"]),
@@ -527,7 +582,7 @@ const asked = option("--targets", TARGETS.join(",")).split(",").filter(Boolean);
 const unknown = asked.filter((t) => !(TARGETS as readonly string[]).includes(t));
 if (unknown.length || argv.includes("--help")) {
   if (unknown.length) console.error(`release: no build for ${unknown.join(", ")}: the targets are ${TARGETS.join(", ")}`);
-  console.log("usage: bun tools/release.ts [--export] [--targets vita,psp,3ds,ipod-touch] [--out dist/release] [--vita-gxp DIR] [--no-build] [--upload]");
+  console.log("usage: bun tools/release.ts [--export] [--targets vita,psp,3ds,ipod-touch,android] [--out dist/release] [--vita-gxp DIR] [--no-build] [--upload]");
   process.exit(unknown.length ? 1 : 0);
 }
 const targets = TARGETS.filter((t) => asked.includes(t));
@@ -593,7 +648,7 @@ if (argv.includes("--no-build")) {
         dirty,
         packages,
         failed: failed.map(({ target, error }) => ({ target, error: error.split("\n")[0] })),
-        inputs: { ...sources, packs, vitaPrograms: programs ?? null, buildIds },
+        inputs: { ...sources, packs, vitaPrograms: programs ?? null, buildIds, androidSigner: signer ?? null },
         toolchains: toolchains(),
       },
       null,
