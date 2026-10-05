@@ -21,7 +21,8 @@
 //                                                  the page in Chrome, driven by keys, pointer and touch: each
 //                                                  device's atlas screen and its lists, a place entered through
 //                                                  the interface and left again, every place's held view beside
-//                                                  this machine's own, another device picked, what a frame costs,
+//                                                  this machine's own, the player with every device in its shell
+//                                                  in a 1440 by 900 window and on a phone, what a frame costs,
 //                                                  what a first frame needs on a slow line (--quick: of one place)
 //                                                  → .pocket-build/validation/web/
 //
@@ -51,6 +52,8 @@ const SURFACE = 1024;
 // What the host a build is deployed to allows (Pocket Studio's site deployments): the size of a file, the
 // files and the bytes of a deployment, and the top-level names it keeps for itself.
 const HOST = { file: 32 << 20, files: 4000, bytes: 1 << 30, reserved: ["play", "runtime"] };
+// The devices the page shows (`DEVICES` in wgpu/page/main.js): each has a shell in the kernel's player.
+const SHOWN: readonly string[] = ["vita", "psp", "3ds", "ipod"];
 // The places' packs as the PS Vita reads them: the browser draws the same file.
 const PACKS = join(ROOT, ".pocket-build/places");
 const pack = (id: string) => join(PACKS, id, `${id}.place`);
@@ -85,8 +88,9 @@ async function build() {
   // interface's guest with the UI core, and the host helpers of the framework. Then the icon of the tab.
   await stagePocket3dWeb(SITE);
   cpSync(POCKET3D_ICON.ios2x, join(SITE, "icon.png"));
-  // The game's interface for each device, as its own build compiles it, with the plan PocketJS resolved.
-  for (const device of DEVICES) {
+  // The game's interface for each device the page shows, as its own build compiles it, with the plan
+  // PocketJS resolved. (An Android phone has no shell in the player: its bundle is not staged.)
+  for (const device of DEVICES.filter((d) => SHOWN.includes(d))) {
     const built = await compileInterface(device);
     mkdirSync(join(SITE, "ui", device), { recursive: true });
     for (const file of ["atlas.js", "atlas.pak", "plan.json"]) cpSync(join(built.directory, file), join(SITE, "ui", device, file));
@@ -763,6 +767,7 @@ if (command === "build") {
       { name: "phone", options: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, hasTouch: true, isMobile: true }, coarse: true },
     ];
     const LABELS: Record<string, string> = { vita: "PS Vita", psp: "PSP", "3ds": "Nintendo 3DS", ipod: "iPod touch" };
+    expect(`the page's devices are the ones whose interface is staged (${Object.keys(LABELS)}, ${SHOWN})`, JSON.stringify(Object.keys(LABELS).sort()) === JSON.stringify([...SHOWN].sort()));
     for (const window of WINDOWS) {
       const context = await browser.newContext(window.options);
       if (window.coarse) {

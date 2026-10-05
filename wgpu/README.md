@@ -13,14 +13,14 @@ The game drawn with [wgpu](https://wgpu.rs) over WebGPU: the atlas screen's glob
 | `wgpu/page/` | the page: the title card first, the devices, the frame loop |
 | `tools/wgpu.ts` | build, serve, the deployable directory, the capture, the check in Chrome |
 
-What is not this game's is PocketJS's browser kernel, `vendor/pocketjs/devices/web/pocket-web-wgpu`: the WebGPU device and its screens, the pass that lays the interface over a frame, ranges of a file over HTTP, the Pocket3D title card and the frame loop, the interface's guest in PocketJS's realm, a handheld's controls and screens on the page with their stylesheet. `tools/wgpu.ts` stages its page modules beside the page; this repository holds no copy of them.
+What is not this game's is PocketJS's browser kernel, `vendor/pocketjs/devices/web/pocket-web-wgpu`: the WebGPU device and its screens, the pass that lays the interface over a frame, ranges of a file over HTTP, the Pocket3D title card and the frame loop, the interface's guest in PocketJS's realm, the player (the bar, a device's shell with the screens in it and its keys as the controls, the Simulated mark, the dock) with its shells, its font and its stylesheets. `tools/wgpu.ts` stages its page modules beside the page; this repository holds no copy of them.
 
 ## How it runs
 
 ```sh
 bun install --cwd web && (cd vendor/pocketjs && bun install)
 bun tools/wgpu.ts build     # → .pocket-build/wgpu/site
-bun tools/wgpu.ts serve     # http://127.0.0.1:8788/   ?device=vita|psp|3ds|ipod, ?buttons
+bun tools/wgpu.ts serve     # http://127.0.0.1:8788/   ?device=vita|psp|3ds|ipod
 bun tools/wgpu.ts check     # Chrome over WebGPU, every device, → .pocket-build/validation/web/
 ```
 
@@ -34,7 +34,30 @@ bun tools/wgpu.ts check     # Chrome over WebGPU, every device, → .pocket-buil
 - **The Pocket3D title card plays first**, over the page, while the interface and the surface are read. A browser without WebGPU is told so in one sentence.
 - **Saved places are kept by the page** (`localStorage`, key `pocket-atlas.interface`) and handed back to the interface at the next visit, as a device's file is.
 
-The keys are the buttons of the device the page shows: W A S D the stick, the arrows the d-pad, Z X C V the face buttons at the right, the bottom, the left and the top (I K J L by their place on a device with one stick), Q and E the shoulders, Shift SELECT, Space START. The pointer is the finger on a touch screen and the stylus on the 3DS's lower one. A browser whose pointer is a finger gets the device's buttons on the page, and the iPod touch first.
+The keys are the buttons of the device the page shows: W A S D the stick, the arrows the d-pad, Z X C V the face buttons at the right, the bottom, the left and the top (I K J L by their place on a device with one stick), Q and E the shoulders, Shift SELECT, Space START. The pointer is the finger on a touch screen and the stylus on the 3DS's lower one. The shell's own keys, d-pad and sticks take a pointer or a finger and go down while they are held. A browser whose pointer is a finger gets the iPod touch first.
+
+## The player
+
+The page is the kernel's player (`createPlayer`, `pocket3d-player.js`): the bar with the game's name and the devices as text, each layout in its device's shell with the shell's keys as the controls, the Simulated mark, Controls, About, and the dock that leads to Pocket Studio. `wgpu/page/index.html` has an empty body and links the kernel's two stylesheets. What Atlas hands the player is what it says of itself (`wgpu/page/main.js`):
+
+| | |
+| --- | --- |
+| `title`, `tagline` | "Pocket Atlas", "The world in your pocket." |
+| `runsOn` | `psp`, `vita`, `3ds`, `ipod-touch`, `android`: the devices Atlas is built for |
+| `devices` | the four layouts, each with the `note` the Simulated mark shows after the kernel's own sentence |
+
+**Every layout draws the PS Vita build's places and the iPod touch build's globe**, so a device's note says that, then what the device itself shows:
+
+| Device | Note |
+| --- | --- |
+| PS Vita | This page draws the PS Vita build's places from the same packs, at about twice the sharpness. On a PS Vita, surfaces more than 18 metres away are not shadowed by the buildings and trees around them and, unless they are wet, do not shine. The shadows of wires and railings break into dots, and the people inside the Konbini are pale. The globe here is the iPod touch build's. The PS Vita draws its own. |
+| PSP | This page draws the PS Vita build's places and the iPod touch build's globe. A PSP has two of the seven places, Rainy Night Konbini and Lombard Street, with lower detail and light that is worked out when the place is built. |
+| Nintendo 3DS | This page draws the PS Vita build's places and the iPod touch build's globe. A 3DS has all seven places at 400 by 240, with lower detail and light that is worked out when the place is built. |
+| iPod touch | The globe is the iPod touch build's own. The places are the PS Vita build's. An iPod touch 4 has five of the seven, without Sangubashi Crossing and Lombard Street, at 480 by 320 with lower detail and light that is worked out when the place is built. |
+
+A note changes when a device gains or loses a place (`targets` in `web/src/places/registry.ts`) or when [what differs from the PS Vita](#what-differs-from-the-ps-vita) changes.
+
+**The dock's words come from the page's host.** The player reads `/app.json` there: the game's name and the packages Pocket Studio holds, with their sizes. Where the host answers none, the page's `pocket-app` and `pocket-studio` stand, which `dist` writes from `.pocket-studio.json` (the project this checkout is registered as; Git ignores it). `serve` answers an `/app.json` with two example packages; `serve --dist` answers none.
 
 ## Where a place's renderer plugs in
 
