@@ -3,6 +3,7 @@
 - Pocket Atlas owns the places (`web/src/places/<id>`), the cooker, the `.place` pack format and the PS Vita / PSP renderers. PocketJS (pinned in `vendor/pocketjs`) owns the Vita dev host, the wired debug transport (`tools/vita-dev.ts`, `tools/vita-usb.ts`), VPK packaging (`tools/vita-package.ts`) and the pinned PSP toolchain resolver.
 - Do not edit the submodule to fix application behavior. Send reusable changes to PocketJS, then update the pinned revision here.
 - Use Conventional Commits for commits and pull requests (`type(scope): summary`). Publish validated changes as a Draft PR.
+- Do not commit a build or a pack, and do not attach one to a GitHub release: the packages for each device are published on Pocket Studio (https://studio.pocket.nexus), where its members download them.
 - Keep captures, logs, cooked packs, USB-share contents and build receipts in the ignored `.pocket-build/`. Put reproducible commands, results and limits in the PR description instead of committing them.
 - Commit an image only when something consumes it (LiveArea art under `vita/assets`, a test fixture).
 - Separate evidence kinds when reporting: host build, on-device compile, device GPU timing (`bun tools/atlas.ts profile`), and what a person saw on the screen.

@@ -4,6 +4,8 @@ A world map of places people remember. A place is a small, self-contained 3D sce
 
 This repository holds the first-party places, the pipeline that turns a place into a pack for a handheld GPU, native PS Vita, Nintendo 3DS, PSP, iPod touch 4 and Android (Redmi 1S) renderers, and the one interface they all draw. Publishing and downloading are not built yet. Vita and 3DS target 30 fps; PSP supports night streets and daytime slopes/streets through its fixed-function GE pipeline; the iPod touch draws five places from the 3DS's kind of pack; the Redmi 1S draws all seven from it at up to 1280 × 720.
 
+The packages for each device are on [Pocket Studio](https://studio.pocket.nexus) for its members.
+
 Places share their assets across the reference and handheld renderers:
 
 - **`web/`** is the reference renderer: a standalone three.js + Vite app with no PocketJS dependency, with a night-side globe to pick a place. Every asset is generated at load time.
