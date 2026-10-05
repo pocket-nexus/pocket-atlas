@@ -5,6 +5,7 @@ CC := $(DEVKITARM)/bin/arm-none-eabi-gcc
 BUILD := /atlas/.pocket-build/3ds/build
 SOURCE := /atlas/n3ds/src
 PICA_KERNEL := /atlas/vendor/pocketjs/devices/3ds/pocket-3ds-pica/include
+TITLE := /atlas/vendor/pocketjs/engine/pocket3d/crates/pocket3d-title/include
 POCKET := /atlas/vendor/pocketjs/hosts/3ds
 OUT := /atlas/dist/3ds/pocket-atlas.3dsx
 ROMFS := /atlas/.pocket-build/3ds/romfs
@@ -17,7 +18,7 @@ CORE_LIB := /atlas/.pocket-build/3ds/ui-core/armv6k-nintendo-3ds/release/libpock
 QUICKJS := /atlas/.pocket-build/3ds/quickjs
 CFLAGS := -O3 -g -Wall -Wextra -std=gnu11 -ffunction-sections -fdata-sections -mword-relocations $(ARCH) \
   -D__3DS__ -DJS_NO_NAN_BOXING -DPOCKETJS_RUNTIME_SLOT='"pocket-atlas"' \
-  -include $(BUILD)/config.h -I$(PICA_KERNEL) -I$(SOURCE) -I$(BUILD) -I$(POCKET)/src -I$(POCKET)/include -I$(QUICKJS) -I$(DEVKITPRO)/libctru/include -I$(DEVKITPRO)/portlibs/3ds/include
+  -include $(BUILD)/config.h -I$(PICA_KERNEL) -I$(TITLE) -I$(SOURCE) -I$(BUILD) -I$(POCKET)/src -I$(POCKET)/include -I$(QUICKJS) -I$(DEVKITPRO)/libctru/include -I$(DEVKITPRO)/portlibs/3ds/include
 LDFLAGS := -specs=3dsx.specs $(ARCH) -Wl,--gc-sections -Wl,-Map,$(BUILD)/atlas.map
 ATLAS := main.o scene.o globe.o settings.o assets.o frame_guard.o interface.o guest.o
 OBJECTS := $(addprefix $(BUILD)/,$(ATLAS) scene_shbin.o field_shbin.o wet_shbin.o water_shbin.o globe_shbin.o vshader_shbin.o devserver.o dev_protocol.o native.o hbldr.o soc.o gfx.o qjs.o input.o)
@@ -39,7 +40,7 @@ $(BUILD)/%_shbin.o: $(BUILD)/%_shbin.s
 	$(CC) $(ARCH) -c $< -o $@
 $(BUILD)/vshader.shbin: $(POCKET)/src/vshader.v.pica | $(BUILD)
 	$(DEVKITPRO)/tools/bin/picasso -o $@ $<
-$(addprefix $(BUILD)/,$(ATLAS)): $(BUILD)/%.o: $(SOURCE)/%.c $(wildcard $(SOURCE)/*.h) $(wildcard $(PICA_KERNEL)/*.h) $(BUILD)/config.h $(BUILD)/scene_shbin.h $(BUILD)/field_shbin.h $(BUILD)/wet_shbin.h $(BUILD)/water_shbin.h $(BUILD)/globe_shbin.h | $(BUILD)
+$(addprefix $(BUILD)/,$(ATLAS)): $(BUILD)/%.o: $(SOURCE)/%.c $(wildcard $(SOURCE)/*.h) $(wildcard $(PICA_KERNEL)/*.h) $(wildcard $(TITLE)/*.h) $(BUILD)/config.h $(BUILD)/scene_shbin.h $(BUILD)/field_shbin.h $(BUILD)/wet_shbin.h $(BUILD)/water_shbin.h $(BUILD)/globe_shbin.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 $(addprefix $(BUILD)/,devserver.o dev_protocol.o native.o hbldr.o soc.o input.o): $(BUILD)/%.o: $(POCKET)/src/%.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@

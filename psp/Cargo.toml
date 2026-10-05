@@ -15,6 +15,7 @@ libquickjs-sys = { git = "https://github.com/pocket-nexus/quickjs-rs.git", rev =
 pocketjs-psp = { path = "../vendor/pocketjs/hosts/psp" }
 pocket-atlas-interface = { path = "../crates/pocket-atlas-interface", features = ["guest"] }
 pocket3d-place-psp = { path = "../crates/pocket3d-place-psp" }
+pocket3d-title = { path = "../vendor/pocketjs/engine/pocket3d/crates/pocket3d-title" }
 bytemuck = "1"
 glam = { version = "0.33", default-features = false, features = ["libm"] }
 libm = "0.2"

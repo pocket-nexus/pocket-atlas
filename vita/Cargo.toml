@@ -13,6 +13,7 @@ resolver = "2"
 [dependencies]
 pocketjs-vita = { path = "../vendor/pocketjs/hosts/vita", default-features = false }
 pocket-vita-gxm = { path = "../vendor/pocketjs/devices/vita/pocket-vita-gxm", features = ["runtime-compiler"] }
+pocket3d-title = { path = "../vendor/pocketjs/engine/pocket3d/crates/pocket3d-title" }
 pocket3d-place = { path = "../crates/pocket3d-place" }
 pocket-atlas-interface = { path = "../crates/pocket-atlas-interface", features = ["guest"] }
 glam = "0.33"

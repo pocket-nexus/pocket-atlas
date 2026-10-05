@@ -30,6 +30,8 @@ export class App implements Navigator {
   private frames = 0;
   private statAccum = 0;
   private currentPlace: PlaceDef | null = null;
+  /** Resolved when the Pocket3D title card has ended; no stage is shown before it. */
+  private title: Promise<void> = Promise.resolve();
 
   constructor(canvas: HTMLCanvasElement, ui: HTMLElement, params: Params) {
     this.canvas = canvas;
@@ -87,7 +89,9 @@ export class App implements Navigator {
     };
   }
 
-  async start(): Promise<void> {
+  /** `title` is the Pocket3D title card: the first stage is built under it and shown when it ends. */
+  async start(title: Promise<void> = Promise.resolve()): Promise<void> {
+    this.title = title;
     this.timer.connect(document);
     this.renderer.setAnimationLoop((ts) => this.tick(ts));
     await this.route();
@@ -132,6 +136,7 @@ export class App implements Navigator {
         const { createGlobeStage } = await import("../globe/GlobeStage");
         this.globe = await createGlobeStage(this.context, this);
       }
+      await this.title;
       this.currentPlace = null;
       this.show(this.globe);
       await this.overlay.fadeTo(0, fromPlace ? 900 : 1600);
@@ -164,6 +169,7 @@ export class App implements Navigator {
       await progress(0.92, "Compiling shaders");
       await this.renderer.compileAsync(stage.scene, stage.camera);
       await progress(1, "Ready");
+      await this.title;
       this.swapOut();
       this.currentPlace = place;
       this.show(stage);

@@ -41,7 +41,7 @@ Requires WebGL 2. Tested in Chrome on Apple silicon (ANGLE / Metal).
 | `#/place/<id>` | open a place directly (`#/place/tokyo-konbini`, `#/place/suga-shrine-stairs`) |
 | `?q=low\|medium\|high\|ultra` | force a quality preset (otherwise picked from the GPU, persisted when changed in the UI) |
 | `?geometry=full\|handheld` | daytime authoring density for train, railway and foliage; defaults to full, independent of lighting quality |
-| `?shot` | capture mode: no UI, no intro, muted |
+| `?shot` | capture mode: no UI, no Pocket3D title card, no intro, muted |
 | `?cam=Konbini\|Puddles\|Vending\|Crossing\|Inside\|Wires` | start at a named shot (konbini) |
 | `?cam=Crossing\|Blossom\|Tracks\|Train\|Lane\|Spring` | start at a named shot (Sangubashi in Bloom) |
 | `?cam=Stairs\|Rails\|Below\|Lane\|Canopy` | start at a named shot (Suga Shrine Stairs) |

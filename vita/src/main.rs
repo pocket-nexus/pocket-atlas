@@ -463,6 +463,15 @@ unsafe fn run_atlas(app: &mut App) -> Next {
 
 fn main() {
     unsafe {
+        // The Pocket3D title card plays before the renderer starts. A
+        // development build skips it with {"title": false} in
+        // host0:atlas/boot.json, readable here when Pocket Devkit's USB driver
+        // is already resident.
+        let live = cfg!(feature = "usb-debug");
+        let boot: Value = if live { hostfs::read("host0:atlas/boot.json", 4096).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null) } else { Value::Null };
+        if boot["title"] != Value::Bool(false) {
+            pocket3d_title::vita::play();
+        }
         if let Err(error) = graphics::init_with_pool(2 * 1024 * 1024) {
             pocketjs_vita::vita_log(format_args!("atlas: graphics {error}"));
             return;
@@ -471,7 +480,6 @@ fn main() {
         // The system lowers the clocks again after a suspend or a power-mode
         // change; they are checked once a second and set again.
         let dev = dev::Host::new();
-        let live = cfg!(feature = "usb-debug");
         let gpu = match Gpu::new(live) {
             Ok(g) => g,
             Err(e) => {

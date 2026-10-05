@@ -195,8 +195,28 @@ fn axis(v: u8) -> f32 {
     }
 }
 
+/// The Pocket3D title card, drawn into video memory before the GE is set up.
+/// It leaves the frame buffer as zero bytes.
+unsafe fn title() {
+    // the uncached mirror of video memory: what is written is what the display reads
+    let vram = (sceGeEdramGetAddr() as usize | 0x4000_0000) as *mut u8;
+    sceDisplaySetMode(DisplayMode::Lcd, 480, 272);
+    let mut surface = pocket3d_title::Surface {
+        pixels: core::slice::from_raw_parts_mut(vram, 512 * 272 * 4),
+        width: 480,
+        height: 272,
+        stride: 512,
+        layout: pocket3d_title::Layout::Rgba8,
+    };
+    pocket3d_title::play(&mut surface, |_| {
+        sceDisplaySetFrameBuf(vram, 512, DisplayPixelFormat::Psm8888, DisplaySetBufSync::NextFrame);
+        sceDisplayWaitVblankStart();
+    });
+}
+
 unsafe fn run() {
     scePowerSetClockFrequency(333, 333, 166);
+    title();
     host::reset_fpu_status();
     renderer::init();
     sceCtrlSetSamplingCycle(0);
