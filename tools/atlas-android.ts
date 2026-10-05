@@ -6,7 +6,7 @@
  * the packs. The NDK compiles it, `aapt`, `zipalign` and `apksigner` package
  * it; there is no Gradle project. */
 import { createHash, randomBytes } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { ensureQuickJsCheckout, quickJsCheckout } from "../vendor/pocketjs/tools/native-host-build.ts";
@@ -294,7 +294,11 @@ async function apk(): Promise<string> {
   const unsigned = join(out, "unsigned.apk"), output = join(out, release ? "PocketAtlas.apk" : "PocketAtlas-dev.apk");
   // Packs are stored, not deflated: the app maps them from the APK. PNGs go in as they are.
   run([join(buildTools, "aapt"), "package", "-f", "--no-crunch", "-0", "place", "-0", "pak", "-0", "rgba", "-M", manifest, "-S", resources, "-A", packed, "-I", platform, "-F", unsigned]);
-  run(["zip", "-q", "-r", unsigned, "lib"], staging);
+  // aapt dates its entries 1980-01-01. `zip` dates an entry by its file and adds the file's access time; apksigner
+  // dates its own entries by the last one it is given. The libraries take aapt's date and `-X` leaves the access
+  // times out, so two packages of the same contents are the same bytes.
+  for (const library of readdirSync(join(staging, "lib/armeabi-v7a"))) utimesSync(join(staging, "lib/armeabi-v7a", library), new Date(1980, 0, 1), new Date(1980, 0, 1));
+  run(["zip", "-q", "-X", "-r", unsigned, "lib"], staging);
   run([join(buildTools, "zipalign"), "-f", "4", unsigned, output]);
   const java = { ...process.env, JAVA_HOME: javaHome, PATH: `${join(javaHome, "bin")}:${process.env.PATH}` };
   if (!existsSync(keystore)) {
