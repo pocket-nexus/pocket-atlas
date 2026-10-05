@@ -23,6 +23,9 @@ jobs:
         with:
           bun-version: 1.3.14
       - run: cargo test --locked --workspace
+      # The browser tab's shell (wgpu/) is its own workspace: it is type-checked for the tab's target here.
+      # Its tests and `bun tools/wgpu.ts check` need a GPU and Chrome, and are run on a developer's machine.
+      - run: cargo check --locked --lib --target wasm32-unknown-unknown --manifest-path wgpu/Cargo.toml
       - run: bun install --frozen-lockfile
         working-directory: web
       - run: bun test tools/*.test.ts web/scripts/*.test.ts web/src/places/shared/daylight/*.test.ts web/src/places/sf-lombard-street/world/*.test.ts
