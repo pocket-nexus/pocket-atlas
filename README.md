@@ -13,7 +13,8 @@ Places share their assets across the reference and handheld renderers:
 - **`n3ds/`** renders the globe and all seven live places on an Old 3DS, using a PICA200 cook of the same assets, native 400 × 240 output and a 30fps quality budget. See [the 3DS build and debug workflow](n3ds/README.md).
 - **`psp/`** renders the globe and the places its GE pipeline supports on a PSP.
 - **`ipod/`** renders the globe and five places on an iPod touch 4 (iOS 6, SGX535, OpenGL ES 2) at 480 × 320, from the 3DS lowering with GLES texels and Griffith's lights and haze cooked for it. See [how it draws, builds and is measured](ipod/README.md).
-- **`ui/`** is what all four put on the screen in two dimensions: one PocketJS app with a presentation for each form of device. See [The interface](#the-interface).
+- **`wgpu/`** draws the atlas screen in a browser tab with wgpu over WebGPU: the iPod touch's globe in WGSL, with the interface over it and the page as any of the four handhelds. It opens no place yet. See [Browser tab](#browser-tab).
+- **`ui/`** is what all of them put on the screen in two dimensions: one PocketJS app with a presentation for each form of device. See [The interface](#the-interface).
 
 The web app exports glTF 2.0 with `extras.pocketAtlas`. The cooker seals a lossless PlaceIR, then independently lowers it into Vita, PICA, GE or GLES assets. See [the compiler boundaries, commands and migration plan](docs/COMPILER.md).
 
@@ -48,6 +49,8 @@ Real places fall into a finite set of kinds; the registry names them (`PlaceKind
 | `tools/atlas.ts` | cook (places and the atlas pack), build, deploy over USB, status/capture/profile/sweep/shots, shader lint, standalone VPK |
 | `tools/atlas-psp.ts` | PSP cook/build, PSPLINK serve/run/control/capture/shot measurements, standalone EBOOT package |
 | `ipod/`, `tools/atlas-ipod.ts` | iPod touch 4 app (the GLES 2 renderer, the globe and the shell that hosts the interface) and its cook/build/install/control/capture/measure tool |
+| `wgpu/`, `tools/wgpu.ts` | browser tab: the atlas screen's globe (`globe.rs`), the shell and the interface channel (`app.rs`), the seam of a renderer of places (`place.rs`), the page; the tool builds, serves, writes the deployable directory and checks the page in Chrome |
+| `vendor/pocketjs/devices/web/pocket-web-wgpu` | Shared browser mechanisms: the WebGPU device and its screens, the interface's overlay pass, ranges of a pack over HTTP, the title card and the frame loop, the interface's guest in a realm, a handheld's controls and screens on the page; no scene |
 | `vendor/pocketjs` | PocketJS: the interface's framework, UI core and per-device guest runtimes; Vita dev host and wired debug transport; 3DS paired transport and native installer; pinned PSP toolchain resolver; iPod touch 4 sysroot, startup objects and installer |
 
 ## The interface
@@ -85,6 +88,7 @@ Every launch starts with the Pocket3D title card: the mark and the name "Pocket3
 | PSP | `title()` → `pocket3d_title::play` | `psp/src/main.rs`, in `run()` before `renderer::init` (`sceGuInit`); `play` leaves the frame buffer as zero bytes |
 | Nintendo 3DS | `pocket3d_title_play()` | `n3ds/src/main.c`, after `gfxInitDefault` (both screens BGR8) and before `C3D_Init` |
 | Web reference | `playTitle()` | `web/src/main.ts`; `App` builds the first stage under the card and shows it when the card ends |
+| Browser tab | `titleCard(playTitle)` | `wgpu/page/main.js`, first in `start`; the shell, the interface and the globe's surface are read under the card, and the canvas is shown when it ends |
 
 A Vita development build skips the card when the USB share holds `atlas/boot.json` with `{"title": false}`; packaged builds do not read that file, and the PSP and 3DS builds have no switch. The web reference skips it under `?shot` and `?export`, which `export-place.ts`, `export-atlas.ts` and `preview-place.ts` pass. The iPod touch app has no card: `pocket3d-title` has no drawer for it. The Pocket3D License (`vendor/pocketjs/pocket3d/LICENSE`) makes showing the card first a condition of distributing a product built on Pocket3D.
 
@@ -110,6 +114,23 @@ bun run dev          # http://127.0.0.1:5173
 ```
 
 Controls and URL switches are listed in `web/README.md`.
+
+## Browser tab
+
+`web/` above is the three.js reference. `wgpu/` is the game in a tab: [`wgpu/README.md`](wgpu/README.md) has the loop, the seam, the deployable directory and the measurements in full.
+
+```sh
+bun tools/wgpu.ts build     # → .pocket-build/wgpu/site
+bun tools/wgpu.ts serve     # http://127.0.0.1:8788/   ?device=vita|psp|3ds|ipod
+bun tools/wgpu.ts check     # Chrome over WebGPU, every device
+```
+
+- **The atlas screen, and no place yet.** The globe is `ipod/src/globe.c`'s mesh and three programs in WGSL, on wgpu 25; one renderer runs over WebGPU in a tab and over Metal on the build machine, where the two frames differ by 0 of 255.
+- **The interface is the bundle a device loads**, compiled by `tools/atlas-ui.ts` for each of the four, as a guest in a realm of the page on PocketJS's UI core built for wasm. It is turned 30 times a second and told so, and rests at one turn a second. Its lines pass through `crates/pocket-atlas-interface`, unchanged.
+- **The page shows one handheld and changes it while it runs**: PS Vita, PSP, Nintendo 3DS with its lower screen under the pointer, iPod touch with the pointer as a finger. A browser whose pointer is a finger gets the device's buttons on the page, and the iPod touch first.
+- **No place's pack is here**, so the interface lists every place as closed, and a visit says so and stays on the atlas. `wgpu/src/place.rs` is where a renderer of places plugs in: it is handed the pack as ranges over HTTP, the GPU and the screen, and gives back the shots, the settings and the frame's passes.
+- **The Pocket3D title card plays first**, over the page. A browser without WebGPU is told so in one sentence.
+- **Measured** (Chrome 154, M3 Max): 30 frames a second on the PS Vita's, the PSP's and the 3DS's screens and 60 on the iPod touch's, **0.1 ms of the processor and the GPU a frame**; a redraw of the interface takes 3.8 ms at the PS Vita's 960 × 544 and 0.9 to 1.5 ms on the others. The deployable directory is 32 files and 11.7 MB; on a line of 16 Mbit/s the globe and the interface are both there after 8.3 MB, at 4.1 s.
 
 ## PSP
 
