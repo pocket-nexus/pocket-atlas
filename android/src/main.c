@@ -950,10 +950,15 @@ static void run(void) {
     if (synced)
       latched(sync);
     if (drawn) {
-      // The frame before: its last tile is waited for, or was drawn while this frame was put together.
-      GLenum fence = glClientWaitSync(drawn, 0, paced ? 60000000 : 0);
+      // The frame before: its last tile is watched for, or was drawn while
+      // this frame was put together. The fence is asked every half
+      // millisecond: a wait inside the driver wakes on the kernel's 10 ms
+      // tick and read 17 ms for a frame the GPU drew in 9.
+      bool waited = false;
+      while (glClientWaitSync(drawn, 0, 0) == GL_TIMEOUT_EXPIRED && paced && now() - swapped < 0.06)
+        usleep(500), waited = true;
       float took = (float)(now() - swapped);
-      if (fence == GL_CONDITION_SATISFIED || (fence == GL_ALREADY_SIGNALED && took < gpu_expected))
+      if (waited || took < gpu_expected)
         gpu_expected += (took - gpu_expected) * 0.3f;
       glDeleteSync(drawn);
       drawn = 0;
