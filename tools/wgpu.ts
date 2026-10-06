@@ -860,8 +860,9 @@ if (command === "build") {
         // The door to Pocket Studio: the game's card there, and the Studio's own front door.
         const door = (await p.page.evaluate(`({ get: document.querySelector('[data-pocket-action=get]').href, make: document.querySelector('[data-pocket-action=make]').href, words: document.querySelector('[data-pocket-pitch]').textContent, shown: document.querySelector('[data-pocket-action=get]').getBoundingClientRect().width > 40 })`)) as Record<string, any>;
         report.player.door ??= door;
-        const card = deployed ? (deployed.studio ? `${deployed.studio.server}/studio/?app=${deployed.studio.app}` : "https://studio.pocket.nexus/") : "https://studio.pocket.nexus/studio/?app=local";
-        expect(`${tag}: the door leads to the game in Pocket Studio (${JSON.stringify(door)}, wanted ${card})`, door.shown && door.get === card && new URL(door.make).pathname === "/" && door.words.includes("Pocket Atlas is built for PSP, PS Vita, Nintendo 3DS, iPod touch and Android."));
+        // The player tags the links that leave it, so the Studio knows a visit came from a game's page.
+        const card = deployed ? (deployed.studio ? `${deployed.studio.server}/studio/?app=${deployed.studio.app}&from=player` : "https://studio.pocket.nexus/?from=player") : "https://studio.pocket.nexus/studio/?app=local&from=player";
+        expect(`${tag}: the door leads to the game in Pocket Studio (${JSON.stringify(door)}, wanted ${card})`, door.shown && door.get === card && new URL(door.make).pathname === "/" && new URL(door.make).search === "?from=player" && door.words.includes("Pocket Atlas is built for PSP, PS Vita, Nintendo 3DS, iPod touch and Android."));
         if (!deployed) expect(`${tag}: the door says what the host holds (${door.words})`, door.words.includes("Pocket Studio has its packages for PSP (31 MB) and Nintendo 3DS (64 MB)."));
 
         // The shell's own keys: the d-pad's lower arm moves down the list and goes down while it is held; the
