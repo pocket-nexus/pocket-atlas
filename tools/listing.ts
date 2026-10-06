@@ -247,7 +247,8 @@ async function check(listing: Listing): Promise<{ file: string; bytes: number; s
     const bytes = statSync(join(OUT, entry.file)).size, seen = await probe(join(OUT, entry.file));
     if (seen.codec !== "h264" || !["High", "Main"].includes(seen.profile) || seen.pixels !== "yuv420p" || seen.streams !== 1) faults.push(`${entry.file}: ${seen.codec} ${seen.profile} ${seen.pixels} in ${seen.streams} stream(s); a clip is H.264 High or Main, yuv420p, with no sound`);
     if (seen.width !== entry.width || seen.height !== entry.height) faults.push(`${entry.file}: ${seen.width} x ${seen.height}, and the listing says ${entry.width} x ${entry.height}`);
-    if (Math.abs(seen.seconds - (entry.seconds ?? 0)) > 0.05) faults.push(`${entry.file}: ${seen.seconds} s, and the listing says ${entry.seconds}`);
+    // Pocket Studio takes a whole number of seconds: the clip's length, rounded
+    if (Math.round(seen.seconds) !== entry.seconds) faults.push(`${entry.file}: ${seen.seconds} s, and the listing says ${entry.seconds}; it states the length rounded to a whole second`);
     if (seen.seconds < 6 || seen.seconds > 30) faults.push(`${entry.file}: a clip is 6 to 30 seconds`);
     if (bytes > LIMIT.video) faults.push(`${entry.file}: ${bytes} bytes, over ${LIMIT.video}`);
     files.push({ file: entry.file, bytes, seconds: seen.seconds });
