@@ -25,6 +25,10 @@ crate-type = ["cdylib", "rlib"]
 name = "atlas-shot"
 path = "src/bin/shot.rs"
 
+[[bin]]
+name = "atlas-film"
+path = "src/bin/film.rs"
+
 [dependencies]
 pocket-atlas-interface = { path = "../crates/pocket-atlas-interface" }
 pocket-web-wgpu = { path = "../vendor/pocketjs/devices/web/pocket-web-wgpu" }

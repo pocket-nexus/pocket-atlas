@@ -1,0 +1,84 @@
+{
+  "tagline": "Seven places to stand in, from a Tokyo backstreet in the rain to Griffith Observatory after sunset.",
+  "description": [
+    "Pocket Atlas is a globe with a pin on each place it holds. Pick a pin and you stand there. The camera tours the place by itself, and the stick takes over when you want to walk and look around.",
+    "There are seven places: a 24-hour convenience store on a Tokyo backstreet in the rain, the stone stairs below Suga Shrine in Yotsuya, Radio Kaikan in Akihabara at blue hour, the Enoden crossing at Kamakura-Kōkōmae with Sagami Bay behind it, Sangubashi No. 3 crossing in Yoyogi under cherry blossom, Lombard Street in San Francisco, and Griffith Observatory above Los Angeles twenty minutes after sunset. Each keeps its own hour and weather. A train passes Sangubashi about once a minute and Kamakura every two.",
+    "It runs on PS Vita, PSP, Nintendo 3DS, iPod touch and Android, with a renderer written for each device's GPU. A PS Vita, a 3DS and an Android phone have all seven places, an iPod touch has five and a PSP has two.",
+    "The browser version draws the PS Vita build's places inside the shell of any of four handhelds. The places need a desktop browser with WebGPU."
+  ],
+  "media": [
+    {
+      "kind": "video",
+      "file": "konbini.mp4",
+      "poster": "konbini.jpg",
+      "width": 960,
+      "height": 544,
+      "seconds": 22,
+      "from": "browser",
+      "caption": "Rainy Night Konbini: a 24-hour shop on a Tokyo backstreet, its light on the wet road, Tokyo Tower at the end of the street."
+    },
+    {
+      "kind": "video",
+      "file": "sangubashi.mp4",
+      "poster": "sangubashi.jpg",
+      "width": 960,
+      "height": 544,
+      "seconds": 29.5,
+      "from": "browser",
+      "caption": "Sangubashi No. 3 crossing, Yoyogi: the lamps flash, the arms come down, an eight-car local passes and the arms rise."
+    },
+    {
+      "kind": "video",
+      "file": "kamakura.mp4",
+      "poster": "kamakura.jpg",
+      "width": 960,
+      "height": 544,
+      "seconds": 13,
+      "from": "browser",
+      "caption": "Kamakura-Kōkōmae: an Enoden train comes along Route 134 and crosses the foot of the slope road, with Sagami Bay behind it."
+    },
+    {
+      "kind": "video",
+      "file": "griffith.mp4",
+      "poster": "griffith.jpg",
+      "width": 960,
+      "height": 544,
+      "seconds": 12.5,
+      "from": "browser",
+      "caption": "Griffith Observatory twenty minutes after sunset, with downtown Los Angeles and the basin's lights below."
+    },
+    {
+      "kind": "image",
+      "file": "suga.jpg",
+      "width": 960,
+      "height": 544,
+      "from": "browser",
+      "caption": "The stone stairs below Suga Shrine in Yotsuya, on a summer afternoon."
+    },
+    {
+      "kind": "image",
+      "file": "kaikan.jpg",
+      "width": 960,
+      "height": 544,
+      "from": "browser",
+      "caption": "Radio Kaikan in Akihabara at blue hour, its signs lit."
+    },
+    {
+      "kind": "image",
+      "file": "lombard.jpg",
+      "width": 960,
+      "height": 544,
+      "from": "browser",
+      "caption": "Lombard Street, San Francisco: the brick turns and the hydrangeas between them."
+    },
+    {
+      "kind": "image",
+      "file": "globe.jpg",
+      "width": 960,
+      "height": 544,
+      "from": "browser",
+      "caption": "The atlas screen's globe turned to Japan, with a pin on each place and the cities' lights on the night side."
+    }
+  ],
+  "card": "card.jpg"
+}
