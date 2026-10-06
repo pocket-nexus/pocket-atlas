@@ -384,6 +384,34 @@ For each target the tool cooks every live place the registry gives that target w
 
 **Packages go to Pocket Studio and to no page on GitHub.** `--upload` runs `pocket-studio package <file> --target <id> --version <version>` for each package from the repository's root, where `pocket-studio register --title "Pocket Atlas"` wrote `.pocket-studio.json` (ignored by Git). It refuses a checkout with uncommitted changes. It does not register the game, publish it or change its address; when the link file is missing it prints the commands that write it. `--no-build --upload` sends the packages `release.json` lists, after checking their hashes.
 
+## The listing
+
+`bun tools/listing.ts` films what the game's page on Pocket Studio shows and writes it to `dist/listing/`, which Git ignores:
+
+```
+bun tools/listing.ts [--only FILE] [--upload]
+```
+
+- **The words are `listing/listing.json`, in Git**: one sentence, the paragraphs, and for each clip and still its file, its size in pixels, what drew it (`from`) and a caption. The tool stops when the JSON names a file it has no take for, or when it has a take the JSON does not name.
+- **The pictures are filmed from the game.** `wgpu/src/bin/film.rs` (`atlas-film`) runs the browser tab's renderer of places on this machine's GPU, at the PS Vita's 960 × 544 with four samples a pixel, and writes one frame for each line of a list: an authored shot at a part of its length, or any eye, with the place's loop at a second of its own. `tools/listing.ts` writes the lists and hands the frames to ffmpeg.
+- **A clip is a row of cuts**, each one of the place's authored shots between two parts of its length. The picture dips to black over ten frames on each side of a cut and at the clip's two ends, as the tour's own cuts do, so a clip loops through a dip. A clip is H.264 at 30 frames a second with no sound, held under 12 MiB by a ceiling on its rate; its poster is that frame drawn again, as a JPEG.
+
+| File | What it shows | Length |
+| --- | --- | --- |
+| `konbini.mp4` | Rainy Night Konbini: the corner, the front from the wet road, the side street with Tokyo Tower at its end | 22 s |
+| `sangubashi.mp4` | Sangubashi in Bloom: the lamps and the arms coming down (the loop's seconds 1.5 to 11.5), the train arriving, the train from down the lane, the last cars and the arms rising (29.5 to 40.5) | 29.5 s |
+| `kamakura.mp4` | Kamakura-Kōkōmae Crossing: the train along Route 134, then on the crossing from the slope road | 13 s |
+| `griffith.mp4` | Griffith Observatory at Blue Hour: the domes before downtown, then the terrace over the basin | 12.5 s |
+| `suga.jpg`, `kaikan.jpg`, `lombard.jpg` | one shot each of Suga Shrine Stairs, Radio Kaikan at Blue Hour and Lombard Street in Bloom | |
+| `globe.jpg` | the atlas screen's globe (`atlas-shot --globe`), turned to Japan, with a pin on each live place | |
+| `card.jpg` | the share picture a link preview carries: the Konbini's corner at 1200 × 630, with no text on it | |
+
+Thirteen files, 33.6 MiB. The cuts keep clear of the seconds when a figure walks close past the camera (the Konbini's loop from 11 to 16 s).
+
+**A frame is a function of its line**: the loop's second, the view and the dip are in the line, the grain follows the count of frames, and the first line is drawn eight times before the film starts, because a place's first three frames differ from run to run. Three runs gave the same bytes for the stills, the posters, the share picture and `griffith.mp4`. `konbini.mp4`, `sangubashi.mp4` and `kamakura.mp4` differed between runs: in the one case looked at, two pixels of one frame in 300 differed by one level of 255.
+
+It needs the packs under `.pocket-build/places`, the globe's export under `.pocket-build/atlas/globe`, ffmpeg and ffprobe. `--upload` runs `pocket-studio listing dist/listing` from the repository's root, where `pocket-studio register` wrote `.pocket-studio.json`; `POCKET_STUDIO_CLI` names the command when it is not on `PATH`. No picture goes to Git or to a GitHub release.
+
 ## License
 
 MIT

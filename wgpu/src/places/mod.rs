@@ -63,6 +63,8 @@ pub struct Visit {
     drive: [f32; 4],
     /// A view held for a picture: the rig does not move it.
     held: Option<View>,
+    /// How far a held picture is dipped to black (0 to 1): a cut inside a film.
+    dip: f32,
     two_sticks: bool,
     arrivals: Arrivals,
     /// Textures whose texels have not arrived.
@@ -119,7 +121,7 @@ pub async fn visit(opening: Opening) -> Result<Visit, String> {
             }
         });
     }
-    Ok(Visit { gpu, scene, renderer, rig, view, clock: 0.0, paused: false, statistics: false, exposure: 2, drive: [0.0; 4], held: None, two_sticks: shape.name == "vita", arrivals, waiting, interval: 1000.0 / shape.hz as f32, last: task::now(), pack, born, opened: (task::now() - born) as f32, completed: None, trouble: String::new() })
+    Ok(Visit { gpu, scene, renderer, rig, view, clock: 0.0, paused: false, statistics: false, exposure: 2, drive: [0.0; 4], held: None, dip: 0.0, two_sticks: shape.name == "vita", arrivals, waiting, interval: 1000.0 / shape.hz as f32, last: task::now(), pack, born, opened: (task::now() - born) as f32, completed: None, trouble: String::new() })
 }
 
 fn open(opening: Opening) -> Opened {
@@ -156,8 +158,24 @@ impl Visit {
     pub fn hold(&mut self, k: usize, part: f32, time: f32) -> bool {
         self.clock = time;
         self.held = self.rig.hold_shot(k, part);
+        self.dip = 0.0;
         self.scene.update(time);
         self.held.is_some()
+    }
+
+    /// The view of shot `k` at `part` of its length, without the tour's sway.
+    pub fn shot_view(&mut self, k: usize, part: f32) -> Option<View> {
+        self.rig.hold_shot(k, part)
+    }
+
+    /// Holds any view with the loop at `time` seconds and the picture dipped to black by `dip` (0 to 1):
+    /// one frame of a film (`src/bin/film.rs`). A step after it eases what follows the eye (a shop's
+    /// doors) and leaves the loop where it was put.
+    pub fn film(&mut self, view: View, time: f32, dip: f32) {
+        self.clock = time;
+        self.held = Some(view);
+        self.dip = dip.clamp(0.0, 1.0);
+        self.scene.update(time);
     }
 
     fn options(&self) -> Vec<Setting> {
@@ -316,8 +334,8 @@ impl Place for Visit {
 
     fn draw(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, frame: &Frame) -> Result<u32, String> {
         let weather = Weather::at(self.clock);
-        // A held view is a picture: no dip to black, no bars.
-        let (fade, bars) = if self.held.is_some() { (0.0, 0.0) } else { (self.rig.fade, self.rig.bars) };
+        // A held view is a picture: no bars, and no dip to black but the one a film asks for.
+        let (fade, bars) = if self.held.is_some() { (self.dip, 0.0) } else { (self.rig.fade, self.rig.bars) };
         self.renderer.render(gpu, encoder, &self.scene, &self.view, self.clock, &weather, fade, bars, frame.shown());
         if self.trouble.is_empty() && !self.renderer.trouble.is_empty() {
             self.trouble = self.renderer.trouble.clone();
