@@ -46,6 +46,8 @@ The page is the kernel's player (`createPlayer`, `pocket3d-player.js`): the bar 
 | `runsOn` | `psp`, `vita`, `3ds`, `ipod-touch`, `android`: the devices Atlas is built for |
 | `devices` | the four layouts, each with the `note` the Simulated mark shows after the kernel's own sentence |
 
+**The page speaks English and Japanese**, as PocketJS's player does (its README, "Languages"): `main.js` gives the game's sentence, each device's `note` and its own lines to the player as `{ en, ja }`; the player picks the language and shows the game's English for a word with no Japanese.
+
 **Every layout draws the PS Vita build's places and the iPod touch build's globe**, so a device's note says that, then what the device itself shows:
 
 | Device | Note |

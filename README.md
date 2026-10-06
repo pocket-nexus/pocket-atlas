@@ -389,10 +389,11 @@ For each target the tool cooks every live place the registry gives that target w
 `bun tools/listing.ts` films what the game's page on Pocket Studio shows and writes it to `dist/listing/`, which Git ignores:
 
 ```
-bun tools/listing.ts [--only FILE] [--upload]
+bun tools/listing.ts [--only FILE | --words] [--upload]
 ```
 
 - **The words are `listing/listing.json`, in Git**: one sentence, the paragraphs, and for each clip and still its file, its size in pixels, what drew it (`from`) and a caption. The tool stops when the JSON names a file it has no take for, or when it has a take the JSON does not name.
+- **The Japanese words are `translations.ja` in the same file**: the sentence, the paragraphs and a caption for each picture, under the English limits; Pocket Studio shows them on the game's Japanese page and shows the English for a word they leave out. `bun tools/listing.ts --words` writes `dist/listing/listing.json` for the pictures already in `dist/listing/`, without filming.
 - **The pictures are filmed from the game.** `wgpu/src/bin/film.rs` (`atlas-film`) runs the browser tab's renderer of places on this machine's GPU, at the PS Vita's 960 × 544 with four samples a pixel, and writes one frame for each line of a list: an authored shot at a part of its length, or any eye, with the place's loop at a second of its own. `tools/listing.ts` writes the lists and hands the frames to ffmpeg.
 - **A clip is a row of cuts**, each one of the place's authored shots between two parts of its length. The picture dips to black over ten frames on each side of a cut and at the clip's two ends, as the tour's own cuts do, so a clip loops through a dip. A clip is H.264 at 30 frames a second with no sound, held under 12 MiB by a ceiling on its rate; its poster is that frame drawn again, as a JPEG.
 

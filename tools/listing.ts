@@ -2,6 +2,7 @@
 //
 //   bun tools/listing.ts                  film every clip and still → dist/listing/
 //   bun tools/listing.ts --only NAME      one file of it (konbini.mp4, suga.jpg, card.jpg, …)
+//   bun tools/listing.ts --words          listing.json alone, for the pictures already in dist/listing/
 //   bun tools/listing.ts --upload         then `pocket-studio listing dist/listing`
 //
 // A listing is what a game's page on Pocket Studio shows: one sentence, a few
@@ -207,6 +208,28 @@ interface Listing {
   description: string[];
   media: Media[];
   card: string;
+  translations?: Translations;
+}
+
+/**
+ * The listing's words in another language (the contract, version 1.1): `translations.<lang>` may hold a
+ * tagline, the description's paragraphs and a caption a picture, each under the English limits. A word
+ * it leaves out is shown in English.
+ */
+type Translations = Record<string, { tagline?: string; description?: string[]; captions?: Record<string, string> }>;
+function translationFaults(media: { file: string }[], translations: Translations | undefined): string[] {
+  const faults: string[] = [];
+  const files = new Set(media.map((entry) => entry.file));
+  for (const [lang, words] of Object.entries(translations ?? {})) {
+    if (!/^[a-z]{2}$/.test(lang)) faults.push(`translations: "${lang}" is not a language`);
+    if (words.tagline !== undefined && (!words.tagline || words.tagline.length > 120)) faults.push(`translations.${lang}: the tagline is one sentence of at most 120 characters`);
+    if (words.description !== undefined && (words.description.length < 1 || words.description.length > 6 || words.description.some((p) => !p || p.length > 600))) faults.push(`translations.${lang}: the description is one to six paragraphs of at most 600 characters`);
+    for (const [file, caption] of Object.entries(words.captions ?? {})) {
+      if (!files.has(file)) faults.push(`translations.${lang}: a caption for ${file}, which the listing does not name`);
+      if (!caption || caption.length > 140) faults.push(`translations.${lang}: the caption of ${file} has at most 140 characters`);
+    }
+  }
+  return faults;
 }
 
 async function probe(file: string): Promise<{ codec: string; pixels: string; width: number; height: number; seconds: number; streams: number; profile: string }> {
@@ -223,6 +246,7 @@ async function check(listing: Listing): Promise<{ file: string; bytes: number; s
   if (listing.description.length < 1 || listing.description.length > 6 || listing.description.some((p) => !p || p.length > 600)) faults.push("the description is one to six paragraphs of at most 600 characters");
   if (listing.media.length < 2 || listing.media.length > 12) faults.push("media has 2 to 12 entries");
   if (listing.media[0]?.kind !== "video") faults.push("the first entry is the lead clip");
+  faults.push(...translationFaults(listing.media, listing.translations));
   const picture = async (file: string, width: number, height: number, most: number) => {
     if (!name.test(file)) return void faults.push(`${file}: a file is named [a-z0-9-]+ with .mp4, .jpg, .webp or .png`);
     const path = join(OUT, file);
@@ -278,7 +302,7 @@ async function upload(): Promise<void> {
 const argv = process.argv.slice(2);
 const only = argv.includes("--only") ? argv[argv.indexOf("--only") + 1] : null;
 if (argv.includes("--help")) {
-  console.log("usage: bun tools/listing.ts [--only FILE] [--upload]");
+  console.log("usage: bun tools/listing.ts [--only FILE | --words] [--upload]");
   process.exit(0);
 }
 const listing = JSON.parse(readFileSync(join(ROOT, "listing/listing.json"), "utf8")) as Listing;
@@ -287,12 +311,15 @@ const takes = [...Object.keys(CLIPS), ...Object.keys(STILLS), CARD.file, GLOBE.f
 for (const file of named) if (!takes.includes(file)) throw new Error(`listing/listing.json names ${file}, and tools/listing.ts has no take for it`);
 for (const file of takes) if (!named.has(file)) throw new Error(`tools/listing.ts films ${file}, and listing/listing.json does not name it`);
 if (only && !takes.includes(only)) throw new Error(`no take named ${only}: ${takes.join(", ")}`);
+// (--words: the words change and the pictures stay; nothing is filmed or removed)
+const words = argv.includes("--words");
+if (words && only) throw new Error("--words writes listing.json for the whole directory: run it without --only");
 
 mkdirSync(WORK, { recursive: true });
-if (!only) rmSync(OUT, { recursive: true, force: true });
+if (!only && !words) rmSync(OUT, { recursive: true, force: true });
 mkdirSync(OUT, { recursive: true });
-await run(["cargo", "build", "--release", "--locked", "--bin", "atlas-film", "--bin", "atlas-shot"], { cwd: CRATE });
-const wanted = (file: string) => !only || only === file;
+if (!words) await run(["cargo", "build", "--release", "--locked", "--bin", "atlas-film", "--bin", "atlas-shot"], { cwd: CRATE });
+const wanted = (file: string) => !words && (!only || only === file);
 for (const [file, take] of Object.entries(CLIPS)) {
   if (!wanted(file)) continue;
   await clip(file, take);
