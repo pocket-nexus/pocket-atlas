@@ -1,16 +1,17 @@
-# Pocket Atlas on the Redmi 1S
+# Pocket Atlas on Android
 
-A native ARMv7 app for the Redmi 1S (HM 1S: Android 4.3, API 18, MSM8226, Adreno 305, OpenGL ES 3.0, a 1280 × 720 panel): the atlas and all seven places (`targets: "android"` in the web registry), each drawn into the window at up to 1280 × 720, as a tour of its authored shots or under the fingers. It is a `NativeActivity` with no Java and no Gradle project; the APK holds the code, the interface and every pack. [The interface](../README.md#the-interface) (`ui/`, in its touch presentation at 640 × 360 logical pixels, two samples each way) is everything flat on the screen:
+A native app for Android 4.3 and later with OpenGL ES 3.0, designed for and measured on the Redmi 1S (HM 1S: Android 4.3, API 18, MSM8226, Adreno 305, a 1280 × 720 panel): the atlas and all seven places (`targets: "android"` in the web registry), each drawn at up to 1280 × 720, as a tour of its authored shots or under the fingers. It is a `NativeActivity` with no Java and no Gradle project; the APK holds the code, the interface and every pack. **One APK holds two libraries**, `lib/armeabi-v7a` for the Redmi 1S and `lib/arm64-v8a` for a phone with no 32-bit support, and declares `minSdkVersion` 18 and `targetSdkVersion` 34: [what it does on a current phone](#on-a-current-phone) is below. [The interface](../README.md#the-interface) (`ui/`, in its touch presentation at 640 × 360 logical pixels, two samples each way) is everything flat on the screen:
 
 | Path | Contents |
 | --- | --- |
 | `android/src/scene.c`, `shaders.h` | one place: pack loader, the sun's shadow map, culling and levels of detail, the mirror, sky, light sprites, rain and glows; one GLSL ES 3.00 source compiled per program with a `#define` |
-| `android/src/main.c` | the shell: the window and its EGL surface, touches and the back and menu keys, the title card, the interface's guest (PocketJS's C runtime and UI core) and the pass that lays it over the frame, the guard of the frame rate, commands, status and captures |
+| `android/src/main.c` | the shell: the window and its EGL surface, where the 16:9 picture goes in a window of another shape, touches and the back and menu keys, the title card, the interface's guest (PocketJS's C runtime and UI core) and the pass that lays it over the frame, the guard of the frame rate, commands, status and captures |
 | `android/src/loader.c` | `libmain.so`, the library the activity names: it opens `libatlas.so`, and in a development build a pushed copy of it first |
+| `android/AndroidManifest.xml` | the SDK levels, the activity and the changes of configuration it stays alive through |
 | `android/src/globe.c` | the atlas screen's globe (the iPod touch's, in landscape) |
 | `android/title/` | the Pocket3D title card as three C calls over PocketJS's `pocket3d-title` |
 | `n3ds/src/interface.c` | the renderer's side of the interface's protocol, shared with the 3DS and the iPod touch |
-| `tools/atlas-android.ts` | cook, build, package, install, push, launch, control, capture, measure |
+| `tools/atlas-android.ts` | cook, build both libraries, package, install, push, launch, control, capture, measure |
 | `crates/pocket3d-place-cook/src/adreno.rs`, `pica.rs`, `profiles/redmi1s30.json` | the pack: the 3DS lowering with ETC2 texels, relief cooked into the textures and the sun's shadow camera |
 
 ## How it draws
@@ -44,9 +45,33 @@ Three things this driver (`V@53.0 AU@04.03.00.129.098`) does that the language d
 
 Not here: sound. Against the Vita it lacks lighting per pixel from normal maps (the relief is cooked instead), moving lights on surfaces, lit haze volumes, bloom, rooms traced behind windows (a flat room texture stands in), glass reflections and steam.
 
+## On a current phone
+
+**The package installs on Android 4.3 and on Android 16, and a phone loads the library of its own ABI.** The Redmi 1S draws the frames it drew when the package held one library: a 1280 × 720 window is all picture, and captures of a frozen shot from the build before and from this one are the same bytes. What a phone of another kind meets:
+
+- **The manifest declares `minSdkVersion` 18 and `targetSdkVersion` 34.** Android 14 installs no package that targets less than 23 (`INSTALL_FAILED_DEPRECATED_SDK_VERSION`), Android 15 none that targets less than 24. Targeting 34 takes `android:exported="true"` on the launcher's activity. **`configChanges` names every change of configuration**: the shell ends its process when its activity is destroyed, and the system destroys an activity for a change its manifest does not name (the dark theme at dusk, a font size, a display size). `resizeableActivity` is false, so the system does not put the game beside another app, and `extractNativeLibs` is true, because `loader.c` opens `libatlas.so` as a file beside `libmain.so`.
+- **Two libraries from one set of sources**, both compiled with `-Wall -Wextra -Werror`:
+
+  | | `lib/armeabi-v7a` | `lib/arm64-v8a` |
+  | --- | --- | --- |
+  | Compiler | `armv7a-linux-androideabi18-clang`, `-mcpu=cortex-a7 -mfpu=neon-vfpv4 -mthumb` | `aarch64-linux-android21-clang` |
+  | Rust target | `armv7-linux-androideabi` | `aarch64-linux-android` |
+  | Links against | API 18 | API 21, the first with 64-bit libraries |
+  | Loadable segments | 4 KiB apart | **16 KiB apart** (`-Wl,-z,max-page-size=16384`), for a kernel with 16 KiB pages |
+
+  The tool reads each library's program headers and refuses a segment aligned otherwise. A pack is mapped from the APK from the start of the page it begins in, and the page's size is the kernel's (`sysconf(_SC_PAGESIZE)`). A pack's records are fields of fixed width with no pointer in them (`n3ds/src/format.h`): both libraries read the same bytes.
+- **The picture is 16:9 in a window of any shape.** `place_picture` in `main.c` takes the largest 16:9 rectangle of the window, centred. The system stretches a window's buffer over the window in each direction by itself, so the buffer is the window at the picture's scale: **on a 2400 × 1080 window the buffer is 1600 × 720, the picture is 1280 × 720 from column 160, and the phone shows it at 1920 × 1080 with 240 black pixels on each side.** The scene, the globe, the title card and the interface are drawn through that rectangle (`glViewport`); the strips beside it are cleared to black once a frame is complete; a capture reads the rectangle; a touch is measured from its corner, and a finger that comes down in a strip is not a contact. The guard's steps (720, 648, 576, 540 lines) are the picture's height, and the interface's drawable is the picture at its most lines. **On a 16:9 window the rectangle is the whole buffer**: no offset and no strips.
+- **The window's size is read again** when the system reports a new configuration or a resized window. `native_app_glue` does not pass on `onNativeWindowResized`: `atlas_activity` in `main.c` is the entry `loader.c` calls, it calls the glue's and then takes that callback.
+- **The bars.** `FLAG_FULLSCREEN` hides the status bar on every version. From Android 4.4 on the shell sets sticky immersive mode (`View.setSystemUiVisibility` through JNI, when the activity is made and each time its window takes the focus): the navigation bar stays hidden until a swipe from an edge. The window keeps the default display cutout mode: in landscape the system lays the window out beside a cutout, and the picture is centred in that window.
+- **Frames at 30 a second without the driver's file.** A phone with no readable `/sys/class/graphics/fb0/vsync_event` reports `"refreshes":"swap"` in its status: where the refreshes fall is taken from the returns of `eglSwapBuffers` on the atlas screen, the period is 1/60 s until 120 refreshes in a row give another, and a place's frames are queued two periods apart on the app's own clock. No wait is open-ended: the fence is asked for 60 ms at most and a sleep is three periods at most.
+- **What it reads and writes.** The packs, the interface and the globe come from the APK's assets; `status.json`, `interface.json` (what a visitor saved) and captures go into the app's own files directory. It asks for no permission. Outside those it reads `/proc/self/statm`, the driver's `vsync_event`, and `/data/local/tmp/<package>/`: the tool's `control.json` in every build, and pushed code, interface and packs in a development build.
+- **The tool there.** An app on Android 16 reads a file `adb` pushed to `/data/local/tmp`, so a command file is obeyed as on the Redmi 1S, by a release build too. A current Android keeps the shell out of an app's directory: the tool reads a development build's `status.json` and captures as the app (`run-as`; `launch` and `status` were run that way), and a release build's files are out of reach, so `launch` and `ctl` do their work there and then fail waiting for a status. Judge a release by `adb exec-out screencap` and `adb logcat -s PocketAtlas`, which names the library and the picture's place each time a surface is made. `native` (a pushed `libatlas.so`) is for the Redmi 1S.
+
+Checked on the Android emulator (Android 16, API 36, `arm64-v8a` alone, a 1080 × 2400 display with a cutout, the host's GPU): the release package installs and loads `lib/arm64/libatlas.so`; the title card, the atlas, the konbini, the Suga stairs and Sangubashi are drawn 1920 × 1080 in the middle of a 2264 × 1080 window (the display less its cutout), from a 1510 × 720 buffer; taps 8 to 16 pixels inside the edge of Save, of Visit and of a list row land on them and a tap in a black strip does nothing; the guard's step to 540 lines keeps the picture's place (960 × 540 in a 1132 × 540 buffer); the back key leaves a place and then the app; the process outlives a change of the dark theme, of the font scale and of the display's size. **Not checked: a 64-bit phone's own GPU and driver** (the programs have been compiled by the Adreno 305's driver and the emulator's translator), a panel faster than 60 Hz (at the menu's 60 the app swaps once a refresh, whatever the refresh is), a kernel with 16 KiB pages, and frame times anywhere but on the Redmi 1S.
+
 ## Build and run
 
-Requirements: Bun, Rust (`rustup`, with the toolchain PocketJS pins and the `armv7-linux-androideabi` target), the Android SDK command line tools with **NDK 21.4.7075529** (the last that builds for API 18), build-tools 34.0.0 and platform 34, a JDK for `apksigner`, ImageMagick, and `adb`. `bun tools/atlas-android.ts doctor` checks each and the phone.
+Requirements: Bun, Rust (`rustup`, with the toolchain PocketJS pins and its `armv7-linux-androideabi` and `aarch64-linux-android` targets: `rustup target add --toolchain <pinned> <target>`), the Android SDK command line tools with **NDK 21.4.7075529** (the last that builds for API 18; it builds both libraries), build-tools 34.0.0 and platform 34, a JDK for `apksigner`, ImageMagick, and `adb`. `bun tools/atlas-android.ts doctor` checks each and the phone. With more than one device on `adb`, `ANDROID_SERIAL` names the one the tool talks to.
 
 Export each place and its preview as for the Vita (`web/scripts/export-place.ts`, `preview-place.ts`), then:
 
@@ -72,7 +97,7 @@ bun tools/atlas-android.ts native --no-title    # the same, without the title ca
 bun tools/atlas-android.ts unpush               # back to what the APK holds
 ```
 
-A release build loads no pushed code, interface or pack and always plays the card. It takes commands and writes its status as a development build does, so `shots` measures what is installed. `ATLAS_ANDROID_PACKAGE` installs a build beside another under its own identity (`dev.pocketnexus.atlas` otherwise). The APK is signed with PocketJS's Android debug key in `~/.cache/pocket-nexus/android/signing/`; an installed app upgrades only under the key it was signed with.
+A release build loads no pushed code, interface or pack and always plays the card. It takes commands and writes its status as a development build does, so `shots` measures what is installed on the Redmi 1S. `ATLAS_ANDROID_PACKAGE` installs a build beside another under its own identity (`dev.pocketnexus.atlas` otherwise). The APK is signed with PocketJS's Android debug key in `~/.cache/pocket-nexus/android/signing/`; an installed app upgrades only under the key it was signed with.
 
 Commands are JSON, pushed as one file and acknowledged in the status: `place` (an id) enters a place and `atlas: true` leaves it; `shot` (index or name) cuts to a shot's midpoint; `time` freezes the loop at that second and a negative one releases it; `view: [x, y, z, tx, ty, tz, fov]` pins a camera; `cinematic`, `pause`, `reflection`, `rain`, `glow` are switches; `lod` is the error tolerance in pixels (1); `rate` is 30 or 60; `samples` is 0, 2 or 4; `lines` pins the window buffer's height (540 – 720) and 0 gives it back to the guard; `touch: [[x, y], …]` holds fingers on the interface (640 × 360) until a message with other contacts or none; `key: "back"` or `"menu"` presses that key; `mark: true` starts the count of frames and late frames again; `profile: true` times the GPU with a timer query on every third frame (`gpuMs`; the frames around a query lose their place in the refresh, so it is a time and not a frame rate, and the guard stands still under it).
 
@@ -88,4 +113,4 @@ Status files are written into the app's directory world-readable and read with `
 
 `shots` records the SoC's hottest sensor and the cores online with each shot (`thermal`): above about 60 °C this phone runs on two cores at 1.0 GHz, so let it rest before a run that is to be kept. The GPU's governor lowers its clock when a frame leaves slack: `drawnMs` is how long a frame took, not what it costs at full clock (`profile: true` with the rate at 60 gives that). The results of the last run are in [the main README](../README.md#redmi-1s).
 
-Not verified by the tool: touch handling under real fingers, tours and walks (the guard does not climb back within a visit), and thermal behaviour over a long session (the SoC reached 77 °C after 25 minutes of sweeps).
+Not verified by the tool: touch handling under real fingers, tours and walks (the guard does not climb back within a visit), thermal behaviour over a long session (the SoC reached 77 °C after 25 minutes of sweeps), and any phone but the Redmi 1S ([On a current phone](#on-a-current-phone) lists what the emulator showed).

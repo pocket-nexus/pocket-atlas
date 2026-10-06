@@ -13,6 +13,7 @@ void globe_pins(const char *list);                // "lat,lon,rrggbb;…"
 void globe_spin(float dx, float dy);              // a finger's travel, logical pixels
 // Advances the turn. True once after a spin has settled, with where it faces.
 bool globe_update(float dt, float *lat, float *lon);
-// Clears the bound drawable (`width` by `height` pixels) and draws.
-void globe_render(int width, int height);
+// Clears the bound drawable and draws into the rectangle `width` by `height`
+// pixels at `left`, `bottom` of it.
+void globe_render(int left, int bottom, int width, int height);
 #endif

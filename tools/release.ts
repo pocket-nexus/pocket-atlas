@@ -14,7 +14,7 @@
 //   psp         pocket-atlas-<version>-psp.zip    PSP/GAME/PocketAtlas/, for the root of a Memory Stick
 //   3ds         pocket-atlas-<version>-3ds.zip    3ds/pocket-atlas.3dsx and pocket-atlas/<sha256>.place, for the root of the SD card
 //   ipod-touch  pocket-atlas-<version>-ipod.ipa   Payload/PocketAtlas.app
-//   android     pocket-atlas-<version>.apk        the app for Android 4.3 and later on ARMv7, every Android place inside, signed
+//   android     pocket-atlas-<version>.apk        the app for Android 4.3 and later, ARMv7 and 64-bit libraries, every Android place inside, signed
 //
 // and release.json beside them: the commit, the version (ui/pocket.json),
 // each file's size and SHA-256, the inputs and the toolchains. A target that
