@@ -5,9 +5,18 @@ use crate::{camera::Rig, interface::Ui, scene::Scene};
 use core::{ffi::c_void, ptr};
 use glam::{Mat4, Vec3, Vec4};
 use pocket3d_place_psp as pp;
+use pocket_psp_ge::DisplayList;
 use psp::{sys::*, Align16};
 
-static mut LIST: Align16<[u32; 262144]> = Align16([0; 262144]);
+// sceGuStart writes the list through the uncached mirror, so it has data-cache
+// lines of its own. In a line shared with a static the CPU writes through the
+// cache, that line's write-back puts older bytes over the list's first
+// commands (pocket_psp_ge::list).
+static mut LIST: DisplayList<262144> = DisplayList::new();
+/// The list every frame is written into.
+fn list() -> *mut c_void {
+    DisplayList::as_mut_ptr(ptr::addr_of_mut!(LIST))
+}
 /// One 8888 frame of video memory; the two buffers are at 0 and at this.
 pub const FB: usize = 512 * 272 * 4;
 pub struct Renderer {
@@ -86,7 +95,7 @@ fn texture_format(t: &pp::Texture) -> TexturePixelFormat {
 /// Sets the GE up, once: two 8888 buffers and depth in video memory.
 pub unsafe fn init() {
     sceGuInit();
-    sceGuStart(GuContextType::Direct, ptr::addr_of_mut!(LIST.0) as *mut _);
+    sceGuStart(GuContextType::Direct, list());
     sceGuDrawBuffer(DisplayPixelFormat::Psm8888, ptr::null_mut(), 512);
     sceGuDispBuffer(480, 272, FB as *mut c_void, 512);
     sceGuDepthBuffer((FB * 2) as *mut c_void, 512);
@@ -109,7 +118,7 @@ pub unsafe fn init() {
 /// pass here starts from (the interface's pass leaves its own behind).
 pub unsafe fn begin(clear: u32) {
     sceKernelDcacheWritebackAll();
-    sceGuStart(GuContextType::Direct, ptr::addr_of_mut!(LIST.0) as *mut _);
+    sceGuStart(GuContextType::Direct, list());
     sceGuTexFilter(TextureFilter::LinearMipmapNearest, TextureFilter::Linear);
     sceGuTexLevelMode(TextureLevelMode::Auto, -0.5);
     sceGuTexFunc(TextureEffect::Modulate, TextureColorComponent::Rgba);
