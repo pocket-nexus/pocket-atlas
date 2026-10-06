@@ -1,25 +1,48 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Rendered by tools/atlas-android.ts: the package, the version and whether
      the build is a development one. A NativeActivity with no Java: the app is
-     android/src, PocketJS's guest runtime and the packs. -->
+     android/src, PocketJS's guest runtime and the packs.
+
+     minSdkVersion 18 is the Redmi 1S's Android 4.3. targetSdkVersion 34:
+     Android 14 installs no package that targets less than 23, Android 15 none
+     that targets less than 24. The tool checks both numbers in the package it
+     built (MIN_SDK, TARGET_SDK). What targeting 34 asks of this manifest:
+
+     - android:exported on the activity the launcher starts (from 31).
+     - configChanges names every change of configuration: the shell ends its
+       process when its activity is destroyed (android_main in
+       android/src/main.c), and the system destroys an activity for a change
+       it did not name (the dark theme at dusk, a font size, a display size).
+       Android 4.3 knows the first of these names and ignores the rest.
+     - resizeableActivity false: the system does not put the game beside
+       another app. The shell still measures its window and draws a 16:9
+       picture in the middle of any shape (place_picture).
+     - extractNativeLibs true: android/src/loader.c opens libatlas.so as a
+       file beside libmain.so, where the installer unpacked both.
+
+     The window keeps the default display cutout mode: in landscape the
+     system lays it out beside a cutout, never under one. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="@PACKAGE@"
     android:versionCode="@VERSION_CODE@"
     android:versionName="@VERSION_NAME@">
-    <uses-sdk android:minSdkVersion="18" android:targetSdkVersion="18" />
+    <uses-sdk android:minSdkVersion="18" android:targetSdkVersion="34" />
     <uses-feature android:glEsVersion="0x00030000" android:required="true" />
     <uses-feature android:name="android.hardware.touchscreen.multitouch" android:required="true" />
     <application
         android:allowBackup="false"
         android:debuggable="@DEBUGGABLE@"
+        android:extractNativeLibs="true"
         android:hasCode="false"
         android:icon="@drawable/icon"
         android:label="@LABEL@">
         <activity
             android:name="android.app.NativeActivity"
-            android:configChanges="orientation|keyboardHidden|screenSize|keyboard|navigation"
+            android:configChanges="mcc|mnc|locale|touchscreen|keyboard|keyboardHidden|navigation|orientation|screenLayout|uiMode|screenSize|smallestScreenSize|layoutDirection|density|fontScale|colorMode|fontWeightAdjustment|grammaticalGender"
+            android:exported="true"
             android:label="@LABEL@"
             android:launchMode="singleTask"
+            android:resizeableActivity="false"
             android:screenOrientation="landscape"
             android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
             <meta-data android:name="android.app.lib_name" android:value="main" />

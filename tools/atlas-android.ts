@@ -1,12 +1,14 @@
-/** Pocket Atlas on Android, built for the Redmi 1S (HM 1S: Android 4.3,
- * Adreno 305, OpenGL ES 3.0): cook, build, package, install and measure.
+/** Pocket Atlas on Android: cook, build, package, install and measure. The
+ * frame is designed for and measured on the Redmi 1S (HM 1S: Android 4.3,
+ * Adreno 305, OpenGL ES 3.0); the one package also holds a 64-bit library, so
+ * it installs on a current phone (`ABIS`, android/AndroidManifest.xml).
  * The app is a NativeActivity with no Java: the C in android/src, PocketJS's
  * runtime for the interface (its UI core with the OpenGL ES 2 backend,
  * QuickJS and the guest driver), the Pocket3D title card (android/title) and
  * the packs. The NDK compiles it, `aapt`, `zipalign` and `apksigner` package
  * it; there is no Gradle project. */
 import { createHash, randomBytes } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { ensureQuickJsCheckout, quickJsCheckout } from "../vendor/pocketjs/tools/native-host-build.ts";
@@ -41,12 +43,24 @@ const pins = JSON.parse(readFileSync(join(pocket, "tools/cli/moto-g-play-toolcha
 const sdk = process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT ?? "/opt/homebrew/share/android-commandlinetools";
 const ndk = process.env.ANDROID_NDK_HOME ?? join(sdk, "ndk/21.4.7075529");
 const llvm = join(ndk, "toolchains/llvm/prebuilt", process.platform === "darwin" ? "darwin-x86_64" : "linux-x86_64", "bin");
-const clang = join(llvm, "armv7a-linux-androideabi18-clang");
+/**
+ * The package's libraries, one directory of `lib/` each. `armeabi-v7a` is the Redmi 1S's: built against API 18
+ * and tuned for its Cortex-A7, as it was when it was the only one. `arm64-v8a` is what a phone with no 32-bit
+ * support loads: built against API 21, the first with a 64-bit ABI, and linked with its segments 16 KiB apart
+ * so that a kernel with 16 KiB pages maps it. A phone loads the first of its own ABIs the package holds.
+ */
+export const ABIS = [
+  { abi: "armeabi-v7a", clang: "armv7a-linux-androideabi18-clang", rust: "armv7-linux-androideabi", machine: ["-mcpu=cortex-a7", "-mfpu=neon-vfpv4", "-mfloat-abi=softfp", "-mthumb"], pageSize: 4096 },
+  { abi: "arm64-v8a", clang: "aarch64-linux-android21-clang", rust: "aarch64-linux-android", machine: [], pageSize: 16384 },
+] as const;
+type Abi = (typeof ABIS)[number];
+/** What android/AndroidManifest.xml declares, checked in the built package: the oldest Android that installs it, and the one its behaviour is declared for. */
+export const MIN_SDK = 18, TARGET_SDK = 34;
 const glue = join(ndk, "sources/android/native_app_glue");
 const buildTools = join(sdk, "build-tools/34.0.0");
 const platform = join(sdk, "platforms/android-34/android.jar");
 const javaHome = process.env.JAVA_HOME ?? "/opt/homebrew/opt/openjdk@17";
-const RUST = pins.rust.toolchain as string, RUST_TARGET = "armv7-linux-androideabi";
+const RUST = pins.rust.toolchain as string;
 const cache = join(homedir(), ".cache/pocket-nexus/android");
 const quickJs = quickJsCheckout(join(cache, "sources/quickjs-rs"));
 // A development package's key: PocketJS's Android tools keep one debug key. An installed app upgrades only under the key it was signed with.
@@ -87,7 +101,15 @@ function push(from: string, name: string) {
 }
 function pull(name: string, to: string): Buffer {
   mkdirSync(dirname(to), { recursive: true });
-  adb("pull", `${FILES}/${name}`, to);
+  try {
+    adb("pull", `${FILES}/${name}`, to);
+  } catch (error) {
+    // Android 4.3 lets the shell read a file the app left world-readable. A current Android keeps the shell out
+    // of an app's directory: a development build's file is read as the app, a release build's is out of reach.
+    const read = Bun.spawnSync(["adb", "-s", phone, "exec-out", "run-as", PACKAGE, "cat", `files/${name}`], { stdout: "pipe", stderr: "pipe" });
+    if (read.exitCode || !read.stdout.length || read.stdout.toString("latin1", 0, 8).startsWith("run-as:")) throw error;
+    writeFileSync(to, read.stdout);
+  }
   return readFileSync(to);
 }
 const status = (): Record<string, any> => JSON.parse(pull("status.json", join(out, "status.json")).toString());
@@ -186,86 +208,100 @@ function cook() {
 
 function doctor() {
   const checks: [string, boolean, string][] = [
-    ["NDK clang for API 18", existsSync(clang), clang],
+    ...ABIS.map((abi): [string, boolean, string] => [`NDK clang (${abi.abi})`, existsSync(join(llvm, abi.clang)), join(llvm, abi.clang)]),
     ["native_app_glue", existsSync(join(glue, "android_native_app_glue.c")), glue],
     ["aapt, zipalign, apksigner", ["aapt", "zipalign", "apksigner"].every((tool) => existsSync(join(buildTools, tool))), buildTools],
     ["android.jar", existsSync(platform), platform],
     ["Java", existsSync(join(javaHome, "bin/java")), javaHome],
-    ["Rust target", existsSync(join(run(["rustup", "run", RUST, "rustc", "--print", "sysroot"]), "lib/rustlib", RUST_TARGET, "lib")), `${RUST_TARGET} on ${RUST}`],
+    ...ABIS.map((abi): [string, boolean, string] => [`Rust target (${abi.abi})`, existsSync(join(run(["rustup", "run", RUST, "rustc", "--print", "sysroot"]), "lib/rustlib", abi.rust, "lib")), `${abi.rust} on ${RUST} (rustup target add --toolchain ${RUST} ${abi.rust})`]),
     ["ImageMagick", !!Bun.which("magick"), "magick"],
   ];
   for (const [label, ok, detail] of checks) console.log(`[${ok ? "ok" : "missing"}] ${label}: ${detail}`);
   try {
     const model = shell("getprop ro.product.model"), release = shell("getprop ro.build.version.release"), board = shell("getprop ro.board.platform");
-    console.log(`[${model === "HM 1S" ? "ok" : "other"}] phone: ${model}, Android ${release}, ${board} (the profile is measured on an HM 1S, Android 4.3, msm8226)`);
+    console.log(`[${model === "HM 1S" ? "ok" : "other"}] phone: ${model}, Android ${release}, ${board}, ${shell("getprop ro.product.cpu.abi")} (the profile is measured on an HM 1S, Android 4.3, msm8226)`);
   } catch (error) {
     console.log(`[missing] phone: ${(error as Error).message}`);
   }
   if (checks.some(([, ok]) => !ok)) process.exitCode = 1;
 }
 
-async function build(): Promise<{ libraries: string; ui: string; build: string }> {
-  if (!existsSync(clang)) throw new Error(`no NDK at ${ndk}: install ndk;21.4.7075529 with sdkmanager`);
+/** Where the build leaves an ABI's two libraries: the staged package's `lib/<abi>`. */
+const staged = (abi: Abi) => join(out, "apk/lib", abi.abi);
+
+async function build(): Promise<{ ui: string; build: string }> {
+  for (const abi of ABIS) if (!existsSync(join(llvm, abi.clang))) throw new Error(`no ${abi.clang} in ${ndk}: install ndk;21.4.7075529 with sdkmanager`);
   const ui = await compileInterface("android");
-  const objects = join(out, "native"), libraries = join(out, "apk/lib/armeabi-v7a");
-  mkdirSync(objects, { recursive: true });
-  mkdirSync(libraries, { recursive: true });
   ensureQuickJsCheckout("atlas-android", quickJs.root, pins.quickjs);
 
   // The interface's runtime, from PocketJS: the UI core as a static library
   // (its OpenGL ES 2 backend, which an ES 3 context runs unchanged), QuickJS,
   // and the driver that runs the guest. Its service wire is answered in the
   // process by n3ds/src/interface.c.
-  const cargo = (directory: string, target: string, extra: string[] = []) =>
-    run(["rustup", "run", RUST, "cargo", "build", "--release", "--locked", "--target", RUST_TARGET, ...extra], directory, { ...process.env, CARGO_TARGET_DIR: target, RUSTUP_TOOLCHAIN: undefined });
-  cargo(join(pocket, "engine/ui-cabi"), join(out, "ui-core"), ["--no-default-features", "--features", "bare-platform"]);
-  cargo(join(root, "android/title"), join(out, "title"));
-  const core = join(out, "ui-core", RUST_TARGET, "release/libpocketjs_symbian_core.a");
-  const title = join(out, "title", RUST_TARGET, "release/libatlas_title.a");
+  const cargo = (abi: Abi, directory: string, target: string, extra: string[] = []) =>
+    run(["rustup", "run", RUST, "cargo", "build", "--release", "--locked", "--target", abi.rust, ...extra], directory, { ...process.env, CARGO_TARGET_DIR: target, RUSTUP_TOOLCHAIN: undefined });
+  const archives = ABIS.map((abi) => {
+    cargo(abi, join(pocket, "engine/ui-cabi"), join(out, "ui-core"), ["--no-default-features", "--features", "bare-platform"]);
+    cargo(abi, join(root, "android/title"), join(out, "title"));
+    return { core: join(out, "ui-core", abi.rust, "release/libpocketjs_symbian_core.a"), title: join(out, "title", abi.rust, "release/libatlas_title.a") };
+  });
 
-  const flags = ["-O3", "-fPIC", "-mcpu=cortex-a7", "-mfpu=neon-vfpv4", "-mfloat-abi=softfp", "-mthumb", "-ffunction-sections", "-fdata-sections", "-fvisibility=hidden", "-DANDROID", "-D_GNU_SOURCE"];
-  const compile = (source: string, extra: string[] = [], inputs: string[] = []) => {
-    const object = join(objects, source.replace(/[^A-Za-z0-9]/g, "_") + ".o");
-    if (newer(object, [source, ...inputs])) run([clang, ...flags, ...extra, "-c", source, "-o", object]);
-    return object;
-  };
   const includes = ["-I", join(pocket, "engine/quickjs-c"), "-I", join(pocket, "engine/ui-cabi/include"), "-I", join(pocket, "contracts/generated"),
     "-I", join(pocket, "hosts/ios-legacy"), "-I", join(pocket, "hosts/shared"), "-I", glue, "-isystem", quickJs.source];
-  const guest = [
-    ...["quickjs.c", "cutils.c", "dtoa.c", "libregexp.c", "libunicode.c"].map((f) => compile(join(quickJs.source, f), ["-std=gnu11", "-I", quickJs.source, "-funsigned-char", "-fwrapv", "-fno-strict-aliasing", `-DCONFIG_VERSION="${pins.quickjs.version}"`, "-w"])),
-    compile(quickJs.staticFunctions, ["-std=gnu11", "-I", quickJs.source, "-funsigned-char", "-w"]),
-    compile(join(pocket, "engine/quickjs-c/rust_eh_personality.c")),
-  ];
   const sources = ["android/src/main.c", "android/src/scene.c", "android/src/globe.c", "n3ds/src/interface.c"].map((f) => join(root, f));
   const headers = ["android/src/scene.h", "android/src/shaders.h", "android/src/globe.h", "n3ds/src/format.h", "n3ds/src/control.h", "n3ds/src/interface.h"].map((f) => join(root, f));
-  const id = createHash("sha256").update([...sources, ...headers, join(ui.directory, "atlas.js"), join(ui.directory, "atlas.pak"), core, title].map(sha).join()).digest("hex").slice(0, 12);
+  // One identity for the package: the same sources and interface in every library, and each ABI's archives.
+  const id = createHash("sha256").update([...sources, ...headers, join(ui.directory, "atlas.js"), join(ui.directory, "atlas.pak"), ...archives.flatMap((a) => [a.core, a.title])].map(sha).join()).digest("hex").slice(0, 12);
   const settings = [`-DATLAS_PACKAGE="${PACKAGE}"`, `-DATLAS_RATE=${profile.presentation.targetFps}`, ...(release ? [] : ["-DATLAS_DEV"])];
   const strict = ["-std=gnu11", "-Wall", "-Wextra", "-Werror", `-DATLAS_BUILD="${id}"`, ...settings, ...includes];
-  // The runtime is rebuilt with the interface: the plan's target, host ABI and density are compiled in.
-  rmSync(join(objects, join(pocket, "engine/quickjs-c/pocket_runtime.c").replace(/[^A-Za-z0-9]/g, "_") + ".o"), { force: true });
-  for (const source of sources) rmSync(join(objects, source.replace(/[^A-Za-z0-9]/g, "_") + ".o"), { force: true });
-  const mine = [
-    ...sources.map((f) => compile(f, strict)),
-    compile(join(pocket, "engine/quickjs-c/pocket_runtime.c"), ["-std=gnu11", ...includes, "-DPOCKET_SVC_WIRE", `-DPOCKETJS_TARGET_ID="${ui.inputs.target}"`,
-      `-DPOCKETJS_HOST_ABI=${ui.inputs.hostAbi}`, `-DPOCKET_RASTER_DENSITY=${ui.inputs.viewport.rasterDensity}`]),
-    // The glue's entry becomes this library's: android/src/loader.c is what NativeActivity loads.
-    compile(join(glue, "android_native_app_glue.c"), ["-DANativeActivity_onCreate=atlas_activity", "-fvisibility=default", "-w"]),
-  ];
-  // Two Rust static libraries each bring their own copy of the language's
-  // runtime symbols; the title card's is the smaller, so its duplicates give way.
-  const link = (output: string, inputs: string[], libs: string[]) =>
-    run([clang, "-shared", "-Wl,--no-undefined", "-Wl,--gc-sections", "-Wl,--build-id=none", `-Wl,-soname,${output.split("/").pop()}`, "-Wl,-z,max-page-size=4096", "-o", output, ...inputs, ...libs]);
-  link(join(libraries, "libatlas.so"), [...mine, ...guest, "-Wl,--whole-archive", core, "-Wl,--no-whole-archive", "-Wl,--allow-multiple-definition", title],
-    ["-landroid", "-llog", "-lEGL", "-lGLESv3", "-ldl", "-lm"]);
-  rmSync(join(objects, join(root, "android/src/loader.c").replace(/[^A-Za-z0-9]/g, "_") + ".o"), { force: true });
-  link(join(libraries, "libmain.so"), [compile(join(root, "android/src/loader.c"), ["-std=gnu11", "-Wall", "-Wextra", "-Werror", ...settings])], ["-landroid", "-llog", "-ldl"]);
-  run([join(llvm, "llvm-strip"), "--strip-unneeded", join(libraries, "libatlas.so"), join(libraries, "libmain.so")]);
+  const sizes: Record<string, number> = {};
+  ABIS.forEach((abi, index) => {
+    const clang = join(llvm, abi.clang), objects = join(out, "native", abi.abi), libraries = staged(abi), { core, title } = archives[index];
+    mkdirSync(objects, { recursive: true });
+    mkdirSync(libraries, { recursive: true });
+    const flags = ["-O3", "-fPIC", ...abi.machine, "-ffunction-sections", "-fdata-sections", "-fvisibility=hidden", "-DANDROID", "-D_GNU_SOURCE"];
+    const compile = (source: string, extra: string[] = [], inputs: string[] = []) => {
+      const object = join(objects, source.replace(/[^A-Za-z0-9]/g, "_") + ".o");
+      if (newer(object, [source, ...inputs])) run([clang, ...flags, ...extra, "-c", source, "-o", object]);
+      return object;
+    };
+    const guest = [
+      ...["quickjs.c", "cutils.c", "dtoa.c", "libregexp.c", "libunicode.c"].map((f) => compile(join(quickJs.source, f), ["-std=gnu11", "-I", quickJs.source, "-funsigned-char", "-fwrapv", "-fno-strict-aliasing", `-DCONFIG_VERSION="${pins.quickjs.version}"`, "-w"])),
+      compile(quickJs.staticFunctions, ["-std=gnu11", "-I", quickJs.source, "-funsigned-char", "-w"]),
+      compile(join(pocket, "engine/quickjs-c/rust_eh_personality.c")),
+    ];
+    // The runtime is rebuilt with the interface: the plan's target, host ABI and density are compiled in.
+    rmSync(join(objects, join(pocket, "engine/quickjs-c/pocket_runtime.c").replace(/[^A-Za-z0-9]/g, "_") + ".o"), { force: true });
+    for (const source of sources) rmSync(join(objects, source.replace(/[^A-Za-z0-9]/g, "_") + ".o"), { force: true });
+    const mine = [
+      ...sources.map((f) => compile(f, strict)),
+      compile(join(pocket, "engine/quickjs-c/pocket_runtime.c"), ["-std=gnu11", ...includes, "-DPOCKET_SVC_WIRE", `-DPOCKETJS_TARGET_ID="${ui.inputs.target}"`,
+        `-DPOCKETJS_HOST_ABI=${ui.inputs.hostAbi}`, `-DPOCKET_RASTER_DENSITY=${ui.inputs.viewport.rasterDensity}`]),
+      // android/src/loader.c is what NativeActivity loads: it calls atlas_activity in android/src/main.c, which calls the glue's entry under this name.
+      compile(join(glue, "android_native_app_glue.c"), ["-DANativeActivity_onCreate=atlas_glue", "-w"]),
+    ];
+    // Two Rust static libraries each bring their own copy of the language's
+    // runtime symbols; the title card's is the smaller, so its duplicates give way.
+    const link = (output: string, inputs: string[], libs: string[]) =>
+      run([clang, "-shared", "-Wl,--no-undefined", "-Wl,--gc-sections", "-Wl,--build-id=none", `-Wl,-soname,${output.split("/").pop()}`, `-Wl,-z,max-page-size=${abi.pageSize}`, "-o", output, ...inputs, ...libs]);
+    link(join(libraries, "libatlas.so"), [...mine, ...guest, "-Wl,--whole-archive", core, "-Wl,--no-whole-archive", "-Wl,--allow-multiple-definition", title],
+      ["-landroid", "-llog", "-lEGL", "-lGLESv3", "-ldl", "-lm"]);
+    rmSync(join(objects, join(root, "android/src/loader.c").replace(/[^A-Za-z0-9]/g, "_") + ".o"), { force: true });
+    link(join(libraries, "libmain.so"), [compile(join(root, "android/src/loader.c"), ["-std=gnu11", "-Wall", "-Wextra", "-Werror", ...settings])], ["-landroid", "-llog", "-ldl"]);
+    run([join(llvm, "llvm-strip"), "--strip-unneeded", join(libraries, "libatlas.so"), join(libraries, "libmain.so")]);
+    // A segment of the library starts on a page of the phone's: every loadable segment is aligned to the ABI's page size.
+    for (const library of ["libatlas.so", "libmain.so"]) {
+      const segments = run([join(llvm, "llvm-readelf"), "-lW", join(libraries, library)]).split("\n").filter((line) => /^\s*LOAD\s/.test(line));
+      if (!segments.length || segments.some((line) => Number(line.trim().split(/\s+/).pop()) !== abi.pageSize)) throw new Error(`${abi.abi}/${library}: a loadable segment is not aligned to ${abi.pageSize} bytes`);
+    }
+    sizes[abi.abi] = statSync(join(libraries, "libatlas.so")).size;
+  });
 
   mkdirSync(assets, { recursive: true });
   writeFileSync(join(assets, "globe.rgba"), globeSurface(1024));
   for (const file of ["atlas.js", "atlas.pak"]) cpSync(join(ui.directory, file), join(assets, file));
-  console.log(JSON.stringify({ build: id, package: PACKAGE, release, libatlas: statSync(join(libraries, "libatlas.so")).size }));
-  return { libraries, ui: ui.directory, build: id };
+  console.log(JSON.stringify({ build: id, package: PACKAGE, release, libatlas: sizes }));
+  return { ui: ui.directory, build: id };
 }
 
 /**
@@ -324,13 +360,15 @@ async function apk(): Promise<string> {
   // aapt dates its entries 1980-01-01. `zip` dates an entry by its file and adds the file's access time; apksigner
   // dates its own entries by the last one it is given. The libraries take aapt's date and `-X` leaves the access
   // times out, so two packages of the same contents are the same bytes.
-  for (const library of readdirSync(join(staging, "lib/armeabi-v7a"))) utimesSync(join(staging, "lib/armeabi-v7a", library), new Date(1980, 0, 1), new Date(1980, 0, 1));
-  run(["zip", "-q", "-X", "-r", unsigned, "lib"], staging);
+  // The libraries are named one by one, in the order of their names: `zip -r` takes a directory's order from the file system.
+  const libraries = ABIS.flatMap((abi) => ["libatlas.so", "libmain.so"].map((library) => `lib/${abi.abi}/${library}`)).sort();
+  for (const library of libraries) utimesSync(join(staging, library), new Date(1980, 0, 1), new Date(1980, 0, 1));
+  run(["zip", "-q", "-X", unsigned, ...libraries], staging);
   run([join(buildTools, "zipalign"), "-f", "4", unsigned, output]);
   run([join(buildTools, "apksigner"), "sign", ...key, "--min-sdk-version", "18", output], root, java);
   const badging = run([join(buildTools, "aapt"), "dump", "badging", output]);
   if (badging.includes("application-debuggable") === release) throw new Error(release ? "the release package is debuggable" : "the development package is not debuggable");
-  for (const marker of [`package: name='${PACKAGE}'`, "sdkVersion:'18'", "native-code: 'armeabi-v7a'", "uses-gl-es: '0x30000'"])
+  for (const marker of [`package: name='${PACKAGE}'`, `sdkVersion:'${MIN_SDK}'`, `targetSdkVersion:'${TARGET_SDK}'`, `native-code: ${ABIS.map((abi) => `'${abi.abi}'`).sort().join(" ")}`, "uses-gl-es: '0x30000'"])
     if (!badging.includes(marker)) throw new Error(`the APK lacks ${marker}`);
   console.log(JSON.stringify({ apk: output, bytes: statSync(output).size, sha256: sha(output), places: args.includes("--lean") ? [] : places.map((p) => p.id) }));
   return output;
@@ -349,7 +387,11 @@ else if (command === "install") {
   if (release) throw new Error("a release build takes nothing pushed");
   const built = await build();
   shell(`am force-stop ${PACKAGE}`);
-  push(join(built.libraries, "libatlas.so"), "libatlas.so");
+  // The library of the ABI the phone runs the installed app in: the first of its own the package holds.
+  const supported = shell("getprop ro.product.cpu.abilist").split(",").concat(shell("getprop ro.product.cpu.abi"));
+  const abi = ABIS.map((candidate) => ({ candidate, rank: supported.indexOf(candidate.abi) })).filter((entry) => entry.rank >= 0).sort((a, b) => a.rank - b.rank)[0]?.candidate;
+  if (!abi) throw new Error(`the phone runs ${supported.filter(Boolean).join(", ")}, and the build holds ${ABIS.map((candidate) => candidate.abi).join(", ")}`);
+  push(join(staged(abi), "libatlas.so"), "libatlas.so");
   for (const file of ["atlas.js", "atlas.pak", "globe.rgba"]) push(join(assets, file), file);
   if (option("--place")) push(join(assets, `${option("--place")}.place`), `${option("--place")}.place`);
   if (args.includes("--packs")) for (const p of places) push(join(assets, `${p.id}.place`), `${p.id}.place`);

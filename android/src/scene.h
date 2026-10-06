@@ -3,7 +3,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 // One place on the calling thread's GLES 3 context, drawn into the bound
-// framebuffer at the size scene_size() was last given.
+// framebuffer in the rectangle scene_size() was last given.
 typedef struct {
   bool reflection, rain, glow, cinematic, paused;
   unsigned shot, features, draws, triangles, mirror_triangles, sprites;
@@ -27,8 +27,9 @@ extern float scene_phase[SCENE_PHASES];
 // The pack is `size` bytes at `offset` of the open file `fd` (an asset of the
 // APK, stored, or a file pushed beside it); the scene maps it and closes `fd`.
 bool scene_load(int fd, long long offset, size_t size, const char *name, char *error, size_t capacity);
-// The drawable in pixels: the window's buffer.
-void scene_size(unsigned width, unsigned height);
+// The picture in the drawable, in pixels from its lower left corner: all of
+// a 16:9 window's buffer, the middle of another's.
+void scene_size(unsigned left, unsigned bottom, unsigned width, unsigned height);
 void scene_free(void);
 unsigned scene_shot_count(void);
 const char *scene_shot_name(unsigned shot);

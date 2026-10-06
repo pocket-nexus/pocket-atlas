@@ -1,16 +1,20 @@
-// Pocket Atlas on Android, built for the Redmi 1S (Android 4.3, Adreno 305,
-// OpenGL ES 3.0): the shell around the place renderer (scene.c), the globe
-// (globe.c) and the interface, a PocketJS guest (ui/, QuickJS) drawn over
-// both. A NativeActivity with no Java: native_app_glue runs android_main on
-// a thread of its own, and that one thread owns the window, its touches, the
-// GL context, the scene and the guest.
+// Pocket Atlas on Android, designed for and measured on the Redmi 1S (Android
+// 4.3, Adreno 305, OpenGL ES 3.0): the shell around the place renderer
+// (scene.c), the globe (globe.c) and the interface, a PocketJS guest (ui/,
+// QuickJS) drawn over both. A NativeActivity with no Java: native_app_glue
+// runs android_main on a thread of its own, and that one thread owns the
+// window, its touches, the GL context, the scene and the guest.
 //
-// The window is landscape. Its buffers are the portrait panel's, drawn
-// rotated by the GL driver, and the display processor shows them as an
-// overlay: presenting a frame takes no GPU time. The scene is drawn straight
-// into the window, whose EGL config supplies the antialiasing; the interface
-// is drawn into a texture when what it shows changes and laid over the frame,
-// and while it shows nothing the frame is the place alone.
+// The window is landscape. On the Redmi 1S its buffers are the portrait
+// panel's, drawn rotated by the GL driver, and the display processor shows
+// them as an overlay: presenting a frame takes no GPU time. The scene is drawn
+// straight into the window, whose EGL config supplies the antialiasing; the
+// interface is drawn into a texture when what it shows changes and laid over
+// the frame, and while it shows nothing the frame is the place alone.
+//
+// The picture is 16:9, the Redmi 1S's whole window. In a window of another
+// shape (a 20:9 phone's) it is the largest 16:9 rectangle, centred, and the
+// rest of the window is black (`place_picture`).
 #include "../../n3ds/src/control.h"
 #include "../../n3ds/src/interface.h"
 #include "contact_latch.h"
@@ -28,7 +32,9 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <jni.h>
 #include <math.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -45,6 +51,12 @@
 #define ATLAS_RATE 30
 #endif
 #define LOG(...) __android_log_print(ANDROID_LOG_INFO, "PocketAtlas", __VA_ARGS__)
+// The library the system loaded: the package holds one for each of these (tools/atlas-android.ts).
+#ifdef __aarch64__
+#define ATLAS_ABI "arm64-v8a"
+#else
+#define ATLAS_ABI "armeabi-v7a"
+#endif
 // What tools/atlas-android.ts pushes: commands in every build; the library,
 // the interface and packs in a development build.
 #define PUSHED "/data/local/tmp/" ATLAS_PACKAGE
@@ -62,9 +74,20 @@ static EGLDisplay display;
 static EGLContext context = EGL_NO_CONTEXT;
 static EGLSurface surface = EGL_NO_SURFACE;
 static bool window_ready, resumed, lost;
-// The window as the panel shows it, and its buffer: the display processor
-// scales a smaller buffer to the panel.
-static int screen_width, screen_height, width, height;
+// The window in its own pixels, the picture's place in it (where touches are
+// measured from), and the window's buffer with the picture's place in that:
+// `width` by `height` at `left`, `bottom`. The system scales a buffer to its
+// window in each direction by itself, so the buffer keeps the window's
+// proportions and the picture keeps its own.
+static int screen_width, screen_height, view_x, view_y, view_width, view_height;
+static int buffer_width, buffer_height, left, bottom, width, height;
+// The picture at its most lines: the size of the interface's drawable.
+static int full_width, full_height;
+// The window's size is read when its surface is first made, and again after
+// the system says the window or the configuration changed. Set on the
+// activity's thread too.
+static atomic_bool reshaped;
+static bool measured;
 // What a visitor can set: samples a pixel (the window's EGL config) and
 // frames a second. The buffer's height is the guard's (`guard`), or pinned by
 // a command (`fixed_lines`).
@@ -175,6 +198,28 @@ static void drop_surface(void) {
   eglDestroySurface(display, surface);
   surface = EGL_NO_SURFACE;
 }
+// Where the picture goes, from the window's size and the lines the guard
+// allows. The picture is 16:9: in the window, the largest such rectangle,
+// centred. The buffer is the window at the picture's scale, so that the
+// system's stretch of the buffer over the window is the same in both
+// directions; a window of 16:9 has a buffer that is all picture, which is
+// the Redmi 1S's case.
+static void place_picture(void) {
+  if (screen_width * 9 >= screen_height * 16)
+    view_height = screen_height, view_width = screen_height * 16 / 9;
+  else
+    view_width = screen_width, view_height = screen_width * 9 / 16;
+  view_x = (screen_width - view_width) / 2, view_y = (screen_height - view_height) / 2;
+  full_height = FULL_LINES < view_height ? FULL_LINES : view_height;
+  full_width = full_height == view_height ? view_width : (view_width * full_height / view_height + 7) / 8 * 8;
+  height = lines < view_height ? lines : view_height;
+  width = height == view_height ? view_width : (view_width * height / view_height + 7) / 8 * 8;
+  // Touches count rows from the top of the window, GL from the bottom of the buffer.
+  left = (view_x * width + view_width / 2) / view_width;
+  bottom = ((screen_height - view_y - view_height) * height + view_height / 2) / view_height;
+  buffer_width = left + width + ((screen_width - view_x - view_width) * width + view_width / 2) / view_width;
+  buffer_height = bottom + height + (view_y * height + view_height / 2) / view_height;
+}
 // The window surface for the buffer size as it stands. Samples belong to the
 // EGL config, and a context draws only into surfaces of its own config
 // (EGL_BAD_MATCH otherwise): the context is made with the samples wanted at
@@ -195,15 +240,21 @@ static bool make_surface(void) {
   EGLConfig config = config_for(context_samples);
   if (!config)
     return false;
-  if (!screen_width) {
-    screen_width = ANativeWindow_getWidth(app->window);
-    screen_height = ANativeWindow_getHeight(app->window);
-  }
   EGLint format = 0;
   eglGetConfigAttrib(display, config, EGL_NATIVE_VISUAL_ID, &format);
-  height = lines < screen_height ? lines : screen_height;
-  width = height == screen_height ? screen_width : (screen_width * height / screen_height + 7) / 8 * 8;
-  ANativeWindow_setBuffersGeometry(app->window, width, height, format);
+  if (!measured) {
+    // A buffer size asked for before stands in for the window's own on some systems: it is given back first.
+    if (screen_width)
+      ANativeWindow_setBuffersGeometry(app->window, 0, 0, format);
+    screen_width = ANativeWindow_getWidth(app->window);
+    screen_height = ANativeWindow_getHeight(app->window);
+    measured = screen_width > 0 && screen_height > 0;
+    if (!measured)
+      return false;
+  }
+  place_picture();
+  const int asked_width = buffer_width, asked_height = buffer_height;
+  ANativeWindow_setBuffersGeometry(app->window, buffer_width, buffer_height, format);
   surface = eglCreateWindowSurface(display, config, app->window, NULL);
   if (context == EGL_NO_CONTEXT) {
     const EGLint version[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
@@ -213,12 +264,19 @@ static bool make_surface(void) {
     LOG("EGL: no surface for %d samples at %dx%d (0x%04x)", context_samples, width, height, eglGetError());
     return false;
   }
-  eglQuerySurface(display, surface, EGL_WIDTH, &width);
-  eglQuerySurface(display, surface, EGL_HEIGHT, &height);
+  // The buffer the system made. Should it be another than the one asked for, the picture takes the part of it the
+  // system will show where the picture belongs in the window: all of it in a 16:9 window.
+  eglQuerySurface(display, surface, EGL_WIDTH, &buffer_width);
+  eglQuerySurface(display, surface, EGL_HEIGHT, &buffer_height);
+  if (buffer_width != asked_width || buffer_height != asked_height) {
+    left = view_x * buffer_width / screen_width, width = view_width * buffer_width / screen_width;
+    bottom = (screen_height - view_y - view_height) * buffer_height / screen_height, height = view_height * buffer_height / screen_height;
+  }
   eglSwapInterval(display, 1);
   surface_lines = lines;
-  scene_size(width, height);
-  LOG("window %dx%d shown at %dx%d, %d samples: %s", width, height, screen_width, screen_height, context_samples, glGetString(GL_RENDERER));
+  scene_size(left, bottom, width, height);
+  LOG("picture %dx%d at %d,%d of a %dx%d buffer, shown at %dx%d from %d,%d of a %dx%d window, %d samples, " ATLAS_ABI ": %s", width, height, left, bottom, buffer_width, buffer_height,
+      view_width, view_height, view_x, view_y, screen_width, screen_height, context_samples, glGetString(GL_RENDERER));
   return true;
 }
 
@@ -229,7 +287,9 @@ static void on_command(struct android_app *a, int32_t command) {
   case APP_CMD_TERM_WINDOW:
     drop_surface();
     window_ready = false;
+    measured = false; // the next window is measured anew
     break;
+  case APP_CMD_CONFIG_CHANGED: atomic_store(&reshaped, true); break;
   case APP_CMD_RESUME: resumed = true; break;
   case APP_CMD_PAUSE: resumed = false; break;
   case APP_CMD_LOST_FOCUS: pocket_contacts_cancel(&touches); break;
@@ -248,20 +308,21 @@ static int32_t on_input(struct android_app *a, AInputEvent *event) {
       pressed |= key == AKEYCODE_BACK ? POCKET_BTN_CROSS : POCKET_BTN_TRIANGLE;
     return 1;
   }
-  if (AInputEvent_getType(event) != AINPUT_EVENT_TYPE_MOTION || !screen_width)
+  if (AInputEvent_getType(event) != AINPUT_EVENT_TYPE_MOTION || !view_width)
     return 0;
   int action = AMotionEvent_getAction(event), kind = action & AMOTION_EVENT_ACTION_MASK;
   size_t index = (size_t)(action & AMOTION_EVENT_ACTION_POINTER_INDEX_MASK) >> AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT, count = AMotionEvent_getPointerCount(event);
-  // Contacts are kept in the interface's logical pixels.
-  const float sx = (float)LOGICAL_WIDTH / screen_width, sy = (float)LOGICAL_HEIGHT / screen_height;
+  // Contacts are kept in the interface's logical pixels, measured from the picture's corner in the window: a
+  // finger that comes down beside the picture is outside the interface, and the latch does not take it.
+  const float sx = (float)LOGICAL_WIDTH / view_width, sy = (float)LOGICAL_HEIGHT / view_height, x0 = (float)view_x, y0 = (float)view_y;
   if (kind == AMOTION_EVENT_ACTION_CANCEL)
     pocket_contacts_cancel(&touches);
   else if (kind == AMOTION_EVENT_ACTION_MOVE)
     for (size_t i = 0; i < count; i++)
-      pocket_contact_event(&touches, POCKET_TOUCH_MOVE, AMotionEvent_getPointerId(event, i), AMotionEvent_getX(event, i) * sx, AMotionEvent_getY(event, i) * sy, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+      pocket_contact_event(&touches, POCKET_TOUCH_MOVE, AMotionEvent_getPointerId(event, i), (AMotionEvent_getX(event, i) - x0) * sx, (AMotionEvent_getY(event, i) - y0) * sy, LOGICAL_WIDTH, LOGICAL_HEIGHT);
   else if (kind == AMOTION_EVENT_ACTION_DOWN || kind == AMOTION_EVENT_ACTION_POINTER_DOWN || kind == AMOTION_EVENT_ACTION_UP || kind == AMOTION_EVENT_ACTION_POINTER_UP)
     pocket_contact_event(&touches, kind == AMOTION_EVENT_ACTION_DOWN || kind == AMOTION_EVENT_ACTION_POINTER_DOWN ? POCKET_TOUCH_DOWN : POCKET_TOUCH_UP,
-                         AMotionEvent_getPointerId(event, index), AMotionEvent_getX(event, index) * sx, AMotionEvent_getY(event, index) * sy, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+                         AMotionEvent_getPointerId(event, index), (AMotionEvent_getX(event, index) - x0) * sx, (AMotionEvent_getY(event, index) - y0) * sy, LOGICAL_WIDTH, LOGICAL_HEIGHT);
   return 1;
 }
 // Takes what the system has for the app. False when the activity is over.
@@ -281,7 +342,10 @@ static bool pump(void) {
       return false;
     if (!(window_ready && resumed))
       continue;
-    if (surface == EGL_NO_SURFACE || lines != surface_lines) {
+    // The system turned the display under the window, or gave the app another part of the screen.
+    if (atomic_exchange(&reshaped, false) && measured && (ANativeWindow_getWidth(app->window) != screen_width || ANativeWindow_getHeight(app->window) != screen_height))
+      measured = false;
+    if (surface == EGL_NO_SURFACE || lines != surface_lines || !measured) {
       if (!make_surface()) {
         // The context did not survive the window: start over when shown again.
         lost = true;
@@ -314,11 +378,11 @@ static void cover_make(void) {
   glLinkProgram(cover_program);
   cover_flip = glGetUniformLocation(cover_program, "uFlip");
 }
-// The whole window: `flip` is 0.5 for a texture drawn by GL, -0.5 for rows from the top.
+// The whole picture: `flip` is 0.5 for a texture drawn by GL, -0.5 for rows from the top.
 static void cover(GLuint picture, float flip, bool blend) {
   static const float corners[8] = {-1, -1, 1, -1, -1, 1, 1, 1};
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
-  glViewport(0, 0, width, height);
+  glViewport(left, bottom, width, height);
   glDisable(GL_DEPTH_TEST);
   glDisable(GL_CULL_FACE);
   glDisable(GL_SCISSOR_TEST);
@@ -338,6 +402,27 @@ static void cover(GLuint picture, float flip, bool blend) {
   glDepthMask(GL_TRUE);
 }
 
+// What the window holds beside the picture is black: the strips are cleared
+// when a frame is complete, over whatever the frame's own clear and its
+// points left there. A window that is all picture has none.
+static void bars(void) {
+  if (buffer_width == width && buffer_height == height)
+    return;
+  const int strips[4][4] = {{0, 0, left, buffer_height},
+                            {left + width, 0, buffer_width - left - width, buffer_height},
+                            {left, 0, width, bottom},
+                            {left, bottom + height, width, buffer_height - bottom - height}};
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  glEnable(GL_SCISSOR_TEST);
+  glClearColor(0, 0, 0, 1);
+  for (unsigned i = 0; i < 4; i++)
+    if (strips[i][2] > 0 && strips[i][3] > 0) {
+      glScissor(strips[i][0], strips[i][1], strips[i][2], strips[i][3]);
+      glClear(GL_COLOR_BUFFER_BIT);
+    }
+  glDisable(GL_SCISSOR_TEST);
+}
+
 // The Pocket3D title card: 144 ticks of a sixtieth of a second, first at
 // every launch, before the interface boots and before anything of a place or
 // the globe is loaded. PocketJS draws each tick's frame into memory; it
@@ -345,20 +430,30 @@ static void cover(GLuint picture, float flip, bool blend) {
 // The card follows the clock: a late frame skips ticks and the card keeps
 // its length.
 static bool title(void) {
-  size_t length = (size_t)width * height * 4;
-  uint8_t *pixels = malloc(length);
+  int drawn_width = 0, drawn_height = 0;
+  size_t length = 0;
+  uint8_t *pixels = NULL;
   GLuint picture;
   glGenTextures(1, &picture);
-  glBindTexture(GL_TEXTURE_2D, picture);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
   double start = now();
   uint32_t shown = UINT32_MAX;
   bool alive = true;
-  while (pixels && (alive = pump())) {
+  do {
+    // The card is drawn at the picture's size, which a window that changes under it changes.
+    if (width != drawn_width || height != drawn_height) {
+      drawn_width = width, drawn_height = height;
+      length = (size_t)width * height * 4;
+      free(pixels);
+      pixels = malloc(length);
+      glBindTexture(GL_TEXTURE_2D, picture);
+      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+      shown = UINT32_MAX;
+      continue; // through `pump`, as before the first frame
+    }
     uint32_t tick = (uint32_t)((now() - start) * 60);
     if (tick >= atlas_title_ticks())
       break;
@@ -372,8 +467,9 @@ static bool title(void) {
     }
     shown = tick;
     cover(picture, -0.5f, false);
+    bars();
     eglSwapBuffers(display, surface);
-  }
+  } while (pixels && (alive = pump()));
   glDeleteTextures(1, &picture);
   free(pixels);
   return alive;
@@ -475,7 +571,7 @@ static unsigned resident(void) {
       pages = 0;
     fclose(file);
   }
-  return pages * 4096u;
+  return pages * (unsigned)sysconf(_SC_PAGESIZE);
 }
 static void status(void) {
   static const char *const scenes[] = {"atlas", "loading", "running", "error"};
@@ -484,10 +580,10 @@ static void status(void) {
   int at = snprintf(text, sizeof text,
                     "{\"build\":\"%s\",\"state\":\"%s\",\"error\":\"%s\",\"place\":\"%s\",\"shots\":%u,\"shot\":%u,\"shotName\":\"%s\","
                     "\"time\":%.3f,\"cinematic\":%s,\"paused\":%s,\"camera\":[%.3f,%.3f,%.3f],\"frame\":%u,\"fps\":%.3f,"
-                    "\"window\":[%d,%d],\"fixedLines\":%d,\"refreshMs\":%.4f,\"refreshes\":\"%s\",\"drawnMs\":%.2f,\"samples\":%d,\"rate\":%d,\"late\":%u,\"marked\":%u,\"markedLate\":%u,\"worstMs\":%.2f,",
+                    "\"window\":[%d,%d],\"buffer\":[%d,%d,%d,%d],\"screen\":[%d,%d,%d,%d,%d,%d],\"abi\":\"" ATLAS_ABI "\",\"fixedLines\":%d,\"refreshMs\":%.4f,\"refreshes\":\"%s\",\"drawnMs\":%.2f,\"samples\":%d,\"rate\":%d,\"late\":%u,\"marked\":%u,\"markedLate\":%u,\"worstMs\":%.2f,",
                     ATLAS_BUILD, scenes[interface.scene], error, interface.place, scene_shot_count(), atlas.shot,
                     loaded ? scene_shot_name(atlas.shot) : "", atlas.time, atlas.cinematic ? "true" : "false", atlas.paused ? "true" : "false",
-                    atlas.position[0], atlas.position[1], atlas.position[2], frames, fps(), width, height, fixed_lines, refresh * 1000, synced ? "driver" : "swap", rate == 30 && loaded ? gpu_expected * 1000 : 0.0f, samples, rate, late, marked, marked_late, worst);
+                    atlas.position[0], atlas.position[1], atlas.position[2], frames, fps(), width, height, left, bottom, buffer_width, buffer_height, view_x, view_y, view_width, view_height, screen_width, screen_height, fixed_lines, refresh * 1000, synced ? "driver" : "swap", rate == 30 && loaded ? gpu_expected * 1000 : 0.0f, samples, rate, late, marked, marked_late, worst);
   // The last 120 frames shown.
   at += summary(text + at, sizeof text - at, "workMs", timing[0], NULL);
   at += summary(text + at, sizeof text - at, "swapMs", timing[1], NULL);
@@ -508,11 +604,14 @@ static void status(void) {
   write_file("status.json", text, at);
 }
 
-// The interface's own drawable: the window's size at two samples a logical pixel.
+// The interface's own drawable: the picture at its most lines, which is two
+// samples a logical pixel on a window of 720 lines or more.
+static int interface_width, interface_height;
 static void interface_make(void) {
+  interface_width = full_width, interface_height = full_height;
   glGenTextures(1, &interface_texture);
   glBindTexture(GL_TEXTURE_2D, interface_texture);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, screen_width, screen_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, interface_width, interface_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -520,6 +619,10 @@ static void interface_make(void) {
   glGenFramebuffers(1, &interface_target);
   glBindFramebuffer(GL_FRAMEBUFFER, interface_target);
   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, interface_texture, 0);
+  // Nothing, until the interface's first turn draws into it: new storage holds what the driver left there.
+  glDisable(GL_SCISSOR_TEST);
+  glClearColor(0, 0, 0, 0);
+  glClear(GL_COLOR_BUFFER_BIT);
 }
 
 static void choice(const char *key, int value, const char *choices) {
@@ -751,17 +854,36 @@ static void run(void) {
   double previous = now(), started = previous, reported = 0, turn = 0;
   unsigned waited = 0, idle = 0;
   long long commanded = 0;
-  uint8_t *pixels = malloc((size_t)screen_width * screen_height * 4);
+  // A readback of the picture, for a capture: the picture at its most lines, and more when a frame has more.
+  size_t readback = (size_t)interface_width * interface_height * 4;
+  uint8_t *pixels = malloc(readback);
   while (pump()) {
     if (samples != context_samples && !regraphics()) {
       lost = true;
       break;
     }
+    // A window of another size: the interface's drawable follows the picture.
+    if (interface_width != full_width || interface_height != full_height) {
+      glDeleteFramebuffers(1, &interface_target);
+      glDeleteTextures(1, &interface_texture);
+      interface_make();
+      drawn_hash = 0;
+    }
+    if ((size_t)width * height * 4 > readback) {
+      free(pixels);
+      pixels = malloc(readback = (size_t)width * height * 4);
+    }
     // Commands from the host (tools/atlas-android.ts ctl): a JSON file pushed
-    // in one step, acknowledged by its nonce in the status.
+    // in one step, acknowledged by its nonce in the status. A system that
+    // keeps the app out of that directory answers EACCES and logs the
+    // refusal: there are no commands there, and the file is not asked for again.
     struct stat info;
     json[0] = 0;
-    if (!stat(PUSHED "/control.json", &info) && (long long)info.st_ctime * 1000000000ll + (long long)info.st_ctime_nsec != commanded) {
+    static bool shut;
+    bool found = !shut && !stat(PUSHED "/control.json", &info);
+    if (!found && !shut && errno == EACCES)
+      shut = true;
+    if (found && (long long)info.st_ctime * 1000000000ll + (long long)info.st_ctime_nsec != commanded) {
       commanded = (long long)info.st_ctime * 1000000000ll + (long long)info.st_ctime_nsec;
       size_t size;
       char *text = read_path(PUSHED "/control.json", "", &size), nonce[40] = "";
@@ -868,11 +990,11 @@ static void run(void) {
           drawn_hash = hash;
           redraws++;
           glBindFramebuffer(GL_FRAMEBUFFER, interface_target);
-          glViewport(0, 0, screen_width, screen_height);
+          glViewport(0, 0, interface_width, interface_height);
           glDisable(GL_SCISSOR_TEST);
           glClearColor(0, 0, 0, 0);
           glClear(GL_COLOR_BUFFER_BIT);
-          ui_gl_render_over(0, 0, screen_width, screen_height, screen_width, screen_height);
+          ui_gl_render_over(0, 0, interface_width, interface_height, interface_width, interface_height);
         }
         timing[5][frames % WINDOW] = (float)(turned - start) * 1000;
         timing[6][frames % WINDOW] = (float)(now() - turned) * 1000;
@@ -907,11 +1029,11 @@ static void run(void) {
       if (globe_update(dt, &lat, &lon))
         interface.lat = lat, interface.lon = lon;
       glBindFramebuffer(GL_FRAMEBUFFER, 0);
-      globe_render(width, height);
+      globe_render(left, bottom, width, height);
     }
     if (capture && pixels) {
       // The frame before the interface: rows from the bottom.
-      glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+      glReadPixels(left, bottom, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
       write_file("frame.rgba", pixels, (size_t)width * height * 4);
     }
     if (!quiet)
@@ -924,7 +1046,7 @@ static void run(void) {
     timing[4][frames % WINDOW] = gpu_ms;
     if (screen && pixels) {
       // The frame as presented, interface and all.
-      glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+      glReadPixels(left, bottom, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
       write_file("screen.rgba", pixels, (size_t)width * height * 4);
     }
     if (capture || screen) {
@@ -933,6 +1055,7 @@ static void run(void) {
       reported = 0;
       start = now(); // a readback is not a frame's work
     }
+    bars();
     const GLenum unused[] = {GL_DEPTH, GL_STENCIL};
     glInvalidateFramebuffer(GL_FRAMEBUFFER, 2, unused);
     double submitted = now();
@@ -1008,6 +1131,58 @@ static void run(void) {
     }
   }
   free(pixels);
+}
+
+// ---- on the activity's own thread
+//
+// The system calls an activity on its main thread; native_app_glue hands what
+// it is told to android_main's thread. Two things are done here, on the
+// system's thread, because only it may do them.
+
+// Hides the status bar and the navigation bar until a swipe from an edge
+// shows them for a moment ("sticky immersive", Android 4.4 and later). The
+// NDK has no call for it: it is View.setSystemUiVisibility on the window's
+// decor view, through JNI. Android 4.3 has FLAG_FULLSCREEN alone.
+static void immerse(ANativeActivity *activity) {
+  if (activity->sdkVersion < 19)
+    return;
+  JNIEnv *env = activity->env;
+  jclass activity_class = (*env)->GetObjectClass(env, activity->clazz);
+  jmethodID get_window = (*env)->GetMethodID(env, activity_class, "getWindow", "()Landroid/view/Window;");
+  jobject window = get_window ? (*env)->CallObjectMethod(env, activity->clazz, get_window) : NULL;
+  jclass window_class = window ? (*env)->GetObjectClass(env, window) : NULL;
+  jmethodID get_decor = window_class ? (*env)->GetMethodID(env, window_class, "getDecorView", "()Landroid/view/View;") : NULL;
+  jobject decor = get_decor ? (*env)->CallObjectMethod(env, window, get_decor) : NULL;
+  jclass view_class = decor ? (*env)->GetObjectClass(env, decor) : NULL;
+  jmethodID set = view_class ? (*env)->GetMethodID(env, view_class, "setSystemUiVisibility", "(I)V") : NULL;
+  // LAYOUT_STABLE, LAYOUT_HIDE_NAVIGATION, LAYOUT_FULLSCREEN, HIDE_NAVIGATION, FULLSCREEN, IMMERSIVE_STICKY
+  if (set)
+    (*env)->CallVoidMethod(env, decor, set, (jint)(0x100 | 0x200 | 0x400 | 0x2 | 0x4 | 0x1000));
+  if ((*env)->ExceptionCheck(env))
+    (*env)->ExceptionClear(env);
+}
+static void (*glue_focus)(ANativeActivity *, int);
+// A window that takes the focus back (after a dialog, the notification shade) hides the bars again.
+static void on_focus(ANativeActivity *activity, int focused) {
+  if (focused)
+    immerse(activity);
+  glue_focus(activity, focused);
+}
+// native_app_glue passes on neither this nor a new content rectangle: the loop reads the window's size again.
+static void on_resize(ANativeActivity *activity, ANativeWindow *window) {
+  (void)activity, (void)window;
+  atomic_store(&reshaped, true);
+}
+// What libmain.so calls (android/src/loader.c): native_app_glue's
+// ANativeActivity_onCreate, which the build names atlas_glue, then the two
+// above.
+void atlas_glue(ANativeActivity *activity, void *saved, size_t size);
+__attribute__((visibility("default"))) void atlas_activity(ANativeActivity *activity, void *saved, size_t size) {
+  atlas_glue(activity, saved, size);
+  glue_focus = activity->callbacks->onWindowFocusChanged;
+  activity->callbacks->onWindowFocusChanged = on_focus;
+  activity->callbacks->onNativeWindowResized = on_resize;
+  immerse(activity);
 }
 
 void android_main(struct android_app *state) {

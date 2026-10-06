@@ -29,8 +29,8 @@ enum { MAX_DRAWS = 4096, MAX_FX = 12000 };
 enum { FORMAT_RGBA8 = 0, FORMAT_RGB565 = 3, FORMAT_RGBA4 = 4, FORMAT_ETC2 = 5 }; // AtlasTexture.format
 // The container of this target's pack: crates/pocket3d-place-cook/src/adreno.rs.
 #define PACK_VERSION 0x201
-// The window's buffer, which the shell may resize, and the mirror, which keeps its size.
-static unsigned WIDTH = 1280, HEIGHT = 720;
+// The picture in the window's buffer, which the shell may resize and place, and the mirror, which keeps its size.
+static unsigned LEFT, BOTTOM, WIDTH = 1280, HEIGHT = 720;
 enum { MIRROR_WIDTH = 640, MIRROR_HEIGHT = 360 };
 #define NEAR 0.1f
 typedef struct {
@@ -313,8 +313,8 @@ static bool cast_shadows(void) {
   last_vertices = NO_VERTICES;
   return true;
 }
-void scene_size(unsigned width, unsigned height) {
-  WIDTH = width, HEIGHT = height;
+void scene_size(unsigned left, unsigned bottom, unsigned width, unsigned height) {
+  LEFT = left, BOTTOM = bottom, WIDTH = width, HEIGHT = height;
 }
 bool scene_load(int file, long long offset, size_t size, const char *path, char *error, size_t capacity) {
   // A rig's vertices get a copy of their joints numbered within the rig.
@@ -328,8 +328,9 @@ bool scene_load(int file, long long offset, size_t size, const char *path, char 
     return false;
   }
   // Private pages: the table is patched below, the rest is paged in as drawn.
-  // An asset starts wherever the APK put it: map from the page before.
-  size_t lead = (size_t)(offset & 4095);
+  // An asset starts wherever the APK put it: map from the start of its page,
+  // whose size is the kernel's (4 KiB on the Redmi 1S, 16 KiB on some phones).
+  size_t lead = (size_t)(offset & (long long)(sysconf(_SC_PAGESIZE) - 1));
   pack_bytes = size;
   mapping_bytes = size + lead;
   mapping = mmap(NULL, mapping_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE, file, (off_t)(offset - lead));
@@ -456,6 +457,9 @@ bool scene_load(int file, long long offset, size_t size, const char *path, char 
       (head->cloud_texture != UINT32_MAX && head->cloud_texture >= head->textures))
     goto invalid;
 
+  // An error a call before this load left behind is not this pack's: the check after the load reads what the load raised.
+  for (unsigned i = 0; i < 8 && glGetError(); i++) {
+  }
   char rig[64], rig_cut[80], rig_depth[96], sunned[4][96];
   snprintf(rig, sizeof rig, "#define SKIN\n#define BONES %u\n", rig_widest);
   snprintf(rig_cut, sizeof rig_cut, "%s#define CUT\n", rig);
@@ -567,8 +571,9 @@ bool scene_load(int file, long long offset, size_t size, const char *path, char 
   free(sky);
   if (sun && !cast_shadows())
     goto invalid;
-  if (glGetError()) {
-    snprintf(error, capacity, "GL error while loading %s", path);
+  GLenum raised = glGetError();
+  if (raised) {
+    snprintf(error, capacity, "GL error 0x%04x while loading %s", raised, path);
     scene_free();
     return false;
   }
@@ -586,8 +591,11 @@ invalid:
 void scene_free(void) {
   if (head)
     glDeleteTextures(head->textures, textures);
+  // Only the programs there are: the Android emulator's GL answers GL_INVALID_VALUE to a program of 0, which the
+  // language says is ignored.
   for (unsigned i = 0; i < PROGRAMS; i++)
-    glDeleteProgram(programs[i].id);
+    if (programs[i].id)
+      glDeleteProgram(programs[i].id);
   GLuint names[] = {white, glow, puddle, mirror_texture, shadow_map};
   glDeleteTextures(5, names);
   glDeleteFramebuffers(1, &shadow_target);
@@ -1155,7 +1163,7 @@ void scene_render(unsigned drawable) {
   }
   phase(PHASE_MIRROR);
   glBindFramebuffer(GL_FRAMEBUFFER, drawable);
-  glViewport(0, 0, WIDTH, HEIGHT);
+  glViewport(LEFT, BOTTOM, WIDTH, HEIGHT);
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
   // Opaque surfaces first: a fragment behind what is drawn fails the depth
   // test before it is shaded. A program that may `discard` is never rejected

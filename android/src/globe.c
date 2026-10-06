@@ -155,8 +155,8 @@ bool globe_update(float dt, float *lat, float *lon) {
   }
   return false;
 }
-void globe_render(int width, int height) {
-  glViewport(0, 0, width, height);
+void globe_render(int left, int bottom, int width, int height) {
+  glViewport(left, bottom, width, height);
   glClearColor(0.012f, 0.018f, 0.035f, 1);
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
   if (!surface)
