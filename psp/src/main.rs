@@ -47,62 +47,55 @@ unsafe extern "C" fn worker(_: usize, _: *mut c_void) -> i32 {
     0
 }
 
-/// A file to read: the handle kept beside the executable (files.rs), or one
-/// opened for this read (a place's pack beside it, or a file on the PSPLINK
-/// share), which `done` closes.
-struct Reading {
-    fd: SceUid,
-    owned: bool,
-}
-impl Reading {
-    unsafe fn open(name: &str) -> Option<Self> {
-        if let Some(fd) = files::kept(name) {
-            return Some(Reading { fd, owned: false });
-        }
-        if let Some(fd) = files::open_place(name) {
-            return Some(Reading { fd, owned: true });
-        }
-        let host = format!("host0:/{name}\0");
-        let fd = sceIoOpen(host.as_ptr(), IoOpenFlags::RD_ONLY, 0o666);
-        (fd.0 >= 0).then_some(Reading { fd, owned: true })
+/// A file to read: inside or beside the executable (files.rs), or on the
+/// PSPLINK share.
+unsafe fn open(name: &str) -> Option<files::File> {
+    if let Some(file) = files::open(name) {
+        return Some(file);
     }
-    unsafe fn done(self) {
-        if self.owned {
-            sceIoClose(self.fd);
-        }
+    let host = format!("host0:/{name}\0");
+    let fd = sceIoOpen(host.as_ptr(), IoOpenFlags::RD_ONLY, 0o666);
+    if fd.0 < 0 {
+        return None;
     }
+    let size = sceIoLseek32(fd, 0, IoWhence::End).max(0) as usize;
+    sceIoLseek32(fd, 0, IoWhence::Set);
+    Some(files::File { fd, offset: 0, size, owned: true, source: files::Source::Share })
 }
-/// Reads `name` into `dest`, whole: its length, or why not.
-unsafe fn read_into(name: &str, dest: &mut [u8]) -> Result<usize, &'static str> {
-    let Some(file) = Reading::open(name) else {
+/// Reads `name` into `dest`, whole: its length and where it was found, or why not.
+unsafe fn read_into(name: &str, dest: &mut [u8]) -> Result<(usize, files::Source), &'static str> {
+    let Some(file) = open(name) else {
         return Err("the file is missing");
     };
-    let fd = file.fd;
-    let size = sceIoLseek32(fd, 0, IoWhence::End);
-    sceIoLseek32(fd, 0, IoWhence::Set);
-    if size <= 0 || size as usize > dest.len() {
-        file.done();
+    let done = |file: &files::File| {
+        if file.owned {
+            sceIoClose(file.fd);
+        }
+    };
+    if file.size == 0 || file.size > dest.len() {
+        done(&file);
         return Err("it does not fit in memory here");
     }
     let mut at = 0;
-    while at < size as usize {
-        let n = sceIoRead(fd, dest[at..].as_mut_ptr() as _, (size as usize - at).min(64 * 1024) as u32);
+    while at < file.size {
+        let n = sceIoRead(file.fd, dest[at..].as_mut_ptr() as _, (file.size - at).min(64 * 1024) as u32);
         if n <= 0 {
-            file.done();
+            done(&file);
             return Err("it could not be read");
         }
         at += n as usize;
     }
-    file.done();
-    Ok(at)
+    done(&file);
+    Ok((at, file.source))
 }
 unsafe fn size(name: &str) -> usize {
-    let Some(file) = Reading::open(name) else {
+    let Some(file) = open(name) else {
         return 0;
     };
-    let size = sceIoLseek32(file.fd, 0, IoWhence::End).max(0) as usize;
-    file.done();
-    size
+    if file.owned {
+        sceIoClose(file.fd);
+    }
+    file.size
 }
 unsafe fn read(name: &str) -> Option<Vec<u8>> {
     let mut bytes = alloc::vec![0u8; size(name)];
@@ -269,7 +262,7 @@ unsafe fn run() {
         let pak = arena::alloc_permanent(length.max(16), 16);
         (!pak.is_null() && read_into("atlas.pak", core::slice::from_raw_parts_mut(pak, length)).is_ok()).then(|| core::slice::from_raw_parts(pak as *const u8, length))
     };
-    let script = read_into("atlas.js", &mut buffer[..capacity - 1]).ok().map(|length| {
+    let script = read_into("atlas.js", &mut buffer[..capacity - 1]).ok().map(|(length, _)| {
         buffer[length] = 0;
         &buffer[..length + 1]
     });
@@ -296,7 +289,7 @@ unsafe fn run() {
 unsafe fn atlas(app: &mut App) -> String {
     app.ui.collect();
     let room = globe::BYTES.min(app.buffer.len());
-    let surface = read_into("globe.psp", &mut app.buffer[..room]).ok().filter(|&n| n == globe::BYTES);
+    let surface = read_into("globe.psp", &mut app.buffer[..room]).ok().map(|(n, _)| n).filter(|&n| n == globe::BYTES);
     let mut globe = globe::Globe::new(if surface.is_some() { app.buffer.as_ptr() } else { core::ptr::null() });
     {
         let state = app.ui.state();
@@ -396,7 +389,10 @@ unsafe fn visit(app: &mut App, place: &str) -> Option<String> {
     let name = format!("{place}.place");
     // The pack is borrowed from the buffer for as long as the place is up.
     let storage = core::slice::from_raw_parts_mut(app.buffer.as_mut_ptr(), app.buffer.len());
-    let loaded = read_into(&name, storage).and_then(|length| pp::validate(&storage[..length]).map(|header| (&storage[..length], header)));
+    let loaded = read_into(&name, storage).and_then(|(length, source)| {
+        app.dev.source = source.name();
+        pp::validate(&storage[..length]).map(|header| (&storage[..length], header))
+    });
     let (bytes, h) = match loaded {
         Ok(pack) => pack,
         Err(why) => {

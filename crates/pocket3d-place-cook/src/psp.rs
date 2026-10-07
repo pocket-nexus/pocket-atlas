@@ -112,11 +112,13 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
     };
     // A sky-lit surface with an emission map of its own (floodlit stone, a
     // train's windows) is lit without it, then drawn again with the map
-    // added (`pp::GLOW`), as the 3DS's second combiner stage adds it.
+    // added (`pp::GLOW`), as the 3DS's second combiner stage adds it. In a
+    // vista an emission map without an albedo (a far tower's windows) goes
+    // the same way, over its hazed base colour.
     let glows = |mat: &pc::Material| {
         daytime
             && mat.kind == pc::Kind::Standard
-            && mat.albedo.is_some()
+            && (mat.albedo.is_some() || m.vista_haze.is_some())
             && mat.emission.is_some()
             && mat.albedo != mat.emission
             && mat.blend == pc::Blend::Opaque
@@ -207,6 +209,8 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
             pp::Material {
                 texture: if let Some(&t) = water_tex.get(&i) {
                     t
+                } else if glows(mat) {
+                    mat.albedo.map(|id| tex_map[&id]).unwrap_or(pp::NONE)
                 } else {
                     mat.albedo.or(mat.emission).map(|id| tex_map[&id]).unwrap_or(pp::NONE)
                 },

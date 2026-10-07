@@ -100,6 +100,8 @@ pub struct Session {
     enabled: bool,
     nonce: Option<u32>,
     pub pack_sha256: String,
+    /// Where the place's pack was read: EBOOT.PBP, folder or host0.
+    pub source: &'static str,
 }
 impl Session {
     /// The digest of the pack now in memory, for the status.
@@ -116,6 +118,7 @@ impl Session {
             enabled,
             nonce: None,
             pack_sha256: String::new(),
+            source: "",
         }
     }
     pub unsafe fn poll(&mut self) -> Option<Command> {
@@ -172,7 +175,7 @@ impl Session {
                 "\"gpuWaitMs\":{:.2},\"maxWorkMs\":{:.2},\"interfaceMs\":{:.2},\"maxInterfaceMs\":{:.2},",
                 "\"draws\":{},\"triangles\":{},",
                 "\"packBytes\":{},\"rain\":{},\"reflection\":{},\"paused\":{},",
-                "\"freeCamera\":{},\"controlNonce\":{},\"packSha256\":\"{}\",\"runtimeBuild\":\"{}\"}}\n"
+                "\"freeCamera\":{},\"controlNonce\":{},\"packSha256\":\"{}\",\"packSource\":\"{}\",\"runtimeBuild\":\"{}\"}}\n"
             ),
             s.scene,
             s.place,
@@ -200,6 +203,7 @@ impl Session {
             s.free_camera,
             self.nonce.unwrap_or(0),
             self.pack_sha256,
+            self.source,
             option_env!("ATLAS_BUILD_ID").unwrap_or("unidentified")
         );
         let fd = sceIoOpen(
