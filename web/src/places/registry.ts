@@ -98,7 +98,7 @@ export const PLACES: PlaceDef[] = [
   },
   {
     id: "sangubashi-crossing",
-    targets: ["vita", "3ds", "android"],
+    targets: ["vita", "3ds", "ipod", "android"],
     name: "Sangubashi in Bloom",
     native: "桜の参宮橋３号踏切",
     locality: "Yoyogi, Tokyo",
@@ -297,7 +297,7 @@ export const PLACES: PlaceDef[] = [
   },
   {
     id: "sf-lombard-street",
-    targets: ["vita", "3ds", "psp", "android"],
+    targets: ["vita", "3ds", "psp", "ipod", "android"],
     name: "Lombard Street in Bloom",
     native: "Lombard Street",
     locality: "San Francisco, California",
