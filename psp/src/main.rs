@@ -9,6 +9,7 @@ extern crate alloc;
 mod audio;
 mod camera;
 mod dev;
+mod files;
 mod globe;
 mod interface;
 mod renderer;
@@ -30,6 +31,8 @@ const RESERVE: usize = 8 * 1024 * 1024;
 
 fn psp_main() {
     psp::enable_home_button();
+    // The files beside the EBOOT open here: the worker has no current directory (files.rs).
+    unsafe { files::locate() };
     // The guest's parser recurses past the main thread's stack.
     unsafe { host::run_on_worker(worker, || run()) }
 }
@@ -38,69 +41,89 @@ unsafe extern "C" fn worker(_: usize, _: *mut c_void) -> i32 {
     0
 }
 
-/// Beside the executable, or on the PSPLINK share.
-unsafe fn open(name: &str, writing: bool) -> SceUid {
-    let flags = || if writing { IoOpenFlags::WR_ONLY | IoOpenFlags::CREAT | IoOpenFlags::TRUNC } else { IoOpenFlags::RD_ONLY };
-    let local = format!("{name}\0");
-    let fd = sceIoOpen(local.as_ptr(), flags(), 0o666);
-    if fd.0 >= 0 {
-        return fd;
+/// A file to read: the handle kept beside the executable (files.rs), or one
+/// opened on the PSPLINK share, which `done` closes.
+struct Reading {
+    fd: SceUid,
+    shared: bool,
+}
+impl Reading {
+    unsafe fn open(name: &str) -> Option<Self> {
+        if let Some(fd) = files::kept(name) {
+            return Some(Reading { fd, shared: false });
+        }
+        let host = format!("host0:/{name}\0");
+        let fd = sceIoOpen(host.as_ptr(), IoOpenFlags::RD_ONLY, 0o666);
+        (fd.0 >= 0).then_some(Reading { fd, shared: true })
     }
-    let host = format!("host0:/{name}\0");
-    sceIoOpen(host.as_ptr(), flags(), 0o666)
+    unsafe fn done(self) {
+        if self.shared {
+            sceIoClose(self.fd);
+        }
+    }
 }
 /// Reads `name` into `dest`, whole: its length, or why not.
 unsafe fn read_into(name: &str, dest: &mut [u8]) -> Result<usize, &'static str> {
-    let fd = open(name, false);
-    if fd.0 < 0 {
+    let Some(file) = Reading::open(name) else {
         return Err("the file is missing");
-    }
+    };
+    let fd = file.fd;
     let size = sceIoLseek32(fd, 0, IoWhence::End);
     sceIoLseek32(fd, 0, IoWhence::Set);
     if size <= 0 || size as usize > dest.len() {
-        sceIoClose(fd);
+        file.done();
         return Err("it does not fit in memory here");
     }
     let mut at = 0;
     while at < size as usize {
         let n = sceIoRead(fd, dest[at..].as_mut_ptr() as _, (size as usize - at).min(64 * 1024) as u32);
         if n <= 0 {
-            sceIoClose(fd);
+            file.done();
             return Err("it could not be read");
         }
         at += n as usize;
     }
-    sceIoClose(fd);
+    file.done();
     Ok(at)
 }
 unsafe fn size(name: &str) -> usize {
-    let fd = open(name, false);
-    if fd.0 < 0 {
+    let Some(file) = Reading::open(name) else {
         return 0;
-    }
-    let size = sceIoLseek32(fd, 0, IoWhence::End).max(0) as usize;
-    sceIoClose(fd);
+    };
+    let size = sceIoLseek32(file.fd, 0, IoWhence::End).max(0) as usize;
+    file.done();
     size
 }
 unsafe fn read(name: &str) -> Option<Vec<u8>> {
     let mut bytes = alloc::vec![0u8; size(name)];
     read_into(name, &mut bytes).ok().map(|_| bytes)
 }
-unsafe fn write(name: &str, bytes: &[u8]) {
-    let fd = open(name, true);
+/// The interface's settings: over the kept file beside the executable, or
+/// on the PSPLINK share.
+unsafe fn write_prefs(bytes: &[u8]) {
+    if files::write_prefs(bytes) {
+        return;
+    }
+    let host = format!("host0:/{}\0", files::PREFS);
+    let fd = sceIoOpen(host.as_ptr(), IoOpenFlags::WR_ONLY | IoOpenFlags::CREAT | IoOpenFlags::TRUNC, 0o666);
     if fd.0 >= 0 {
         sceIoWrite(fd, bytes.as_ptr() as _, bytes.len());
         sceIoClose(fd);
     }
 }
 /// The places here whose pack fits the buffer: `<id>.place` beside the
-/// executable or on the PSPLINK share.
+/// executable (kept open by files.rs) or on the PSPLINK share.
 unsafe fn installed(capacity: usize) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
-    for directory in [".\0", "host0:/\0"] {
-        let fd = sceIoDopen(directory.as_ptr());
+    for (id, bytes) in files::places() {
+        if bytes <= capacity && !ids.iter().any(|i| i == id) {
+            ids.push(id.into());
+        }
+    }
+    {
+        let fd = sceIoDopen(b"host0:/\0".as_ptr());
         if fd.0 < 0 {
-            continue;
+            return ids;
         }
         let mut entry: SceIoDirent = core::mem::zeroed();
         while sceIoDread(fd, &mut entry) > 0 {
@@ -244,7 +267,7 @@ unsafe fn run() {
     let mut app = App { ui, dev: dev::Session::connect(), buffer, frame: 0, now: sceKernelGetSystemTimeLow(), turns: (0, 0) };
     {
         let places = installed(capacity);
-        let prefs = read("interface.json").and_then(|bytes| String::from_utf8(bytes).ok()).unwrap_or_default();
+        let prefs = read(files::PREFS).and_then(|bytes| String::from_utf8(bytes).ok()).unwrap_or_default();
         let state = app.ui.state();
         state.installed = places;
         state.prefs = prefs;
@@ -292,7 +315,7 @@ unsafe fn atlas(app: &mut App) -> String {
                 Command::Enter(place) => go = Some(place),
                 Command::Hold(on) => held = on,
                 Command::Prefs(text) => {
-                    write("interface.json", text.as_bytes());
+                    write_prefs(text.as_bytes());
                     app.ui.state().prefs = text;
                 }
                 _ => {}
