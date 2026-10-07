@@ -171,6 +171,12 @@ pub fn simplify(verts: &[Vertex], tris: &[[u32; 3]], keep: f32, max_error: f32, 
 /// along the part's own face axes (exact for the boxes most parts are, and
 /// for rotated buildings), not along the world axes.
 fn part_widths(verts: &[Vertex], tris: &[[u32; 3]]) -> Vec<f32> {
+    part_extents(verts, tris).1.iter().map(|e| e[1]).collect()
+}
+
+/// Each vertex's part (a representative vertex) and the part's three
+/// extents along its face axes, smallest first.
+pub(crate) fn part_extents(verts: &[Vertex], tris: &[[u32; 3]]) -> (Vec<u32>, Vec<[f32; 3]>) {
     let mut parent: Vec<u32> = (0..verts.len() as u32).collect();
     fn find(p: &mut [u32], mut i: u32) -> u32 {
         while p[i as usize] != i {
@@ -224,15 +230,16 @@ fn part_widths(verts: &[Vertex], tris: &[[u32; 3]]) -> Vec<f32> {
             b.1[k] = b.1[k].max(p[k]);
         }
     }
-    roots
+    let extents = roots
         .iter()
         .map(|r| {
-            let Some((lo, hi)) = bounds.get(r) else { return f32::MAX };
+            let Some((lo, hi)) = bounds.get(r) else { return [f32::MAX; 3] };
             let mut e = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
             e.sort_by(|a, b| a.total_cmp(b));
-            e[1]
+            e
         })
-        .collect()
+        .collect();
+    (roots, extents)
 }
 
 /// LODs at the requested metre error bounds, nested so each level only

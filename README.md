@@ -140,13 +140,13 @@ bun tools/wgpu.ts check     # Chrome over WebGPU, every device
 
 ## PSP
 
-The app opens on the atlas: a night globe drawn by the GE (a lit sphere with city lights, a halo and a pin per place) under [the interface](#the-interface), which lists the places and enters the ones whose pack is beside the executable. In a place the analog stick moves and the d-pad looks; L/R change shots, START pauses or resumes the tour, △ opens the place's menu (tour, rain, sound and reflections where the place has them, statistics) and × returns to the atlas. HOME exits.
+The app opens on the atlas: a night globe drawn by the GE (a lit sphere with city lights, a halo and a pin per place) under [the interface](#the-interface), which lists the places and enters the ones packed into its EBOOT.PBP (or beside it, during development). In a place the analog stick moves and the d-pad looks; L/R change shots, START pauses or resumes the tour, △ opens the place's menu (tour, rain, sound and reflections where the place has them, statistics) and × returns to the atlas. HOME exits.
 
-Lombard Street has a graded sky panorama, baked directional light and static shadows; rain and wet-road reflections are disabled by the pack's features. Export its full 120-second loop, then `cook --place sf-lombard-street`; see [the PSP daylight details and limitations](psp/README.md). Runtime and frame budgets for Lombard still require physical hardware measurement.
+All seven places run on the PSP. The daytime and dusk places have a graded sky panorama, baked directional light and static shadows; rain and wet-road reflections are disabled by the pack's features. Griffith Observatory's vista is drawn in a depth range of its own, its city lights are GE sprites and its haze is in the vertex colours; the sea at Kamakura is a polar grid with its Fresnel mix in the vertex colours. Export a place, then `cook --place <id>`; see [the PSP details and limitations](psp/README.md).
 
 Rainy Night Konbini runs at **480×272**, with baked lighting, alpha-tested shelf facings, planar reflections of lit surfaces and moving objects, rain, lamp halos, the six authored camera shots, the taxi and skinned pedestrians. Walking near the entrance opens the doors and plays the door chime; the rain bed quiets indoors.
 
-The package asks for the large memory of a PSP-2000 or later (`MEMSIZE` in `PARAM.SFO`): there the 18 MiB pack buffer fits beside the interface (about 5 MiB with its runtime). On a PSP-1000 a place whose pack does not fit is listed as not on the device.
+The package asks for the large memory of a PSP-2000 or later (`MEMSIZE` in `PARAM.SFO`): there the 24 MiB pack buffer fits beside the interface (about 5 MiB with its runtime). On a PSP-1000 a place whose pack does not fit is listed as not on the device. The package is one file, `PSP/GAME/PocketAtlas/EBOOT.PBP`, with the interface, the globe and every place in its DATA.PSAR section.
 
 Requirements: `usbhostfs_pc` and `pspsh`, PSPLINK running on the console, and PocketJS's pinned PSP toolchain. Run `bun tools/bootstrap.ts` in `vendor/pocketjs` to provision it. An existing SDK may be selected with `PSP_SDK=/absolute/path/to/mipsel-sony-psp`; the toolchain resolver checks that override. PocketJS's submodule stays unchanged.
 
@@ -169,10 +169,10 @@ bun tools/atlas-psp.ts shots                     # every authored shot, captures
 bun tools/atlas-psp.ts ctl '{}'                  # live clock
 
 # Standalone files beside each other; no USB host needed after installation.
-bun tools/atlas-psp.ts package                  # dist/PSP/GAME/PocketAtlas/{EBOOT.PBP,atlas.js,atlas.pak,globe.psp,<id>.place}
+bun tools/atlas-psp.ts package                  # dist/PSP/GAME/PocketAtlas/EBOOT.PBP, every file inside
 ```
 
-The PSP cook starts from the same PlaceIR as Vita and 3DS, and writes `<id>.psp.place` with separate `PLPS` magic/version. It rejects unsupported place kinds and packs above 18 MiB. It preserves rigid and skeletal tracks, uses the shared cooker's coarse geometry, bakes the Products material onto world-space shelf cards, shares static vertex buffers across spatial chunks, and combines only visible chunks at draw time. GPU pointers, indices, texture layouts and animation ranges are validated before upload. The current 20-second export follows the existing Vita workflow; it does not contain the web traffic simulation's full, longer schedule.
+The PSP cook starts from the same PlaceIR as Vita and 3DS, and writes `<id>.psp.place` with separate `PLPS` magic/version. It rejects unsupported place kinds and packs above 24 MiB. It preserves rigid and skeletal tracks, uses the shared cooker's coarse geometry, bakes the Products material onto world-space shelf cards, shares static vertex buffers across spatial chunks, and combines only visible chunks at draw time. GPU pointers, indices, texture layouts and animation ranges are validated before upload. The current 20-second export follows the existing Vita workflow; it does not contain the web traffic simulation's full, longer schedule.
 
 This is a fixed-function adaptation: it does not reproduce Vita's HDR/PBR shaders, normal maps, volumetric haze, per-pixel wet ripples, dynamic per-pixel lights or bloom. The PSP's 16-bit depth and reduced texture sizes also limit fine facade detail and lettering. Reflection geometry is limited to lit surfaces and moving objects. PSP `workMs` includes CPU submission and waiting for the GE; `gpuWaitMs` is only the wait after submission, **not** serialized GPU pass timing. Captures and USB transfers must be kept outside measurement windows. Host build, physical runtime, installed-file readback, manual control feel and listening to the sound are separate evidence.
 
@@ -357,7 +357,7 @@ bun tools/release.ts [--export] [--targets vita,psp,3ds,ipod-touch,android] [--o
 | Target | File | Holds |
 | --- | --- | --- |
 | `vita` | `pocket-atlas-<version>.vpk` | the program, `atlas.pack`, every Vita place, the interface and the programs a console compiled |
-| `psp` | `pocket-atlas-<version>-psp.zip` | `PSP/GAME/PocketAtlas/` for the root of a Memory Stick: `EBOOT.PBP`, the interface, `globe.psp` and each PSP place |
+| `psp` | `pocket-atlas-<version>-psp.zip` | `PSP/GAME/PocketAtlas/EBOOT.PBP` for the root of a Memory Stick: the program with the interface, `globe.psp` and each PSP place in it |
 | `3ds` | `pocket-atlas-<version>-3ds.zip` | the root of the SD card: `3ds/pocket-atlas.3dsx`, and `pocket-atlas/manifest.json` with each place as `pocket-atlas/<sha256>.place`. The `.3dsx` is the only form: no CIA is built |
 | `ipod-touch` | `pocket-atlas-<version>-ipod.ipa` | `Payload/PocketAtlas.app`, with the globe and each iPod place |
 | `android` | `pocket-atlas-<version>.apk` | the release build for Android 4.3 and later with OpenGL ES 3.0 (`minSdkVersion` 18, `targetSdkVersion` 34): `libmain.so` and `libatlas.so` for `armeabi-v7a` and for `arm64-v8a`, the interface, the globe and each Android place, signed |

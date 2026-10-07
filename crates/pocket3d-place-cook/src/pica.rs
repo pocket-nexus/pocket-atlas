@@ -630,7 +630,7 @@ fn push_texture(src: &Rgba, format: u32, gles: bool, tex: &mut Vec<u8>, textures
 }
 /// A dusk vista's height haze between `eye` and `p` (`VistaHaze`), on a
 /// scene-linear colour: what is left of it, and the horizon scattered in.
-fn vista(m: &crate::source::Scene, eye: Vec3, p: Vec3, c: Vec3, additive: bool) -> Vec3 {
+pub(super) fn vista(m: &crate::source::Scene, eye: Vec3, p: Vec3, c: Vec3, additive: bool) -> Vec3 {
     let Some(h) = &m.vista_haze else { return c };
     let t = h.transmittance(eye.to_array(), p.to_array());
     if additive {
@@ -655,7 +655,7 @@ fn vista(m: &crate::source::Scene, eye: Vec3, p: Vec3, c: Vec3, additive: bool) 
 /// pixel and a half of each other there (sprites are wider) are summed into
 /// one before it: a hundred of them would otherwise add up to white. What
 /// the curve leaves at black is dropped.
-fn sprites(lights: &[pc::LightPoint], f: &pc::LightField, eye: Vec3, focal: f32, height: f32, brightest_first: bool, air: impl Fn(Vec3, Vec3) -> Vec3, display: impl Fn(Vec3) -> Vec3) -> Vec<u8> {
+pub(super) fn sprites(lights: &[pc::LightPoint], f: &pc::LightField, eye: Vec3, focal: f32, height: f32, brightest_first: bool, air: impl Fn(Vec3, Vec3) -> Vec3, display: impl Fn(Vec3) -> Vec3) -> Vec<u8> {
     let (lo, hi) = (f.min_pixels * height / 272.0, f.max_pixels * height / 272.0);
     // (energy, position weighted by energy with the weight in w, first light with the largest radius)
     let mut cells: std::collections::BTreeMap<Option<[i32; 2]>, Vec<(Vec3, glam::Vec4, pc::LightPoint)>> = Default::default();

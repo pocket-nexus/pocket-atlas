@@ -4,14 +4,22 @@
 use bytemuck::{Pod, Zeroable};
 
 pub const MAGIC: u32 = u32::from_le_bytes(*b"PLPS");
-pub const VERSION: u32 = 3;
-pub const MAX_BYTES: usize = 18 * 1024 * 1024;
+pub const VERSION: u32 = 4;
+/// The largest pack a PSP holds: the pack buffer reserved at start (see
+/// psp/README.md, Memory). A PSP-1000 reserves what it has and lists a
+/// larger place as not on the device.
+pub const MAX_BYTES: usize = 24 * 1024 * 1024;
 pub const NONE: u32 = u32::MAX;
 pub const ALPHA: u32 = 1;
 pub const DOUBLE_SIDED: u32 = 2;
 pub const WET: u32 = 4;
 pub const NO_REFLECT: u32 = 8;
 pub const NO_DEPTH_WRITE: u32 = 16;
+/// Draw: lies beyond the near range and is drawn in the vista range.
+pub const FAR: u32 = 32;
+/// Material: a surface's emission map, added over the lit surface drawn
+/// with the same triangles (depth-tested, not written).
+pub const GLOW: u32 = 64;
 /// GE PRIM has a 16-bit vertex/index count. Keep complete triangles.
 pub const MAX_INDICES: usize = 65532;
 
@@ -49,6 +57,18 @@ pub struct Header {
     /// Camera-centered, unindexed sky dome; empty for the night clear colour.
     pub sky_vertices: Span,
     pub sky_texture: u32,
+    /// Far plane of the near range (the depth buffer is 16-bit; the near
+    /// plane is 0.5 m).
+    pub far: f32,
+    /// The vista range: `FAR` draws and light sprites are drawn first with
+    /// these planes, then the depth buffer is cleared for the near range.
+    /// `vista_far` 0: no vista range.
+    pub vista_near: f32,
+    pub vista_far: f32,
+    /// Light sprites (`SpriteGroup`) and their falloff texture.
+    pub sprites: Span,
+    pub sprite_texture: u32,
+    pub reserved: [u32; 2],
 }
 #[repr(C)]
 #[derive(Clone, Copy, Default, Pod, Zeroable)]
@@ -135,6 +155,28 @@ pub struct Shot {
     pub to: [f32; 7],
     pub duration: f32,
 }
+/// A light sprite's corner, two per sprite (a GE sprite between opposite
+/// corners). The GE places it from three bone matrices set per frame: the
+/// light (identity), the camera's right + up scaled by view depth in pixels,
+/// and the step toward the camera. `weights` = [1, ±size × (1 − pull) / 2,
+/// pull]: a square `size` pixels wide whose depth sits `pull` of the way to
+/// the camera, clear of the surface the light stands on.
+#[repr(C)]
+#[derive(Clone, Copy, Default, Pod, Zeroable)]
+pub struct SpriteVertex {
+    pub weights: [f32; 3],
+    pub uv: [f32; 2],
+    pub color: u32,
+    pub pos: [f32; 3],
+}
+/// The sprites of one region, culled together.
+#[repr(C)]
+#[derive(Clone, Copy, Default, Pod, Zeroable)]
+pub struct SpriteGroup {
+    pub vertices: Span,
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+}
 #[repr(C)]
 #[derive(Clone, Copy, Default, Pod, Zeroable)]
 pub struct Light {
@@ -174,7 +216,13 @@ pub fn validate(bytes: &[u8]) -> Result<&Header, &'static str> {
     }
     if !h.fog_near.is_finite()
         || !h.fog_far.is_finite()
-        || h.fog_far <= h.fog_near
+        // 0 and 0: no fog (a vista's haze is in its vertex colours).
+        || (h.fog_far <= h.fog_near && (h.fog_near, h.fog_far) != (0.0, 0.0))
+        || !h.far.is_finite()
+        || h.far < 1.0
+        || !h.vista_near.is_finite()
+        || !h.vista_far.is_finite()
+        || (h.vista_far != 0.0 && !(h.vista_near > 0.5 && h.vista_far > h.vista_near))
         || !h.door_radius.is_finite()
         || h.door_radius < 0.0
         || !h.door_travel.is_finite()
@@ -361,6 +409,26 @@ pub fn validate(bytes: &[u8]) -> Result<&Header, &'static str> {
             return Err("door node");
         }
     }
+    let groups = slice::<SpriteGroup>(bytes, h.sprites)?;
+    if !groups.is_empty() && h.sprite_texture as usize >= ts.len() {
+        return Err("sprite texture");
+    }
+    for g in groups {
+        let vs = slice::<SpriteVertex>(bytes, g.vertices)?;
+        if g.vertices.offset % 16 != 0
+            || vs.is_empty()
+            || vs.len() % 2 != 0
+            || vs.len() > MAX_INDICES
+            || !valid_bounds(&g.min, &g.max)
+            || vs.iter().any(|v| {
+                v.pos.iter().chain(v.uv.iter()).chain(v.weights.iter()).any(|v| !v.is_finite())
+                    || v.weights[0] != 1.0
+                    || !(0.0..1.0).contains(&v.weights[2])
+            })
+        {
+            return Err("light sprites");
+        }
+    }
     Ok(h)
 }
 
@@ -395,6 +463,7 @@ mod tests {
         h.frames = 1;
         h.fps = 30.0;
         h.fog_far = 100.0;
+        h.far = 300.0;
         h.doors = [NONE; 2];
         h.sky_texture = NONE;
         h.shots = Span {
@@ -457,8 +526,52 @@ mod tests {
         let h = bytemuck::from_bytes_mut::<Header>(
             &mut bytemuck::cast_slice_mut::<_, u8>(&mut data)[..core::mem::size_of::<Header>()],
         );
+        h.fog_near = 10.0;
         h.fog_far = h.fog_near;
         assert!(validate(bytemuck::cast_slice(&data)).is_err());
+        // No fog at all is 0 and 0; a vista range needs its planes in order.
+        let check = |f: &dyn Fn(&mut Header)| {
+            let mut data = fixture();
+            f(header(&mut data));
+            validate(bytemuck::cast_slice(&data)).is_ok()
+        };
+        assert!(check(&|h| (h.fog_near, h.fog_far) = (0.0, 0.0)));
+        assert!(!check(&|h| (h.vista_near, h.vista_far) = (2000.0, 1000.0)));
+        assert!(check(&|h| (h.vista_near, h.vista_far) = (100.0, 1000.0)));
+        assert!(!check(&|h| h.far = 0.0));
+    }
+    fn header(data: &mut std::vec::Vec<u32>) -> &mut Header {
+        bytemuck::from_bytes_mut::<Header>(&mut bytemuck::cast_slice_mut::<_, u8>(data)[..core::mem::size_of::<Header>()])
+    }
+
+    #[test]
+    fn light_sprites_are_corner_pairs_with_a_unit_light_weight() {
+        let mut data = fixture();
+        data.resize(data.len().next_multiple_of(4), 0);
+        let start = data.len() * 4;
+        let corner = |w1: f32| SpriteVertex { weights: [1.0, w1, 0.1], uv: [0.0; 2], color: 0, pos: [0.0, 1.0, 2.0] };
+        let vertices = [corner(-2.0), corner(2.0)];
+        data.extend_from_slice(bytemuck::cast_slice(&vertices));
+        let group = SpriteGroup { vertices: Span { offset: start as u32, count: 2 }, min: [0.0, 1.0, 2.0], max: [0.0, 1.0, 2.0] };
+        let groups = Span { offset: (data.len() * 4) as u32, count: 1 };
+        data.extend_from_slice(bytemuck::cast_slice(&[group]));
+        let texture = Texture { pixels: Span { offset: start as u32, count: 8 * 8 * 2 }, width: 8, height: 8, wrap: 3, mips: 1, format: RGBA4444 };
+        let textures = Span { offset: (data.len() * 4) as u32, count: 1 };
+        data.extend_from_slice(bytemuck::cast_slice(&[texture]));
+        data.resize(data.len().max(start / 4 + 32), 0);
+        let size = data.len() as u32 * 4;
+        let h = header(&mut data);
+        h.bytes = size;
+        h.sprites = groups;
+        h.textures = textures;
+        h.sprite_texture = 0;
+        assert!(validate(bytemuck::cast_slice(&data)).is_ok());
+        let mut bad = data.clone();
+        bad[start / 4] = 0.5f32.to_bits();
+        assert_eq!(validate(bytemuck::cast_slice(&bad)).err(), Some("light sprites"));
+        let mut bad = data.clone();
+        header(&mut bad).sprite_texture = 1;
+        assert_eq!(validate(bytemuck::cast_slice(&bad)).err(), Some("sprite texture"));
     }
 
     #[test]

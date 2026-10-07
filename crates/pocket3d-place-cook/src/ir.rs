@@ -155,23 +155,9 @@ fn required_files(document: &Value) -> Result<BTreeSet<String>, String> {
 
 impl Manifest {
     pub fn check_target(&self, target: Target) -> Result<(), String> {
-        for feature in &self.features {
-            if target == Target::Psp
-                && matches!(feature.as_str(), "material:lights" | "vista-haze")
-            {
-                return Err(format!(
-                    "{}: {feature} has no {} lowering; the source remains intact",
-                    self.name,
-                    target.name()
-                ));
-            }
-            if target == Target::Psp && feature == "material:water" {
-                return Err(format!("{}: {feature} has no PSP lowering", self.name));
-            }
-        }
-        if target == Target::Psp && !matches!(self.kind.as_str(), "night-street" | "daytime-slope" | "daytime-street") {
+        if target == Target::Psp && !matches!(self.kind.as_str(), "night-street" | "daytime-slope" | "daytime-street" | "daytime-coast" | "dusk-street" | "dusk-vista") {
             return Err(format!(
-                "{}: PSP currently supports night streets and dry daytime streets/slopes, got {}",
+                "{}: PSP has no lowering for {} places",
                 self.name, self.kind
             ));
         }
@@ -465,29 +451,29 @@ mod tests {
     }
     #[test]
     fn rejects_missing_lowerings_instead_of_treating_web_live_as_supported() {
-        let m = Manifest {
+        let mut m = Manifest {
             version: VERSION,
             name: "vista".into(),
             kind: "dusk-vista".into(),
             features: ["material:lights".into(), "vista-haze".into()].into(),
             files: vec![],
         };
-        assert!(m.check_target(Target::Vita).is_ok());
-        assert!(m.check_target(Target::Ipod).is_ok());
-        assert!(m.check_target(Target::Pica).is_ok());
+        for target in [Target::Vita, Target::Ipod, Target::Pica, Target::Psp] {
+            assert!(m.check_target(target).is_ok());
+        }
+        m.kind = "night-coast".into();
         assert!(m
             .check_target(Target::Psp)
             .unwrap_err()
-            .contains("no psp lowering"));
+            .contains("no lowering for night-coast"));
     }
     #[test]
-    fn psp_daylight_admission_keeps_water_and_vista_effects_explicit() {
-        for kind in ["daytime-street", "daytime-slope"] {
-            let mut m = Manifest { version: VERSION, name: "day".into(),
-                kind: kind.into(), features: ["day-sky".into()].into(), files: vec![] };
-            assert!(m.check_target(Target::Psp).is_ok());
-            m.features.insert("material:water".into());
-            assert!(m.check_target(Target::Psp).is_err());
+    fn psp_admits_every_lowered_kind_with_its_effects() {
+        for kind in ["night-street", "daytime-slope", "daytime-street", "daytime-coast", "dusk-street", "dusk-vista"] {
+            let m = Manifest { version: VERSION, name: "place".into(), kind: kind.into(),
+                features: ["day-sky".into(), "material:water".into(), "material:lights".into(), "vista-haze".into()].into(),
+                files: vec![] };
+            assert!(m.check_target(Target::Psp).is_ok(), "{kind}");
         }
     }
     #[test]

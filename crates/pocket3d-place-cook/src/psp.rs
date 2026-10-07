@@ -5,6 +5,12 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 #[path = "psp_daylight.rs"]
 mod daylight;
+#[path = "psp_lights.rs"]
+mod lights;
+#[path = "psp_thin.rs"]
+mod thin;
+#[path = "psp_water.rs"]
+mod water;
 use pocket_atlas_model as pc;
 use pocket3d_place_psp as pp;
 use std::collections::HashMap;
@@ -55,22 +61,87 @@ pub(super) fn static_sun_light(sun: Option<&pc::Sun>, occluder: Option<&crate::o
     daylight::sun_light(sun, shadows, pos + normal.normalize_or(Vec3::Y) * 0.5, normal, true)
 }
 
+/// Draws at least this far from every camera are drawn in the vista range.
+const SPLIT: f32 = 400.0;
+
+/// Where the cameras stand: each shot's ends and middle, and the corners of
+/// the free camera's walkable volumes.
+fn cameras(m: &crate::source::Scene) -> Vec<Vec3> {
+    let mut points: Vec<Vec3> = m
+        .camera
+        .shots
+        .iter()
+        .flat_map(|s| {
+            let (a, b) = (Vec3::from(s.from.pos), Vec3::from(s.to.pos));
+            [a, b, (a + b) * 0.5]
+        })
+        .collect();
+    for b in &m.camera.walkable {
+        for i in 0..8 {
+            points.push(Vec3::new(b[if i & 1 == 0 { 0 } else { 3 }], b[if i & 2 == 0 { 1 } else { 4 }], b[if i & 4 == 0 { 2 } else { 5 }]));
+        }
+    }
+    points
+}
+
 pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,String> {
     let m = scene;
     assert!(m.materials.iter().all(|m| !m.vertex_pbr), "PSP lowering requires source materials, not Vita PBR palettes");
     let daytime = daylight::enabled(&m.kind);
+    // The vista's haze, the water's Fresnel and the light sprites are cooked
+    // as seen from the middle of the camera shots, as on the 3DS.
+    let eye = m.camera.shots.iter().flat_map(|s| [s.from.pos, s.to.pos]).map(Vec3::from).sum::<Vec3>()
+        / (2 * m.camera.shots.len().max(1)) as f32;
+    let cameras = cameras(m);
+    // Metres a pixel spans per metre of distance, at the shots' mean lens.
+    let fov = m.camera.shots.iter().map(|s| s.from.fov + s.to.fov).sum::<f32>() / (2 * m.camera.shots.len().max(1)) as f32;
+    let pixel = (fov.to_radians() * 0.5).tan() / 136.0;
+    let mut narrow_triangles = 0;
     let mut w = Writer(vec![0; core::mem::size_of::<pp::Header>()]);
     let mut textures = Vec::new();
     let mut tex_map = HashMap::new();
-    for mat in &m.materials {
-        if let Some(id) = mat.albedo.or(mat.emission) {
+    let water_tex: HashMap<usize, u32> = if daytime {
+        m.materials
+            .iter()
+            .enumerate()
+            .filter(|(_, mat)| mat.kind == pc::Kind::Water)
+            .filter_map(|(i, mat)| water::texture(m, mat, &mut w, &mut textures).map(|t| (i, t)))
+            .collect()
+    } else {
+        HashMap::new()
+    };
+    // A sky-lit surface with an emission map of its own (floodlit stone, a
+    // train's windows) is lit without it, then drawn again with the map
+    // added (`pp::GLOW`), as the 3DS's second combiner stage adds it. In a
+    // vista an emission map without an albedo (a far tower's windows) goes
+    // the same way, over its hazed base colour.
+    let glows = |mat: &pc::Material| {
+        daytime
+            && mat.kind == pc::Kind::Standard
+            && (mat.albedo.is_some() || m.vista_haze.is_some())
+            && mat.emission.is_some()
+            && mat.albedo != mat.emission
+            && mat.blend == pc::Blend::Opaque
+            && mat.alpha_test == 0.0
+            && !mat.interior
+            && mat.emissive.iter().any(|&e| e >= 0.1)
+    };
+    let ids: Vec<u32> = m
+        .materials
+        .iter()
+        .filter(|mat| !(daytime && mat.kind == pc::Kind::Water))
+        .flat_map(|mat| [mat.albedo.or(mat.emission), mat.emission.filter(|_| glows(mat))])
+        .flatten()
+        .collect();
+    for id in ids {
+        {
             if tex_map.contains_key(&id) {
                 continue;
             }
             let t = &m.textures[id as usize];
             let rgba = t.rgba8();
             let luminous = m.materials.iter().any(|m| {
-                m.albedo.or(m.emission) == Some(id)
+                (m.albedo.or(m.emission) == Some(id) || (glows(m) && m.emission == Some(id)))
                     && (m.emissive.iter().any(|&e| e > 0.1) || m.kind == pc::Kind::Unlit)
             });
             // Daylight glossy maps carry smooth reflected gradients. Keep their
@@ -129,14 +200,20 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
     let mut materials: Vec<_> = m
         .materials
         .iter()
-        .map(|mat| {
-            let uv = mat.uv_anim.unwrap_or_default();
+        .enumerate()
+        .map(|(i, mat)| {
+            let mut uv = mat.uv_anim.unwrap_or_default();
+            if water_tex.contains_key(&i) {
+                uv.scroll = water::scroll(mat);
+            }
             pp::Material {
-                texture: mat
-                    .albedo
-                    .or(mat.emission)
-                    .map(|id| tex_map[&id])
-                    .unwrap_or(pp::NONE),
+                texture: if let Some(&t) = water_tex.get(&i) {
+                    t
+                } else if glows(mat) {
+                    mat.albedo.map(|id| tex_map[&id]).unwrap_or(pp::NONE)
+                } else {
+                    mat.albedo.or(mat.emission).map(|id| tex_map[&id]).unwrap_or(pp::NONE)
+                },
                 flags: if mat.blend != pc::Blend::Opaque {
                     pp::ALPHA
                 } else {
@@ -174,6 +251,22 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
             }
         })
         .collect();
+    let glow_materials: HashMap<usize, u32> = m
+        .materials
+        .iter()
+        .enumerate()
+        .filter(|(_, mat)| glows(mat))
+        .map(|(i, mat)| {
+            let base = materials[i];
+            materials.push(pp::Material {
+                texture: tex_map[&mat.emission.unwrap()],
+                flags: pp::GLOW | (base.flags & pp::DOUBLE_SIDED),
+                alpha_test: 0,
+                ..base
+            });
+            (i, materials.len() as u32 - 1)
+        })
+        .collect();
     let baker = crate::bake::Baker::new(
         &m.lights,
         (m.atmosphere.hemisphere_sky, m.atmosphere.hemisphere_ground),
@@ -187,6 +280,9 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
     let world = daylight::world_matrices(m);
     let mut draws = Vec::new();
     for draw in &m.draws {
+        if matches!(draw.geometry, crate::source::Geometry::LightField(_)) {
+            continue;
+        }
         let mat = &m.materials[draw.material as usize];
         let model = if daytime {
             draw.node.map_or(Mat4::IDENTITY, |i| world[i as usize])
@@ -206,14 +302,54 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
             );
             continue;
         }
+        if daytime && mat.kind == pc::Kind::Water {
+            let spread = cameras.iter().map(|c| (*c - eye).length()).fold(0.0, f32::max);
+            let laid = water::lay(m, draw, mat, eye, SPLIT + spread);
+            for part in laid.parts {
+                let mut remap = HashMap::<u16, u16>::new();
+                let mut vertices = Vec::new();
+                let indices: Vec<u16> = part
+                    .iter()
+                    .map(|&i| {
+                        *remap.entry(i).or_insert_with(|| {
+                            vertices.push(laid.vertices[i as usize]);
+                            (vertices.len() - 1) as u16
+                        })
+                    })
+                    .collect();
+                let (min, max) = vertices.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(a, b), v| {
+                    (a.min(Vec3::from(v.pos)), b.max(Vec3::from(v.pos)))
+                });
+                draws.push(pp::Draw {
+                    vertices: w.push(&vertices),
+                    indices: w.push(&indices),
+                    weights: w.push::<pp::Weights>(&[]),
+                    joints: w.push::<pp::Joint>(&[]),
+                    material: draw.material,
+                    node: pp::NONE,
+                    flags: pp::NO_REFLECT,
+                    reserved: 0,
+                    min: min.to_array(),
+                    max: max.to_array(),
+                });
+            }
+            continue;
+        }
         // Coarse lists retain outlines and the bake's lighting boundaries.
         // No camera-specific scene copies: all six shots share these draws.
         // Keep the visible aperture of overlay panes intact.
+        let thin = (daytime && mat.polygon_offset.is_none() && draw.node.is_none() && draw.skin.is_none())
+            .then(|| thin::select(draw, eye, pixel));
+        narrow_triangles += thin.as_ref().map_or(0, |t| t.narrow_triangles);
         let indices = if daytime && mat.polygon_offset.is_some() {
             draw.indices()
+        } else if let Some(t) = &thin {
+            &t.indices
         } else {
             draw.lods().last().map(|l| l.indices.as_slice()).unwrap_or(draw.indices())
         };
+        let glow = glow_materials.get(&(draw.material as usize)).copied();
+        let mut glow_colors = Vec::new();
         let mut remap = HashMap::<u16, u16>::new();
         let mut vertices = Vec::new();
         let mut weights = Vec::new();
@@ -241,11 +377,12 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         for old in selected {
             let index = *remap.entry(old).or_insert_with(|| {
                 let v = scene.vertex(draw, old as usize);
-                let pos = v.pos.to_array();
+                let normal = v.normal.normalize_or(Vec3::Y);
+                let at = v.pos + normal * thin.as_ref().map_or(0.0, |t| t.widen[old as usize]);
+                let pos = at.to_array();
                 let uv = v.uv.to_array();
                 let vc = core::array::from_fn::<_, 3, _>(|i| pc::color::decode(v.color[i] as f32 / 255.0));
-                let normal = v.normal.normalize_or(Vec3::Y);
-                let world_pos = model.transform_point3(v.pos);
+                let world_pos = model.transform_point3(at);
                 let world_normal = normal_matrix.transform_vector3(normal).normalize_or(normal);
                 let mut irradiance = if draw.class == crate::source::VertexClass::Baked {
                     let a = v.light[3] as f32 / 255.0;
@@ -276,7 +413,21 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
                     pc::Kind::Products => base * mat.emissive[0],
                     pc::Kind::Glass => Vec3::new(0.07, 0.10, 0.12),
                     _ if mat.interior => Vec3::from_array(mat.emissive) * Vec3::from_array(vc),
+                    _ if glow.is_some() => base * irradiance,
                     _ => base * irradiance + Vec3::from_array(mat.emissive),
+                };
+                if glow.is_some() {
+                    // What the emission adds to the frame, through the haze.
+                    let lit = |c: Vec3| Vec3::from(pc::color::tone(c.to_array(), &m.post));
+                    let add = lit(crate::pica::vista(m, eye, world_pos, Vec3::from_array(mat.emissive), true)) - lit(Vec3::ZERO);
+                    let b = add.to_array().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+                    glow_colors.push(u32::from_le_bytes([b[0], b[1], b[2], 255]));
+                }
+                // A vista's height haze between the shots and the surface.
+                let light = if mat.fog && !mat.interior {
+                    crate::pica::vista(m, eye, world_pos, light, false)
+                } else {
+                    light
                 };
                 let alpha = if mat.kind == pc::Kind::Glass {
                     0.14
@@ -316,6 +467,21 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
                     .collect()
             })
             .unwrap_or_default();
+        if let Some(material) = glow {
+            let lit: Vec<pp::Vertex> = vertices.iter().zip(&glow_colors).map(|(v, &color)| pp::Vertex { color, ..*v }).collect();
+            draws.push(pp::Draw {
+                vertices: w.push(&lit),
+                indices: w.push(&out_indices),
+                weights: w.push(&weights),
+                joints: w.push(&joints),
+                material,
+                node: draw.node.unwrap_or(pp::NONE),
+                flags: pp::NO_REFLECT,
+                reserved: 0,
+                min: draw.min,
+                max: draw.max,
+            });
+        }
         draws.push(pp::Draw {
             vertices: w.push(&vertices),
             indices: w.push(&out_indices),
@@ -398,8 +564,37 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         .map(|b| [b[0][0], b[0][1], b[0][2], b[1][0], b[1][1], b[1][2]])
         .collect();
     draws.retain(|d| d.indices.count > 0);
+    // A sky-lit place draws what lies at least SPLIT from every camera in a
+    // vista range of its own, then clears depth for the near range: a 16-bit
+    // depth buffer from 0.5 m holds a street, not a 70 km horizon. A night
+    // street keeps its 300 m far plane.
+    let reach = |d: &pp::Draw| {
+        let (lo, hi) = (Vec3::from(d.min), Vec3::from(d.max));
+        cameras.iter().fold((f32::MAX, 0.0f32), |(near, far), &c| {
+            (near.min((c.clamp(lo, hi) - c).length()), far.max((c - lo).abs().max((c - hi).abs()).length()))
+        })
+    };
+    let (mut far, mut vista) = (300.0f32, (f32::MAX, 0.0f32));
+    if daytime {
+        far = 0.0;
+        for d in &mut draws {
+            let (near, farthest) = reach(d);
+            if d.node == pp::NONE && d.weights.count == 0 && near > SPLIT {
+                d.flags |= pp::FAR;
+                vista = (vista.0.min(near), vista.1.max(farthest));
+            } else {
+                far = far.max(farthest);
+            }
+        }
+        far = far.max(300.0) * 1.02;
+    }
     batch_geometry(&mut w, &mut draws, &materials);
     compact(&mut w, &mut textures, &mut draws, &mut nodes, &mut lights);
+    let field = lights::cook(m, eye, &mut w, &mut textures);
+    if let Some(f) = &field {
+        vista = (vista.0.min(f.nearest), vista.1.max(f.farthest));
+    }
+    let vista = if vista.1 > 0.0 { (vista.0 * 0.9, vista.1 * 1.02) } else { (0.0, 0.0) };
     let mut h = pp::Header::zeroed();
     h.magic = pp::MAGIC;
     h.version = pp::VERSION;
@@ -431,8 +626,24 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
     } else {
         color(m.atmosphere.sky_horizon, 1.0)
     };
-    h.fog_near = 12.0;
-    h.fog_far = (1.8 / m.atmosphere.fog_density.max(0.001)).min(250.0);
+    // GE fog is linear: a sky-lit place's runs where the authored exp² fog
+    // goes from 5% to 95%; a vista's haze is in its vertex colours.
+    let density = m.atmosphere.fog_density;
+    (h.fog_near, h.fog_far) = if !daytime {
+        (12.0, (1.8 / density.max(0.001)).min(250.0))
+    } else if m.vista_haze.is_some() || density <= 0.0 {
+        (0.0, 0.0)
+    } else {
+        (0.226 / density, 1.73 / density)
+    };
+    h.far = far;
+    (h.vista_near, h.vista_far) = vista;
+    if let Some(f) = &field {
+        h.sprites = w.push(&f.groups);
+        h.sprite_texture = f.texture;
+    } else {
+        h.sprite_texture = pp::NONE;
+    }
     h.doors = [pp::NONE; 2];
     if let Some(d) = &m.doors {
         h.doors = [d.left, d.right];
@@ -457,7 +668,7 @@ pub fn cook(scene: &crate::source::Scene, profile: &Profile) -> Result<Artifact,
         .iter()
         .map(|v| v.1)
         .sum();
-    let report = serde_json::json!({"target":"psp","kind":m.kind,"skyTriangles":h.sky_vertices.count / 3,"sunBake":daytime && m.sun.is_some(),"rain":h.rain != 0,"draws":draws.len(),"triangles":triangles,"vertices":vertices_total,"textures":textures.len(),"bytes":w.0.len(),"animatedNodes":nodes.iter().filter(|n|n.track.count>0).count(),"skinnedDraws":draws.iter().filter(|d|d.weights.count>0).count(),"shots":shots.len()});
+    let report = serde_json::json!({"target":"psp","kind":m.kind,"skyTriangles":h.sky_vertices.count / 3,"sunBake":daytime && m.sun.is_some(),"rain":h.rain != 0,"draws":draws.len(),"triangles":triangles,"vertices":vertices_total,"textures":textures.len(),"bytes":w.0.len(),"far":h.far,"vista":[h.vista_near,h.vista_far],"farDraws":draws.iter().filter(|d|d.flags & pp::FAR != 0).count(),"narrowTriangles":narrow_triangles,"fog":[h.fog_near,h.fog_far],"sprites":field.as_ref().map_or(0,|f|f.sprites),"spriteGroups":field.as_ref().map_or(0,|f|f.groups.len()),"animatedNodes":nodes.iter().filter(|n|n.track.count>0).count(),"skinnedDraws":draws.iter().filter(|d|d.weights.count>0).count(),"shots":shots.len()});
     Ok(Artifact {
         bytes: w.0, summary: report, sections: Default::default(),
         textures: textures.iter().enumerate().map(|(id,t)|serde_json::json!({"id":id,"sourceTextures":tex_map.iter().filter_map(|(source,output)|(*output as usize==id).then_some(*source)).collect::<std::collections::BTreeSet<_>>(),"sources":tex_map.iter().filter(|(_,output)|**output as usize==id).flat_map(|(source,_)|crate::provenance::texture_sources(scene,*source as usize)).collect::<std::collections::BTreeSet<_>>(),"width":t.width,"height":t.height,"levels":t.mips,"bytes":t.pixels.count})).collect(),
@@ -598,7 +809,7 @@ mod tests {
             .join("../../.pocket-build/validation/psp-daylight-tests");
         std::fs::create_dir_all(&root).unwrap();
         let key = serde_json::json!({"pos":[0,1,3],"target":[0,1,0],"fov":50});
-        for kind in ["night-street", "daytime-slope", "daytime-street"] {
+        for kind in daylight::KINDS {
             let meta = serde_json::json!({
                 "name":"Daylight conversion regression","kind":kind,
                 "min":[-10,0,-10],"max":[10,20,10],"textures":[],"materials":[],"draws":[],
@@ -638,14 +849,20 @@ mod tests {
             std::fs::write(&output, &artifact.bytes).unwrap();
             let bytes = artifact.bytes;
             let h = pp::validate(&bytes).unwrap();
-            assert_eq!(core::mem::size_of::<pp::Header>(), 144);
+            assert_eq!(core::mem::size_of::<pp::Header>(), 176);
             if kind == "night-street" {
+                // A night street keeps its 300 m range and its fog.
+                assert_eq!((h.far, h.vista_far), (300.0, 0.0));
+                assert_eq!((h.fog_near, h.fog_far), (12.0, (1.8f32 / 0.003).min(250.0)));
                 assert_eq!(h.rain, 1);
                 assert_eq!(h.lights.count, 1);
                 assert_eq!(h.sky_texture, pp::NONE);
                 assert_eq!(h.sky_vertices.count, 0);
                 assert_eq!(h.sky_color, color([0.4, 0.5, 0.6], 1.0));
             } else {
+                // Linear fog where the authored exp² fog runs from 5% to 95%.
+                assert_eq!((h.fog_near, h.fog_far), (0.226 / 0.003, 1.73 / 0.003));
+                assert!(h.far >= 300.0 && h.vista_far == 0.0);
                 assert_eq!(h.rain, 0);
                 assert_eq!(h.lights.count, 0);
                 assert_eq!(h.sky_vertices.count, 32 * 16 * 6);
@@ -686,7 +903,7 @@ mod tests {
                     .copy_from_slice(&f32::NAN.to_le_bytes());
                 assert_eq!(pp::validate(&bad).err(), Some("sky vertex"));
                 let mut bad = bytes.clone();
-                let head = bytemuck::from_bytes_mut::<pp::Header>(&mut bad[..144]);
+                let head = bytemuck::from_bytes_mut::<pp::Header>(&mut bad[..core::mem::size_of::<pp::Header>()]);
                 head.sky_texture = head.textures.count;
                 assert_eq!(pp::validate(&bad).err(), Some("sky geometry"));
                 let mut bad = bytes.clone();

@@ -1,7 +1,7 @@
 // PSP uses PocketJS's pinned SDK resolver, Atlas owns the place renderer.
 // bun tools/atlas-psp.ts cook|build|serve|run|status|ctl|capture|package
 import { $ } from "bun";
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { guardDeviceCommand } from "../vendor/pocketjs/tools/device-lease.ts";
@@ -147,6 +147,39 @@ async function build() {
   await Bun.write(`${share}/build.json`, JSON.stringify({ runtimeBuild, packSha256: fileSha256(pack), prxSha256: fileSha256(`${share}/pocket-atlas.prx`), places: Object.keys(packs), packs }, null, 2));
   console.log(`PSP release: ${share}`);
 }
+/**
+ * The release EBOOT.PBP: the built one with `files` in its DATA.PSAR section,
+ * which runs from the eighth offset of the PBP's table to the end of the file
+ * (`psp/src/files.rs`): a `PKAR` index (magic, version 1, count, then 64-byte
+ * entries: name up to 47 bytes, offset from the section's start, size), then
+ * the files, each at a multiple of 64 bytes. The other sections keep their
+ * offsets, so the XMB still shows PARAM.SFO, ICON0 and PIC1.
+ */
+function packagePbp(pbp: string, files: [string, string][], out: string) {
+  const head = readFileSync(pbp);
+  if (head.toString("latin1", 0, 4) !== "\0PBP") throw new Error(`${pbp} is not a PBP`);
+  if (head.readUInt32LE(8 + 7 * 4) !== head.length) throw new Error(`${pbp} already has a DATA.PSAR section`);
+  const align = (n: number) => Math.ceil(n / 64) * 64;
+  const index = Buffer.alloc(16 + files.length * 64);
+  index.write("PKAR", 0, "latin1");
+  index.writeUInt32LE(1, 4);
+  index.writeUInt32LE(files.length, 8);
+  let at = align(index.length);
+  const bodies: [number, Buffer][] = [];
+  files.forEach(([name, path], i) => {
+    if (Buffer.byteLength(name) > 47) throw new Error(`${name}: a packaged name has at most 47 bytes`);
+    const data = readFileSync(path);
+    index.write(name, 16 + i * 64, "latin1");
+    index.writeUInt32LE(at, 16 + i * 64 + 48);
+    index.writeUInt32LE(data.length, 16 + i * 64 + 52);
+    bodies.push([at, data]);
+    at = align(at + data.length);
+  });
+  const section = Buffer.alloc(at);
+  index.copy(section, 0);
+  for (const [offset, data] of bodies) data.copy(section, offset);
+  writeFileSync(out, Buffer.concat([head, section]));
+}
 async function shell(text: string) {
   lease?.assertHeld();
   const p = Bun.spawn(["pspsh", "-p", port, "-e", text], {
@@ -270,7 +303,8 @@ else if (command === "serve") {
   const out = `${root}/dist/PSP/GAME/PocketAtlas`;
   rmSync(out, { recursive: true, force: true });
   mkdirSync(out, { recursive: true });
-  // The executable, the interface, the globe and every cooked place.
-  for (const file of ["EBOOT.PBP", "atlas.js", "atlas.pak", "globe.psp", ...cooked().map(([id]) => `${id}.place`)]) cpSync(`${share}/${file}`, `${out}/${file}`);
-  console.log(`Copy dist/PSP to the Memory Stick: ${out}`);
+  // One file: the executable with the interface, the globe and every cooked place in it.
+  const files = ["atlas.js", "atlas.pak", "globe.psp", ...cooked().map(([id]) => `${id}.place`)];
+  packagePbp(`${share}/EBOOT.PBP`, files.map((f) => [f, `${share}/${f}`]), `${out}/EBOOT.PBP`);
+  console.log(`Copy dist/PSP to the Memory Stick: ${out}/EBOOT.PBP (${statSync(`${out}/EBOOT.PBP`).size} bytes)`);
 } else throw new Error(`unknown PSP command ${command}`);
