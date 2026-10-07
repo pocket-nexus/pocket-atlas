@@ -4,7 +4,7 @@
   "id": "dev.pocket-nexus.atlas",
   "name": "pocket-atlas",
   "title": "Pocket Atlas",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "engine": {
     "capabilities": {
       "requires": ["text.glyphs.baked"],
