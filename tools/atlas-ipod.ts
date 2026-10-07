@@ -14,6 +14,9 @@ import { PLACES } from "../web/src/places/registry";
 import { globeSurface } from "./atlas-globe";
 import { compileInterface } from "./atlas-ui";
 
+/** The app's version, as every package names it (ui/pocket.json). */
+const VERSION = JSON.parse(readFileSync(resolve(import.meta.dir, "../ui/pocket.json"), "utf8")).version as string;
+
 const root = resolve(import.meta.dir, "..");
 const args = Bun.argv.slice(2);
 const command = args[0] ?? "build";
@@ -111,7 +114,7 @@ async function build() {
     CFBundleIdentifier: text(bundleId), CFBundleExecutable: text("PocketAtlas"), CFBundleName: text("Pocket Atlas"),
     CFBundleDisplayName: text(bundleId.endsWith(".atlas") ? "Pocket Atlas" : "Atlas " + bundleId.split(".").pop()),
     CFBundleIconFiles: `<array>${text("Icon.png")}${text("Icon@2x.png")}</array>`, UIPrerenderedIcon: "<true/>", CFBundlePackageType: text("APPL"),
-    CFBundleVersion: text("1"), CFBundleShortVersionString: text("0.1.0"), MinimumOSVersion: text("6.0"), UIDeviceFamily: "<array><integer>1</integer></array>",
+    CFBundleVersion: text("1"), CFBundleShortVersionString: text(VERSION), MinimumOSVersion: text("6.0"), UIDeviceFamily: "<array><integer>1</integer></array>",
     // Leaving the app ends it: UIKit would do so anyway (the link stubs carry no UIKit version).
     UIStatusBarHidden: "<true/>", UIApplicationExitsOnSuspend: "<true/>", UIRequiredDeviceCapabilities: `<array>${text("armv7")}${text("opengles-2")}</array>`,
     // `launch` opens the app through its own URL scheme.
