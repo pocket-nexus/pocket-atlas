@@ -809,7 +809,7 @@ mod tests {
             .join("../../.pocket-build/validation/psp-daylight-tests");
         std::fs::create_dir_all(&root).unwrap();
         let key = serde_json::json!({"pos":[0,1,3],"target":[0,1,0],"fov":50});
-        for kind in ["night-street", "daytime-slope", "daytime-street"] {
+        for kind in daylight::KINDS {
             let meta = serde_json::json!({
                 "name":"Daylight conversion regression","kind":kind,
                 "min":[-10,0,-10],"max":[10,20,10],"textures":[],"materials":[],"draws":[],
@@ -849,14 +849,20 @@ mod tests {
             std::fs::write(&output, &artifact.bytes).unwrap();
             let bytes = artifact.bytes;
             let h = pp::validate(&bytes).unwrap();
-            assert_eq!(core::mem::size_of::<pp::Header>(), 144);
+            assert_eq!(core::mem::size_of::<pp::Header>(), 176);
             if kind == "night-street" {
+                // A night street keeps its 300 m range and its fog.
+                assert_eq!((h.far, h.vista_far), (300.0, 0.0));
+                assert_eq!((h.fog_near, h.fog_far), (12.0, (1.8f32 / 0.003).min(250.0)));
                 assert_eq!(h.rain, 1);
                 assert_eq!(h.lights.count, 1);
                 assert_eq!(h.sky_texture, pp::NONE);
                 assert_eq!(h.sky_vertices.count, 0);
                 assert_eq!(h.sky_color, color([0.4, 0.5, 0.6], 1.0));
             } else {
+                // Linear fog where the authored exp² fog runs from 5% to 95%.
+                assert_eq!((h.fog_near, h.fog_far), (0.226 / 0.003, 1.73 / 0.003));
+                assert!(h.far >= 300.0 && h.vista_far == 0.0);
                 assert_eq!(h.rain, 0);
                 assert_eq!(h.lights.count, 0);
                 assert_eq!(h.sky_vertices.count, 32 * 16 * 6);
@@ -897,7 +903,7 @@ mod tests {
                     .copy_from_slice(&f32::NAN.to_le_bytes());
                 assert_eq!(pp::validate(&bad).err(), Some("sky vertex"));
                 let mut bad = bytes.clone();
-                let head = bytemuck::from_bytes_mut::<pp::Header>(&mut bad[..144]);
+                let head = bytemuck::from_bytes_mut::<pp::Header>(&mut bad[..core::mem::size_of::<pp::Header>()]);
                 head.sky_texture = head.textures.count;
                 assert_eq!(pp::validate(&bad).err(), Some("sky geometry"));
                 let mut bad = bytes.clone();

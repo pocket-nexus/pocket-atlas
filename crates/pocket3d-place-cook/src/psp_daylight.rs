@@ -159,8 +159,9 @@ mod tests {
     #[test]
     fn daylight_is_kind_driven_and_night_keeps_legacy_effects() {
         assert!(!enabled("night-street"));
-        assert!(enabled("daytime-slope"));
-        assert!(enabled("daytime-street"));
+        for kind in ["daytime-slope", "daytime-street", "daytime-coast", "dusk-street", "dusk-vista"] {
+            assert!(enabled(kind));
+        }
     }
     #[test]
     fn sun_bake_respects_normal_shadow_and_dynamic_object_motion() {
