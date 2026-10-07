@@ -27,7 +27,7 @@
     "maxFieldPoints": 16384
   },
   "budgets": {
-    "maxPackBytes": 18874368,
+    "maxPackBytes": 25165824,
     "sections": {}
   },
   "disabledFeatures": []

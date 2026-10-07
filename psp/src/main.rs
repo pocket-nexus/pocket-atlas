@@ -33,31 +33,41 @@ fn psp_main() {
     psp::enable_home_button();
     // The files beside the EBOOT open here: the worker has no current directory (files.rs).
     unsafe { files::locate() };
-    // The guest's parser recurses past the main thread's stack.
-    unsafe { host::run_on_worker(worker, || run()) }
+    // The guest's parser recurses past the main thread's stack; this thread
+    // opens the places for it.
+    unsafe {
+        if !files::serve(worker) {
+            run();
+        }
+    }
 }
 unsafe extern "C" fn worker(_: usize, _: *mut c_void) -> i32 {
     run();
+    files::finished();
     0
 }
 
 /// A file to read: the handle kept beside the executable (files.rs), or one
-/// opened on the PSPLINK share, which `done` closes.
+/// opened for this read (a place's pack beside it, or a file on the PSPLINK
+/// share), which `done` closes.
 struct Reading {
     fd: SceUid,
-    shared: bool,
+    owned: bool,
 }
 impl Reading {
     unsafe fn open(name: &str) -> Option<Self> {
         if let Some(fd) = files::kept(name) {
-            return Some(Reading { fd, shared: false });
+            return Some(Reading { fd, owned: false });
+        }
+        if let Some(fd) = files::open_place(name) {
+            return Some(Reading { fd, owned: true });
         }
         let host = format!("host0:/{name}\0");
         let fd = sceIoOpen(host.as_ptr(), IoOpenFlags::RD_ONLY, 0o666);
-        (fd.0 >= 0).then_some(Reading { fd, shared: true })
+        (fd.0 >= 0).then_some(Reading { fd, owned: true })
     }
     unsafe fn done(self) {
-        if self.shared {
+        if self.owned {
             sceIoClose(self.fd);
         }
     }

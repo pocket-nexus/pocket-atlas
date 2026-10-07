@@ -25,6 +25,8 @@ pub struct Renderer {
     bound_texture: u32,
     indices: alloc::vec::Vec<Align16<[u16; 8]>>,
     index_cursor: usize,
+    /// The frame's fog is on (a glow is added without it).
+    fog: bool,
 }
 pub struct Stats {
     pub draws: u32,
@@ -43,7 +45,8 @@ enum Pass {
 impl Pass {
     fn includes(self, draw: &pp::Draw, material: &pp::Material) -> bool {
         let wet = material.flags & pp::WET != 0;
-        let alpha = material.flags & pp::ALPHA != 0;
+        // A glow is added over its lit surface, after the opaque pass.
+        let alpha = material.flags & (pp::ALPHA | pp::GLOW) != 0;
         match self {
             Self::WetMask => wet,
             Self::Reflection => !wet && !alpha && draw.flags & pp::NO_REFLECT == 0,
@@ -183,6 +186,7 @@ impl Renderer {
             bound_texture: pp::NONE,
             indices: alloc::vec![Align16([0u16;8]);scene.draws.iter().map(|d|d.indices.count as usize).sum::<usize>()*3/8+scene.batches.len()*3+8],
             index_cursor: 0,
+            fog: false,
         }
     }
     unsafe fn draw(
@@ -225,9 +229,15 @@ impl Renderer {
         } else {
             sceGuDisable(GuState::AlphaTest);
         }
+        let glow = mat.flags & pp::GLOW != 0;
         if mask {
             sceGuDisable(GuState::Blend);
             sceGuDepthMask(1);
+        } else if glow {
+            sceGuEnable(GuState::Blend);
+            sceGuBlendFunc(BlendOp::Add, BlendFactor::Fix, BlendFactor::Fix, 0xffffff, 0xffffff);
+            sceGuDepthMask(1);
+            sceGuDisable(GuState::Fog);
         } else if mat.flags & pp::ALPHA != 0 {
             sceGuEnable(GuState::Blend);
             sceGuBlendFunc(
@@ -330,9 +340,13 @@ impl Renderer {
             indices.1,
             vertex,
         );
+        if glow && self.fog {
+            sceGuEnable(GuState::Fog);
+        }
         stats.draws += 1;
         stats.triangles += indices.0 / 3;
     }
+    /// The pass's draws in one range: `pp::FAR` for the vista, 0 for the near.
     unsafe fn pass(
         &mut self,
         s: &Scene,
@@ -341,11 +355,12 @@ impl Renderer {
         pass: Pass,
         reflect: bool,
         stats: &mut Stats,
+        range: u32,
     ) {
         for group in &s.batches {
             let d = &s.draws[group[0]];
             let m = &s.materials[d.material as usize];
-            if !pass.includes(d, m) {
+            if !pass.includes(d, m) || d.flags & pp::FAR != range {
                 continue;
             }
             let is_visible = |i: usize| {
@@ -423,12 +438,9 @@ impl Renderer {
         self.index_cursor = 0;
         self.bound_texture = pp::NONE;
         begin(s.header.sky_color);
-        let projection = glam::camera::rh::proj::opengl::perspective(
-            rig.fov * core::f32::consts::PI / 180.0,
-            480.0 / 272.0,
-            0.5,
-            300.0,
-        );
+        let fov = rig.fov * core::f32::consts::PI / 180.0;
+        let projection =
+            glam::camera::rh::proj::opengl::perspective(fov, 480.0 / 272.0, 0.5, s.header.far);
         let view = glam::camera::rh::view::look_at_mat4(rig.pos, rig.target, Vec3::Y);
         matrix(MatrixMode::Projection, projection);
         matrix(MatrixMode::View, view);
@@ -436,9 +448,34 @@ impl Renderer {
         let vp = projection * view;
         let clip = planes(vp);
         let mirror_clip = planes(vp * Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0)));
-        sceGuEnable(GuState::Fog);
-        sceGuFog(s.header.fog_near, s.header.fog_far, s.header.fog_color);
+        let fog = s.header.fog_far > s.header.fog_near;
+        self.fog = fog;
+        if fog {
+            sceGuEnable(GuState::Fog);
+            sceGuFog(s.header.fog_near, s.header.fog_far, s.header.fog_color);
+        } else {
+            sceGuDisable(GuState::Fog);
+        }
         sceGuEnable(GuState::DepthTest);
+        // The vista range first, with its own planes and its lights; then the
+        // near range over it, from a cleared depth buffer.
+        if s.header.vista_far > 0.0 {
+            let vista = glam::camera::rh::proj::opengl::perspective(
+                fov,
+                480.0 / 272.0,
+                s.header.vista_near,
+                s.header.vista_far,
+            );
+            matrix(MatrixMode::Projection, vista);
+            let far_clip = planes(vista * view);
+            self.pass(s, &far_clip, time, Pass::Opaque, reflect, &mut stats, pp::FAR);
+            self.pass(s, &far_clip, time, Pass::Transparent, reflect, &mut stats, pp::FAR);
+            self.sprites(s, rig, &far_clip, fog, &mut stats);
+            sceGuDepthOffset(0);
+            sceGuDepthMask(0);
+            sceGuClear(ClearBuffer::DEPTH_BUFFER_BIT);
+            matrix(MatrixMode::Projection, projection);
+        }
         if reflect {
             sceGuEnable(GuState::StencilTest);
             sceGuStencilFunc(StencilFunc::Always, 1, 255);
@@ -448,7 +485,7 @@ impl Renderer {
                 StencilOperation::Replace,
             );
             sceGuPixelMask(0x00ffffff);
-            self.pass(s, &clip, time, Pass::WetMask, reflect, &mut stats);
+            self.pass(s, &clip, time, Pass::WetMask, reflect, &mut stats, 0);
             sceGuPixelMask(0);
             sceGuDepthMask(0);
             sceGuClear(ClearBuffer::DEPTH_BUFFER_BIT);
@@ -458,14 +495,17 @@ impl Renderer {
                 StencilOperation::Keep,
                 StencilOperation::Keep,
             );
-            self.pass(s, &mirror_clip, time, Pass::Reflection, reflect, &mut stats);
+            self.pass(s, &mirror_clip, time, Pass::Reflection, reflect, &mut stats, 0);
             sceGuDisable(GuState::StencilTest);
             sceGuDepthMask(0);
             sceGuClear(ClearBuffer::DEPTH_BUFFER_BIT);
         }
-        self.pass(s, &clip, time, Pass::WetSurface, reflect, &mut stats);
-        self.pass(s, &clip, time, Pass::Opaque, reflect, &mut stats);
-        self.pass(s, &clip, time, Pass::Transparent, reflect, &mut stats);
+        self.pass(s, &clip, time, Pass::WetSurface, reflect, &mut stats, 0);
+        self.pass(s, &clip, time, Pass::Opaque, reflect, &mut stats, 0);
+        self.pass(s, &clip, time, Pass::Transparent, reflect, &mut stats, 0);
+        if s.header.vista_far == 0.0 {
+            self.sprites(s, rig, &clip, fog, &mut stats);
+        }
         sceGuDepthOffset(0);
         if !s.lights.is_empty() {
             self.halos(s, rig, time);
@@ -477,6 +517,74 @@ impl Renderer {
         sceGuDisable(GuState::Blend);
         stats.gpu_us = end(ui);
         stats
+    }
+    /// Light sprites: each is two corners the GE places from three bone
+    /// matrices (`pp::SpriteVertex`): the light, the camera's right + up
+    /// scaled to pixels at the light's depth, and the step to the camera.
+    /// Added to the frame, depth-tested, not written.
+    unsafe fn sprites(&mut self, s: &Scene, rig: &Rig, clip: &[Vec4; 6], fog: bool, stats: &mut Stats) {
+        if s.sprites.is_empty() {
+            return;
+        }
+        let f = (rig.target - rig.pos).normalize();
+        let right = f.cross(Vec3::Y).normalize();
+        let up = right.cross(f);
+        let pixel = libm::tanf(rig.fov * core::f32::consts::PI / 360.0) / 136.0;
+        let d = (right + up) * pixel;
+        let bones = [
+            Mat4::IDENTITY,
+            Mat4::from_cols((d * f.x).extend(0.0), (d * f.y).extend(0.0), (d * f.z).extend(0.0), (-d * f.dot(rig.pos)).extend(1.0)),
+            Mat4::from_cols(-Vec4::X, -Vec4::Y, -Vec4::Z, rig.pos.extend(1.0)),
+        ];
+        for (i, b) in bones.iter().enumerate() {
+            let data = Align16(b.to_cols_array());
+            sceGuBoneMatrix(i as u32, &*(data.0.as_ptr() as *const ScePspFMatrix4));
+        }
+        matrix(MatrixMode::Model, Mat4::IDENTITY);
+        let t = &s.textures[s.header.sprite_texture as usize];
+        sceGuEnable(GuState::Texture2D);
+        sceGuTexMode(texture_format(t), 0, 0, 1);
+        sceGuTexImage(
+            MipmapLevel::None,
+            t.width as i32,
+            t.height as i32,
+            t.width as i32,
+            s.bytes.as_ptr().add(t.pixels.offset as usize) as _,
+        );
+        sceGuTexWrap(GuTexWrapMode::Clamp, GuTexWrapMode::Clamp);
+        sceGuTexScale(1.0, 1.0);
+        sceGuTexOffset(0.0, 0.0);
+        self.bound_texture = pp::NONE;
+        sceGuDisable(GuState::Fog);
+        sceGuDisable(GuState::AlphaTest);
+        sceGuDisable(GuState::CullFace);
+        sceGuDepthOffset(0);
+        sceGuDepthMask(1);
+        sceGuEnable(GuState::Blend);
+        sceGuBlendFunc(BlendOp::Add, BlendFactor::Fix, BlendFactor::Fix, 0xffffff, 0xffffff);
+        for g in s.sprites {
+            if !visible(clip, Vec3::from_array(g.min), Vec3::from_array(g.max)) {
+                continue;
+            }
+            sceGuDrawArray(
+                GuPrimitive::Sprites,
+                VertexType::WEIGHT_32BITF
+                    | VertexType::WEIGHTS3
+                    | VertexType::TEXTURE_32BITF
+                    | VertexType::COLOR_8888
+                    | VertexType::VERTEX_32BITF
+                    | VertexType::TRANSFORM_3D,
+                g.vertices.count as i32,
+                ptr::null(),
+                s.bytes.as_ptr().add(g.vertices.offset as usize) as _,
+            );
+            stats.draws += 1;
+        }
+        sceGuDisable(GuState::Blend);
+        sceGuDepthMask(0);
+        if fog {
+            sceGuEnable(GuState::Fog);
+        }
     }
     unsafe fn sky(&mut self, s: &Scene, rig: &Rig, stats: &mut Stats) {
         let vertices = s.header.sky_vertices;

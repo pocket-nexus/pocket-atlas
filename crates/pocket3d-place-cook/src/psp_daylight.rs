@@ -4,12 +4,15 @@ use glam::{Mat4, Quat, Vec3};
 use pocket_atlas_model as pc;
 use pocket3d_place_psp as pp;
 
+/// Every place kind the PSP lowers. A night street keeps its rain, wet
+/// reflections and lamp halos; every other kind is lit by its authored sky:
+/// the panorama, the sun bake and the grade (a dusk is a low sun and a
+/// twilight sky, which the same path draws).
+pub(super) const KINDS: [&str; 6] = ["night-street", "daytime-slope", "daytime-street", "daytime-coast", "dusk-street", "dusk-vista"];
+
 pub(super) fn enabled(kind: &str) -> bool {
-    assert!(
-        matches!(kind, "night-street" | "daytime-slope" | "daytime-street"),
-        "PSP supports night-street, daytime-slope and daytime-street places"
-    );
-    kind.starts_with("daytime-")
+    assert!(KINDS.contains(&kind), "PSP supports {KINDS:?} places, got {kind}");
+    kind != "night-street"
 }
 
 pub(super) fn graded(c: Vec3, alpha: f32, post: &pc::Post) -> u32 {

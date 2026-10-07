@@ -13,6 +13,7 @@ pub struct Scene<'a> {
     pub dry: &'a [[f32; 6]],
     pub walkable: &'a [[f32; 6]],
     pub lights: &'a [pp::Light],
+    pub sprites: &'a [pp::SpriteGroup],
     pub world: Vec<Mat4>,
     pub skinned: Vec<Vec<pp::Vertex>>,
     pub door: f32,
@@ -48,6 +49,7 @@ impl<'a> Scene<'a> {
             dry: pp::slice(bytes, h.dry_boxes).unwrap(),
             walkable: pp::slice(bytes, h.walkable).unwrap(),
             lights: pp::slice(bytes, h.lights).unwrap(),
+            sprites: pp::slice(bytes, h.sprites).unwrap(),
             world: vec![Mat4::IDENTITY; h.nodes.count as usize],
             skinned: draws
                 .iter()
