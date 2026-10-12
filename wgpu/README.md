@@ -44,22 +44,13 @@ The page is the kernel's player (`createPlayer`, `pocket3d-player.js`): the bar 
 | --- | --- |
 | `title`, `tagline` | "Pocket Atlas", "The world in your pocket." |
 | `runsOn` | `psp`, `vita`, `3ds`, `ipod-touch`, `android`: the devices Atlas is built for |
-| `devices` | the four layouts, each with the `note` the Simulated mark shows after the kernel's own sentence |
+| `devices` | the four layouts |
 
-**The page speaks English and Japanese**, as PocketJS's player does (its README, "Languages"): `main.js` gives the game's sentence, each device's `note` and its own lines to the player as `{ en, ja }`; the player picks the language and shows the game's English for a word with no Japanese.
+**The page speaks English and Japanese**, as PocketJS's player does (its README, "Languages"): `main.js` gives the game's sentence and its own lines to the player as `{ en, ja }`; the player picks the language and shows the game's English for a word with no Japanese.
 
-**Every layout draws the PS Vita build's places and the iPod touch build's globe**, so a device's note says that, then what the device itself shows:
+**Every layout draws the PS Vita build's places and the iPod touch build's globe.** The Simulated mark says one sentence for every device: the browser draws the picture, and a real device draws the game with its own hardware. What each device's own build shows is in the repository's README and in [what differs from the PS Vita](#what-differs-from-the-ps-vita).
 
-| Device | Note |
-| --- | --- |
-| PS Vita | This page draws the PS Vita build's places from the same packs, at about twice the sharpness. On a PS Vita, surfaces more than 18 metres away are not shadowed by the buildings and trees around them and, unless they are wet, do not shine. The shadows of wires and railings break into dots, and the people inside the Konbini are pale. The globe here is the iPod touch build's. The PS Vita draws its own. |
-| PSP | This page draws the PS Vita build's places and the iPod touch build's globe. A PSP has two of the seven places, Rainy Night Konbini and Lombard Street, with lower detail and light that is worked out when the place is built. |
-| Nintendo 3DS | This page draws the PS Vita build's places and the iPod touch build's globe. A 3DS has all seven places at 400 by 240, with lower detail and light that is worked out when the place is built. |
-| iPod touch | The globe is the iPod touch build's own. The places are the PS Vita build's. An iPod touch 4 has five of the seven, without Sangubashi Crossing and Lombard Street, at 480 by 320 with lower detail and light that is worked out when the place is built. |
-
-A note changes when a device gains or loses a place (`targets` in `web/src/places/registry.ts`) or when [what differs from the PS Vita](#what-differs-from-the-ps-vita) changes.
-
-**The dock's words come from the page's host.** The player reads `/app.json` there: the game's name and the packages Pocket Studio holds, with their sizes. Where the host answers none, the page's `pocket-app` and `pocket-studio` stand, which `dist` writes from `.pocket-studio.json` (the project this checkout is registered as; Git ignores it). `serve` answers an `/app.json` with two example packages; `serve --dist` answers none.
+**The dock's links come from the page's host.** The player reads `/app.json` there: the game's name, whether Pocket Studio holds packages of it and whether it can be remixed, which decide the dock's Download and Remix links to the game's page in Pocket Studio. Where the host answers none, the page's `pocket-app` and `pocket-studio` stand, which `dist` writes from `.pocket-studio.json` (the project this checkout is registered as; Git ignores it). `serve` answers an `/app.json` with two example packages; `serve --dist` answers none.
 
 ## Where a place's renderer plugs in
 

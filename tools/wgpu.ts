@@ -198,7 +198,7 @@ const TYPES: Record<string, string> = { html: "text/html; charset=utf-8", js: "t
  * the game's name and its packages from it. (The packages and their sizes are examples.)
  */
 const APP = {
-  kind: "site", id: "local", slug: null, url: null, title: "Pocket Atlas", author: "local", tagline: "The world in your pocket.", verified: true, status: "published",
+  kind: "site", id: "local", slug: "atlas", url: null, title: "Pocket Atlas", author: "local", tagline: "The world in your pocket.", verified: true, status: "published", remixable: true,
   packages: [{ target: "psp", filename: "pocket-atlas-psp.zip", size: 31_000_000, version: "0.0.0" }, { target: "3ds", filename: "pocket-atlas.3dsx", size: 64_000_000, version: "0.0.0" }],
 };
 
@@ -849,21 +849,26 @@ if (command === "build") {
         else await p.page.mouse.move(mark.x, mark.y);
         await p.page.waitForTimeout(250);
         const said = (await p.page.evaluate(`(() => { const tip = document.getElementById("pocket-simulated"); const r = tip.getBoundingClientRect(); return { hidden: tip.hidden, text: tip.textContent, inside: r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight }; })()`)) as Record<string, any>;
-        expect(`${tag}: the mark says the picture is simulated, and how this device's differs (${JSON.stringify(said)})`, said.hidden === false && said.inside && said.text.includes("Your browser draws this picture") && said.text.includes(`A real ${LABELS[id]}`) && said.text.includes("PS Vita build's") && said.text.includes("iPod touch build's") && !said.text.includes("—"));
-        (report.player.notes ??= {})[id] = said.text;
+        expect(`${tag}: the mark says the picture is simulated, in the player's one sentence (${JSON.stringify(said)})`, said.hidden === false && said.inside && said.text.startsWith("Your browser draws this picture") && said.text.includes(`A real ${LABELS[id]}`) && said.text.endsWith("differently there."));
         await p.page.screenshot({ path: join(directory, `player-${window.name}-${id}-simulated.png`) });
         if (window.coarse) await held(mark.x, mark.y, async () => {});
         else await p.page.mouse.move(4, seen.view[1] / 2);
         await p.page.waitForTimeout(200);
         expect(`${tag}: the mark's words leave again`, (await p.page.evaluate(`document.getElementById("pocket-simulated").hidden`)) === true);
 
-        // The door to Pocket Studio: the game's card there, and the Studio's own front door.
-        const door = (await p.page.evaluate(`({ get: document.querySelector('[data-pocket-action=get]').href, make: document.querySelector('[data-pocket-action=make]').href, words: document.querySelector('[data-pocket-pitch]').textContent, shown: document.querySelector('[data-pocket-action=get]').getBoundingClientRect().width > 40 })`)) as Record<string, any>;
+        // The dock: Download and Remix, each an icon and a word, to the game's page in Pocket Studio. The
+        // server here names the game's address (`slug`) and says it can be remixed; the deployable
+        // directory's has no /app.json, so its page knows the Studio alone and has the one link to it.
+        const door = (await p.page.evaluate(`(() => { const of = (action) => { const link = document.querySelector('[data-pocket-action=' + action + ']'); return { href: link.href, text: link.textContent, shown: !link.hidden && link.getBoundingClientRect().width > 40, icon: !!link.querySelector('svg') }; }; const dock = document.querySelector('[data-pocket-studio]'); return { get: of('get'), remix: of('remix'), make: of('make'), words: dock.textContent, hosted: dock.hasAttribute('data-pocket-hosted'), height: dock.getBoundingClientRect().height }; })()`)) as Record<string, any>;
         report.player.door ??= door;
-        // The player tags the links that leave it, so the Studio knows a visit came from a game's page.
-        const card = deployed ? (deployed.studio ? `${deployed.studio.server}/studio/?app=${deployed.studio.app}&from=player` : "https://studio.pocket.nexus/?from=player") : "https://studio.pocket.nexus/studio/?app=local&from=player";
-        expect(`${tag}: the door leads to the game in Pocket Studio (${JSON.stringify(door)}, wanted ${card})`, door.shown && door.get === card && new URL(door.make).pathname === "/" && new URL(door.make).search === "?from=player" && door.words.includes("Pocket Atlas is built for PSP, PS Vita, Nintendo 3DS, iPod touch and Android."));
-        if (!deployed) expect(`${tag}: the door says what the host holds (${door.words})`, door.words.includes("Pocket Studio has its packages for PSP (31 MB) and Nintendo 3DS (64 MB)."));
+        const studio = deployed?.studio?.server ?? "https://studio.pocket.nexus";
+        expect(`${tag}: the dock has no heading and no sentence (${JSON.stringify(door.words)}, ${door.height} px)`, !door.hosted && door.height < 72 && !/built for|real thing|packages/i.test(door.words));
+        if (deployed) {
+          expect(`${tag}: Download leads to Pocket Studio (${JSON.stringify(door)})`, door.get.shown && door.get.icon && door.get.text === "Download" && door.get.href === `${studio}/?from=player` && !door.remix.shown && !door.make.shown);
+        } else {
+          expect(`${tag}: Download leads to the game's page with its files open (${JSON.stringify(door.get)})`, door.get.shown && door.get.icon && door.get.text === "Download" && door.get.href === "https://studio.pocket.nexus/games/atlas?get=&from=player");
+          expect(`${tag}: Remix leads to the game's page with its remix open (${JSON.stringify(door.remix)})`, door.remix.shown && door.remix.icon && door.remix.text === "Remix" && door.remix.href === "https://studio.pocket.nexus/games/atlas?remix=&from=player" && !door.make.shown);
+        }
 
         // The shell's own keys: the d-pad's lower arm moves down the list and goes down while it is held; the
         // stick's cap slides and the globe spins. An iPod touch has neither: its screen is under the finger.
