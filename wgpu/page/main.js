@@ -30,34 +30,14 @@ import init, { Atlas, shapes, surface, turns } from "./pkg/atlas_wgpu.js";
 
 // The handhelds: each one's screen is the shell's shape of the same name and its interface the bundle under
 // ui/<id>/. `sticks` says what the device's keys stand for: on the atlas screen the left stick spins the
-// globe, and a device with a touch panel alone has no buttons at all. `note` is what the player's Simulated
-// mark says of the device: every layout here draws the PS Vita build's places (wgpu/README.md, "What
-// differs from the PS Vita") and the iPod touch build's globe, and the device itself draws its own.
+// globe, and a device with a touch panel alone has no buttons at all. Every layout here draws the PS Vita
+// build's places (wgpu/README.md, "What differs from the PS Vita") and the iPod touch build's globe, and
+// the device itself draws its own; the player's Simulated mark says one sentence for every device.
 const DEVICES = [
-  {
-    id: "vita",
-    label: "PS Vita",
-    sticks: 2,
-    note: { en: "This page draws the PS Vita build's places from the same packs, at about twice the sharpness. On a PS Vita, surfaces more than 18 metres away are not shadowed by the buildings and trees around them and, unless they are wet, do not shine. The shadows of wires and railings break into dots, and the people inside the Konbini are pale. The globe here is the iPod touch build's. The PS Vita draws its own.", ja: "このページは PS Vita 版の場所を同じパックから、約 2 倍の精細さで描いています。PS Vita では、18 メートルより遠くの面には周りの建物や木の影が落ちず、濡れていなければ光を反射しません。電線や手すりの影は点状にとぎれ、コンビニの店内の人は白っぽく見えます。ここの地球儀は iPod touch 版のもので、PS Vita は自分の地球儀を描きます。" },
-  },
-  {
-    id: "psp",
-    label: "PSP",
-    sticks: 1,
-    note: { en: "This page draws the PS Vita build's places and the iPod touch build's globe. A PSP has two of the seven places, Rainy Night Konbini and Lombard Street, with lower detail and light that is worked out when the place is built.", ja: "このページは PS Vita 版の場所と iPod touch 版の地球儀を描いています。PSP に入っているのは 7 つのうち「雨夜のコンビニ」とロンバード・ストリートの 2 つで、細部は少なく、光は場所を作るときに計算したものです。" },
-  },
-  {
-    id: "3ds",
-    label: "Nintendo 3DS",
-    sticks: 1,
-    note: { en: "This page draws the PS Vita build's places and the iPod touch build's globe. A 3DS has all seven places at 400 by 240, with lower detail and light that is worked out when the place is built.", ja: "このページは PS Vita 版の場所と iPod touch 版の地球儀を描いています。3DS には 7 つの場所すべてが 400 × 240 で入っていて、細部は少なく、光は場所を作るときに計算したものです。" },
-  },
-  {
-    id: "ipod",
-    label: "iPod touch",
-    sticks: 0,
-    note: { en: "The globe is the iPod touch build's own. The places are the PS Vita build's. An iPod touch 4 has five of the seven, without Sangubashi Crossing and Lombard Street, at 480 by 320 with lower detail and light that is worked out when the place is built.", ja: "地球儀は iPod touch 版そのものです。場所は PS Vita 版のものです。iPod touch 4 には、7 つのうち参宮橋の踏切とロンバード・ストリートを除く 5 つが 480 × 320 で入っていて、細部は少なく、光は場所を作るときに計算したものです。" },
-  },
+  { id: "vita", label: "PS Vita", sticks: 2 },
+  { id: "psp", label: "PSP", sticks: 1 },
+  { id: "3ds", label: "Nintendo 3DS", sticks: 1 },
+  { id: "ipod", label: "iPod touch", sticks: 0 },
 ];
 // Where the interface's saved places are kept between visits (a device keeps them in a file).
 const KEPT = "pocket-atlas.interface";
