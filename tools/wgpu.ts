@@ -2,7 +2,7 @@
 // Pocket Atlas drawn with wgpu (wgpu/): the atlas screen and the places in a
 // browser tab over WebGPU, and on this machine, where a frame goes to a file.
 //
-//   bun tools/wgpu.ts build                        wasm32 + wasm-bindgen + the page + the interface for the four
+//   bun tools/wgpu.ts build                        wasm32 + wasm-bindgen + the page + the interface for the five
 //                                                  devices (tools/atlas-ui.ts) on PocketJS's UI core + the globe's
 //                                                  surface (tools/atlas-globe.ts) + the places' packs that are
 //                                                  here → .pocket-build/wgpu/site
@@ -53,7 +53,7 @@ const SURFACE = 1024;
 // files and the bytes of a deployment, and the top-level names it keeps for itself.
 const HOST = { file: 32 << 20, files: 4000, bytes: 1 << 30, reserved: ["play", "runtime"] };
 // The devices the page shows (`DEVICES` in wgpu/page/main.js): each has a shell in the kernel's player.
-const SHOWN: readonly string[] = ["vita", "psp", "3ds", "ipod"];
+const SHOWN = ["vita", "psp", "3ds", "ipod", "android"] as const satisfies readonly string[];
 // The places' packs as the PS Vita reads them: the browser draws the same file.
 const PACKS = join(ROOT, ".pocket-build/places");
 const pack = (id: string) => join(PACKS, id, `${id}.place`);
@@ -89,8 +89,8 @@ async function build() {
   await stagePocket3dWeb(SITE);
   cpSync(POCKET3D_ICON.ios2x, join(SITE, "icon.png"));
   // The game's interface for each device the page shows, as its own build compiles it, with the plan
-  // PocketJS resolved. (An Android phone has no shell in the player: its bundle is not staged.)
-  for (const device of DEVICES.filter((d) => SHOWN.includes(d))) {
+  // PocketJS resolved.
+  for (const device of DEVICES.filter((d) => (SHOWN as readonly string[]).includes(d))) {
     const built = await compileInterface(device);
     mkdirSync(join(SITE, "ui", device), { recursive: true });
     for (const file of ["atlas.js", "atlas.pak", "plan.json"]) cpSync(join(built.directory, file), join(SITE, "ui", device, file));
@@ -766,7 +766,7 @@ if (command === "build") {
       { name: "1440", options: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2 }, coarse: false },
       { name: "phone", options: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, hasTouch: true, isMobile: true }, coarse: true },
     ];
-    const LABELS: Record<string, string> = { vita: "PS Vita", psp: "PSP", "3ds": "Nintendo 3DS", ipod: "iPod touch" };
+    const LABELS: Record<string, string> = { vita: "PS Vita", psp: "PSP", "3ds": "Nintendo 3DS", ipod: "iPod touch", android: "Android phone" };
     expect(`the page's devices are the ones whose interface is staged (${Object.keys(LABELS)}, ${SHOWN})`, JSON.stringify(Object.keys(LABELS).sort()) === JSON.stringify([...SHOWN].sort()));
     for (const window of WINDOWS) {
       const context = await browser.newContext(window.options);
@@ -871,9 +871,9 @@ if (command === "build") {
         }
 
         // The shell's own keys: the d-pad's lower arm moves down the list and goes down while it is held; the
-        // stick's cap slides and the globe spins. An iPod touch has neither: its screen is under the finger.
+        // stick's cap slides and the globe spins. An iPod touch and an Android phone have neither: the screen is under the finger.
         const before = await p.status();
-        if (id === "ipod") {
+        if (id === "ipod" || id === "android") {
           expect(`${tag}: a touch panel's shell has no key`, (await p.page.locator("[data-pocket-control], [data-pocket-stick], [data-pocket-pad]").count()) === 0);
         } else {
           const pad = await middle("[data-pocket-pad]");
@@ -903,7 +903,7 @@ if (command === "build") {
         await p.page.waitForTimeout(2500);
         whole(await look(), "place");
         await p.page.screenshot({ path: join(directory, `player-${window.name}-${id}-place.png`) });
-        if (id !== "ipod") {
+        if (id !== "ipod" && id !== "android") {
           // ✕ on the shell leaves the place.
           const leave = await middle("[data-pocket-control=cross]");
           await held(leave.x, leave.y, async () => p.page.waitForTimeout(120));
@@ -918,7 +918,7 @@ if (command === "build") {
           await p.page.locator("[data-pocket-open=about]").click();
           await p.page.waitForTimeout(200);
           report.player.about = await p.page.evaluate(`document.getElementById("pocket-about").textContent`);
-          expect(`the notices name the devices as their owners' marks (${report.player.about})`, /PS Vita, PSP, Nintendo 3DS and iPod touch are trademarks of their owners\. Pocket Nexus is not affiliated with them\./.test(report.player.about));
+          expect(`the notices name the devices as their owners' marks (${report.player.about})`, /PS Vita, PSP, Nintendo 3DS, iPod touch and Android are trademarks of their owners\. Pocket Nexus is not affiliated with them\./.test(report.player.about));
           await p.page.screenshot({ path: join(directory, "player-1440-vita-about.png") });
         }
         expect(`${tag}: no error on the page (${p.problems.join("; ")})`, p.problems.length === 0);

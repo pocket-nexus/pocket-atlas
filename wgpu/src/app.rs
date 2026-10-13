@@ -63,11 +63,14 @@ pub struct Shape {
 /// The screens of the handhelds the atlas runs on. The sizes are each device's presentation of the
 /// interface (`ui/pocket.json`, resolved into `plan.json` by `tools/atlas-ui.ts`); a page reads them from
 /// the plan and hands them to [`App::reshape`], so these are what a frame written to a file uses.
-pub const SHAPES: [Shape; 4] = [
+pub const SHAPES: [Shape; 5] = [
     Shape { name: "psp", width: 480, height: 272, samples: 4, hz: 30, logical: [480, 272] },
     Shape { name: "vita", width: 960, height: 544, samples: 4, hz: 30, logical: [480, 272] },
     Shape { name: "3ds", width: 400, height: 240, samples: 4, hz: 30, logical: [400, 240] },
     Shape { name: "ipod", width: 480, height: 320, samples: 4, hz: 60, logical: [480, 320] },
+    // The Redmi 1S: its panel on its side, with the interface at 640 × 360 and two samples a logical pixel
+    // (`android/src/main.c`).
+    Shape { name: "android", width: 1280, height: 720, samples: 4, hz: 60, logical: [640, 360] },
 ];
 
 impl Shape {

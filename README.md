@@ -14,7 +14,7 @@ Places share their assets across the reference and handheld renderers:
 - **`psp/`** renders the globe and the places its GE pipeline supports on a PSP.
 - **`ipod/`** renders the globe and the seven places on an iPod touch 4 (iOS 6, SGX535, OpenGL ES 2) at 480 × 320, from the 3DS lowering with GLES texels and Griffith's lights and haze cooked for it. See [how it draws, builds and is measured](ipod/README.md).
 - **`android/`** renders the globe and all seven places on a Redmi 1S (Android 4.3, Adreno 305, OpenGL ES 3.0) at up to 1280 × 720 and 30 fps, from the 3DS lowering with ETC2 texels at 1024, relief cooked into the textures and the sun's shadows read per pixel from a depth map. Its one APK holds an ARMv7 and a 64-bit library and targets API 34: a current phone installs it and shows the 16:9 picture in the middle of a window of another shape. See [how it draws, builds and is measured](android/README.md).
-- **`wgpu/`** draws the atlas screen in a browser tab with wgpu over WebGPU: the iPod touch's globe in WGSL, with the interface over it and the page as any of the four handhelds. A place is the PS Vita's renderer on wgpu, from the PS Vita's pack. See [Browser tab](#browser-tab).
+- **`wgpu/`** draws the atlas screen in a browser tab with wgpu over WebGPU: the iPod touch's globe in WGSL, with the interface over it and the page as any of the five devices the game has a package for (PS Vita, PSP, Nintendo 3DS, iPod touch, Android phone). A place is the PS Vita's renderer on wgpu, from the PS Vita's pack. See [Browser tab](#browser-tab).
 - **`ui/`** is what all of them put on the screen in two dimensions: one PocketJS app with a presentation for each form of device. See [The interface](#the-interface).
 
 The web app exports glTF 2.0 with `extras.pocketAtlas`. The cooker seals a lossless PlaceIR, then independently lowers it into Vita, PICA, GE or GLES assets. See [the compiler boundaries, commands and migration plan](docs/COMPILER.md).
@@ -75,6 +75,7 @@ A renderer need not give the guest every turn: while no button or touch is down 
 bun tools/atlas-ui.ts <psp|vita|3ds|ipod|android>   # → .pocket-build/ui/<device>/atlas.js, atlas.pak (each device's build runs this)
 (cd vendor/pocketjs && bun install && bun tools/wasm.ts)   # once, for the host tests and previews
 bun test ui/test                            # each presentation on PocketJS's wasm core: presses and touches in, commands out
+bun test ./tools/platforms.test.ts          # a device with a package is a device of the browser page
 bun ui/test/preview.ts <psp|3ds|ipod|android>   # pictures of the screens → .pocket-build/ui/preview/
 ```
 

@@ -26,7 +26,7 @@ bun tools/wgpu.ts check     # Chrome over WebGPU, every device, → .pocket-buil
 
 `build` needs the wasm32 target, `wasm-bindgen` at the version in `wgpu/Cargo.lock`, ImageMagick, the globe's export (`.pocket-build/atlas/globe`, `web/scripts/export-atlas.ts`) and, for the cards' pictures, each place's preview (`.pocket-build/places/<id>/preview.png`). A place without a preview is listed with a wash of its accent colour.
 
-- **The interface is the bundle a device loads.** `tools/atlas-ui.ts` compiles `ui/` for the PSP, the PS Vita, the 3DS and the iPod touch; the page runs the chosen device's bundle as a guest in a realm of its own on PocketJS's UI core built for wasm, with the `plan.json` PocketJS resolved for it. The screens, the raster density and the surface that takes touch are read from the plan.
+- **The interface is the bundle a device loads.** `tools/atlas-ui.ts` compiles `ui/` for the PSP, the PS Vita, the 3DS, the iPod touch and the Android phone (the Redmi 1S's 640 × 360 at two samples a pixel, drawn at 1280 × 720); the page runs the chosen device's bundle as a guest in a realm of its own on PocketJS's UI core built for wasm, with the `plan.json` PocketJS resolved for it. The screens, the raster density and the surface that takes touch are read from the plan.
 - **The guest is turned 30 times a second and told so**, as each handheld's host does (`__simHz`), with 2 sixtieths of a second a turn. It rests when no button or touch is down and neither the state nor its picture changed (`pocket_atlas_interface::Rest`): **one turn a second at rest**, with the sixtieths that passed.
 - **A frame** is `step` (the globe eases to the place it faces; the left stick spins it unless a sheet of the interface holds the pad), the guest's turn when one is due (`heard`, the turn, `say` for each line, `turned`), then `draw`: the globe in the scene's pass, the interface's picture over it in a pass of its own.
 - **The interface's picture is drawn again when its draw hash changes**: one drawing by the UI core with its alpha, then an upload. The 3DS's lower screen goes to a second canvas when its own hash changes.
@@ -183,7 +183,7 @@ The last column is the site (`check` without `--dist`), where a read fetches the
 ## What it does not do
 
 - **No place on a GPU without BC textures**: the packs are not transcoded, so a phone's browser gets the one sentence.
-- **One look for four devices**: the PSP's, the 3DS's and the iPod touch's pages draw the PS Vita's renderer at their screen size, not those consoles' own.
+- **One look for five devices**: the PSP's, the 3DS's, the iPod touch's and the Android phone's pages draw the PS Vita's renderer at their screen size, not those consoles' own.
 - **Not compared on the console in this change**: the PS Vita captures used are earlier ones of the same shots (`.pocket-build/validation` of other checkouts).
 - **No fallback renderer**: a browser without WebGPU gets the page's sentence.
 - **The globe is the iPod touch's** on every device's screen. The PS Vita's own (clouds, an atmosphere baked for its camera, the surface shaded per pixel from `atlas.pack`), the 3DS's and the PSP's are not ported.
