@@ -7,6 +7,9 @@
 <title>Pocket Atlas</title>
 <link rel="icon" href="icon.png">
 <!-- The globe's surface: its file, on a server that answers byte ranges, or the manifest of one cut into pieces. -->
+<!-- The devices the page plays as, as Pocket Studio names a package's target: `pocket-studio site` and
+     `pocket-studio package` read it. A device with a package is a device here (tools/platforms.test.ts). -->
+<meta name="pocket-devices" content="vita psp 3ds ipod-touch android">
 <meta name="pocket-globe" content="globe.rgba">
 <!-- The places' packs, a JSON object of a place's id to where its pack is: `tools/wgpu.ts build` names the ones that are here. -->
 <meta name="pocket-places" content="{}">

@@ -38,6 +38,8 @@ const DEVICES = [
   { id: "psp", label: "PSP", sticks: 1 },
   { id: "3ds", label: "Nintendo 3DS", sticks: 1 },
   { id: "ipod", label: "iPod touch", sticks: 0 },
+  // (`mark`: the name the player's line about trademarks gives it)
+  { id: "android", label: "Android phone", sticks: 0, mark: "Android" },
 ];
 // Where the interface's saved places are kept between visits (a device keeps them in a file).
 const KEPT = "pocket-atlas.interface";
